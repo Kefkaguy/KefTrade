@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: keftrade-postgres
+    environment:
+      POSTGRES_USER: keftrade
+      POSTGRES_PASSWORD: keftrade
+      POSTGRES_DB: keftrade
+    ports:
+      - "5432:5432"
+    volumes:
+      - keftrade-postgres:/var/lib/postgresql/data
+      - ./database/migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keftrade -d keftrade"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+volumes:
+  keftrade-postgres:
