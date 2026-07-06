@@ -23,18 +23,18 @@ def recent_candles() -> list[dict]:
             "symbol": "BTCUSDT",
             "timeframe": "4h",
             "timestamp": start + timedelta(hours=4 * index),
-            "open": Decimal("100"),
-            "high": Decimal("105"),
+            "open": Decimal(90 + index),
+            "high": Decimal(95 + index),
             "low": Decimal("98"),
-            "close": Decimal("102"),
+            "close": Decimal(90 + index),
             "volume": Decimal("1000"),
         }
-        for index in range(10)
+        for index in range(60)
     ]
 
 
 def test_trend_pullback_setup_when_all_filters_pass() -> None:
-    candle = {"symbol": "BTCUSDT", "close": Decimal("101"), "low": Decimal("99")}
+    candle = {"symbol": "BTCUSDT", "close": Decimal("150"), "low": Decimal("99")}
     feature = {
         "ema_20": Decimal("100"),
         "ema_50": Decimal("95"),
@@ -43,7 +43,8 @@ def test_trend_pullback_setup_when_all_filters_pass() -> None:
         "distance_from_ema_20": Decimal("0.01"),
     }
 
-    decision = trend_pullback_decision(candle, feature, recent_candles(), PARAMS)
+    params = {**PARAMS, "entry_distance_to_ema20_max": 0.10}
+    decision = trend_pullback_decision(candle, feature, recent_candles(), params)
 
     assert decision.signal == "setup"
     assert decision.stop_loss == Decimal("98")
@@ -63,4 +64,3 @@ def test_trend_pullback_avoids_when_trend_filter_fails() -> None:
     decision = trend_pullback_decision(candle, feature, recent_candles(), PARAMS)
 
     assert decision.signal == "avoid"
-

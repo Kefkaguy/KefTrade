@@ -29,6 +29,28 @@ export type BacktestResult = {
   trades: Array<Record<string, unknown>>;
 };
 
+export type StrategyResearchRun = {
+  run_id: string;
+  rank: number;
+  strategy_name: string;
+  strategy_version: string;
+  parameters: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  trade_count: number;
+  rank_score: number;
+};
+
+export type StrategyResearchReport = {
+  symbol: string;
+  timeframe: string;
+  strategy_name: string;
+  strategy_version: string;
+  run_count: number;
+  rank_metrics: string[];
+  ranking_table: StrategyResearchRun[];
+  charts: Record<string, Array<{ run_id: string; rank: number; value: unknown }>>;
+};
+
 export type RiskSettings = {
   account_size: string;
   max_risk_per_trade: string;
@@ -79,6 +101,10 @@ export function syncFeatures() {
 
 export function runBacktest() {
   return request<BacktestResult>("/backtests?symbol=BTCUSDT&timeframe=4h", { method: "POST" });
+}
+
+export function runStrategyResearch() {
+  return request<StrategyResearchReport>("/research/strategies?symbol=BTCUSDT&timeframe=4h", { method: "POST" });
 }
 
 export function getRiskSettings() {

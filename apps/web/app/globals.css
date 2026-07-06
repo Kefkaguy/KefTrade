@@ -296,6 +296,27 @@ th {
   color: var(--muted);
 }
 
+.barRow {
+  display: grid;
+  grid-template-columns: 44px 1fr 72px;
+  gap: 12px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.barTrack {
+  height: 12px;
+  border-radius: 999px;
+  background: var(--panel-soft);
+  overflow: hidden;
+}
+
+.barFill {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
 @media (max-width: 860px) {
   .shell {
     grid-template-columns: 1fr;
@@ -319,4 +340,3 @@ th {
     flex-direction: column;
   }
 }
-

@@ -36,22 +36,26 @@ def trend_pullback_decision(
     recent_candles: list[dict[str, Any]],
     params: dict[str, Any],
 ) -> StrategyDecision:
-    required = ["ema_20", "ema_50", "rsi_14", "volume_change", "distance_from_ema_20"]
+    required = ["rsi_14", "volume_change"]
     if any(feature.get(key) is None for key in required):
         return StrategyDecision("avoid", None, None, None, None, ["Not enough historical candles to calculate required indicators."])
 
     close = Decimal(candle["close"])
-    ema_20 = Decimal(feature["ema_20"])
-    ema_50 = Decimal(feature["ema_50"])
+    ema_fast_period = int(params["ema_fast"])
+    ema_slow_period = int(params["ema_slow"])
+    ema_fast = calculate_ema_from_candles(recent_candles, ema_fast_period)
+    ema_slow = calculate_ema_from_candles(recent_candles, ema_slow_period)
+    if ema_fast is None or ema_slow is None:
+        return StrategyDecision("avoid", None, None, None, None, ["Not enough historical candles to calculate configured EMA periods."])
     rsi_14 = Decimal(feature["rsi_14"])
     volume_change = Decimal(feature["volume_change"])
-    distance = abs(Decimal(feature["distance_from_ema_20"]))
+    distance = abs((close - ema_fast) / ema_fast)
 
     explanation: list[str] = []
-    if close > ema_50:
-        explanation.append("Price is above EMA50.")
-    if ema_20 > ema_50:
-        explanation.append("EMA20 is above EMA50.")
+    if close > ema_slow:
+        explanation.append(f"Price is above EMA{ema_slow_period}.")
+    if ema_fast > ema_slow:
+        explanation.append(f"EMA{ema_fast_period} is above EMA{ema_slow_period}.")
     if Decimal(str(params["rsi_min"])) <= rsi_14 <= Decimal(str(params["rsi_max"])):
         explanation.append("RSI is in the neutral pullback range.")
     if volume_change >= Decimal(str(params["volume_change_min"])):
@@ -59,7 +63,7 @@ def trend_pullback_decision(
     if distance <= Decimal(str(params["entry_distance_to_ema20_max"])):
         explanation.append("Price is near EMA20 entry zone.")
 
-    trend_ok = close > ema_50 and ema_20 > ema_50
+    trend_ok = close > ema_slow and ema_fast > ema_slow
     rsi_ok = Decimal(str(params["rsi_min"])) <= rsi_14 <= Decimal(str(params["rsi_max"]))
     volume_ok = volume_change >= Decimal(str(params["volume_change_min"]))
     entry_ok = distance <= Decimal(str(params["entry_distance_to_ema20_max"]))
@@ -80,7 +84,7 @@ def trend_pullback_decision(
 
     risk_per_unit = close - swing_low
     take_profit = close + (risk_per_unit * Decimal(str(params["risk_reward"])))
-    entry_zone = (ema_20 * Decimal("0.995"), ema_20 * Decimal("1.005"))
+    entry_zone = (ema_fast * Decimal("0.995"), ema_fast * Decimal("1.005"))
 
     if not entry_ok:
         return StrategyDecision(
@@ -101,3 +105,13 @@ def trend_pullback_decision(
         explanation + ["Research setup is present; this is not execution advice."],
     )
 
+
+def calculate_ema_from_candles(candles: list[dict[str, Any]], period: int) -> Decimal | None:
+    if period <= 0 or len(candles) < period:
+        return None
+    closes = [Decimal(row["close"]) for row in candles]
+    multiplier = Decimal("2") / Decimal(period + 1)
+    ema = sum(closes[:period]) / Decimal(period)
+    for close in closes[period:]:
+        ema = (close - ema) * multiplier + ema
+    return ema

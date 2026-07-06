@@ -11,6 +11,7 @@ const navItems = [
   { href: "/dashboard", label: "Dashboard" },
   { href: "/symbol/BTCUSDT", label: "BTCUSDT" },
   { href: "/backtest", label: "Backtest" },
+  { href: "/research", label: "Research" },
   { href: "/risk-settings", label: "Risk" }
 ];
 

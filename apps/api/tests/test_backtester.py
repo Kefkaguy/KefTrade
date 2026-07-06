@@ -10,7 +10,7 @@ PARAMS = {
     "rsi_min": 40,
     "rsi_max": 60,
     "volume_change_min": -0.25,
-    "entry_distance_to_ema20_max": 0.015,
+    "entry_distance_to_ema20_max": 0.25,
     "swing_lookback": 5,
     "risk_reward": 2,
     "fee_rate": 0,
