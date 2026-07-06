@@ -26,6 +26,25 @@ BTC_DEV_ASSET = ResearchAsset(
     provider_symbol="BTCUSDT",
 )
 
+ETH_DEV_ASSET = ResearchAsset(
+    symbol="ETHUSDT",
+    asset_class="crypto",
+    exchange="BINANCE",
+    currency="USDT",
+    name="Ethereum / Tether USD",
+    provider_symbol="ETHUSDT",
+)
+
+CRYPTO_VALIDATION_UNIVERSE = (
+    BTC_DEV_ASSET.symbol,
+    ETH_DEV_ASSET.symbol,
+)
+
+VALIDATION_TIMEFRAMES = (
+    "4h",
+    "1d",
+)
+
 US_EQUITY_RESEARCH_UNIVERSE = (
     "AAPL",
     "MSFT",
@@ -42,4 +61,3 @@ US_EQUITY_RESEARCH_UNIVERSE = (
 DEFAULT_DEV_SYMBOL = BTC_DEV_ASSET.symbol
 DEFAULT_DEV_TIMEFRAME = "4h"
 DEFAULT_DEV_PROVIDER = "binance_dev"
-

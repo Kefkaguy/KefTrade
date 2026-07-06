@@ -12,6 +12,7 @@ from app.settings import settings
 BINANCE_KLINES_ENDPOINT = "/api/v3/klines"
 TIMEFRAME_MS = {
     "4h": 4 * 60 * 60 * 1000,
+    "1d": 24 * 60 * 60 * 1000,
 }
 
 

@@ -69,6 +69,51 @@ export type StrategyResearchReport = {
   markdown_report: string;
 };
 
+export type AlphaDiscoveryRow = {
+  rank: number;
+  candidate_id: string;
+  blocks: Record<string, unknown>;
+  parameters: Record<string, unknown>;
+  metrics: Record<string, unknown>;
+  stability: Record<string, unknown>;
+  monte_carlo: Record<string, unknown>;
+  alpha_score: number;
+  confidence_score: number;
+  recommendation: "Reject" | "Research More" | "Candidate for Paper Trading";
+  alpha_report: string;
+};
+
+export type AlphaDiscoveryReport = {
+  symbol: string;
+  timeframe: string;
+  candidate_count: number;
+  rank_metrics: string[];
+  leaderboard: AlphaDiscoveryRow[];
+  summary: Record<string, unknown>;
+};
+
+export type AlphaValidationRow = {
+  rank: number;
+  candidate_id: string;
+  metrics: Record<string, unknown>;
+  stability: Record<string, unknown>;
+  robustness: Record<string, unknown>;
+  validation_score: number;
+  recommendation: "Reject" | "Research More" | "Validated Alpha";
+  markdown_report: string;
+};
+
+export type AlphaValidationReport = {
+  id: number;
+  symbols: string[];
+  timeframes: string[];
+  candidate_count: number;
+  thresholds: Record<string, unknown>;
+  summary: Record<string, unknown>;
+  leaderboard: AlphaValidationRow[];
+  markdown_report: string;
+};
+
 export type RiskSettings = {
   account_size: string;
   max_risk_per_trade: string;
@@ -123,6 +168,14 @@ export function runBacktest() {
 
 export function runStrategyResearch() {
   return request<StrategyResearchReport>("/research/strategies?symbol=BTCUSDT&timeframe=4h", { method: "POST" });
+}
+
+export function runAlphaDiscovery(maxCandidates = 250) {
+  return request<AlphaDiscoveryReport>(`/alpha/discover?symbol=BTCUSDT&timeframe=4h&max_candidates=${maxCandidates}`, { method: "POST" });
+}
+
+export function runAlphaValidation(maxCandidates = 50) {
+  return request<AlphaValidationReport>(`/alpha/validate?max_candidates=${maxCandidates}`, { method: "POST" });
 }
 
 export function getRiskSettings() {
