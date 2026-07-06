@@ -30,6 +30,7 @@ class MarketDataSyncResult:
     incomplete_latest_candle_excluded: bool
     first_timestamp: datetime | None
     last_timestamp: datetime | None
+    invalid_ohlc_count: int = 0
 
 
 class MarketDataProvider(Protocol):
@@ -60,4 +61,3 @@ class SymbolMetadata(Protocol):
 class ExchangeInfo(Protocol):
     def get_exchange(self, exchange: str) -> dict[str, Any] | None:
         ...
-

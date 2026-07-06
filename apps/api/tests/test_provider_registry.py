@@ -1,4 +1,4 @@
-from app.domain.assets import DEFAULT_DEV_PROVIDER, US_EQUITY_RESEARCH_UNIVERSE
+from app.domain.assets import DEFAULT_DEV_PROVIDER, US_EQUITY_RESEARCH_UNIVERSE, US_EQUITY_VALIDATION_UNIVERSE, YFINANCE_RESEARCH_PROVIDER
 from app.domain.market_data import MarketDataSyncResult
 from app.providers.registry import get_market_data_provider
 from datetime import UTC, datetime
@@ -25,6 +25,17 @@ def test_stock_research_universe_is_explicit() -> None:
         "SPY",
         "QQQ",
     )
+
+
+def test_stock_validation_universe_is_explicit() -> None:
+    assert US_EQUITY_VALIDATION_UNIVERSE == ("SPY", "QQQ", "AAPL", "MSFT", "NVDA", "TSLA")
+
+
+def test_yfinance_research_provider_is_registered() -> None:
+    provider = get_market_data_provider(YFINANCE_RESEARCH_PROVIDER)
+
+    assert provider.name == YFINANCE_RESEARCH_PROVIDER
+    assert hasattr(provider, "sync_candles")
 
 
 def test_data_sync_routes_through_selected_provider(monkeypatch) -> None:
