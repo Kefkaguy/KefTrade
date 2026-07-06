@@ -45,6 +45,11 @@ export type StrategyResearchRun = {
   by_year: Array<{ year: number; metrics: Record<string, unknown> }>;
   by_volatility_regime: Array<{ regime: string; metrics: Record<string, unknown> }>;
   by_market_regime: Array<{ regime: string; metrics: Record<string, unknown> }>;
+  by_trend_strength: Array<{ regime: string; metrics: Record<string, unknown> }>;
+  feature_correlations: Array<{ feature: string; correlation_to_profitable_trade: number | null; sample_size: number }>;
+  trade_explorer: Array<Record<string, unknown>>;
+  filter_options: Record<string, string[]>;
+  dashboard: Record<string, unknown>;
   recommendation: "Reject" | "Needs More Research" | "Candidate for Paper Trading";
   markdown_report: string;
   rank_score: number;
@@ -60,6 +65,7 @@ export type StrategyResearchReport = {
   strategy_library: Array<Record<string, unknown>>;
   ranking_table: StrategyResearchRun[];
   charts: Record<string, Array<{ run_id: string; rank: number; strategy_name: string; value: unknown }>>;
+  dashboard: Record<string, unknown>;
   markdown_report: string;
 };
 

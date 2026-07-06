@@ -1,3 +1,4 @@
+from datetime import datetime
 from decimal import Decimal
 from statistics import mean, pstdev
 from typing import Any
@@ -43,12 +44,14 @@ def run_backtest(
     equity_curve = [equity]
 
     start_index = rows.index(execution_rows[0]) if execution_rows else 0
+    realized_equity_points = [{"timestamp": rows[start_index]["candle"]["timestamp"], "equity": equity}] if rows else []
     i = max(start_index, 50)
     while i < len(rows) - 1:
         current = rows[i]
         candle = current["candle"]
+        feature = current["feature"]
         recent_candles = [row["candle"] for row in rows[: i + 1]]
-        decision = strategy_decide(candle, current["feature"], recent_candles, params)
+        decision = strategy_decide(candle, feature, recent_candles, params)
 
         if decision.signal != "setup" or decision.stop_loss is None or decision.take_profit is None:
             i += 1
@@ -105,6 +108,7 @@ def run_backtest(
         pnl = gross_pnl - fees
         equity += pnl
         equity_curve.append(equity)
+        realized_equity_points.append({"timestamp": rows[exit_index]["candle"]["timestamp"], "equity": equity})
         trades.append(
             {
                 "symbol": candle["symbol"],
@@ -120,6 +124,10 @@ def run_backtest(
                 "pnl_pct": pnl / initial_equity,
                 "exit_reason": exit_reason,
                 "holding_period_hours": (rows[exit_index]["candle"]["timestamp"] - entry_candle["timestamp"]).total_seconds() / 3600,
+                "entry_reason": decision.explanation,
+                "entry_candle": candle_snapshot(entry_candle),
+                "exit_candle": candle_snapshot(rows[exit_index]["candle"]),
+                "indicators": indicator_snapshot(feature),
             }
         )
         i = exit_index + 1
@@ -136,7 +144,13 @@ def run_backtest(
     else:
         metrics["walk_forward"] = {"enabled": False, "reason": "At least 80 candle/feature rows are required."}
 
-    return {"metrics": metrics, "trades": trades, "equity_curve_summary": summarize_equity_curve(equity_curve)}
+    return {
+        "metrics": metrics,
+        "trades": trades,
+        "equity_curve": build_equity_curve(realized_equity_points),
+        "drawdown_curve": build_drawdown_curve(realized_equity_points),
+        "equity_curve_summary": summarize_equity_curve(equity_curve),
+    }
 
 
 def mark_to_market_equity(equity_before_trade: Decimal, entry_price: Decimal, mark_price: Decimal, quantity: Decimal) -> Decimal:
@@ -218,3 +232,50 @@ def summarize_equity_curve(equity_curve: list[Decimal]) -> dict[str, Any]:
         "high": float(max(equity_curve)),
         "low": float(min(equity_curve)),
     }
+
+
+def candle_snapshot(candle: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "timestamp": candle["timestamp"],
+        "open": candle["open"],
+        "high": candle["high"],
+        "low": candle["low"],
+        "close": candle["close"],
+        "volume": candle["volume"],
+    }
+
+
+def indicator_snapshot(feature: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "returns_1",
+        "returns_5",
+        "ema_20",
+        "ema_50",
+        "rsi_14",
+        "macd",
+        "macd_signal",
+        "volume_change",
+        "volatility_20",
+        "distance_from_ema_20",
+        "distance_from_ema_50",
+    ]
+    return {key: feature.get(key) for key in keys}
+
+
+def build_equity_curve(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"timestamp": point["timestamp"], "equity": point["equity"]} for point in points]
+
+
+def build_drawdown_curve(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    peak: Decimal | None = None
+    curve = []
+    for point in points:
+        equity = Decimal(point["equity"])
+        peak = equity if peak is None else max(peak, equity)
+        drawdown = Decimal("0") if peak == 0 else (peak - equity) / peak
+        curve.append({"timestamp": point["timestamp"], "drawdown": drawdown})
+    return curve
+
+
+def month_key(value: datetime) -> str:
+    return f"{value.year:04d}-{value.month:02d}"

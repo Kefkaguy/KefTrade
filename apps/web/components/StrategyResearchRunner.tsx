@@ -93,6 +93,65 @@ export function StrategyResearchRunner() {
             <h2>Top report</h2>
             <pre className="reportBlock">{topRows[0]?.markdown_report}</pre>
           </section>
+
+          <div className="grid cols2">
+            <section className="panel">
+              <h2>Feature correlations</h2>
+              <div className="miniTable">
+                {(topRows[0]?.feature_correlations ?? []).map((row) => (
+                  <div key={row.feature}>
+                    <span>{row.feature}</span>
+                    <strong>{row.correlation_to_profitable_trade === null ? "N/A" : number(row.correlation_to_profitable_trade)}</strong>
+                    <small>{row.sample_size} trades</small>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section className="panel">
+              <h2>Regime breakdown</h2>
+              <div className="miniTable">
+                {(topRows[0]?.by_market_regime ?? []).map((row) => (
+                  <div key={row.regime}>
+                    <span>{row.regime}</span>
+                    <strong>{money(row.metrics.expectancy_per_trade)}</strong>
+                    <small>{String(row.metrics.number_of_trades ?? 0)} trades</small>
+                  </div>
+                ))}
+              </div>
+            </section>
+          </div>
+
+          <div className="tablePanel">
+            <table>
+              <thead>
+                <tr>
+                  <th>Trade</th>
+                  <th>Regime</th>
+                  <th>Volatility</th>
+                  <th>Outcome</th>
+                  <th>Entry</th>
+                  <th>Exit</th>
+                  <th>PnL</th>
+                  <th>Exit reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(topRows[0]?.trade_explorer ?? []).slice(0, 12).map((trade) => (
+                  <tr key={String(trade.trade_number)}>
+                    <td>{String(trade.trade_number)}</td>
+                    <td>{String(trade.trend_regime)}</td>
+                    <td>{String(trade.volatility_regime)}</td>
+                    <td>{String(trade.outcome)}</td>
+                    <td>{money(trade.entry_price)}</td>
+                    <td>{money(trade.exit_price)}</td>
+                    <td>{money(trade.pnl)}</td>
+                    <td>{String(trade.exit_reason)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </>
       ) : null}
     </div>

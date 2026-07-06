@@ -326,6 +326,25 @@ th {
   font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 }
 
+.miniTable {
+  display: grid;
+  gap: 8px;
+}
+
+.miniTable > div {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 12px;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.miniTable small {
+  color: var(--muted);
+}
+
 @media (max-width: 860px) {
   .shell {
     grid-template-columns: 1fr;

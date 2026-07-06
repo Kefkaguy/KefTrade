@@ -149,10 +149,27 @@ def test_strategy_research_compares_full_strategy_library(monkeypatch) -> None:
             },
             "trades": [
                 {
+                    "symbol": "BTCUSDT",
+                    "side": "long",
                     "entry_time": candles[1]["timestamp"],
                     "exit_time": candles[2]["timestamp"],
+                    "entry_price": Decimal("100"),
+                    "exit_price": Decimal("101"),
                     "pnl": Decimal("25"),
+                    "pnl_pct": Decimal("0.0025"),
+                    "exit_reason": "take_profit",
                     "holding_period_hours": 4,
+                    "entry_reason": ["test setup"],
+                    "entry_candle": candles[1],
+                    "exit_candle": candles[2],
+                    "indicators": {
+                        "rsi_14": Decimal("55"),
+                        "distance_from_ema_20": Decimal("0.01"),
+                        "distance_from_ema_50": Decimal("0.02"),
+                        "macd": Decimal("1"),
+                        "volume_change": Decimal("0.1"),
+                        "volatility_20": Decimal("0.012"),
+                    },
                 }
             ],
             "equity_curve_summary": {"points": 2, "start": 10000, "end": 10025, "high": 10025, "low": 10000},
@@ -166,6 +183,11 @@ def test_strategy_research_compares_full_strategy_library(monkeypatch) -> None:
     assert len(report["strategy_library"]) == 6
     assert report["ranking_table"][0]["recommendation"] == "Candidate for Paper Trading"
     assert report["ranking_table"][0]["by_year"][0]["year"] == 2024
-    assert report["ranking_table"][0]["by_market_regime"][0]["regime"] == "bull"
+    assert report["ranking_table"][0]["by_market_regime"][0]["regime"] == "bull_trend"
     assert report["ranking_table"][0]["by_volatility_regime"][0]["regime"] == "normal_volatility"
+    assert report["ranking_table"][0]["by_trend_strength"][0]["regime"] == "weak"
+    assert report["ranking_table"][0]["feature_correlations"]
+    assert report["ranking_table"][0]["trade_explorer"][0]["trend_regime"] == "bull_trend"
+    assert "monthly_returns" in report["ranking_table"][0]["dashboard"]
+    assert "strategy_heatmap" in report["dashboard"]
     assert "Executive Summary" in report["markdown_report"]

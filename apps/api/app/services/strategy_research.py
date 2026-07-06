@@ -1,6 +1,8 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 from itertools import product
+from math import sqrt
 from typing import Any
 
 from app.services.backtester import calculate_metrics, run_backtest
@@ -55,13 +57,15 @@ def build_parameter_sweep(base_params: dict[str, Any], sweep: dict[str, list[Any
 def run_strategy_research(
     candles: list[dict[str, Any]],
     features: list[dict[str, Any]],
+    regimes: list[dict[str, Any]] | None = None,
     strategy_name: str | None = None,
     strategy_version: str = "v1",
     base_params: dict[str, Any] | None = None,
     sweep: dict[str, list[Any]] | None = None,
+    filters: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     candidates = build_candidates(strategy_name, strategy_version, base_params, sweep)
-    context_by_time = build_context_by_time(candles, features)
+    context_by_time = build_context_by_time(candles, features, regimes)
 
     runs = []
     for index, candidate in enumerate(candidates, start=1):
@@ -70,7 +74,11 @@ def run_strategy_research(
         run_id = f"{candidate.strategy.name}_{candidate.strategy.version}_{index:03d}"
         by_year = compare_by_year(result["trades"])
         by_volatility_regime = compare_by_regime(result["trades"], context_by_time, "volatility_regime")
-        by_market_regime = compare_by_regime(result["trades"], context_by_time, "market_regime")
+        by_market_regime = compare_by_regime(result["trades"], context_by_time, "trend_regime")
+        by_trend_strength = compare_by_regime(result["trades"], context_by_time, "trend_strength_bucket")
+        enriched_trades = build_trade_explorer(result["trades"], context_by_time, filters)
+        feature_correlations = calculate_feature_correlations(enriched_trades)
+        dashboard = build_research_dashboard(result, enriched_trades)
         recommendation = recommend_strategy(metrics)
         run = {
             "run_id": run_id,
@@ -87,6 +95,11 @@ def run_strategy_research(
             "by_year": by_year,
             "by_volatility_regime": by_volatility_regime,
             "by_market_regime": by_market_regime,
+            "by_trend_strength": by_trend_strength,
+            "feature_correlations": feature_correlations,
+            "trade_explorer": enriched_trades,
+            "filter_options": build_filter_options(result["trades"], context_by_time),
+            "dashboard": dashboard,
             "recommendation": recommendation,
             "markdown_report": "",
             "rank_score": score_metrics(metrics),
@@ -106,6 +119,7 @@ def run_strategy_research(
         "strategy_library": serialize_strategy_library(),
         "ranking_table": ranked,
         "charts": build_comparison_charts(ranked),
+        "dashboard": build_library_dashboard(ranked),
         "markdown_report": build_library_markdown_report(ranked),
     }
 
@@ -146,19 +160,30 @@ def scorecard_from_result(result: dict[str, Any]) -> dict[str, Any]:
     return metrics
 
 
-def build_context_by_time(candles: list[dict[str, Any]], features: list[dict[str, Any]]) -> dict[Any, dict[str, str]]:
+def build_context_by_time(
+    candles: list[dict[str, Any]],
+    features: list[dict[str, Any]],
+    regimes: list[dict[str, Any]] | None = None,
+) -> dict[Any, dict[str, Any]]:
     if any(not isinstance(row, dict) for row in candles + features):
         return {}
     candles_by_time = {row["timestamp"]: row for row in candles}
+    regimes_by_time = {row["timestamp"]: row for row in regimes or []}
     contexts = {}
     for feature in features:
         timestamp = feature["timestamp"]
         candle = candles_by_time.get(timestamp)
         if not candle:
             continue
+        stored_regime = regimes_by_time.get(timestamp)
+        trend_regime = stored_regime["trend_regime"] if stored_regime else classify_market_regime(candle, feature)
+        volatility_regime = stored_regime["volatility_regime"] if stored_regime else classify_volatility_regime(feature)
+        trend_strength = stored_regime.get("trend_strength") if stored_regime else abs(Decimal(feature.get("distance_from_ema_50") or 0))
         contexts[timestamp] = {
-            "volatility_regime": classify_volatility_regime(feature),
-            "market_regime": classify_market_regime(candle, feature),
+            "volatility_regime": volatility_regime,
+            "trend_regime": trend_regime,
+            "trend_strength": trend_strength,
+            "trend_strength_bucket": classify_trend_strength(trend_strength),
         }
     return contexts
 
@@ -184,10 +209,21 @@ def classify_market_regime(candle: dict[str, Any], feature: dict[str, Any]) -> s
     ema = Decimal(ema_50)
     momentum = Decimal(returns_5)
     if close > ema and momentum > 0:
-        return "bull"
+        return "bull_trend"
     if close < ema and momentum < 0:
-        return "bear"
+        return "bear_trend"
     return "sideways"
+
+
+def classify_trend_strength(value: Any) -> str:
+    if value is None:
+        return "unknown"
+    strength = abs(Decimal(value))
+    if strength >= Decimal("0.05"):
+        return "strong"
+    if strength >= Decimal("0.02"):
+        return "moderate"
+    return "weak"
 
 
 def compare_by_year(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -204,6 +240,164 @@ def compare_by_regime(trades: list[dict[str, Any]], context_by_time: dict[Any, d
         regime = context.get(key, "unknown")
         grouped.setdefault(regime, []).append(trade)
     return [{"regime": regime, "metrics": metrics_for_trades(rows)} for regime, rows in sorted(grouped.items())]
+
+
+def build_trade_explorer(
+    trades: list[dict[str, Any]],
+    context_by_time: dict[Any, dict[str, Any]],
+    filters: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    rows = []
+    for index, trade in enumerate(trades, start=1):
+        context = context_by_time.get(trade["entry_time"], {})
+        outcome = "winning" if Decimal(trade["pnl"]) > 0 else "losing"
+        row = {
+            "trade_number": index,
+            "symbol": trade["symbol"],
+            "side": trade["side"],
+            "entry_time": trade["entry_time"],
+            "exit_time": trade["exit_time"],
+            "entry_price": trade["entry_price"],
+            "exit_price": trade["exit_price"],
+            "pnl": trade["pnl"],
+            "pnl_pct": trade["pnl_pct"],
+            "outcome": outcome,
+            "entry_reason": trade.get("entry_reason", []),
+            "exit_reason": trade["exit_reason"],
+            "entry_chart": trade.get("entry_candle", {}),
+            "exit_chart": trade.get("exit_candle", {}),
+            "indicators": trade.get("indicators", {}),
+            "trend_regime": context.get("trend_regime", "unknown"),
+            "volatility_regime": context.get("volatility_regime", "unknown"),
+            "trend_strength": context.get("trend_strength"),
+            "trend_strength_bucket": context.get("trend_strength_bucket", "unknown"),
+        }
+        if row_matches_filters(row, filters):
+            rows.append(row)
+    return rows
+
+
+def row_matches_filters(row: dict[str, Any], filters: dict[str, str] | None) -> bool:
+    if not filters:
+        return True
+    for key, expected in filters.items():
+        if expected and row.get(key) != expected:
+            return False
+    return True
+
+
+def build_filter_options(trades: list[dict[str, Any]], context_by_time: dict[Any, dict[str, Any]]) -> dict[str, list[str]]:
+    explorer = build_trade_explorer(trades, context_by_time)
+    return {
+        "trend_regime": sorted(unique_values(row["trend_regime"] for row in explorer)),
+        "volatility_regime": sorted(unique_values(row["volatility_regime"] for row in explorer)),
+        "trend_strength_bucket": sorted(unique_values(row["trend_strength_bucket"] for row in explorer)),
+        "outcome": sorted(unique_values(row["outcome"] for row in explorer)),
+    }
+
+
+def unique_values(values: Iterable[str]) -> set[str]:
+    return {value for value in values if value}
+
+
+def calculate_feature_correlations(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    fields = ["rsi_14", "distance_from_ema_20", "distance_from_ema_50", "macd", "volume_change", "volatility_20"]
+    rows = []
+    for field in fields:
+        x_values = []
+        y_values = []
+        for trade in trades:
+            value = trade.get("indicators", {}).get(field)
+            if value is None:
+                continue
+            x_values.append(float(value))
+            y_values.append(1.0 if Decimal(trade["pnl"]) > 0 else 0.0)
+        rows.append({"feature": field, "correlation_to_profitable_trade": pearson(x_values, y_values), "sample_size": len(x_values)})
+    return rows
+
+
+def pearson(x_values: list[float], y_values: list[float]) -> float | None:
+    if len(x_values) < 2 or len(y_values) < 2:
+        return None
+    x_mean = sum(x_values) / len(x_values)
+    y_mean = sum(y_values) / len(y_values)
+    numerator = sum((x - x_mean) * (y - y_mean) for x, y in zip(x_values, y_values))
+    x_var = sum((x - x_mean) ** 2 for x in x_values)
+    y_var = sum((y - y_mean) ** 2 for y in y_values)
+    denominator = sqrt(x_var * y_var)
+    return numerator / denominator if denominator else None
+
+
+def build_research_dashboard(result: dict[str, Any], trades: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "equity_curve": result.get("equity_curve", []),
+        "drawdown_curve": result.get("drawdown_curve", []),
+        "monthly_returns": calculate_monthly_returns(trades),
+        "rolling_profit_factor": rolling_metric(trades, "profit_factor", window=10),
+        "rolling_win_rate": rolling_metric(trades, "win_rate", window=10),
+        "strategy_heatmap": [],
+        "regime_heatmap": build_regime_heatmap(trades),
+    }
+
+
+def calculate_monthly_returns(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, Decimal] = {}
+    for trade in trades:
+        key = f"{trade['exit_time'].year:04d}-{trade['exit_time'].month:02d}"
+        grouped[key] = grouped.get(key, Decimal("0")) + Decimal(trade["pnl_pct"])
+    return [{"month": month, "return": float(value)} for month, value in sorted(grouped.items())]
+
+
+def rolling_metric(trades: list[dict[str, Any]], metric: str, window: int) -> list[dict[str, Any]]:
+    rows = []
+    for index in range(len(trades)):
+        sample = trades[max(0, index - window + 1) : index + 1]
+        metrics = metrics_for_trades(sample)
+        rows.append({"trade_number": index + 1, metric: metrics.get(metric)})
+    return rows
+
+
+def build_regime_heatmap(trades: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for trade in trades:
+        key = (trade["trend_regime"], trade["volatility_regime"])
+        grouped.setdefault(key, []).append(trade)
+    rows = []
+    for (trend_regime, volatility_regime), grouped_trades in sorted(grouped.items()):
+        metrics = metrics_for_trades(grouped_trades)
+        rows.append(
+            {
+                "trend_regime": trend_regime,
+                "volatility_regime": volatility_regime,
+                "trade_count": metrics["number_of_trades"],
+                "expectancy": metrics["expectancy_per_trade"],
+                "profit_factor": metrics["profit_factor"],
+            }
+        )
+    return rows
+
+
+def build_library_dashboard(ranked: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "strategy_heatmap": [
+            {
+                "strategy": f"{row['strategy_name']}_{row['strategy_version']}",
+                "profit_factor": row["metrics"].get("profit_factor"),
+                "expectancy": row["metrics"].get("expectancy_per_trade"),
+                "max_drawdown": row["metrics"].get("max_drawdown"),
+                "trade_count": row["metrics"].get("number_of_trades"),
+            }
+            for row in ranked
+        ],
+        "regime_heatmap": [
+            {
+                "strategy": f"{row['strategy_name']}_{row['strategy_version']}",
+                **heatmap_row,
+            }
+            for row in ranked
+            for heatmap_row in row["dashboard"]["regime_heatmap"]
+        ],
+    }
 
 
 def metrics_for_trades(trades: list[dict[str, Any]]) -> dict[str, Any]:
