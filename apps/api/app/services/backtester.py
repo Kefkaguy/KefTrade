@@ -2,7 +2,7 @@ from decimal import Decimal
 from statistics import mean, pstdev
 from typing import Any
 
-from app.services.strategy import trend_pullback_decision
+from app.services.strategy import StrategyFn, trend_pullback_decision
 
 SAME_CANDLE_EXIT_POLICY = "stop_first"
 
@@ -28,6 +28,7 @@ def run_backtest(
     candles: list[dict[str, Any]],
     features: list[dict[str, Any]],
     params: dict[str, Any],
+    strategy_decide: StrategyFn = trend_pullback_decision,
 ) -> dict[str, Any]:
     rows = combine_candles_features(candles, features)
     train_rows, validation_rows = walk_forward_split(rows, float(params["walk_forward_train_ratio"]))
@@ -47,7 +48,7 @@ def run_backtest(
         current = rows[i]
         candle = current["candle"]
         recent_candles = [row["candle"] for row in rows[: i + 1]]
-        decision = trend_pullback_decision(candle, current["feature"], recent_candles, params)
+        decision = strategy_decide(candle, current["feature"], recent_candles, params)
 
         if decision.signal != "setup" or decision.stop_loss is None or decision.take_profit is None:
             i += 1
@@ -118,6 +119,7 @@ def run_backtest(
                 "pnl": pnl,
                 "pnl_pct": pnl / initial_equity,
                 "exit_reason": exit_reason,
+                "holding_period_hours": (rows[exit_index]["candle"]["timestamp"] - entry_candle["timestamp"]).total_seconds() / 3600,
             }
         )
         i = exit_index + 1
@@ -134,7 +136,7 @@ def run_backtest(
     else:
         metrics["walk_forward"] = {"enabled": False, "reason": "At least 80 candle/feature rows are required."}
 
-    return {"metrics": metrics, "trades": trades}
+    return {"metrics": metrics, "trades": trades, "equity_curve_summary": summarize_equity_curve(equity_curve)}
 
 
 def mark_to_market_equity(equity_before_trade: Decimal, entry_price: Decimal, mark_price: Decimal, quantity: Decimal) -> Decimal:
@@ -172,6 +174,8 @@ def calculate_metrics(initial_equity: Decimal, final_equity: Decimal, trades: li
         "sharpe_ratio": float(sharpe) if sharpe is not None else None,
         "number_of_trades": len(trades),
         "expectancy_per_trade": float(expectancy),
+        "longest_losing_streak": longest_losing_streak(trades),
+        "average_holding_time_hours": average_holding_time_hours(trades),
     }
 
 
@@ -185,3 +189,32 @@ def calculate_max_drawdown(equity_curve: list[Decimal]) -> Decimal:
             drawdown = (peak - value) / peak
             max_drawdown = max(max_drawdown, drawdown)
     return max_drawdown
+
+
+def longest_losing_streak(trades: list[dict[str, Any]]) -> int:
+    longest = 0
+    current = 0
+    for trade in trades:
+        if trade["pnl"] <= 0:
+            current += 1
+            longest = max(longest, current)
+        else:
+            current = 0
+    return longest
+
+
+def average_holding_time_hours(trades: list[dict[str, Any]]) -> float:
+    durations = [float(trade.get("holding_period_hours", 0)) for trade in trades]
+    return mean(durations) if durations else 0.0
+
+
+def summarize_equity_curve(equity_curve: list[Decimal]) -> dict[str, Any]:
+    if not equity_curve:
+        return {"points": 0, "start": None, "end": None, "high": None, "low": None}
+    return {
+        "points": len(equity_curve),
+        "start": float(equity_curve[0]),
+        "end": float(equity_curve[-1]),
+        "high": float(max(equity_curve)),
+        "low": float(min(equity_curve)),
+    }

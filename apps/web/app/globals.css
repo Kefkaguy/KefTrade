@@ -298,7 +298,7 @@ th {
 
 .barRow {
   display: grid;
-  grid-template-columns: 44px 1fr 72px;
+  grid-template-columns: 180px 1fr 72px;
   gap: 12px;
   align-items: center;
   font-size: 13px;
@@ -315,6 +315,15 @@ th {
   height: 100%;
   border-radius: inherit;
   background: var(--accent);
+}
+
+.reportBlock {
+  margin: 0;
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  color: var(--ink);
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
 }
 
 @media (max-width: 860px) {
