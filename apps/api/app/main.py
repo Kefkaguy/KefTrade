@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import alpha, backtests, data, features, regimes, research, risk, signals, symbols, validation
+from app.routers import alpha, backtests, data, features, regimes, research, research_lab, risk, signals, symbols, validation
 
 app = FastAPI(title="KefTrade API", version="0.1.0")
 
@@ -20,6 +20,7 @@ app.include_router(regimes.router)
 app.include_router(signals.router)
 app.include_router(backtests.router)
 app.include_router(research.router)
+app.include_router(research_lab.router)
 app.include_router(alpha.router)
 app.include_router(validation.router)
 app.include_router(risk.router)
