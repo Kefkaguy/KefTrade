@@ -26,7 +26,7 @@ export function CandleChart({ candles }: CandleChartProps) {
   };
 
   return (
-    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="BTCUSDT 4h candlestick chart">
+    <svg className="chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Development asset candlestick chart">
       {visible.map((candle, index) => {
         const open = Number(candle.open);
         const close = Number(candle.close);
@@ -48,4 +48,3 @@ export function CandleChart({ candles }: CandleChartProps) {
     </svg>
   );
 }
-

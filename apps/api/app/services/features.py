@@ -4,8 +4,9 @@ from typing import Any
 import pandas as pd
 import psycopg
 
+from app.domain.assets import DEFAULT_DEV_SYMBOL, DEFAULT_DEV_TIMEFRAME
 
-def load_candles(conn: psycopg.Connection, symbol: str = "BTCUSDT", timeframe: str = "4h") -> list[dict[str, Any]]:
+def load_candles(conn: psycopg.Connection, symbol: str = DEFAULT_DEV_SYMBOL, timeframe: str = DEFAULT_DEV_TIMEFRAME) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
         SELECT symbol, timeframe, timestamp, open, high, low, close, volume
@@ -112,7 +113,7 @@ def upsert_features(conn: psycopg.Connection, feature_rows: list[dict[str, Any]]
     return affected
 
 
-def sync_features(conn: psycopg.Connection, symbol: str = "BTCUSDT", timeframe: str = "4h") -> dict[str, Any]:
+def sync_features(conn: psycopg.Connection, symbol: str = DEFAULT_DEV_SYMBOL, timeframe: str = DEFAULT_DEV_TIMEFRAME) -> dict[str, Any]:
     candles = load_candles(conn, symbol, timeframe)
     feature_rows = calculate_features(candles)
     upserted = upsert_features(conn, feature_rows)

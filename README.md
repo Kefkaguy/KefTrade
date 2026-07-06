@@ -1,11 +1,12 @@
-# KefTrade BTC MVP
+# KefTrade Quant Research MVP
 
-KefTrade is a quantitative trading research MVP, not an automated trading system. Version 0.1 is scoped to `BTCUSDT` on the `4h` timeframe using Binance public candles.
+KefTrade is a professional quantitative stock research platform in development, not an automated trading system. Version 0.1 uses `BTCUSDT` on the `4h` timeframe only as a deterministic development environment because Binance provides accessible historical candles.
 
 ## What v0.1 Does
 
-- Syncs Binance `BTCUSDT` `4h` candles.
-- Logs raw Binance API responses for debugging.
+- Syncs development market data through a `MarketDataProvider` abstraction.
+- Uses Binance `BTCUSDT` `4h` candles as the current dev provider.
+- Logs raw provider responses for debugging.
 - Calculates technical features with past-only rolling windows.
 - Runs `trend_pullback_v1` from versioned strategy parameters.
 - Backtests with fees, slippage, stop-loss, take-profit, and walk-forward validation.
@@ -17,6 +18,25 @@ KefTrade is a quantitative trading research MVP, not an automated trading system
 - No paper trading.
 - No live trading.
 - No futures, leverage, margin, or auto-execution.
+- No production stock provider yet.
+
+## Architecture Direction
+
+KefTrade is designed around US equities first. The initial research universe is:
+
+```text
+AAPL, MSFT, NVDA, AMD, META, AMZN, GOOGL, TSLA, SPY, QQQ
+```
+
+Provider-specific integrations must sit behind common interfaces:
+
+- `MarketDataProvider`
+- `TradingCalendar`
+- `CorporateActions`
+- `SymbolMetadata`
+- `ExchangeInfo`
+
+Stock-specific concepts are first-class architectural concerns: regular market hours, premarket, after-hours, earnings dates, dividends, stock splits, exchange holidays, sector classification, market capitalization, and index membership.
 
 ## Local Development
 
@@ -37,3 +57,4 @@ docker compose up -d postgres
 - Web: `http://127.0.0.1:3000`
 - Symbol: `BTCUSDT`
 - Timeframe: `4h`
+- Provider: `binance_dev`

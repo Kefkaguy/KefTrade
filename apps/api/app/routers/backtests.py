@@ -5,6 +5,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.db import get_connection
+from app.domain.assets import DEFAULT_DEV_SYMBOL, DEFAULT_DEV_TIMEFRAME
 from app.services.backtester import run_backtest
 from app.services.features import load_candles, sync_features
 from app.services.strategy import get_strategy_version
@@ -14,8 +15,8 @@ router = APIRouter(tags=["backtests"])
 
 @router.post("/backtests")
 def create_backtest(
-    symbol: str = Query("BTCUSDT"),
-    timeframe: str = Query("4h"),
+    symbol: str = Query(DEFAULT_DEV_SYMBOL),
+    timeframe: str = Query(DEFAULT_DEV_TIMEFRAME),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     sync_features(conn, symbol=symbol, timeframe=timeframe)
@@ -34,8 +35,8 @@ def create_backtest(
     walk_forward = result["metrics"]["walk_forward"]
     backtest_row = conn.execute(
         """
-        INSERT INTO backtests(symbol, timeframe, strategy_name, strategy_version, train_start, train_end, validation_start, validation_end, metrics)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO backtests(symbol, timeframe, strategy_name, strategy_version, strategy_parameters, train_start, train_end, validation_start, validation_end, metrics)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
         """,
         (
@@ -43,6 +44,7 @@ def create_backtest(
             timeframe,
             strategy["name"],
             strategy["version"],
+            Jsonb(strategy["parameters"]),
             walk_forward.get("train_start"),
             walk_forward.get("train_end"),
             walk_forward.get("validation_start"),

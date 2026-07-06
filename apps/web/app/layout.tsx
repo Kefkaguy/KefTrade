@@ -4,7 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "KefTrade",
-  description: "BTCUSDT 4h trading intelligence research MVP"
+  description: "Quantitative stock research platform in development"
 };
 
 const navItems = [
@@ -24,7 +24,7 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
               <span className="brandMark">SF</span>
               <span>
                 <strong>KefTrade</strong>
-                <small>BTC research</small>
+                <small>Quant research</small>
               </span>
             </Link>
             <nav>

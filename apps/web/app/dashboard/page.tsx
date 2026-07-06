@@ -12,8 +12,8 @@ export default async function DashboardPage() {
     <div className="grid">
       <header className="pageHeader">
         <div>
-          <h1>BTCUSDT 4h research dashboard</h1>
-          <p className="muted">Data first. Backtest before trust. Execution remains locked.</p>
+          <h1>KefTrade research dashboard</h1>
+          <p className="muted">US stock research architecture. BTCUSDT 4h is the current deterministic data environment.</p>
         </div>
         <DataActions />
       </header>
@@ -43,8 +43,8 @@ export default async function DashboardPage() {
         <section className="panel">
           <h2>MVP constraints</h2>
           <ul className="list">
-            <li>BTCUSDT and 4h only.</li>
-            <li>Binance public market data only.</li>
+            <li>BTCUSDT and 4h only for v0.1 validation.</li>
+            <li>Market data flows through a provider abstraction.</li>
             <li>No Model Engine or trained model in v0.1.</li>
             <li>No paper trading or live execution.</li>
             <li>Backtests include fees, slippage, and walk-forward validation.</li>

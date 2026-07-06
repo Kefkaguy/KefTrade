@@ -65,8 +65,12 @@ export function getSignal() {
   return request<Signal>("/signals/BTCUSDT?timeframe=4h");
 }
 
+export function generateSignal() {
+  return request<Signal>("/signals/generate?symbol=BTCUSDT&timeframe=4h", { method: "POST" });
+}
+
 export function syncCandles() {
-  return request<Record<string, unknown>>("/data/sync?symbol=BTCUSDT&timeframe=4h&limit=500", { method: "POST" });
+  return request<Record<string, unknown>>("/data/sync?symbol=BTCUSDT&timeframe=4h&provider=binance_dev&limit=1500", { method: "POST" });
 }
 
 export function syncFeatures() {

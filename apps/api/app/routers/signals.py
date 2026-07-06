@@ -5,6 +5,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.db import get_connection
+from app.domain.assets import DEFAULT_DEV_SYMBOL, DEFAULT_DEV_TIMEFRAME
 from app.services.features import load_candles, sync_features
 from app.services.strategy import get_strategy_version, trend_pullback_decision
 
@@ -27,7 +28,28 @@ def list_signals(conn: psycopg.Connection = Depends(get_connection)) -> list[dic
 @router.get("/signals/{symbol}")
 def get_latest_signal(
     symbol: str,
-    timeframe: str = Query("4h"),
+    timeframe: str = Query(DEFAULT_DEV_TIMEFRAME),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM signals
+        WHERE symbol = %s AND timeframe = %s
+        ORDER BY generated_at DESC, created_at DESC
+        LIMIT 1
+        """,
+        (symbol, timeframe),
+    ).fetchone()
+    if not row:
+        return {"symbol": symbol, "timeframe": timeframe, "signal": "avoid", "explanation": ["No generated signal exists yet."]}
+    return dict(row)
+
+
+@router.post("/signals/generate")
+def generate_signal(
+    symbol: str = Query(DEFAULT_DEV_SYMBOL),
+    timeframe: str = Query(DEFAULT_DEV_TIMEFRAME),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     sync_features(conn, symbol=symbol, timeframe=timeframe)
@@ -71,6 +93,15 @@ def get_latest_signal(
         """
         INSERT INTO signals(symbol, timeframe, strategy_name, strategy_version, signal, generated_at, entry_zone, stop_loss, take_profit, risk_reward, explanation)
         VALUES (%(symbol)s, %(timeframe)s, %(strategy_name)s, %(strategy_version)s, %(signal)s, %(generated_at)s, %(entry_zone)s, %(stop_loss)s, %(take_profit)s, %(risk_reward)s, %(explanation)s)
+        ON CONFLICT(symbol, timeframe, strategy_name, strategy_version, generated_at)
+        DO UPDATE SET
+            signal = EXCLUDED.signal,
+            entry_zone = EXCLUDED.entry_zone,
+            stop_loss = EXCLUDED.stop_loss,
+            take_profit = EXCLUDED.take_profit,
+            risk_reward = EXCLUDED.risk_reward,
+            explanation = EXCLUDED.explanation,
+            created_at = NOW()
         """,
         db_payload,
     )

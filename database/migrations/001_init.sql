@@ -1,9 +1,17 @@
 CREATE TABLE IF NOT EXISTS symbols (
     id BIGSERIAL PRIMARY KEY,
     symbol TEXT NOT NULL UNIQUE,
-    base_asset TEXT NOT NULL,
-    quote_asset TEXT NOT NULL,
-    source TEXT NOT NULL,
+    asset_class TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    name TEXT NOT NULL,
+    provider_symbol TEXT NOT NULL,
+    primary_provider TEXT NOT NULL,
+    base_asset TEXT,
+    quote_asset TEXT,
+    sector TEXT,
+    market_cap NUMERIC,
+    index_membership JSONB,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -30,7 +38,15 @@ CREATE TABLE IF NOT EXISTS candles (
     close NUMERIC NOT NULL,
     volume NUMERIC NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(symbol, source, timeframe, timestamp)
+    UNIQUE(symbol, source, timeframe, timestamp),
+    CONSTRAINT candles_open_positive_check CHECK (open > 0),
+    CONSTRAINT candles_high_positive_check CHECK (high > 0),
+    CONSTRAINT candles_low_positive_check CHECK (low > 0),
+    CONSTRAINT candles_close_positive_check CHECK (close > 0),
+    CONSTRAINT candles_volume_nonnegative_check CHECK (volume >= 0),
+    CONSTRAINT candles_high_low_check CHECK (high >= low),
+    CONSTRAINT candles_open_range_check CHECK (open BETWEEN low AND high),
+    CONSTRAINT candles_close_range_check CHECK (close BETWEEN low AND high)
 );
 
 CREATE INDEX IF NOT EXISTS candles_symbol_timeframe_timestamp_idx
@@ -72,6 +88,7 @@ CREATE TABLE IF NOT EXISTS backtests (
     timeframe TEXT NOT NULL,
     strategy_name TEXT NOT NULL,
     strategy_version TEXT NOT NULL,
+    strategy_parameters JSONB NOT NULL,
     started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     train_start TIMESTAMPTZ,
     train_end TIMESTAMPTZ,
@@ -110,7 +127,8 @@ CREATE TABLE IF NOT EXISTS signals (
     take_profit NUMERIC,
     risk_reward NUMERIC,
     explanation JSONB NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT signals_unique_generation UNIQUE(symbol, timeframe, strategy_name, strategy_version, generated_at)
 );
 
 CREATE TABLE IF NOT EXISTS risk_settings (
@@ -125,8 +143,8 @@ CREATE TABLE IF NOT EXISTS risk_settings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-INSERT INTO symbols(symbol, base_asset, quote_asset, source)
-VALUES ('BTCUSDT', 'BTC', 'USDT', 'binance')
+INSERT INTO symbols(symbol, asset_class, exchange, currency, name, provider_symbol, primary_provider, base_asset, quote_asset)
+VALUES ('BTCUSDT', 'crypto', 'BINANCE', 'USDT', 'Bitcoin / Tether USD', 'BTCUSDT', 'binance_dev', 'BTC', 'USDT')
 ON CONFLICT (symbol) DO NOTHING;
 
 INSERT INTO risk_settings(id)
@@ -155,4 +173,3 @@ VALUES (
     'Long-only trend pullback strategy for BTCUSDT 4h research.'
 )
 ON CONFLICT (name, version) DO NOTHING;
-

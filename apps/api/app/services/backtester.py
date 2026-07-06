@@ -4,6 +4,8 @@ from typing import Any
 
 from app.services.strategy import trend_pullback_decision
 
+SAME_CANDLE_EXIT_POLICY = "stop_first"
+
 
 def combine_candles_features(candles: list[dict[str, Any]], features: list[dict[str, Any]]) -> list[dict[str, Any]]:
     feature_by_time = {row["timestamp"]: row for row in features}
@@ -51,12 +53,13 @@ def run_backtest(
             i += 1
             continue
 
-        signal_close = Decimal(candle["close"])
-        entry_price = signal_close * (Decimal("1") + slippage_rate)
+        entry_candle = rows[i + 1]["candle"]
+        entry_price = Decimal(entry_candle["open"]) * (Decimal("1") + slippage_rate)
         risk_per_unit = entry_price - decision.stop_loss
         if risk_per_unit <= 0:
             i += 1
             continue
+        effective_take_profit = entry_price + (risk_per_unit * Decimal(str(params["risk_reward"])))
 
         max_risk = equity * risk_per_trade
         quantity = max_risk / risk_per_unit
@@ -64,23 +67,33 @@ def run_backtest(
         exit_reason = "end_of_data"
         exit_index = len(rows) - 1
 
-        # Entry is evaluated on the next candle to avoid same-candle lookahead.
         for j in range(i + 1, len(rows)):
             future_candle = rows[j]["candle"]
             low = Decimal(future_candle["low"])
             high = Decimal(future_candle["high"])
             close = Decimal(future_candle["close"])
-            if low <= decision.stop_loss:
+            mark_price = close
+
+            # Explicit same-candle policy: when both stop and target are touched
+            # inside one OHLC candle, assume the stop filled first.
+            stop_touched = low <= decision.stop_loss
+            target_touched = high >= effective_take_profit
+            if stop_touched:
                 exit_price = decision.stop_loss * (Decimal("1") - slippage_rate)
-                exit_reason = "stop_loss"
+                exit_reason = "stop_loss" if not target_touched else f"stop_loss_{SAME_CANDLE_EXIT_POLICY}"
                 exit_index = j
+                mark_price = exit_price
+                equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))
                 break
-            if high >= decision.take_profit:
-                exit_price = decision.take_profit * (Decimal("1") - slippage_rate)
+            if target_touched:
+                exit_price = effective_take_profit * (Decimal("1") - slippage_rate)
                 exit_reason = "take_profit"
                 exit_index = j
+                mark_price = exit_price
+                equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))
                 break
             exit_price = close * (Decimal("1") - slippage_rate)
+            equity_curve.append(mark_to_market_equity(equity, entry_price, exit_price, quantity))
 
         if exit_price is None:
             i += 1
@@ -95,13 +108,13 @@ def run_backtest(
             {
                 "symbol": candle["symbol"],
                 "side": "long",
-                "entry_time": rows[i + 1]["candle"]["timestamp"],
+                "entry_time": entry_candle["timestamp"],
                 "exit_time": rows[exit_index]["candle"]["timestamp"],
                 "entry_price": entry_price,
                 "exit_price": exit_price,
                 "quantity": quantity,
                 "stop_loss": decision.stop_loss,
-                "take_profit": decision.take_profit,
+                "take_profit": effective_take_profit,
                 "pnl": pnl,
                 "pnl_pct": pnl / initial_equity,
                 "exit_reason": exit_reason,
@@ -122,6 +135,10 @@ def run_backtest(
         metrics["walk_forward"] = {"enabled": False, "reason": "At least 80 candle/feature rows are required."}
 
     return {"metrics": metrics, "trades": trades}
+
+
+def mark_to_market_equity(equity_before_trade: Decimal, entry_price: Decimal, mark_price: Decimal, quantity: Decimal) -> Decimal:
+    return equity_before_trade + ((mark_price - entry_price) * quantity)
 
 
 def calculate_metrics(initial_equity: Decimal, final_equity: Decimal, trades: list[dict[str, Any]], equity_curve: list[Decimal]) -> dict[str, Any]:
