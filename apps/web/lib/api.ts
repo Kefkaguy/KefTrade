@@ -124,6 +124,26 @@ export type RiskSettings = {
   allow_live_trading: boolean;
 };
 
+export type CopilotResponse = {
+  answer: string;
+  evidence_refs: string[];
+  confidence: string;
+  model: string;
+  safety_flags: string[];
+  context_summary: Record<string, unknown>;
+};
+
+export type CopilotInteraction = {
+  id: number;
+  question: string;
+  answer: string;
+  evidence_references: string[];
+  model: string;
+  confidence: string;
+  safety_flags: string[];
+  created_at: string;
+};
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 3500);
@@ -184,4 +204,12 @@ export function getRiskSettings() {
 
 export function updateRiskSettings(payload: Partial<RiskSettings>) {
   return request<RiskSettings>("/risk/settings", { method: "PUT", body: JSON.stringify(payload) });
+}
+
+export function askCopilot(question: string) {
+  return request<CopilotResponse>("/research/copilot", { method: "POST", body: JSON.stringify({ question }) });
+}
+
+export function getCopilotInteractions() {
+  return request<CopilotInteraction[]>("/research/copilot/interactions");
 }

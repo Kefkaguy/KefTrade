@@ -1,49 +1,17 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { AppShell } from "@/components/AppShell";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "KefTrade",
-  description: "Quantitative stock research platform in development"
+  description: "Professional quantitative research intelligence platform"
 };
-
-const navItems = [
-  { href: "/dashboard", label: "Dashboard" },
-  { href: "/symbol/BTCUSDT", label: "BTCUSDT" },
-  { href: "/backtest", label: "Backtest" },
-  { href: "/research", label: "Research" },
-  { href: "/alpha", label: "Alpha Lab" },
-  { href: "/validation", label: "Validation" },
-  { href: "/risk-settings", label: "Risk" }
-];
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <body>
-        <div className="shell">
-          <aside className="sidebar">
-            <Link href="/dashboard" className="brand">
-              <span className="brandMark">SF</span>
-              <span>
-                <strong>KefTrade</strong>
-                <small>Quant research</small>
-              </span>
-            </Link>
-            <nav>
-              {navItems.map((item) => (
-                <Link key={item.href} href={item.href}>
-                  {item.label}
-                </Link>
-              ))}
-            </nav>
-            <div className="guardrail">
-              <strong>Execution locked</strong>
-              <span>No Model Engine, paper trading, live orders, leverage, or futures in v0.1.</span>
-            </div>
-          </aside>
-          <main className="content">{children}</main>
-        </div>
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );
