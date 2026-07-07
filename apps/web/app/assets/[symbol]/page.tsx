@@ -1,42 +1,61 @@
 import { notFound } from "next/navigation";
-import { BarList, Card, DataTable, LineChart, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
-import { assets, equityCurve, journalEntries, regimeRows, strategies } from "@/lib/research-data";
+import { BarList, Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
+import {
+  barRows,
+  countBy,
+  displayAssetClass,
+  getLiveResearchSnapshot,
+  metricValue,
+  statusClass,
+  timelineItems,
+  validationSeries
+} from "@/lib/live-research";
 
 export default async function AssetDetailPage({ params }: { params: Promise<{ symbol: string }> }) {
   const { symbol } = await params;
-  const asset = assets.find((item) => item.symbol === symbol.toUpperCase());
+  const snapshot = await getLiveResearchSnapshot();
+  const asset = snapshot.symbols.find((item) => item.symbol === symbol.toUpperCase());
   if (!asset) notFound();
+  const assetArchive = snapshot.archive.filter((row) => row.assets.includes(asset.symbol));
+  const recommendations = countBy(assetArchive, (row) => row.recommendation);
+  const regimes = barRows(countBy(assetArchive.flatMap((row) => row.market_regimes), (value) => value), "No regimes");
+  const events = timelineItems(snapshot, 5);
 
   return (
     <div className="pageStack">
-      <PageTitle title={asset.symbol} description={`${asset.className} research history, validation summary, strategies tested, and market regimes.`} />
+      <PageTitle title={asset.symbol} description={`${displayAssetClass(asset.asset_class)} research history, validation summary, strategies tested, and market regimes.`} />
       <div className="metricGrid">
-        <MetricCard label="Asset class" value={asset.className} detail={asset.exchange} />
+        <MetricCard label="Asset class" value={displayAssetClass(asset.asset_class)} detail={asset.exchange} />
         <MetricCard label="Currency" value={asset.currency} detail="Research denomination" />
-        <MetricCard label="Validation" value="Rejected" detail="No validated alpha yet" tone="error" />
-        <MetricCard label="Strategies" value={strategies.length} detail="Tested deterministic library" />
+        <MetricCard label="Rejected" value={recommendations.Reject ?? 0} detail="Rejected evidence rows" tone="error" />
+        <MetricCard label="Strategies" value={new Set(assetArchive.map((row) => row.strategy)).size} detail="Tested deterministic library" />
       </div>
       <div className="dashboardGrid">
         <Card title="Performance" eyebrow="Summary">
-          <LineChart values={equityCurve} label={`${asset.symbol} performance summary`} />
+          <LineChart values={validationSeries(snapshot.validationRuns)} label={`${asset.symbol} validation summary`} />
         </Card>
         <Card title="Market regimes" eyebrow="Diagnostics">
-          <BarList rows={regimeRows} />
+          <BarList rows={regimes} />
         </Card>
       </div>
       <div className="dashboardGrid wideLeft">
         <Card title="Strategies tested" eyebrow="Validation">
-          <DataTable
-            columns={["Strategy", "Recommendation", "Failure"]}
-            rows={strategies.map((strategy) => [
-              `${strategy.name}_${strategy.version}`,
-              <span className={`status ${strategy.recommendation === "Reject" ? "avoid" : "watchlist"}`} key={strategy.name}>{strategy.recommendation}</span>,
-              strategy.failure
-            ])}
-          />
+          {assetArchive.length ? (
+            <DataTable
+              columns={["Strategy", "Recommendation", "Trades", "Failure"]}
+              rows={assetArchive.map((row) => [
+                row.strategy,
+                <span className={`status ${statusClass(row.recommendation)}`} key={row.evidence_ref}>{row.recommendation}</span>,
+                metricValue(row.metrics, "number_of_trades"),
+                row.failure_reasons?.[0] || "No failure reason recorded."
+              ])}
+            />
+          ) : (
+            <EmptyState title="No strategy evidence for this asset." body="Run validation across this asset to populate strategy coverage." />
+          )}
         </Card>
         <Card title="Research history" eyebrow="Journal">
-          <Timeline items={journalEntries.slice(0, 3)} />
+          {events.length ? <Timeline items={events} /> : <EmptyState title="No research history yet." body="Research events will appear here after experiments run." />}
         </Card>
       </div>
     </div>

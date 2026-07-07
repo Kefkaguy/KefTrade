@@ -1,47 +1,59 @@
 import Link from "next/link";
-import { Card, DataTable, LineChart, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
-import { drawdownCurve, journalEntries, strategies } from "@/lib/research-data";
+import { Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
+import { countBy, getLiveResearchSnapshot, metricValue, statusClass, timelineItems, validationSeries } from "@/lib/live-research";
 
-export default function StrategiesPage() {
-  const selected = strategies[0];
+export default async function StrategiesPage() {
+  const snapshot = await getLiveResearchSnapshot();
+  const strategyNames = Array.from(new Set(snapshot.archive.map((row) => row.strategy)));
+  const recommendationCounts = countBy(snapshot.archive, (row) => row.recommendation);
+  const selected = snapshot.archive[0];
+  const events = timelineItems(snapshot, 8);
   return (
     <div className="pageStack">
       <PageTitle title="Strategies" description="Deterministic strategy library with evidence rules, validation history, and failure analysis." />
       <div className="metricGrid">
-        <MetricCard label="Library size" value={strategies.length} detail="Common deterministic interface" />
-        <MetricCard label="Validated" value="0" detail="No statistical edge proven" tone="success" />
-        <MetricCard label="Rejected" value="5" detail="Evidence gates failed" tone="error" />
-        <MetricCard label="Needs research" value="1" detail="Insufficient evidence" tone="warning" />
+        <MetricCard label="Library size" value={strategyNames.length} detail="Strategies in evidence archive" />
+        <MetricCard label="Validated" value={recommendationCounts["Validated Alpha"] ?? 0} detail="Statistical edge proven" tone="success" />
+        <MetricCard label="Rejected" value={recommendationCounts.Reject ?? 0} detail="Evidence gates failed" tone="error" />
+        <MetricCard label="Needs research" value={recommendationCounts["Research More"] ?? recommendationCounts["Needs More Research"] ?? 0} detail="Insufficient evidence" tone="warning" />
       </div>
       <div className="dashboardGrid wideLeft">
         <Card title="Strategy library" eyebrow="Compare">
-          <DataTable
-            columns={["Strategy", "Version", "Status", "Trades", "Detail"]}
-            rows={strategies.map((strategy) => [
-              <Link className="tableLink" href={`/strategies/${strategy.name}`} key={strategy.name}>{strategy.name}</Link>,
-              strategy.version,
-              <span className={`status ${strategy.recommendation === "Reject" ? "avoid" : "watchlist"}`} key={`${strategy.name}-status`}>{strategy.recommendation}</span>,
-              strategy.trades,
-              strategy.failure
-            ])}
-          />
+          {snapshot.archive.length ? (
+            <DataTable
+              columns={["Strategy", "Candidate", "Status", "Trades", "Detail"]}
+              rows={snapshot.archive.map((row) => [
+                <Link className="tableLink" href={`/strategies/${encodeURIComponent(row.strategy)}`} key={row.evidence_ref}>{row.strategy}</Link>,
+                row.candidate_id,
+                <span className={`status ${statusClass(row.recommendation)}`} key={`${row.evidence_ref}-status`}>{row.recommendation}</span>,
+                metricValue(row.metrics, "number_of_trades"),
+                row.failure_reasons?.[0] || "No failure reason recorded."
+              ])}
+            />
+          ) : (
+            <EmptyState title="No strategy evidence yet." body="Run alpha discovery or validation to populate the strategy library." />
+          )}
         </Card>
-        <Card title={`${selected.name}_${selected.version}`} eyebrow="Scorecard">
-          <div className="scoreList">
-            <span>Profit Factor <strong>Below gate</strong></span>
-            <span>Expectancy <strong>Unstable</strong></span>
-            <span>Max Drawdown <strong>Too high</strong></span>
-            <span>Trade Count <strong>{selected.trades}</strong></span>
-            <span>Recommendation <strong>{selected.recommendation}</strong></span>
-          </div>
+        <Card title={selected?.strategy ?? "No strategy selected"} eyebrow="Scorecard">
+          {selected ? (
+            <div className="scoreList">
+              <span>Profit Factor <strong>{metricValue(selected.metrics, "profit_factor")}</strong></span>
+              <span>Expectancy <strong>{metricValue(selected.metrics, "expectancy_per_trade")}</strong></span>
+              <span>Max Drawdown <strong>{metricValue(selected.metrics, "max_drawdown")}</strong></span>
+              <span>Trade Count <strong>{metricValue(selected.metrics, "number_of_trades")}</strong></span>
+              <span>Recommendation <strong>{selected.recommendation}</strong></span>
+            </div>
+          ) : (
+            <EmptyState title="No scorecard yet." body="Strategy metrics will appear after validation creates evidence rows." />
+          )}
         </Card>
       </div>
       <div className="dashboardGrid">
-        <Card title="Drawdown behavior" eyebrow="Risk">
-          <LineChart values={drawdownCurve} label="Strategy drawdown curve" />
+        <Card title="Validation behavior" eyebrow="Risk">
+          <LineChart values={validationSeries(snapshot.validationRuns)} label="Strategy validation score history" />
         </Card>
         <Card title="Research timeline" eyebrow="Evidence">
-          <Timeline items={journalEntries} />
+          {events.length ? <Timeline items={events} /> : <EmptyState title="No research timeline yet." body="Run experiments to build strategy history." />}
         </Card>
       </div>
     </div>

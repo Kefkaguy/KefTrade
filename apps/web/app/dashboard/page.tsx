@@ -1,91 +1,122 @@
-import { AssetLink, BarList, Card, DataTable, LineChart, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
+import { AssetLink, BarList, Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
 import { DataActions } from "@/components/DataActions";
 import { getCandles, getSignal } from "@/lib/api";
-import { assets, equityCurve, hypotheses, journalEntries, regimeRows, strategies } from "@/lib/research-data";
+import {
+  barRows,
+  countBy,
+  displayAssetClass,
+  getLiveResearchSnapshot,
+  latestExperimentRows,
+  statusClass,
+  timelineItems,
+  validationSeries
+} from "@/lib/live-research";
 import { money } from "@/lib/format";
 
 export default async function DashboardPage() {
-  const candles = await getCandles(120).catch(() => []);
-  const signal = await getSignal().catch(() => null);
+  const [candles, signal, snapshot] = await Promise.all([
+    getCandles(120).catch(() => []),
+    getSignal().catch(() => null),
+    getLiveResearchSnapshot()
+  ]);
   const latest = candles.at(-1);
-  const rejected = strategies.filter((strategy) => strategy.recommendation === "Reject").length;
-  const researchMore = strategies.filter((strategy) => strategy.recommendation === "Research More").length;
+  const recommendations = countBy(snapshot.archive, (row) => row.recommendation);
+  const regimeRows = barRows(countBy(snapshot.archive.flatMap((row) => row.market_regimes), (value) => value), "No regimes");
+  const strategyRows = latestExperimentRows(snapshot.archive, 6);
+  const events = timelineItems(snapshot, 5);
+  const latestConclusion = snapshot.intelligence?.confidence?.[0]?.conclusion;
+  const latestValidation = snapshot.validationRuns.at(-1);
 
   return (
     <div className="pageStack">
       <PageTitle
-        title="Research Dashboard"
-        description="A stock-first quantitative research workspace showing validation status, active hypotheses, and evidence-backed next steps."
+        title="Research Command Center"
+        description="Live research status, validation evidence, market data health, assets, timeline, and copilot-ready context."
         actions={<DataActions />}
       />
 
       <section className="heroPanel">
         <div>
-          <span className="sectionLabel">Today</span>
-          <h2>Evidence gates are working. No weak strategy is promoted.</h2>
+          <span className="sectionLabel">Research Status</span>
+          <h2>{latestConclusion || "No validated research conclusion yet."}</h2>
           <p>
-            Latest research continues to reject unstable deterministic strategies. The next productive work is hypothesis-driven equity analysis,
-            not forced optimization.
+            {snapshot.intelligence
+              ? `${snapshot.intelligence.summary.evidence_item_count} evidence records, ${snapshot.intelligence.summary.validation_run_count} validation runs, and ${snapshot.intelligence.summary.recommendation_count} research recommendations are loaded from the backend.`
+              : "Sync data, create hypotheses, and run validation to populate the research command center."}
           </p>
         </div>
         <div className="heroMetrics">
           <MetricCard label="Latest BTC close" value={latest ? money(latest.close) : "No candles"} detail="Development dataset" />
           <MetricCard label="Current signal" value={signal?.signal ?? "No signal"} detail="Read-only research signal" tone="warning" />
+          <MetricCard label="Latest validation" value={latestValidation ? `Run ${latestValidation.id}` : "None"} detail={latestValidation ? `${latestValidation.candidate_count} candidates` : "Run alpha validation"} />
         </div>
       </section>
 
       <div className="metricGrid">
-        <MetricCard label="Total experiments" value="61" detail="Backend test coverage mirrors research modules" />
-        <MetricCard label="Validated strategies" value="0" detail="Evidence gates preserved" tone="success" />
-        <MetricCard label="Rejected strategies" value={rejected} detail="Correctly rejected" tone="error" />
-        <MetricCard label="Research More" value={researchMore} detail="Needs stronger evidence" tone="warning" />
+        <MetricCard label="Total experiments" value={snapshot.intelligence?.summary.experiment_count ?? 0} detail="Strategy experiment records" />
+        <MetricCard label="Validated strategies" value={recommendations["Validated Alpha"] ?? 0} detail="Passed evidence gates" tone="success" />
+        <MetricCard label="Rejected strategies" value={recommendations.Reject ?? 0} detail="Rejected by validation" tone="error" />
+        <MetricCard label="Research More" value={recommendations["Research More"] ?? recommendations["Needs More Research"] ?? 0} detail="Needs stronger evidence" tone="warning" />
       </div>
 
       <div className="dashboardGrid">
         <Card title="Validation history" eyebrow="Evidence">
-          <LineChart values={equityCurve} label="Validation history equity curve summary" />
+          <LineChart values={validationSeries(snapshot.validationRuns)} label="Validation history score summary" />
         </Card>
-        <Card title="Regime pressure" eyebrow="Market Intelligence">
+        <Card title="Regime distribution" eyebrow="Market Intelligence">
           <BarList rows={regimeRows} />
         </Card>
       </div>
 
       <div className="dashboardGrid wideLeft">
         <Card title="Latest experiments" eyebrow="Research">
-          <DataTable
-            columns={["Strategy", "Version", "Recommendation", "Failure analysis"]}
-            rows={strategies.slice(0, 5).map((strategy) => [
-              strategy.name,
-              strategy.version,
-              <span className={`status ${strategy.recommendation === "Reject" ? "avoid" : "watchlist"}`} key={strategy.name}>
-                {strategy.recommendation}
-              </span>,
-              strategy.failure
-            ])}
-          />
+          {strategyRows.length ? (
+            <DataTable
+              columns={["Strategy", "Candidate", "Recommendation", "Trades", "Failure analysis"]}
+              rows={strategyRows.map((row) => [
+                row.strategy,
+                row.candidate,
+                <span className={`status ${statusClass(row.recommendation)}`} key={row.candidate}>
+                  {row.recommendation}
+                </span>,
+                row.trades,
+                row.failure
+              ])}
+            />
+          ) : (
+            <EmptyState title="No experiments yet." body="Run alpha discovery or validation to build the experiment archive." />
+          )}
         </Card>
         <Card title="Active hypotheses" eyebrow="Workspace">
-          <div className="hypothesisList">
-            {hypotheses.map((hypothesis) => (
-              <article key={hypothesis}>
-                <span />
-                <p>{hypothesis}</p>
-              </article>
-            ))}
-          </div>
+          {snapshot.hypotheses.length ? (
+            <div className="hypothesisList">
+              {snapshot.hypotheses.slice(0, 5).map((hypothesis) => (
+                <article key={hypothesis.id}>
+                  <span />
+                  <p>{hypothesis.title}</p>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="No hypotheses yet." body="Create your first research hypothesis." />
+          )}
         </Card>
       </div>
 
       <div className="dashboardGrid">
         <Card title="Research progress" eyebrow="Archive">
-          <Timeline items={journalEntries.slice(0, 3)} />
+          {events.length ? <Timeline items={events} /> : <EmptyState title="No timeline yet." body="Research activity will appear here after hypotheses, experiments, or validation runs." />}
         </Card>
         <Card title="Assets under study" eyebrow="Coverage">
-          <div className="assetGrid">
-            {assets.map((asset) => (
-              <AssetLink key={asset.symbol} symbol={asset.symbol} />
-            ))}
-          </div>
+          {snapshot.symbols.length ? (
+            <div className="assetGrid">
+              {snapshot.symbols.map((asset) => (
+                <AssetLink key={asset.symbol} symbol={asset.symbol} label={`${asset.symbol} · ${displayAssetClass(asset.asset_class)}`} />
+              ))}
+            </div>
+          ) : (
+            <EmptyState title="No assets synced." body="Sync market data to register research assets." />
+          )}
         </Card>
       </div>
     </div>

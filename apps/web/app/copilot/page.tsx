@@ -1,5 +1,6 @@
-import { Card, DataTable, EmptyState, PageTitle } from "@/components/ResearchUI";
+import { Card, DataTable, EmptyState, EvidenceBadges, PageTitle } from "@/components/ResearchUI";
 import { getCopilotInteractions } from "@/lib/api";
+import { displayProviderFromModel } from "@/lib/live-research";
 
 export default async function CopilotPage() {
   const interactions = await getCopilotInteractions().catch(() => []);
@@ -9,11 +10,11 @@ export default async function CopilotPage() {
       <Card title="Interaction history" eyebrow="Audit trail">
         {interactions.length ? (
           <DataTable
-            columns={["Question", "Model", "Confidence", "Safety", "Created"]}
+            columns={["Question", "Provider / Model", "Evidence", "Safety", "Created"]}
             rows={interactions.slice(0, 12).map((item) => [
               item.question,
-              item.model,
-              item.confidence,
+              `${displayProviderFromModel(item.model)} / ${item.model}`,
+              <EvidenceBadges key={`${item.id}-refs`} refs={item.evidence_refs ?? []} />,
               item.safety_flags?.join(", ") || "None",
               new Date(item.created_at).toLocaleString()
             ])}

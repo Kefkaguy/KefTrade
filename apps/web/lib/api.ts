@@ -136,12 +136,107 @@ export type CopilotResponse = {
 export type CopilotInteraction = {
   id: number;
   question: string;
-  answer: string;
-  evidence_references: string[];
+  response: string;
+  evidence_refs: string[];
   model: string;
-  confidence: string;
+  context_summary: Record<string, unknown>;
   safety_flags: string[];
   created_at: string;
+};
+
+export type SymbolRow = {
+  symbol: string;
+  asset_class: string;
+  exchange: string;
+  currency: string;
+  name: string;
+  provider_symbol: string;
+  primary_provider: string;
+  sector?: string | null;
+  market_cap?: string | number | null;
+  index_membership?: string[] | null;
+  is_active: boolean;
+};
+
+export type ResearchHypothesis = {
+  id: number;
+  title: string;
+  hypothesis: string;
+  status: string;
+  tags: string[];
+  created_at: string;
+  updated_at: string;
+};
+
+export type ResearchJournalEntry = {
+  id: number;
+  hypothesis_id?: number | null;
+  experiment_id?: number | null;
+  entry_type: string;
+  dataset: Record<string, unknown>;
+  parameters: Record<string, unknown>;
+  results: Record<string, unknown>;
+  conclusion: string;
+  next_actions: string[];
+  created_at: string;
+};
+
+export type ResearchTimelineEvent = {
+  timestamp: string | null;
+  event_type: string;
+  summary: string;
+  evidence_refs: string[];
+};
+
+export type ResearchArchiveRow = {
+  evidence_ref: string;
+  candidate_id: string;
+  strategy: string;
+  indicators: string[];
+  assets: string[];
+  timeframes: string[];
+  market_regimes: string[];
+  recommendation: string;
+  failure_reasons: string[];
+  validation_status: string;
+  metrics: Record<string, unknown>;
+};
+
+export type ValidationRun = {
+  id: number;
+  symbol_set: string[];
+  timeframe_set: string[];
+  candidate_count: number;
+  thresholds: Record<string, unknown>;
+  summary: Record<string, unknown>;
+  created_at: string;
+};
+
+export type ResearchIntelligence = {
+  summary: {
+    hypothesis_count: number;
+    experiment_count: number;
+    validation_run_count: number;
+    evidence_item_count: number;
+    recommendation_count: number;
+  };
+  meta_analysis: Record<string, Array<Record<string, unknown>>>;
+  recommendations: Array<{
+    title: string;
+    finding: string;
+    recommendation: string;
+    evidence_refs: string[];
+    confidence: string;
+  }>;
+  confidence: Array<{
+    conclusion: string;
+    confidence: string;
+    supporting_evidence_count: number;
+    evidence_refs: string[];
+  }>;
+  timeline: ResearchTimelineEvent[];
+  archive: ResearchArchiveRow[];
+  markdown_report: string;
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
@@ -212,4 +307,32 @@ export function askCopilot(question: string) {
 
 export function getCopilotInteractions() {
   return request<CopilotInteraction[]>("/research/copilot/interactions");
+}
+
+export function getSymbols() {
+  return request<SymbolRow[]>("/symbols");
+}
+
+export function getResearchHypotheses() {
+  return request<ResearchHypothesis[]>("/research/hypotheses");
+}
+
+export function getResearchJournal() {
+  return request<ResearchJournalEntry[]>("/research/journal");
+}
+
+export function getResearchTimeline() {
+  return request<ResearchTimelineEvent[]>("/research/timeline");
+}
+
+export function getResearchArchive() {
+  return request<ResearchArchiveRow[]>("/research/archive");
+}
+
+export function getResearchIntelligence() {
+  return request<ResearchIntelligence>("/research/intelligence");
+}
+
+export function getValidationRuns() {
+  return request<ValidationRun[]>("/alpha/validation-runs");
 }

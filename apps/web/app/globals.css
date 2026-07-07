@@ -724,13 +724,36 @@ th {
   gap: 7px;
 }
 
-.evidenceList span {
+.evidenceList span,
+.evidenceList a {
   border-radius: 999px;
   padding: 5px 8px;
   background: var(--bg-secondary);
   color: var(--muted-accent);
   font-size: 11px;
   font-weight: 800;
+}
+
+.metadataGrid {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-soft);
+  font-size: 12px;
+}
+
+.metadataGrid span {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--muted);
+}
+
+.metadataGrid strong {
+  color: var(--ink);
+  text-align: right;
 }
 
 .skeletonStack {
@@ -744,6 +767,53 @@ th {
   background: linear-gradient(90deg, var(--bg-secondary), var(--line), var(--bg-secondary));
   background-size: 200% 100%;
   animation: shimmer 1.25s infinite;
+}
+
+.loadingHeader {
+  display: grid;
+  gap: 12px;
+  max-width: 720px;
+}
+
+.loadingHeader span,
+.loadingHeader strong,
+.loadingCard span,
+.loadingCard strong,
+.loadingCard small,
+.loadingPanel {
+  border-radius: 12px;
+  background: linear-gradient(90deg, var(--bg-secondary), var(--line), var(--bg-secondary));
+  background-size: 200% 100%;
+  animation: shimmer 1.25s infinite;
+}
+
+.loadingHeader span {
+  width: 160px;
+  height: 18px;
+}
+
+.loadingHeader strong {
+  width: min(620px, 72vw);
+  height: 42px;
+}
+
+.loadingCard span {
+  width: 60%;
+  height: 12px;
+}
+
+.loadingCard strong {
+  width: 44%;
+  height: 30px;
+}
+
+.loadingCard small {
+  width: 78%;
+  height: 11px;
+}
+
+.loadingPanel {
+  min-height: 260px;
 }
 
 .skeletonStack span:nth-child(2) {
@@ -845,6 +915,10 @@ th {
   .sidebar {
     position: static;
     height: auto;
+  }
+
+  .copilotPanel {
+    grid-column: auto;
   }
 
   .navList {

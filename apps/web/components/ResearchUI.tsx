@@ -45,6 +45,9 @@ export function Card({ title, eyebrow, children, action }: { title: string; eyeb
 }
 
 export function LineChart({ values, label }: { values: number[]; label: string }) {
+  if (!values.length) {
+    return <EmptyState title="No chart data yet" body="Run a sync, experiment, or validation to populate this visualization." />;
+  }
   const width = 720;
   const height = 220;
   const min = Math.min(...values);
@@ -67,6 +70,9 @@ export function LineChart({ values, label }: { values: number[]; label: string }
 }
 
 export function BarList({ rows }: { rows: Array<{ label: string; value: number; meta?: string }> }) {
+  if (!rows.length) {
+    return <EmptyState title="No distribution yet" body="Research records will appear here after experiments or validation runs exist." />;
+  }
   const max = Math.max(...rows.map((row) => row.value), 1);
   return (
     <div className="barList">
@@ -86,8 +92,8 @@ export function BarList({ rows }: { rows: Array<{ label: string; value: number; 
 export function Timeline({ items }: { items: Array<{ date: string; title: string; body: string; status?: string }> }) {
   return (
     <div className="timeline">
-      {items.map((item) => (
-        <article key={`${item.date}-${item.title}`}>
+      {items.map((item, index) => (
+        <article key={`${item.date}-${item.title}-${index}`}>
           <time>{item.date}</time>
           <div>
             <h3>{item.title}</h3>
@@ -128,6 +134,21 @@ export function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
-export function AssetLink({ symbol }: { symbol: string }) {
-  return <Link className="assetLink" href={`/assets/${symbol}`}>{symbol}</Link>;
+export function AssetLink({ symbol, label }: { symbol: string; label?: string }) {
+  return <Link className="assetLink" href={`/assets/${symbol}`}>{label ?? symbol}</Link>;
+}
+
+export function EvidenceBadges({ refs }: { refs: string[] }) {
+  if (!refs.length) {
+    return <span className="status">No refs</span>;
+  }
+  return (
+    <div className="evidenceList">
+      {refs.map((ref) => (
+        <Link key={ref} href={`/copilot?evidence=${encodeURIComponent(ref)}`}>
+          {ref}
+        </Link>
+      ))}
+    </div>
+  );
 }

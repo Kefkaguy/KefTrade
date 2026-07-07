@@ -1,26 +1,35 @@
-import { Card, DataTable, MetricCard, PageTitle } from "@/components/ResearchUI";
-import { hypotheses } from "@/lib/research-data";
+import { Card, DataTable, EmptyState, MetricCard, PageTitle } from "@/components/ResearchUI";
+import { countBy, getLiveResearchSnapshot, statusClass, titleFromEvent } from "@/lib/live-research";
 
-export default function HypothesesPage() {
+export default async function HypothesesPage() {
+  const snapshot = await getLiveResearchSnapshot();
+  const statuses = countBy(snapshot.hypotheses, (hypothesis) => hypothesis.status);
   return (
     <div className="pageStack">
       <PageTitle title="Hypotheses" description="Evidence-backed research questions with status, linked experiments, and next actions." />
       <div className="metricGrid">
-        <MetricCard label="Active" value={hypotheses.length} detail="Awaiting more evidence" />
-        <MetricCard label="Rejected" value="7" detail="Repeated failures" tone="error" />
-        <MetricCard label="Research More" value="3" detail="Needs deeper tests" tone="warning" />
-        <MetricCard label="Validated" value="0" detail="Evidence threshold intact" tone="success" />
+        <MetricCard label="Total" value={snapshot.hypotheses.length} detail="Backend hypotheses" />
+        <MetricCard label="Rejected" value={statuses.rejected ?? 0} detail="Repeated failures" tone="error" />
+        <MetricCard label="Research More" value={statuses.research_more ?? 0} detail="Needs deeper tests" tone="warning" />
+        <MetricCard label="Validated" value={statuses.validated ?? 0} detail="Evidence threshold passed" tone="success" />
       </div>
       <Card title="Research backlog" eyebrow="Questions">
-        <DataTable
-          columns={["Hypothesis", "Status", "Linked evidence", "Next step"]}
-          rows={hypotheses.map((hypothesis, index) => [
-            hypothesis,
-            <span className="status watchlist" key={hypothesis}>Research More</span>,
-            `validation_run:${20 + index}`,
-            index % 2 === 0 ? "Test across equities and volatility regimes" : "Add falsification test before new variants"
-          ])}
-        />
+        {snapshot.hypotheses.length ? (
+          <DataTable
+            columns={["Title", "Hypothesis", "Status", "Tags", "Updated"]}
+            rows={snapshot.hypotheses.map((hypothesis) => [
+              hypothesis.title,
+              hypothesis.hypothesis,
+              <span className={`status ${statusClass(hypothesis.status)}`} key={hypothesis.id}>
+                {titleFromEvent(hypothesis.status)}
+              </span>,
+              hypothesis.tags?.join(", ") || "None",
+              new Date(hypothesis.updated_at).toLocaleDateString()
+            ])}
+          />
+        ) : (
+          <EmptyState title="No hypotheses yet." body="Create your first research hypothesis." />
+        )}
       </Card>
     </div>
   );

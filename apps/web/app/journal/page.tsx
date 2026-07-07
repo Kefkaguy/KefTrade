@@ -1,18 +1,21 @@
-import { Card, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
-import { journalEntries } from "@/lib/research-data";
+import { Card, EmptyState, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
+import { countBy, getLiveResearchSnapshot, timelineItems } from "@/lib/live-research";
 
-export default function JournalPage() {
+export default async function JournalPage() {
+  const snapshot = await getLiveResearchSnapshot();
+  const events = timelineItems(snapshot, 30);
+  const journalTypes = countBy(snapshot.journal, (entry) => entry.entry_type);
   return (
     <div className="pageStack">
       <PageTitle title="Research Journal" description="Chronological research memory connecting hypotheses, experiments, results, conclusions, and next actions." />
       <div className="metricGrid">
-        <MetricCard label="Entries" value={journalEntries.length} detail="Recent research timeline" />
-        <MetricCard label="Open actions" value="3" detail="Evidence-backed" tone="warning" />
-        <MetricCard label="Rejected paths" value="7" detail="Documented failures" tone="error" />
-        <MetricCard label="Validated alpha" value="0" detail="No false positives" tone="success" />
+        <MetricCard label="Entries" value={snapshot.journal.length} detail="Journal records" />
+        <MetricCard label="Timeline events" value={snapshot.timeline.length} detail="Research activity" tone="warning" />
+        <MetricCard label="Hypotheses created" value={journalTypes.hypothesis_created ?? 0} detail="Backlog additions" />
+        <MetricCard label="Validation runs" value={snapshot.validationRuns.length} detail="Evidence checks" tone="success" />
       </div>
       <Card title="Chronological history" eyebrow="Archive">
-        <Timeline items={journalEntries} />
+        {events.length ? <Timeline items={events} /> : <EmptyState title="No journal entries yet." body="Create a hypothesis or run an experiment to start the research timeline." />}
       </Card>
     </div>
   );
