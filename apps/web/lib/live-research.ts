@@ -108,7 +108,7 @@ export function latestExperimentRows(archive: ResearchArchiveRow[], limit = 8) {
   return archive.slice(0, limit).map((row) => ({
     strategy: row.strategy,
     candidate: row.candidate_id,
-    recommendation: row.recommendation,
+    recommendation: displayRecommendation(row.recommendation),
     trades: metricValue(row.metrics, "number_of_trades"),
     failure: row.failure_reasons?.[0] || "No failure reason recorded."
   }));
@@ -122,10 +122,14 @@ export function metricValue(metrics: Record<string, unknown> | undefined, key: s
 }
 
 export function recommendationTone(value: string): "success" | "warning" | "error" | "neutral" {
-  if (value === "Validated Alpha" || value === "Candidate for Paper Trading") return "success";
+  if (value === "Validated Alpha" || value === "Candidate for Paper Trading" || value === "Candidate for Alpha Validation") return "success";
   if (value === "Research More" || value === "Needs More Research") return "warning";
   if (value === "Reject" || value === "rejected") return "error";
   return "neutral";
+}
+
+export function displayRecommendation(value: string): string {
+  return value === "Candidate for Paper Trading" ? "Candidate for Alpha Validation" : value;
 }
 
 export function statusClass(value: string): string {

@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -74,6 +74,21 @@ def list_validation_runs(conn: psycopg.Connection = Depends(get_connection)) -> 
         """
     ).fetchall()
     return list(rows)
+
+
+@router.get("/alpha/validation-runs/{run_id}")
+def get_validation_run(run_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT id, symbol_set, timeframe_set, candidate_count, thresholds, summary, report, markdown_report, created_at
+        FROM alpha_validation_runs
+        WHERE id = %s
+        """,
+        (run_id,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Validation run not found")
+    return dict(row)
 
 
 def persist_validation_run(

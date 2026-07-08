@@ -1,18 +1,30 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { ActionNote, EmptyState, Toast } from "@/components/ResearchUI";
 import { runStrategyResearch, type StrategyResearchReport } from "@/lib/api";
 import { money, number, percent } from "@/lib/format";
 
 export function StrategyResearchRunner() {
+  const router = useRouter();
   const [report, setReport] = useState<StrategyResearchReport | null>(null);
   const [status, setStatus] = useState("Ready");
+  const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string }>({ tone: "info", message: "" });
 
   async function handleRun() {
     setStatus("Running deterministic strategy library comparison...");
-    const next = await runStrategyResearch();
-    setReport(next);
-    setStatus(`Report complete: ${next.run_count} runs ranked.`);
+    setToast({ tone: "info", message: "" });
+    try {
+      const next = await runStrategyResearch();
+      setReport(next);
+      setStatus(`Report complete: ${next.run_count} runs ranked.`);
+      setToast({ tone: "success", message: `Strategy research ranked ${next.run_count} runs. Review the top report before creating follow-up hypotheses.` });
+      router.refresh();
+    } catch {
+      setStatus("Strategy research failed.");
+      setToast({ tone: "error", message: "Strategy research failed. Sync candles/features first, then retry." });
+    }
   }
 
   const topRows = report?.ranking_table.slice(0, 10) ?? [];
@@ -20,12 +32,17 @@ export function StrategyResearchRunner() {
 
   return (
     <div className="grid">
+      <ActionNote
+        title="What this does"
+        body="Runs the deterministic strategy library against the current development dataset and compares metrics, regimes, feature correlations, and trade outcomes."
+      />
       <div className="toolbar">
         <button className="button" onClick={handleRun}>
           Run strategy research
         </button>
         <span className="muted">{status}</span>
       </div>
+      <Toast tone={toast.tone} message={toast.message} />
 
       {report ? (
         <>
@@ -153,7 +170,9 @@ export function StrategyResearchRunner() {
             </table>
           </div>
         </>
-      ) : null}
+      ) : (
+        <EmptyState title="No strategy research run yet." body="Run the strategy library comparison to review deterministic candidates and generate follow-up hypotheses." />
+      )}
     </div>
   );
 }

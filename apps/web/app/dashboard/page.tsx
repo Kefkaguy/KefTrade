@@ -1,9 +1,11 @@
+import Link from "next/link";
 import { AssetLink, BarList, Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
 import { DataActions } from "@/components/DataActions";
 import { getCandles, getSignal } from "@/lib/api";
 import {
   barRows,
   countBy,
+  displayRecommendation,
   displayAssetClass,
   getLiveResearchSnapshot,
   latestExperimentRows,
@@ -20,7 +22,7 @@ export default async function DashboardPage() {
     getLiveResearchSnapshot()
   ]);
   const latest = candles.at(-1);
-  const recommendations = countBy(snapshot.archive, (row) => row.recommendation);
+  const recommendations = countBy(snapshot.archive, (row) => displayRecommendation(row.recommendation));
   const regimeRows = barRows(countBy(snapshot.archive.flatMap((row) => row.market_regimes), (value) => value), "No regimes");
   const strategyRows = latestExperimentRows(snapshot.archive, 6);
   const events = timelineItems(snapshot, 5);
@@ -46,7 +48,7 @@ export default async function DashboardPage() {
           </p>
         </div>
         <div className="heroMetrics">
-          <MetricCard label="Latest BTC close" value={latest ? money(latest.close) : "No candles"} detail="Development dataset" />
+        <MetricCard label="Latest BTC close" value={latest ? money(latest.close) : "No candles"} detail="Live candles endpoint" />
           <MetricCard label="Current signal" value={signal?.signal ?? "No signal"} detail="Read-only research signal" tone="warning" />
           <MetricCard label="Latest validation" value={latestValidation ? `Run ${latestValidation.id}` : "None"} detail={latestValidation ? `${latestValidation.candidate_count} candidates` : "Run alpha validation"} />
         </div>
@@ -84,7 +86,11 @@ export default async function DashboardPage() {
               ])}
             />
           ) : (
-            <EmptyState title="No experiments yet." body="Run alpha discovery or validation to build the experiment archive." />
+            <EmptyState
+              title="No experiments yet."
+              body="Run alpha discovery or validation to build the experiment archive."
+              action={<Link className="button" href="/alpha">Open discovery lab</Link>}
+            />
           )}
         </Card>
         <Card title="Active hypotheses" eyebrow="Workspace">
@@ -98,14 +104,26 @@ export default async function DashboardPage() {
               ))}
             </div>
           ) : (
-            <EmptyState title="No hypotheses yet." body="Create your first research hypothesis." />
+            <EmptyState
+              title="No hypotheses yet."
+              body="Create your first research hypothesis."
+              action={<Link className="button" href="/hypotheses">Create hypothesis</Link>}
+            />
           )}
         </Card>
       </div>
 
       <div className="dashboardGrid">
         <Card title="Research progress" eyebrow="Archive">
-          {events.length ? <Timeline items={events} /> : <EmptyState title="No timeline yet." body="Research activity will appear here after hypotheses, experiments, or validation runs." />}
+          {events.length ? (
+            <Timeline items={events} />
+          ) : (
+            <EmptyState
+              title="No timeline yet."
+              body="Research activity will appear here after hypotheses, experiments, or validation runs."
+              action={<Link className="button" href="/hypotheses">Start research</Link>}
+            />
+          )}
         </Card>
         <Card title="Assets under study" eyebrow="Coverage">
           {snapshot.symbols.length ? (
@@ -115,7 +133,7 @@ export default async function DashboardPage() {
               ))}
             </div>
           ) : (
-            <EmptyState title="No assets synced." body="Sync market data to register research assets." />
+            <EmptyState title="No assets synced." body="Sync market data to register research assets." action={<Link className="button" href="/dashboard">Sync data</Link>} />
           )}
         </Card>
       </div>

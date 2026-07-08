@@ -1,4 +1,5 @@
 import { Card, DataTable, EmptyState, MetricCard, PageTitle } from "@/components/ResearchUI";
+import { HypothesisComposer, HypothesisExperimentAction } from "@/components/HypothesisWorkflow";
 import { countBy, getLiveResearchSnapshot, statusClass, titleFromEvent } from "@/lib/live-research";
 
 export default async function HypothesesPage() {
@@ -13,10 +14,13 @@ export default async function HypothesesPage() {
         <MetricCard label="Research More" value={statuses.research_more ?? 0} detail="Needs deeper tests" tone="warning" />
         <MetricCard label="Validated" value={statuses.validated ?? 0} detail="Evidence threshold passed" tone="success" />
       </div>
+      <Card title="Create hypothesis" eyebrow="Research intake">
+        <HypothesisComposer />
+      </Card>
       <Card title="Research backlog" eyebrow="Questions">
         {snapshot.hypotheses.length ? (
           <DataTable
-            columns={["Title", "Hypothesis", "Status", "Tags", "Updated"]}
+            columns={["Title", "Hypothesis", "Status", "Tags", "Updated", "Action"]}
             rows={snapshot.hypotheses.map((hypothesis) => [
               hypothesis.title,
               hypothesis.hypothesis,
@@ -24,11 +28,12 @@ export default async function HypothesesPage() {
                 {titleFromEvent(hypothesis.status)}
               </span>,
               hypothesis.tags?.join(", ") || "None",
-              new Date(hypothesis.updated_at).toLocaleDateString()
+              new Date(hypothesis.updated_at).toLocaleDateString(),
+              <HypothesisExperimentAction key={`${hypothesis.id}-action`} hypothesis={hypothesis} />
             ])}
           />
         ) : (
-          <EmptyState title="No hypotheses yet." body="Create your first research hypothesis." />
+          <EmptyState title="No hypotheses yet." body="Create your first research hypothesis using the form above, then run its first experiment from this page." />
         )}
       </Card>
     </div>

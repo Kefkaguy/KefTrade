@@ -169,6 +169,7 @@ def calculate_metrics(initial_equity: Decimal, final_equity: Decimal, trades: li
     loss_rate = Decimal("1") - win_rate if trades else Decimal("0")
     expectancy = (win_rate * avg_win) - (loss_rate * avg_loss)
     profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+    profit_factor_is_infinite = gross_loss == 0 and gross_profit > 0
     max_drawdown = calculate_max_drawdown(equity_curve)
     sharpe = None
     if len(returns) > 1:
@@ -183,7 +184,10 @@ def calculate_metrics(initial_equity: Decimal, final_equity: Decimal, trades: li
         "win_rate": float(win_rate),
         "average_win": float(avg_win),
         "average_loss": float(avg_loss),
+        "gross_profit": float(gross_profit),
+        "gross_loss": float(gross_loss),
         "profit_factor": float(profit_factor) if profit_factor is not None else None,
+        "profit_factor_is_infinite": profit_factor_is_infinite,
         "max_drawdown": float(max_drawdown),
         "sharpe_ratio": float(sharpe) if sharpe is not None else None,
         "number_of_trades": len(trades),

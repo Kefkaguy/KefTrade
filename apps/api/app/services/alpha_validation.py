@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from decimal import Decimal
 from hashlib import sha256
+import logging
 from random import Random
 from typing import Any
 
@@ -23,6 +24,8 @@ DEFAULT_VALIDATION_THRESHOLDS = {
     "max_confidence_interval_width": 0.35,
     "min_confidence_score": 70,
 }
+
+logger = logging.getLogger("keftrade.alpha_validation")
 
 
 @dataclass(frozen=True)
@@ -49,6 +52,13 @@ def run_alpha_validation(
         row["rank"] = rank
     summary = summarize_validation(ranked, datasets, thresholds)
     markdown = build_validation_markdown(summary, ranked[:10])
+    logger.info(
+        "alpha_validation.complete candidates=%s datasets=%s recommendations=%s failed_rule_counts=%s",
+        len(ranked),
+        [{"symbol": dataset.symbol, "timeframe": dataset.timeframe, "candles": len(dataset.candles), "features": len(dataset.features)} for dataset in datasets],
+        summary["recommendations"],
+        summary["failed_rule_counts"],
+    )
     return {
         "candidate_count": len(ranked),
         "thresholds": thresholds,
@@ -94,8 +104,9 @@ def validate_candidate(
     sortino = calculate_sortino(all_trades)
     confidence_width = confidence_interval_width(bootstrap)
     confidence_score = calculate_confidence_score(aggregate_metrics, stability, cross_asset, monte_carlo)
-    gates = evaluate_evidence_rules(aggregate_metrics, stability, confidence_width, thresholds)
-    recommendation = recommend_validation(gates, confidence_score)
+    gate_details = evaluate_evidence_rule_details(aggregate_metrics, stability, confidence_width, confidence_score, thresholds)
+    gates = {name: detail["passed"] for name, detail in gate_details.items()}
+    recommendation = recommend_validation(gates)
     validation_score = calculate_validation_score(aggregate_metrics, stability, cross_asset, parameter_stability, confidence_score, confidence_width, sortino)
     row = {
         "rank": 0,
@@ -119,12 +130,24 @@ def validate_candidate(
             "confidence_score": confidence_score,
         },
         "evidence_rules": gates,
+        "evidence_rule_details": gate_details,
+        "passed_rules": [name for name, detail in gate_details.items() if detail["passed"]],
+        "failed_rules": [name for name, detail in gate_details.items() if not detail["passed"]],
+        "rejection_explanation": explain_rejection(gate_details, recommendation),
         "validation_score": validation_score,
         "recommendation": recommendation,
         "markdown_report": "",
     }
     row["candidate_id"] = candidate_id(candidate)
     row["markdown_report"] = build_candidate_markdown(row)
+    if recommendation == "Reject":
+        logger.info(
+            "alpha_validation.rejected candidate_id=%s failed_rules=%s metrics=%s stability=%s",
+            row["candidate_id"],
+            row["failed_rules"],
+            row["metrics"],
+            row["stability"],
+        )
     return row
 
 
@@ -229,17 +252,98 @@ def confidence_interval_width(bootstrap: dict[str, Any]) -> float:
     return abs(float(p95) - float(p05)) / denominator
 
 
-def evaluate_evidence_rules(metrics: dict[str, Any], stability: float, confidence_width: float, thresholds: dict[str, Any]) -> dict[str, bool]:
+def evaluate_evidence_rules(
+    metrics: dict[str, Any],
+    stability: float,
+    confidence_width: float,
+    thresholds: dict[str, Any],
+    confidence_score: float | None = None,
+) -> dict[str, bool]:
+    details = evaluate_evidence_rule_details(metrics, stability, confidence_width, confidence_score, thresholds)
+    return {name: detail["passed"] for name, detail in details.items()}
+
+
+def evaluate_evidence_rule_details(
+    metrics: dict[str, Any],
+    stability: float,
+    confidence_width: float,
+    confidence_score: float | None,
+    thresholds: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    trade_count = int(metrics.get("number_of_trades", 0))
+    profit_factor = validation_profit_factor(metrics)
+    profit_factor_actual = "infinite" if profit_factor == float("inf") else profit_factor
+    details = {
+        "min_trades": rule_detail(
+            actual=trade_count,
+            threshold=thresholds["min_trades"],
+            passed=trade_count >= int(thresholds["min_trades"]),
+            comparator=">=",
+            explanation=f"Requires at least {thresholds['min_trades']} trades for statistical sample size; observed {trade_count}.",
+        ),
+        "profit_factor": rule_detail(
+            actual=profit_factor_actual,
+            threshold=thresholds["min_profit_factor"],
+            passed=profit_factor >= float(thresholds["min_profit_factor"]),
+            comparator=">=",
+            explanation=profit_factor_explanation(profit_factor, thresholds),
+        ),
+        "stability": rule_detail(
+            actual=stability,
+            threshold=thresholds["min_stability_score"],
+            passed=stability >= float(thresholds["min_stability_score"]),
+            comparator=">=",
+            explanation=f"Requires stability score of at least {thresholds['min_stability_score']} across years/regimes; observed {stability:.4f}.",
+        ),
+        "confidence_interval": rule_detail(
+            actual=confidence_width,
+            threshold=thresholds["max_confidence_interval_width"],
+            passed=confidence_width <= float(thresholds["max_confidence_interval_width"]),
+            comparator="<=",
+            explanation=(
+                f"Requires bootstrap expectancy interval width no greater than {thresholds['max_confidence_interval_width']}; "
+                f"observed {confidence_width:.4f}."
+            ),
+        ),
+    }
+    if confidence_score is not None:
+        details["confidence_score"] = rule_detail(
+            actual=confidence_score,
+            threshold=thresholds["min_confidence_score"],
+            passed=confidence_score >= float(thresholds["min_confidence_score"]),
+            comparator=">=",
+            explanation=f"Requires confidence score of at least {thresholds['min_confidence_score']}; observed {confidence_score:.4f}.",
+        )
+    return details
+
+
+def validation_profit_factor(metrics: dict[str, Any]) -> float:
+    if metrics.get("profit_factor_is_infinite"):
+        return float("inf")
+    return finite_metric(metrics.get("profit_factor"))
+
+
+def profit_factor_explanation(profit_factor: float, thresholds: dict[str, Any]) -> str:
+    if profit_factor == float("inf"):
+        return (
+            f"Requires gross profits to be at least {thresholds['min_profit_factor']}x gross losses; "
+            "observed no losing trades, so profit factor is infinite."
+        )
+    return f"Requires gross profits to be at least {thresholds['min_profit_factor']}x gross losses; observed {profit_factor:.4f}."
+
+
+def rule_detail(actual: Any, threshold: Any, passed: bool, comparator: str, explanation: str) -> dict[str, Any]:
     return {
-        "min_trades": int(metrics.get("number_of_trades", 0)) >= int(thresholds["min_trades"]),
-        "profit_factor": finite_metric(metrics.get("profit_factor")) >= float(thresholds["min_profit_factor"]),
-        "stability": stability >= float(thresholds["min_stability_score"]),
-        "confidence_interval": confidence_width <= float(thresholds["max_confidence_interval_width"]),
+        "passed": passed,
+        "actual": actual,
+        "threshold": threshold,
+        "comparator": comparator,
+        "explanation": explanation,
     }
 
 
-def recommend_validation(gates: dict[str, bool], confidence_score: float) -> str:
-    if all(gates.values()) and confidence_score >= 70:
+def recommend_validation(gates: dict[str, bool]) -> str:
+    if all(gates.values()):
         return "Validated Alpha"
     if gates["profit_factor"] and gates["stability"]:
         return "Research More"
@@ -270,21 +374,25 @@ def calculate_validation_score(
 
 
 def candidate_id(candidate: AlphaCandidate) -> str:
-    keys = ["trend_filter", "trend_fast", "trend_slow", "momentum_block", "price_action", "risk_reward"]
-    suffix = "_".join(str(candidate.parameters[key]) for key in keys)
+    suffix = "|".join(f"{key}={candidate.parameters[key]}" for key in sorted(candidate.parameters))
     return f"validation_{sha256(suffix.encode('utf-8')).hexdigest()[:10]}"
 
 
 def summarize_validation(ranked: list[dict[str, Any]], datasets: list[ValidationDataset], thresholds: dict[str, Any]) -> dict[str, Any]:
     recommendations: dict[str, int] = {}
+    failed_rule_counts: dict[str, int] = {}
     for row in ranked:
         recommendations[row["recommendation"]] = recommendations.get(row["recommendation"], 0) + 1
+        for rule in row.get("failed_rules", []):
+            failed_rule_counts[rule] = failed_rule_counts.get(rule, 0) + 1
     return {
         "best_candidate": ranked[0]["candidate_id"] if ranked else None,
         "best_recommendation": ranked[0]["recommendation"] if ranked else None,
         "datasets": [{"symbol": dataset.symbol, "timeframe": dataset.timeframe, "candles": len(dataset.candles)} for dataset in datasets],
         "thresholds": thresholds,
         "recommendations": recommendations,
+        "failed_rule_counts": failed_rule_counts,
+        "all_rejected": bool(ranked) and all(row["recommendation"] == "Reject" for row in ranked),
     }
 
 
@@ -297,6 +405,7 @@ def build_validation_markdown(summary: dict[str, Any], top_rows: list[dict[str, 
         "",
         "## Statistical Confidence",
         f"Thresholds: {summary.get('thresholds')}",
+        f"Failed rule counts: {summary.get('failed_rule_counts')}",
         "",
         "## Leaderboard",
     ]
@@ -305,8 +414,13 @@ def build_validation_markdown(summary: dict[str, Any], top_rows: list[dict[str, 
         lines.append(
             f"- {row['candidate_id']}: {row['recommendation']}; PF={metrics.get('profit_factor')}; "
             f"Expectancy={metrics.get('expectancy_per_trade')}; Trades={metrics.get('number_of_trades')}; "
-            f"Stability={row['stability']['stability_score']:.2f}"
+            f"Stability={row['stability']['stability_score']:.2f}; Failed={', '.join(row.get('failed_rules', [])) or 'none'}"
         )
+    rejected = [row for row in top_rows if row["recommendation"] == "Reject"]
+    if rejected:
+        lines.extend(["", "## Rejection Detail"])
+        for row in rejected:
+            lines.append(f"- {row['candidate_id']}: {row['rejection_explanation']}")
     return "\n".join(lines)
 
 
@@ -322,6 +436,12 @@ def build_candidate_markdown(row: dict[str, Any]) -> str:
             "## Statistical Confidence",
             f"Confidence Score: {row['stability']['confidence_score']}",
             f"Bootstrap: {row['robustness']['bootstrap']}",
+            "",
+            "## Evidence Rules",
+            format_rule_details(row["evidence_rule_details"]),
+            "",
+            "## Rejection Explanation",
+            row["rejection_explanation"],
             "",
             "## Metrics",
             f"Profit Factor: {metrics.get('profit_factor')}",
@@ -340,3 +460,22 @@ def build_candidate_markdown(row: dict[str, Any]) -> str:
             row["recommendation"],
         ]
     )
+
+
+def explain_rejection(gate_details: dict[str, dict[str, Any]], recommendation: str) -> str:
+    failed = [detail["explanation"] for detail in gate_details.values() if not detail["passed"]]
+    if not failed:
+        return "All validation evidence rules passed."
+    prefix = "Rejected" if recommendation == "Reject" else "Not fully validated"
+    return f"{prefix} because " + " ".join(failed)
+
+
+def format_rule_details(details: dict[str, dict[str, Any]]) -> str:
+    lines = []
+    for name, detail in details.items():
+        status = "PASS" if detail["passed"] else "FAIL"
+        lines.append(
+            f"- {status} {name}: actual {detail['actual']} {detail['comparator']} threshold {detail['threshold']}. "
+            f"{detail['explanation']}"
+        )
+    return "\n".join(lines)

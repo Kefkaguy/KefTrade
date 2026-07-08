@@ -1,60 +1,163 @@
 # KefTrade Quant Research MVP
 
-KefTrade is a professional quantitative stock research platform in development, not an automated trading system. Version 0.1 uses `BTCUSDT` on the `4h` timeframe only as a deterministic development environment because Binance provides accessible historical candles.
+KefTrade is a research-only quantitative market research platform. It is built to generate, backtest, compare, validate, and explain strategy research evidence. It is not a live trading system.
 
-## What v0.1 Does
+The MVP now includes deterministic strategy research, experiment sweeps, cross-asset candidate ranking, alpha validation diagnostics, lifecycle tracking, portfolio views, research notebooks, and drilldown pages for assets, strategies, candidates, experiments, and validation runs.
 
-- Syncs development market data through a `MarketDataProvider` abstraction.
-- Uses Binance `BTCUSDT` `4h` candles as the current dev provider.
-- Logs raw provider responses for debugging.
-- Calculates technical features with past-only rolling windows.
-- Runs `trend_pullback_v1` from versioned strategy parameters.
-- Backtests with fees, slippage, stop-loss, take-profit, and walk-forward validation.
-- Shows restrained research signals and risk settings.
+## Research-Only Guardrails
 
-## What v0.1 Does Not Do
+KefTrade does not implement:
 
-- No Model Engine or trained model.
-- No paper trading.
-- No live trading.
-- No futures, leverage, margin, or auto-execution.
-- No production stock provider yet.
+- Live trading
+- Paper trading workflows
+- Broker integration
+- Order routing or execution
+- Futures, margin, or leverage workflows
+- Buy/sell recommendations
+- Weakened validation standards to make strategies pass
 
-## Architecture Direction
+Any strategy that has not passed alpha validation must be treated as research evidence only.
 
-KefTrade is designed around US equities first. The initial research universe is:
+## What The MVP Does
 
-```text
-AAPL, MSFT, NVDA, AMD, META, AMZN, GOOGL, TSLA, SPY, QQQ
-```
+- Syncs market candles through provider abstractions.
+- Supports crypto development data and US equity research symbols.
+- Calculates past-only technical features.
+- Runs deterministic strategy research for:
+  - Trend Pullback
+  - Momentum
+  - Breakout
+  - Mean Reversion
+  - Volatility Breakout
+  - 200 EMA Trend
+- Runs backtests with fees, slippage, stop-loss, take-profit, equity curve, drawdown, expectancy, Sharpe, profit factor, and trade counts.
+- Runs bounded strategy experiment sweeps without weakening validation gates.
+- Evaluates promising candidates across assets, timeframes, train/test splits, and walk-forward windows.
+- Produces alpha validation diagnostics with passed rules, failed rules, thresholds, actual values, and plain-English rejection explanations.
+- Tracks research candidate lifecycle states:
+  - Hypothesis
+  - Experimenting
+  - Promising
+  - Needs More Evidence
+  - Alpha Validation
+  - Validated
+  - Archived
+  - Rejected
+- Shows research portfolio, evidence timeline, candidate comparison, evidence drift, notebooks, and audit reports.
+- Provides read-only AI copilot summaries over stored research evidence.
 
-Provider-specific integrations must sit behind common interfaces:
+## Main Web Pages
 
-- `MarketDataProvider`
-- `TradingCalendar`
-- `CorporateActions`
-- `SymbolMetadata`
-- `ExchangeInfo`
+- `/` - simple research workflow
+- `/dashboard` - research command center
+- `/portfolio` - candidate lifecycle and research portfolio
+- `/promising` - cross-asset promising candidate ranking
+- `/candidates/[id]` - candidate drilldown
+- `/experiments` - experiment definitions and archive
+- `/experiments/[id]` - experiment drilldown
+- `/validation` - alpha validation runner and saved runs
+- `/validation/[id]` - validation run drilldown
+- `/assets` and `/assets/[symbol]` - asset coverage and market data
+- `/strategies` and `/strategies/[name]` - strategy evidence
+- `/hypotheses` - research hypothesis workflow
+- `/journal` - research journal
+- `/market-intelligence` - regime and archive diagnostics
+- `/reports` - saved local research reports
 
-Stock-specific concepts are first-class architectural concerns: regular market hours, premarket, after-hours, earnings dates, dividends, stock splits, exchange holidays, sector classification, market capitalization, and index membership.
+## Backend API Areas
+
+- Market data: `/data/sync`, `/candles/{symbol}`
+- Features/regimes: `/features/sync`, `/regimes/sync`
+- Strategy research: `/research/strategies`
+- Strategy experiments: `/research/strategy-experiments`
+- Promising candidates: `/research/promising-candidates`
+- Research portfolio: `/research/portfolio`
+- Alpha discovery: `/alpha/discover`
+- Alpha validation: `/alpha/validate`, `/alpha/validation-runs`
+- Research lab: `/research/hypotheses`, `/research/journal`
+- Research intelligence: `/research/intelligence`, `/research/archive`, `/research/timeline`
+- Copilot: `/research/copilot`
 
 ## Local Development
 
 1. Copy `.env.example` to `.env`.
-2. Start Postgres:
+
+2. Start Postgres from the repository root:
 
 ```powershell
 docker compose up -d postgres
 ```
 
-3. Apply the migration in `database/migrations/001_init.sql`.
-4. Start the API from `apps/api`.
-5. Start the web app from `apps/web`.
+3. Install API dependencies:
 
-## API Defaults
+```powershell
+cd apps/api
+python -m pip install -e ".[dev]"
+```
+
+4. Start the API:
+
+```powershell
+cd apps/api
+python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+5. Install web dependencies:
+
+```powershell
+cd apps/web
+npm install
+```
+
+6. Start the web app:
+
+```powershell
+cd apps/web
+npm run dev
+```
+
+The web app defaults to `http://127.0.0.1:3000`. If that port is occupied, Next.js may use `http://127.0.0.1:3001`.
+
+## Useful Commands
+
+Run backend tests:
+
+```powershell
+cd apps/api
+python -m pytest
+```
+
+Build the web app:
+
+```powershell
+cd apps/web
+npm run build
+```
+
+## Default Development Settings
 
 - API: `http://127.0.0.1:8000`
 - Web: `http://127.0.0.1:3000`
-- Symbol: `BTCUSDT`
-- Timeframe: `4h`
-- Provider: `binance_dev`
+- Fallback web port: `http://127.0.0.1:3001`
+- Crypto development provider: `binance_dev`
+- Equity research provider: `yfinance_research`
+- Default crypto symbol/timeframe: `BTCUSDT` / `4h`
+
+## Reports
+
+Generated research and audit artifacts are stored in `reports/`, including:
+
+- `strategy_experiment_sweep_2026-07-08.md`
+- `mvp_product_polish_audit_2026-07-08.md`
+
+## Current Technical Debt
+
+The MVP is functional, but the next engineering pass should focus on:
+
+- Typed API response models
+- Pagination and sorting on large research endpoints
+- Dedicated candidate detail API endpoints
+- Materialized portfolio snapshots instead of expensive GET-time recomputation
+- Splitting the frontend API client by domain
+- Stronger chart axes, legends, and table filtering
+- More consistent error envelopes across the API

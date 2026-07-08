@@ -1,11 +1,11 @@
 import Link from "next/link";
 import { Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
-import { countBy, getLiveResearchSnapshot, metricValue, statusClass, timelineItems, validationSeries } from "@/lib/live-research";
+import { countBy, displayRecommendation, getLiveResearchSnapshot, metricValue, statusClass, timelineItems, validationSeries } from "@/lib/live-research";
 
 export default async function StrategiesPage() {
   const snapshot = await getLiveResearchSnapshot();
   const strategyNames = Array.from(new Set(snapshot.archive.map((row) => row.strategy)));
-  const recommendationCounts = countBy(snapshot.archive, (row) => row.recommendation);
+  const recommendationCounts = countBy(snapshot.archive, (row) => displayRecommendation(row.recommendation));
   const selected = snapshot.archive[0];
   const events = timelineItems(snapshot, 8);
   return (
@@ -25,7 +25,7 @@ export default async function StrategiesPage() {
               rows={snapshot.archive.map((row) => [
                 <Link className="tableLink" href={`/strategies/${encodeURIComponent(row.strategy)}`} key={row.evidence_ref}>{row.strategy}</Link>,
                 row.candidate_id,
-                <span className={`status ${statusClass(row.recommendation)}`} key={`${row.evidence_ref}-status`}>{row.recommendation}</span>,
+                <span className={`status ${statusClass(row.recommendation)}`} key={`${row.evidence_ref}-status`}>{displayRecommendation(row.recommendation)}</span>,
                 metricValue(row.metrics, "number_of_trades"),
                 row.failure_reasons?.[0] || "No failure reason recorded."
               ])}
@@ -41,7 +41,7 @@ export default async function StrategiesPage() {
               <span>Expectancy <strong>{metricValue(selected.metrics, "expectancy_per_trade")}</strong></span>
               <span>Max Drawdown <strong>{metricValue(selected.metrics, "max_drawdown")}</strong></span>
               <span>Trade Count <strong>{metricValue(selected.metrics, "number_of_trades")}</strong></span>
-              <span>Recommendation <strong>{selected.recommendation}</strong></span>
+              <span>Recommendation <strong>{displayRecommendation(selected.recommendation)}</strong></span>
             </div>
           ) : (
             <EmptyState title="No scorecard yet." body="Strategy metrics will appear after validation creates evidence rows." />

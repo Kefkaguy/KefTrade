@@ -3,6 +3,7 @@ import { BarList, Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle,
 import {
   barRows,
   countBy,
+  displayRecommendation,
   getLiveResearchSnapshot,
   metricValue,
   recommendationTone,
@@ -29,7 +30,7 @@ export default async function StrategyDetailPage({ params }: { params: Promise<{
         description="Dedicated strategy evidence page showing overview, validation history, assets tested, regimes, evidence rules, and failure analysis."
       />
       <div className="metricGrid">
-        <MetricCard label="Recommendation" value={strategy.recommendation} detail="Evidence gate result" tone={recommendationTone(strategy.recommendation)} />
+        <MetricCard label="Recommendation" value={displayRecommendation(strategy.recommendation)} detail="Evidence gate result" tone={recommendationTone(strategy.recommendation)} />
         <MetricCard label="Trade count" value={metricValue(strategy.metrics, "number_of_trades")} detail="Validation sample size" />
         <MetricCard label="Profit factor" value={metricValue(strategy.metrics, "profit_factor")} detail="Evidence metric" tone="warning" />
         <MetricCard label="Max drawdown" value={metricValue(strategy.metrics, "max_drawdown")} detail="Risk metric" tone="error" />
@@ -50,7 +51,7 @@ export default async function StrategyDetailPage({ params }: { params: Promise<{
               ["Profit Factor", metricValue(strategy.metrics, "profit_factor"), "Current recorded profit factor."],
               ["Expectancy", metricValue(strategy.metrics, "expectancy_per_trade"), "Average expected result per trade."],
               ["Sharpe", metricValue(strategy.metrics, "sharpe_ratio"), "Risk-adjusted return metric."],
-              ["Recommendation", <span className={`status ${statusClass(strategy.recommendation)}`} key="recommendation">{strategy.recommendation}</span>, strategy.failure_reasons?.[0] || "No failure reason recorded."]
+              ["Recommendation", <span className={`status ${statusClass(strategy.recommendation)}`} key="recommendation">{displayRecommendation(strategy.recommendation)}</span>, strategy.failure_reasons?.[0] || "No failure reason recorded."]
             ]}
           />
         </Card>

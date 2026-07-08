@@ -9,6 +9,16 @@ export type Candle = {
   volume: string;
 };
 
+export type StrategyExperimentDefinition = {
+  id: string;
+  strategy: string;
+  title: string;
+  hypothesis: string;
+  variables: string[];
+  sweep: Record<string, unknown[]>;
+  rationale: string;
+};
+
 export type Signal = {
   symbol: string;
   timeframe: string;
@@ -98,6 +108,21 @@ export type AlphaValidationRow = {
   metrics: Record<string, unknown>;
   stability: Record<string, unknown>;
   robustness: Record<string, unknown>;
+  market_results?: Array<Record<string, unknown>>;
+  evidence_rules?: Record<string, boolean>;
+  evidence_rule_details?: Record<
+    string,
+    {
+      passed: boolean;
+      actual: unknown;
+      threshold: unknown;
+      comparator: string;
+      explanation: string;
+    }
+  >;
+  passed_rules?: string[];
+  failed_rules?: string[];
+  rejection_explanation?: string;
   validation_score: number;
   recommendation: "Reject" | "Research More" | "Validated Alpha";
   markdown_report: string;
@@ -168,6 +193,12 @@ export type ResearchHypothesis = {
   updated_at: string;
 };
 
+export type HypothesisPayload = {
+  title: string;
+  hypothesis: string;
+  tags: string[];
+};
+
 export type ResearchJournalEntry = {
   id: number;
   hypothesis_id?: number | null;
@@ -212,6 +243,11 @@ export type ValidationRun = {
   created_at: string;
 };
 
+export type ValidationRunDetail = ValidationRun & {
+  report: AlphaValidationReport;
+  markdown_report: string;
+};
+
 export type ResearchIntelligence = {
   summary: {
     hypothesis_count: number;
@@ -239,16 +275,147 @@ export type ResearchIntelligence = {
   markdown_report: string;
 };
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
+export type PromisingResearchCandidate = {
+  rank: number;
+  candidate_id: string;
+  experiment_id: string;
+  strategy_name: string;
+  title: string;
+  parameters: Record<string, unknown>;
+  aggregate_metrics: Record<string, unknown>;
+  research_score: number;
+  stability_score: number;
+  cross_asset_consistency: number;
+  timeframe_consistency: number;
+  out_of_sample_score: number;
+  dataset_results: Array<Record<string, unknown>>;
+  train_test_results: Array<Record<string, unknown>>;
+  walk_forward: Record<string, unknown>;
+  assets_worked: string[];
+  assets_failed: string[];
+  validation_status: string;
+  evidence_summary: string;
+  recommended_next_experiment: string;
+  research_report: string;
+};
+
+export type PromisingResearchReport = {
+  summary: Record<string, unknown>;
+  datasets: Array<Record<string, unknown>>;
+  thresholds: Record<string, unknown>;
+  rank_metrics: string[];
+  candidates: PromisingResearchCandidate[];
+  markdown_report: string;
+};
+
+export type MetricDefinition = {
+  label: string;
+  measures: string;
+  why_it_matters: string;
+  calculation: string;
+};
+
+export type LifecycleEvent = {
+  id?: number;
+  candidate_id: string;
+  from_state?: string | null;
+  to_state: string;
+  reason: string;
+  metrics: Record<string, unknown>;
+  created_at: string;
+};
+
+export type EvidenceDrift = {
+  status: string;
+  score_delta: number;
+  robustness_delta: number;
+  message: string;
+};
+
+export type LifecycleCandidate = PromisingResearchCandidate & {
+  lifecycle_status: string;
+  lifecycle_events: LifecycleEvent[];
+  evidence_drift: EvidenceDrift;
+  research_notebook: string;
+};
+
+export type PortfolioTimelineEvent = {
+  timestamp: string;
+  candidate_id: string;
+  event_type: string;
+  summary: string;
+  reason: string;
+};
+
+export type CandidateComparisonRow = {
+  candidate_id: string;
+  strategy: string;
+  profit_factor: number | null;
+  stability: number;
+  trade_count: number;
+  drawdown: number | null;
+  research_score: number;
+  assets: string[];
+  timeframes: string[];
+  validation_status: string;
+  lifecycle_status: string;
+};
+
+export type EvidenceCluster = {
+  cluster: string;
+  candidate_count: number;
+  avg_score: number;
+  top_candidate: string;
+};
+
+export type ResearchPortfolio = {
+  states: string[];
+  summary: Record<string, unknown>;
+  metric_definitions: Record<string, MetricDefinition>;
+  timeline: PortfolioTimelineEvent[];
+  comparison: CandidateComparisonRow[];
+  clusters: EvidenceCluster[];
+  candidates: LifecycleCandidate[];
+};
+
+export type ResearchAssetInput = {
+  symbol: string;
+  timeframe?: string;
+  provider?: string;
+};
+
+export type StrategyResearchInput = ResearchAssetInput & {
+  strategy?: string;
+};
+
+export type AlphaDiscoveryInput = ResearchAssetInput & {
+  maxCandidates?: number;
+  monteCarloRuns?: number;
+};
+
+export type AlphaValidationInput = {
+  symbols?: string[];
+  timeframes?: string[];
+  maxCandidates?: number;
+  monteCarloRuns?: number;
+  bootstrapRuns?: number;
+};
+
+type ApiRequestInit = RequestInit & {
+  timeoutMs?: number;
+};
+
+async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 3500);
+  const { timeoutMs = 3500, ...fetchOptions } = options ?? {};
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const response = await fetch(`${API_URL}${path}`, {
-    ...options,
+    ...fetchOptions,
     cache: "no-store",
     signal: controller.signal,
     headers: {
       "Content-Type": "application/json",
-      ...(options?.headers ?? {})
+      ...(fetchOptions.headers ?? {})
     }
   }).finally(() => clearTimeout(timeout));
   if (!response.ok) {
@@ -257,8 +424,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function getCandles(limit = 220) {
-  return request<Candle[]>(`/candles/BTCUSDT?timeframe=4h&limit=${limit}`);
+export function getCandles(limit = 220, input: ResearchAssetInput = { symbol: "BTCUSDT", timeframe: "4h" }) {
+  const params = new URLSearchParams({
+    timeframe: input.timeframe ?? "4h",
+    limit: String(limit)
+  });
+  return request<Candle[]>(`/candles/${encodeURIComponent(input.symbol)}?${params.toString()}`);
 }
 
 export function getSignal() {
@@ -269,28 +440,57 @@ export function generateSignal() {
   return request<Signal>("/signals/generate?symbol=BTCUSDT&timeframe=4h", { method: "POST" });
 }
 
-export function syncCandles() {
-  return request<Record<string, unknown>>("/data/sync?symbol=BTCUSDT&timeframe=4h&provider=binance_dev&limit=1500", { method: "POST" });
+export function syncCandles(input: ResearchAssetInput = { symbol: "BTCUSDT" }) {
+  const params = new URLSearchParams({
+    symbol: input.symbol,
+    timeframe: input.timeframe ?? "4h",
+    provider: input.provider ?? "binance_dev",
+    limit: "1500"
+  });
+  return request<Record<string, unknown>>(`/data/sync?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
 
-export function syncFeatures() {
-  return request<Record<string, unknown>>("/features/sync?symbol=BTCUSDT&timeframe=4h", { method: "POST" });
+export function syncFeatures(input: ResearchAssetInput = { symbol: "BTCUSDT" }) {
+  const params = new URLSearchParams({
+    symbol: input.symbol,
+    timeframe: input.timeframe ?? "4h"
+  });
+  return request<Record<string, unknown>>(`/features/sync?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
 
 export function runBacktest() {
-  return request<BacktestResult>("/backtests?symbol=BTCUSDT&timeframe=4h", { method: "POST" });
+  return request<BacktestResult>("/backtests?symbol=BTCUSDT&timeframe=4h", { method: "POST", timeoutMs: 120000 });
 }
 
-export function runStrategyResearch() {
-  return request<StrategyResearchReport>("/research/strategies?symbol=BTCUSDT&timeframe=4h", { method: "POST" });
+export function runStrategyResearch(input: StrategyResearchInput = { symbol: "BTCUSDT" }) {
+  const params = new URLSearchParams({
+    symbol: input.symbol,
+    timeframe: input.timeframe ?? "4h"
+  });
+  if (input.strategy) params.set("strategy", input.strategy);
+  return request<StrategyResearchReport>(`/research/strategies?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
 
-export function runAlphaDiscovery(maxCandidates = 250) {
-  return request<AlphaDiscoveryReport>(`/alpha/discover?symbol=BTCUSDT&timeframe=4h&max_candidates=${maxCandidates}`, { method: "POST" });
+export function runAlphaDiscovery(input: number | AlphaDiscoveryInput = 250) {
+  const normalized: AlphaDiscoveryInput = typeof input === "number" ? { symbol: "BTCUSDT", maxCandidates: input } : input;
+  const params = new URLSearchParams({
+    symbol: normalized.symbol,
+    timeframe: normalized.timeframe ?? "4h",
+    max_candidates: String(normalized.maxCandidates ?? 250),
+    monte_carlo_runs: String(normalized.monteCarloRuns ?? 50)
+  });
+  return request<AlphaDiscoveryReport>(`/alpha/discover?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
 
-export function runAlphaValidation(maxCandidates = 50) {
-  return request<AlphaValidationReport>(`/alpha/validate?max_candidates=${maxCandidates}`, { method: "POST" });
+export function runAlphaValidation(input: number | AlphaValidationInput = 50) {
+  const normalized: AlphaValidationInput = typeof input === "number" ? { maxCandidates: input } : input;
+  const params = new URLSearchParams();
+  params.set("max_candidates", String(normalized.maxCandidates ?? 50));
+  params.set("monte_carlo_runs", String(normalized.monteCarloRuns ?? 50));
+  params.set("bootstrap_runs", String(normalized.bootstrapRuns ?? 50));
+  for (const symbol of normalized.symbols ?? ["BTCUSDT", "ETHUSDT"]) params.append("symbols", symbol);
+  for (const timeframe of normalized.timeframes ?? ["4h", "1d"]) params.append("timeframes", timeframe);
+  return request<AlphaValidationReport>(`/alpha/validate?${params.toString()}`, { method: "POST", timeoutMs: 180000 });
 }
 
 export function getRiskSettings() {
@@ -302,7 +502,7 @@ export function updateRiskSettings(payload: Partial<RiskSettings>) {
 }
 
 export function askCopilot(question: string) {
-  return request<CopilotResponse>("/research/copilot", { method: "POST", body: JSON.stringify({ question }) });
+  return request<CopilotResponse>("/research/copilot", { method: "POST", body: JSON.stringify({ question }), timeoutMs: 60000 });
 }
 
 export function getCopilotInteractions() {
@@ -315,6 +515,23 @@ export function getSymbols() {
 
 export function getResearchHypotheses() {
   return request<ResearchHypothesis[]>("/research/hypotheses");
+}
+
+export function createResearchHypothesis(payload: HypothesisPayload) {
+  return request<ResearchHypothesis>("/research/hypotheses", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function runHypothesisExperiment(
+  hypothesisId: number,
+  options?: { maxCandidates?: number; monteCarloRuns?: number; bootstrapRuns?: number; symbols?: string[]; timeframes?: string[] }
+) {
+  const params = new URLSearchParams();
+  params.set("max_candidates", String(options?.maxCandidates ?? 5));
+  params.set("monte_carlo_runs", String(options?.monteCarloRuns ?? 10));
+  params.set("bootstrap_runs", String(options?.bootstrapRuns ?? 10));
+  for (const symbol of options?.symbols ?? ["BTCUSDT"]) params.append("symbols", symbol);
+  for (const timeframe of options?.timeframes ?? ["4h"]) params.append("timeframes", timeframe);
+  return request<Record<string, unknown>>(`/research/hypotheses/${hypothesisId}/experiments?${params.toString()}`, { method: "POST", timeoutMs: 180000 });
 }
 
 export function getResearchJournal() {
@@ -335,4 +552,33 @@ export function getResearchIntelligence() {
 
 export function getValidationRuns() {
   return request<ValidationRun[]>("/alpha/validation-runs");
+}
+
+export function getValidationRun(runId: number | string) {
+  return request<ValidationRunDetail>(`/alpha/validation-runs/${runId}`, { timeoutMs: 60000 });
+}
+
+export function getStrategyExperiments(options?: { strategy?: string }) {
+  const params = new URLSearchParams();
+  if (options?.strategy) params.set("strategy", options.strategy);
+  const suffix = params.size ? `?${params.toString()}` : "";
+  return request<StrategyExperimentDefinition[]>(`/research/strategy-experiments${suffix}`, { timeoutMs: 60000 });
+}
+
+export function getStrategyExperiment(experimentId: string) {
+  return request<StrategyExperimentDefinition>(`/research/strategy-experiments/${encodeURIComponent(experimentId)}`, { timeoutMs: 60000 });
+}
+
+export function getPromisingResearchCandidates(options?: { maxCandidates?: number; maxRunsPerExperiment?: number; foldCount?: number }) {
+  const params = new URLSearchParams();
+  params.set("max_candidates", String(options?.maxCandidates ?? 24));
+  params.set("max_runs_per_experiment", String(options?.maxRunsPerExperiment ?? 6));
+  params.set("fold_count", String(options?.foldCount ?? 2));
+  return request<PromisingResearchReport>(`/research/promising-candidates?${params.toString()}`, { timeoutMs: 240000 });
+}
+
+export function getResearchPortfolio(options?: { maxCandidates?: number }) {
+  const params = new URLSearchParams();
+  params.set("max_candidates", String(options?.maxCandidates ?? 24));
+  return request<ResearchPortfolio>(`/research/portfolio?${params.toString()}`, { timeoutMs: 240000 });
 }

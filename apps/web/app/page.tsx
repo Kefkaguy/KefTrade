@@ -1,6 +1,5 @@
-import { redirect } from "next/navigation";
+import { SimpleResearchFlow } from "@/components/SimpleResearchFlow";
 
 export default function Home() {
-  redirect("/dashboard");
+  return <SimpleResearchFlow />;
 }
-

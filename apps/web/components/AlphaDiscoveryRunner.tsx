@@ -1,30 +1,53 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
+import { ActionNote, EmptyState, Toast } from "@/components/ResearchUI";
 import { runAlphaDiscovery, type AlphaDiscoveryReport } from "@/lib/api";
+import { displayRecommendation } from "@/lib/live-research";
 import { money, number, percent } from "@/lib/format";
 
 export function AlphaDiscoveryRunner() {
+  const router = useRouter();
   const [report, setReport] = useState<AlphaDiscoveryReport | null>(null);
   const [status, setStatus] = useState("Ready");
+  const [maxCandidates, setMaxCandidates] = useState(250);
+  const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string }>({ tone: "info", message: "" });
 
   async function handleRun() {
     setStatus("Running deterministic alpha discovery...");
-    const next = await runAlphaDiscovery(250);
-    setReport(next);
-    setStatus(`Discovery complete: ${next.candidate_count} candidates ranked.`);
+    setToast({ tone: "info", message: "" });
+    try {
+      const next = await runAlphaDiscovery(maxCandidates);
+      setReport(next);
+      setStatus(`Discovery complete: ${next.candidate_count} candidates ranked.`);
+      setToast({ tone: "success", message: `Alpha discovery ranked ${next.candidate_count} candidates. Review the leaderboard, then validate promising candidates.` });
+      router.refresh();
+    } catch {
+      setStatus("Discovery failed.");
+      setToast({ tone: "error", message: "Alpha discovery failed. Sync market data and features, then try again." });
+    }
   }
 
   const topRows = report?.leaderboard.slice(0, 20) ?? [];
 
   return (
     <div className="grid">
+      <ActionNote
+        title="What this does"
+        body="Generates deterministic alpha candidates from reusable blocks, backtests them on BTCUSDT 4h, and ranks them. This is research discovery, not trading advice."
+      />
       <div className="toolbar">
+        <label className="field">
+          <span className="muted">Candidates</span>
+          <input type="number" min={1} max={5000} value={maxCandidates} onChange={(event) => setMaxCandidates(Number(event.target.value))} />
+        </label>
         <button className="button" onClick={handleRun}>
           Run alpha discovery
         </button>
         <span className="muted">{status}</span>
       </div>
+      <Toast tone={toast.tone} message={toast.message} />
 
       {report ? (
         <>
@@ -71,7 +94,7 @@ export function AlphaDiscoveryRunner() {
                     <td>{row.candidate_id}</td>
                     <td>{number(row.alpha_score)}</td>
                     <td>{number(row.confidence_score)}</td>
-                    <td>{row.recommendation}</td>
+                    <td>{displayRecommendation(row.recommendation)}</td>
                     <td>{row.metrics.profit_factor ? number(row.metrics.profit_factor) : "N/A"}</td>
                     <td>{money(row.metrics.expectancy_per_trade)}</td>
                     <td>{row.metrics.sharpe_ratio ? number(row.metrics.sharpe_ratio) : "N/A"}</td>
@@ -90,7 +113,9 @@ export function AlphaDiscoveryRunner() {
             <pre className="reportBlock">{topRows[0]?.alpha_report}</pre>
           </section>
         </>
-      ) : null}
+      ) : (
+        <EmptyState title="No discovery run yet." body="Run alpha discovery to generate and rank deterministic research candidates." />
+      )}
     </div>
   );
 }
