@@ -23,6 +23,11 @@ const advancedItems = [
   { href: "/hypotheses", label: "Hypotheses" },
   { href: "/alpha", label: "Alpha Discovery" },
   { href: "/validation", label: "Validation Runs" },
+  { href: "/paper", label: "Paper Dashboard" },
+  { href: "/paper/portfolio", label: "Paper Portfolio" },
+  { href: "/paper/orders", label: "Paper Orders" },
+  { href: "/paper/positions", label: "Paper Positions" },
+  { href: "/paper/deployments", label: "Strategy Deployments" },
   { href: "/market-intelligence", label: "Market Intelligence" },
   { href: "/journal", label: "Research Journal" },
   { href: "/backtest", label: "Backtest" }

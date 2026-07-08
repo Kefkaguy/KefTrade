@@ -378,6 +378,90 @@ export type ResearchPortfolio = {
   candidates: LifecycleCandidate[];
 };
 
+export type PaperAccount = {
+  id: number;
+  name: string;
+  base_currency: string;
+  starting_cash: string | number;
+  cash_balance: string | number;
+  realized_pnl: string | number;
+  status: string;
+  simulation_only: boolean;
+  created_at?: string;
+};
+
+export type PaperBalance = PaperAccount & {
+  market_value: string | number;
+  unrealized_pnl: string | number;
+  equity: string | number;
+};
+
+export type PaperOrder = {
+  id: number;
+  account_id: number;
+  deployment_id?: number | null;
+  symbol: string;
+  timeframe: string;
+  side: string;
+  order_type: string;
+  quantity: string | number;
+  limit_price?: string | number | null;
+  status: string;
+  submitted_at?: string;
+  filled_at?: string | null;
+  rejected_reason?: string | null;
+  simulation_only: boolean;
+};
+
+export type PaperFill = {
+  id: number;
+  order_id: number;
+  account_id: number;
+  symbol: string;
+  side: string;
+  quantity: string | number;
+  fill_price: string | number;
+  gross_amount: string | number;
+  fee: string | number;
+  filled_at: string;
+  simulation_only: boolean;
+};
+
+export type PaperPosition = {
+  account_id: number;
+  symbol: string;
+  quantity: string | number;
+  average_price: string | number;
+  realized_pnl: string | number;
+  last_price?: string | number;
+  market_value?: string | number;
+  unrealized_pnl?: string | number;
+};
+
+export type PaperEquityPoint = {
+  id: number;
+  account_id: number;
+  timestamp: string;
+  cash_balance: string | number;
+  equity: string | number;
+  unrealized_pnl: string | number;
+  realized_pnl: string | number;
+};
+
+export type StrategyDeployment = {
+  id: number;
+  account_id: number;
+  strategy_name: string;
+  strategy_version: string;
+  symbol: string;
+  timeframe: string;
+  parameters: Record<string, unknown>;
+  status: string;
+  simulation_only: boolean;
+  created_at?: string;
+  paused_at?: string | null;
+};
+
 export type ResearchAssetInput = {
   symbol: string;
   timeframe?: string;
@@ -581,4 +665,50 @@ export function getResearchPortfolio(options?: { maxCandidates?: number }) {
   const params = new URLSearchParams();
   params.set("max_candidates", String(options?.maxCandidates ?? 24));
   return request<ResearchPortfolio>(`/research/portfolio?${params.toString()}`, { timeoutMs: 240000 });
+}
+
+export function getPaperAccounts() {
+  return request<PaperAccount[]>("/paper/accounts");
+}
+
+export function createPaperAccount(payload: { name: string; starting_cash: number; base_currency?: string }) {
+  return request<PaperAccount>("/paper/accounts", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function getPaperBalances(accountId: number) {
+  return request<PaperBalance>(`/paper/accounts/${accountId}/balances`);
+}
+
+export function getPaperPositions(accountId: number) {
+  return request<PaperPosition[]>(`/paper/accounts/${accountId}/positions`);
+}
+
+export function getPaperOrders(accountId: number) {
+  return request<PaperOrder[]>(`/paper/accounts/${accountId}/orders`);
+}
+
+export function getPaperFills(accountId: number) {
+  return request<PaperFill[]>(`/paper/accounts/${accountId}/fills`);
+}
+
+export function getPaperEquityCurve(accountId: number) {
+  return request<PaperEquityPoint[]>(`/paper/accounts/${accountId}/equity-curve`);
+}
+
+export function createPaperOrder(payload: { account_id: number; symbol: string; quantity: number; side?: string; order_type?: string; timeframe?: string; limit_price?: number; deployment_id?: number }) {
+  return request<PaperOrder>("/paper/orders", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function getStrategyDeployments(accountId?: number) {
+  const params = new URLSearchParams();
+  if (accountId) params.set("account_id", String(accountId));
+  return request<StrategyDeployment[]>(`/paper/deployments${params.size ? `?${params.toString()}` : ""}`);
+}
+
+export function createStrategyDeployment(payload: { account_id: number; strategy_name: string; symbol: string; timeframe?: string; strategy_version?: string; parameters?: Record<string, unknown> }) {
+  return request<StrategyDeployment>("/paper/deployments", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function pauseStrategyDeployment(deploymentId: number) {
+  return request<StrategyDeployment>(`/paper/deployments/${deploymentId}/pause`, { method: "POST" });
 }

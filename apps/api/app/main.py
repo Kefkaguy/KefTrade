@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.routers import alpha, backtests, data, features, regimes, research, research_copilot, research_intelligence, research_lab, risk, signals, symbols, validation
+from app.routers import alpha, backtests, data, features, paper, regimes, research, research_copilot, research_intelligence, research_lab, risk, signals, symbols, validation
 
 app = FastAPI(title="KefTrade API", version="0.1.0")
 
@@ -26,6 +26,7 @@ app.include_router(research_copilot.router)
 app.include_router(alpha.router)
 app.include_router(validation.router)
 app.include_router(risk.router)
+app.include_router(paper.router)
 
 
 @app.get("/health")

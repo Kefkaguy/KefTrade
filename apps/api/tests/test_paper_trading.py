@@ -1,0 +1,247 @@
+from decimal import Decimal
+
+import pytest
+
+from app.services.paper_trading import create_deployment, create_order, create_paper_account, pause_deployment
+
+
+class Result:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+
+class FakeConn:
+    def __init__(self):
+        self.accounts = {}
+        self.orders = {}
+        self.fills = {}
+        self.positions = {}
+        self.deployments = {}
+        self.equity = []
+        self.logs = []
+        self.commits = 0
+        self.candle = {
+            "symbol": "AAPL",
+            "timeframe": "1d",
+            "timestamp": "2026-01-02T00:00:00Z",
+            "open": Decimal("100"),
+            "high": Decimal("104"),
+            "low": Decimal("99"),
+            "close": Decimal("100"),
+            "volume": Decimal("1000000"),
+        }
+
+    def execute(self, query, params=None):
+        if "INSERT INTO paper_accounts" in query:
+            row = {
+                "id": len(self.accounts) + 1,
+                "name": params[0],
+                "base_currency": params[1],
+                "starting_cash": params[2],
+                "cash_balance": params[3],
+                "realized_pnl": Decimal("0"),
+                "status": "active",
+                "simulation_only": True,
+            }
+            self.accounts[row["id"]] = row
+            return Result([row])
+        if "SELECT * FROM paper_accounts WHERE id" in query:
+            return Result([self.accounts[params[0]]] if params[0] in self.accounts else [])
+        if "INSERT INTO execution_logs" in query:
+            self.logs.append({"event_type": params[3], "simulation_only": True})
+            return Result([])
+        if "SELECT * FROM paper_positions WHERE account_id" in query and "AND symbol" in query:
+            return Result([self.positions[(params[0], params[1])]] if (params[0], params[1]) in self.positions else [])
+        if "SELECT * FROM paper_positions WHERE account_id" in query:
+            return Result([row for (account_id, _symbol), row in self.positions.items() if account_id == params[0]])
+        if "INSERT INTO paper_equity_curve" in query:
+            row = {
+                "id": len(self.equity) + 1,
+                "account_id": params[0],
+                "cash_balance": params[1],
+                "equity": params[2],
+                "unrealized_pnl": params[3],
+                "realized_pnl": params[4],
+            }
+            self.equity.append(row)
+            return Result([row])
+        if "SELECT symbol, timeframe, timestamp" in query:
+            return Result([self.candle])
+        if "INSERT INTO paper_orders" in query:
+            row = {
+                "id": len(self.orders) + 1,
+                "account_id": params[0],
+                "deployment_id": params[1],
+                "symbol": params[2],
+                "timeframe": params[3],
+                "side": params[4],
+                "order_type": params[5],
+                "quantity": params[6],
+                "limit_price": params[7],
+                "status": params[8],
+                "rejected_reason": params[9],
+                "simulation_only": True,
+            }
+            self.orders[row["id"]] = row
+            return Result([row])
+        if "SELECT * FROM paper_orders WHERE id" in query:
+            return Result([self.orders[params[0]]] if params[0] in self.orders else [])
+        if "SELECT id, account_id, status, simulation_only" in query:
+            return Result([self.deployments[params[0]]] if params[0] in self.deployments else [])
+        if "INSERT INTO paper_fills" in query:
+            row = {
+                "id": len(self.fills) + 1,
+                "order_id": params[0],
+                "account_id": params[1],
+                "symbol": params[2],
+                "side": params[3],
+                "quantity": params[4],
+                "fill_price": params[5],
+                "gross_amount": params[6],
+                "fee": params[7],
+                "slippage": params[8],
+                "candle_timestamp": params[9],
+                "simulation_only": True,
+                "filled_at": "2026-01-02T00:00:00Z",
+            }
+            self.fills[row["id"]] = row
+            return Result([row])
+        if "INSERT INTO paper_positions" in query:
+            self.positions[(params[0], params[1])] = {
+                "account_id": params[0],
+                "symbol": params[1],
+                "quantity": params[2],
+                "average_price": params[3],
+                "realized_pnl": params[4],
+                "simulation_only": True,
+            }
+            return Result([])
+        if "UPDATE paper_accounts" in query:
+            account = self.accounts[params[2]]
+            account["cash_balance"] += params[0]
+            account["realized_pnl"] += params[1]
+            return Result([])
+        if "UPDATE paper_orders SET status = 'filled'" in query:
+            self.orders[params[1]]["status"] = "filled"
+            self.orders[params[1]]["filled_at"] = params[0]
+            return Result([])
+        if "INSERT INTO strategy_deployments" in query:
+            row = {
+                "id": len(self.deployments) + 1,
+                "account_id": params[0],
+                "strategy_name": params[1],
+                "strategy_version": params[2],
+                "symbol": params[3],
+                "timeframe": params[4],
+                "parameters": params[5],
+                "status": "active",
+                "simulation_only": True,
+            }
+            self.deployments[row["id"]] = row
+            return Result([row])
+        if "UPDATE strategy_deployments" in query:
+            row = self.deployments.get(params[0])
+            if not row:
+                return Result([])
+            row["status"] = "paused"
+            row["paused_at"] = "2026-01-02T00:00:00Z"
+            return Result([row])
+        raise AssertionError(query)
+
+    def commit(self):
+        self.commits += 1
+
+
+def test_paper_account_is_simulation_only() -> None:
+    conn = FakeConn()
+
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+
+    assert account["simulation_only"] is True
+    assert conn.logs[0]["event_type"] == "paper_account_created"
+    assert all(log["simulation_only"] is True for log in conn.logs)
+
+
+def test_market_order_fills_from_candle_and_updates_position_and_cash() -> None:
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+
+    order = create_order(conn, account["id"], "AAPL", Decimal("10"), side="buy", order_type="market")
+    position = conn.positions[(account["id"], "AAPL")]
+
+    assert order["status"] == "filled"
+    assert position["quantity"] == Decimal("10")
+    assert position["average_price"] > Decimal("100")
+    assert conn.accounts[account["id"]]["cash_balance"] < Decimal("10000")
+    assert all(fill["simulation_only"] is True for fill in conn.fills.values())
+
+
+def test_risk_blocks_leverage_and_keeps_order_simulated() -> None:
+    conn = FakeConn()
+    account = create_paper_account(conn, "Small Paper", Decimal("1000"))
+
+    order = create_order(conn, account["id"], "AAPL", Decimal("100"), side="buy", order_type="market")
+
+    assert order["status"] == "rejected"
+    assert "leverage is disabled" in order["rejected_reason"] or "max simulation risk" in order["rejected_reason"]
+    assert order["simulation_only"] is True
+    assert conn.fills == {}
+
+
+def test_sell_fill_updates_realized_pnl_without_shorting() -> None:
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+    create_order(conn, account["id"], "AAPL", Decimal("10"), side="buy", order_type="market")
+    conn.candle = {**conn.candle, "close": Decimal("110"), "high": Decimal("112"), "low": Decimal("108")}
+
+    sell = create_order(conn, account["id"], "AAPL", Decimal("5"), side="sell", order_type="market")
+    position = conn.positions[(account["id"], "AAPL")]
+
+    assert sell["status"] == "filled"
+    assert position["quantity"] == Decimal("5")
+    assert position["realized_pnl"] > Decimal("0")
+    assert conn.accounts[account["id"]]["realized_pnl"] > Decimal("0")
+
+
+def test_deployment_lifecycle_is_simulation_only() -> None:
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+
+    deployment = create_deployment(conn, account["id"], "trend_pullback", "AAPL", "1d")
+    paused = pause_deployment(conn, deployment["id"])
+
+    assert deployment["simulation_only"] is True
+    assert deployment["status"] == "active"
+    assert paused["status"] == "paused"
+    assert all(log["simulation_only"] is True for log in conn.logs)
+
+
+def test_paused_deployment_cannot_create_order() -> None:
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+    deployment = create_deployment(conn, account["id"], "trend_pullback", "AAPL", "1d")
+    pause_deployment(conn, deployment["id"])
+
+    order = create_order(conn, account["id"], "AAPL", Decimal("1"), deployment_id=deployment["id"])
+
+    assert order["status"] == "rejected"
+    assert "paused deployments cannot create paper orders" in order["rejected_reason"]
+    assert conn.fills == {}
+
+
+def test_duplicate_fill_call_does_not_create_second_fill() -> None:
+    from app.services.paper_trading import simulate_order_fill
+
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+    order = create_order(conn, account["id"], "AAPL", Decimal("10"), side="buy", order_type="market")
+
+    simulate_order_fill(conn, order["id"])
+
+    assert len(conn.fills) == 1

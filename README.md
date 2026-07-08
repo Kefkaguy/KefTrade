@@ -4,6 +4,8 @@ KefTrade is a research-only quantitative market research platform. It is built t
 
 The MVP now includes deterministic strategy research, experiment sweeps, cross-asset candidate ranking, alpha validation diagnostics, lifecycle tracking, portfolio views, research notebooks, and drilldown pages for assets, strategies, candidates, experiments, and validation runs.
 
+Phase 1 toward algorithmic trading adds internal paper trading architecture only. It is a simulation subsystem for accounting, orders, fills, positions, equity curves, and deployment lifecycle. It does not connect to brokers or route real orders.
+
 ## Research-Only Guardrails
 
 KefTrade does not implement:
@@ -45,6 +47,7 @@ Any strategy that has not passed alpha validation must be treated as research ev
   - Rejected
 - Shows research portfolio, evidence timeline, candidate comparison, evidence drift, notebooks, and audit reports.
 - Provides read-only AI copilot summaries over stored research evidence.
+- Provides simulation-only paper accounts, orders, fills, positions, equity curves, and strategy deployment lifecycle records.
 
 ## Main Web Pages
 
@@ -63,6 +66,11 @@ Any strategy that has not passed alpha validation must be treated as research ev
 - `/journal` - research journal
 - `/market-intelligence` - regime and archive diagnostics
 - `/reports` - saved local research reports
+- `/paper` - paper trading dashboard
+- `/paper/portfolio` - simulated portfolio balances
+- `/paper/orders` - simulated orders and fills
+- `/paper/positions` - simulated long-only positions
+- `/paper/deployments` - simulation-only strategy deployment lifecycle
 
 ## Backend API Areas
 
@@ -77,6 +85,7 @@ Any strategy that has not passed alpha validation must be treated as research ev
 - Research lab: `/research/hypotheses`, `/research/journal`
 - Research intelligence: `/research/intelligence`, `/research/archive`, `/research/timeline`
 - Copilot: `/research/copilot`
+- Paper simulation: `/paper/accounts`, `/paper/orders`, `/paper/deployments`
 
 ## Local Development
 
