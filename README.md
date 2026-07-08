@@ -11,7 +11,7 @@ Phase 1 toward algorithmic trading adds internal paper trading architecture only
 KefTrade does not implement:
 
 - Live trading
-- Paper trading workflows
+- External paper broker integrations or live broker paper accounts
 - Broker integration
 - Order routing or execution
 - Futures, margin, or leverage workflows
@@ -48,6 +48,14 @@ Any strategy that has not passed alpha validation must be treated as research ev
 - Shows research portfolio, evidence timeline, candidate comparison, evidence drift, notebooks, and audit reports.
 - Provides read-only AI copilot summaries over stored research evidence.
 - Provides simulation-only paper accounts, orders, fills, positions, equity curves, and strategy deployment lifecycle records.
+
+## Paper Simulation Scope
+
+- Internal simulation only; no broker connection, live routing, leverage, or shorting.
+- Supports market and limit paper orders filled from stored candle data.
+- Uses explicit assumptions of 0.1% fees and 0.05% slippage.
+- Fills are single-fill per order; partial fills are not modeled.
+- Stop-loss, take-profit, and cancel endpoints are not implemented yet.
 
 ## Main Web Pages
 
