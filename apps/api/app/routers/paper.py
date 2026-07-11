@@ -13,6 +13,7 @@ from app.services.paper_trading import (
     create_deployment,
     create_order,
     create_paper_account,
+    ensure_tsla_momentum_bull_deployment,
     list_accounts,
     list_deployments,
     list_equity_curve,
@@ -23,7 +24,9 @@ from app.services.paper_trading import (
     pause_deployment,
     process_pending_orders,
     reconcile_account,
+    run_deployment_scan,
 )
+from app.services.paper_scheduler import get_scheduler_status, run_scheduled_scan_once, update_scheduler_status
 
 router = APIRouter(prefix="/paper", tags=["paper-trading"])
 
@@ -58,6 +61,11 @@ class StrategyDeploymentCreate(BaseModel):
     timeframe: str = "1d"
     strategy_version: str = "v1"
     parameters: dict[str, Any] = Field(default_factory=dict)
+
+
+class SchedulerUpdate(BaseModel):
+    enabled: bool | None = None
+    cadence: str | None = None
 
 
 def paper_error(error: PaperTradingError) -> HTTPException:
@@ -170,6 +178,22 @@ def create_strategy_deployment(payload: StrategyDeploymentCreate, conn: psycopg.
         raise paper_error(error) from error
 
 
+@router.post("/deployments/tsla-momentum-bull")
+def deploy_tsla_momentum_bull(account_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return ensure_tsla_momentum_bull_deployment(conn, account_id)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
+
+
+@router.post("/deployments/{deployment_id}/scan")
+async def scan_strategy_deployment(deployment_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return await run_deployment_scan(conn, deployment_id)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
+
+
 @router.post("/deployments/{deployment_id}/pause")
 def pause_strategy_deployment(deployment_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     try:
@@ -181,3 +205,24 @@ def pause_strategy_deployment(deployment_id: int, conn: psycopg.Connection = Dep
 @router.get("/deployments")
 def get_deployments(account_id: int | None = Query(None), conn: psycopg.Connection = Depends(get_connection)) -> list[dict[str, Any]]:
     return list_deployments(conn, account_id)
+
+
+@router.get("/scheduler")
+def get_paper_scheduler(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    return get_scheduler_status(conn)
+
+
+@router.put("/scheduler")
+def update_paper_scheduler(payload: SchedulerUpdate, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return update_scheduler_status(conn, enabled=payload.enabled, cadence=payload.cadence)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
+
+
+@router.post("/scheduler/run")
+async def run_paper_scheduler_now(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return await run_scheduled_scan_once(conn, force=True)
+    except PaperTradingError as error:
+        raise paper_error(error) from error

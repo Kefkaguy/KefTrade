@@ -101,7 +101,13 @@ def test_strategy_library_contains_required_metadata() -> None:
         "breakout_v1",
         "mean_reversion_v1",
         "momentum_v1",
+        "momentum_bull_v2",
+        "momentum_loose_v2",
+        "trend_pullback_bull_v2",
+        "trend_pullback_loose_v2",
         "volatility_breakout_v1",
+        "volatility_breakout_bull_v2",
+        "volatility_breakout_loose_v2",
         "trend_following_200ema_v1",
     ]:
         strategy = library[key]

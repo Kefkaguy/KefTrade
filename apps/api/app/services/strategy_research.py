@@ -22,6 +22,13 @@ RANK_METRICS = (
     "average_holding_time_hours",
 )
 
+PAPER_READY_THRESHOLDS = {
+    "profit_factor": 1.25,
+    "expectancy_per_trade": 0.0,
+    "max_drawdown": 0.2,
+    "number_of_trades": 30,
+}
+
 
 @dataclass(frozen=True)
 class StrategyCandidate:
@@ -79,7 +86,8 @@ def run_strategy_research(
         enriched_trades = build_trade_explorer(result["trades"], context_by_time, filters)
         feature_correlations = calculate_feature_correlations(enriched_trades)
         dashboard = build_research_dashboard(result, enriched_trades)
-        recommendation = recommend_strategy(metrics)
+        paper_readiness = paper_readiness_report(metrics, by_market_regime, by_volatility_regime)
+        recommendation = recommend_strategy(metrics, paper_readiness)
         run = {
             "run_id": run_id,
             "strategy_name": candidate.strategy.name,
@@ -100,6 +108,8 @@ def run_strategy_research(
             "trade_explorer": enriched_trades,
             "filter_options": build_filter_options(result["trades"], context_by_time),
             "dashboard": dashboard,
+            "paper_readiness": paper_readiness,
+            "why_not_paper_ready": paper_readiness["failed_reasons"],
             "recommendation": recommendation,
             "markdown_report": "",
             "rank_score": score_metrics(metrics),
@@ -472,16 +482,99 @@ def finite_metric(value: Any) -> float:
     return parsed
 
 
-def recommend_strategy(metrics: dict[str, Any]) -> str:
+def recommend_strategy(metrics: dict[str, Any], paper_readiness: dict[str, Any] | None = None) -> str:
+    if paper_readiness is None:
+        paper_readiness = paper_readiness_report(metrics)
     profit_factor = finite_metric(metrics.get("profit_factor"))
     expectancy = finite_metric(metrics.get("expectancy_per_trade"))
-    max_drawdown = finite_metric(metrics.get("max_drawdown"))
     trade_count = int(finite_metric(metrics.get("number_of_trades")))
-    if profit_factor >= 1.25 and expectancy > 0 and max_drawdown <= 0.2 and trade_count >= 30:
+    if paper_readiness["paper_ready"]:
         return "Candidate for Paper Trading"
+    if profit_factor >= 1.05 and expectancy > 0 and trade_count >= 15:
+        return "Needs More Research"
     if profit_factor >= 0.9 and trade_count >= 20:
         return "Needs More Research"
     return "Reject"
+
+
+def paper_readiness_report(
+    metrics: dict[str, Any],
+    by_market_regime: list[dict[str, Any]] | None = None,
+    by_volatility_regime: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    checks = [
+        readiness_check(
+            "profit_factor",
+            finite_metric(metrics.get("profit_factor")) >= PAPER_READY_THRESHOLDS["profit_factor"],
+            f"Profit factor {format_metric(metrics.get('profit_factor'))} must be >= {PAPER_READY_THRESHOLDS['profit_factor']}.",
+        ),
+        readiness_check(
+            "positive_expectancy",
+            finite_metric(metrics.get("expectancy_per_trade")) > PAPER_READY_THRESHOLDS["expectancy_per_trade"],
+            f"Expectancy {format_metric(metrics.get('expectancy_per_trade'))} must be positive.",
+        ),
+        readiness_check(
+            "drawdown",
+            finite_metric(metrics.get("max_drawdown")) <= PAPER_READY_THRESHOLDS["max_drawdown"],
+            f"Max drawdown {format_metric(metrics.get('max_drawdown'))} must be <= {PAPER_READY_THRESHOLDS['max_drawdown']}.",
+        ),
+        readiness_check(
+            "trade_count",
+            finite_metric(metrics.get("number_of_trades")) >= PAPER_READY_THRESHOLDS["number_of_trades"],
+            f"Trade count {int(finite_metric(metrics.get('number_of_trades')))} must be >= {PAPER_READY_THRESHOLDS['number_of_trades']}.",
+        ),
+        readiness_check(
+            "walk_forward_oos",
+            bool((metrics.get("walk_forward") or {}).get("enabled")),
+            "Walk-forward/OOS validation window must be available.",
+        ),
+        readiness_check(
+            "regime_stability",
+            regime_stability_passes(by_market_regime or [], by_volatility_regime or []),
+            regime_stability_detail(by_market_regime or [], by_volatility_regime or []),
+        ),
+    ]
+    failed_reasons = [check["detail"] for check in checks if not check["passed"]]
+    return {
+        "thresholds": PAPER_READY_THRESHOLDS,
+        "checks": checks,
+        "paper_ready": not failed_reasons,
+        "failed_reasons": failed_reasons,
+    }
+
+
+def readiness_check(name: str, passed: bool, detail: str) -> dict[str, Any]:
+    return {"name": name, "passed": passed, "detail": detail}
+
+
+def regime_stability_passes(by_market_regime: list[dict[str, Any]], by_volatility_regime: list[dict[str, Any]]) -> bool:
+    material_rows = [
+        row
+        for row in [*by_market_regime, *by_volatility_regime]
+        if finite_metric(row.get("metrics", {}).get("number_of_trades")) >= 5
+    ]
+    if not material_rows:
+        return True
+    return all(
+        finite_metric(row.get("metrics", {}).get("expectancy_per_trade")) > 0
+        and finite_metric(row.get("metrics", {}).get("profit_factor")) >= 1
+        for row in material_rows
+    )
+
+
+def regime_stability_detail(by_market_regime: list[dict[str, Any]], by_volatility_regime: list[dict[str, Any]]) -> str:
+    weak_rows = [
+        row["regime"]
+        for row in [*by_market_regime, *by_volatility_regime]
+        if finite_metric(row.get("metrics", {}).get("number_of_trades")) >= 5
+        and (
+            finite_metric(row.get("metrics", {}).get("expectancy_per_trade")) <= 0
+            or finite_metric(row.get("metrics", {}).get("profit_factor")) < 1
+        )
+    ]
+    if weak_rows:
+        return f"Material regimes with weak expectancy/profit factor: {', '.join(sorted(set(weak_rows)))}."
+    return "No material regime bucket failed profit-factor or expectancy stability checks."
 
 
 def build_comparison_charts(ranked: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
@@ -547,6 +640,9 @@ def build_markdown_report(run: dict[str, Any]) -> str:
             "## Failure Analysis",
             bullet_list(failures),
             "",
+            "## Why Not Paper-Ready",
+            bullet_list(run["why_not_paper_ready"] or ["All paper-readiness gates passed."]),
+            "",
             "## Recommendation",
             run["recommendation"],
         ]
@@ -586,6 +682,9 @@ def build_library_markdown_report(ranked: list[dict[str, Any]]) -> str:
             "",
             "## Failure Analysis",
             bullet_list(infer_failure_analysis(top["metrics"], top["by_market_regime"], top["by_volatility_regime"])),
+            "",
+            "## Why Not Paper-Ready",
+            bullet_list(top["why_not_paper_ready"] or ["All paper-readiness gates passed."]),
             "",
             "## Recommendation",
             top["recommendation"],

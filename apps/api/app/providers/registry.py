@@ -1,7 +1,9 @@
+from app.providers.alpaca import AlpacaMarketDataProvider
 from app.providers.binance import BinanceMarketDataProvider
 from app.providers.yfinance_provider import YFinanceMarketDataProvider
 
 market_data_providers = {
+    "alpaca_iex": AlpacaMarketDataProvider(),
     "binance_dev": BinanceMarketDataProvider(),
     "yfinance_research": YFinanceMarketDataProvider(),
 }

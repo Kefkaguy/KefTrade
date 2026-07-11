@@ -1,4 +1,4 @@
-from app.domain.assets import DEFAULT_DEV_PROVIDER, US_EQUITY_RESEARCH_UNIVERSE, US_EQUITY_VALIDATION_UNIVERSE, YFINANCE_RESEARCH_PROVIDER
+from app.domain.assets import ALPACA_IEX_PROVIDER, DEFAULT_DEV_PROVIDER, US_EQUITY_RESEARCH_UNIVERSE, US_EQUITY_VALIDATION_UNIVERSE, YFINANCE_RESEARCH_PROVIDER
 from app.domain.market_data import MarketDataSyncResult
 from app.providers.registry import get_market_data_provider
 from datetime import UTC, datetime
@@ -35,6 +35,13 @@ def test_yfinance_research_provider_is_registered() -> None:
     provider = get_market_data_provider(YFINANCE_RESEARCH_PROVIDER)
 
     assert provider.name == YFINANCE_RESEARCH_PROVIDER
+    assert hasattr(provider, "sync_candles")
+
+
+def test_alpaca_iex_provider_is_registered() -> None:
+    provider = get_market_data_provider(ALPACA_IEX_PROVIDER)
+
+    assert provider.name == ALPACA_IEX_PROVIDER
     assert hasattr(provider, "sync_candles")
 
 

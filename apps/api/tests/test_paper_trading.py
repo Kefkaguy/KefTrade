@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -26,6 +27,18 @@ class FakeConn:
         self.equity = []
         self.logs = []
         self.commits = 0
+        self.scheduler = {
+            "id": True,
+            "enabled": True,
+            "cadence": "60m",
+            "last_run_at": None,
+            "next_run_at": datetime.now(UTC) - timedelta(minutes=1),
+            "latest_result": None,
+            "latest_error": None,
+            "is_running": False,
+            "running_since": None,
+            "updated_at": datetime.now(UTC),
+        }
         self.candle = {
             "symbol": "AAPL",
             "timeframe": "1d",
@@ -56,6 +69,33 @@ class FakeConn:
         if "INSERT INTO execution_logs" in query:
             self.logs.append({"event_type": params[3], "simulation_only": True})
             return Result([])
+        if "SELECT * FROM paper_scan_scheduler WHERE id = TRUE" in query:
+            return Result([self.scheduler])
+        if "INSERT INTO paper_scan_scheduler" in query:
+            return Result([self.scheduler])
+        if "UPDATE paper_scan_scheduler" in query and "is_running = TRUE" in query:
+            self.scheduler["is_running"] = True
+            self.scheduler["running_since"] = datetime.now(UTC)
+            self.scheduler["latest_error"] = None
+            return Result([self.scheduler])
+        if "UPDATE paper_scan_scheduler" in query and "last_run_at = NOW()" in query:
+            self.scheduler["last_run_at"] = datetime.now(UTC)
+            self.scheduler["next_run_at"] = params[0]
+            self.scheduler["latest_result"] = params[1]
+            self.scheduler["latest_error"] = params[2]
+            self.scheduler["is_running"] = False
+            self.scheduler["running_since"] = None
+            return Result([self.scheduler])
+        if "UPDATE paper_scan_scheduler" in query and "latest_result = %s" in query:
+            self.scheduler["latest_result"] = params[0]
+            self.scheduler["latest_error"] = None
+            return Result([self.scheduler])
+        if "UPDATE paper_scan_scheduler" in query and "enabled = %s" in query:
+            self.scheduler["enabled"] = params[0]
+            self.scheduler["cadence"] = params[1]
+            self.scheduler["next_run_at"] = params[2]
+            self.scheduler["latest_error"] = None
+            return Result([self.scheduler])
         if "SELECT * FROM paper_positions WHERE account_id" in query and "AND symbol" in query:
             return Result([self.positions[(params[0], params[1])]] if (params[0], params[1]) in self.positions else [])
         if "SELECT * FROM paper_positions WHERE account_id" in query:
@@ -121,6 +161,9 @@ class FakeConn:
             return Result(rows)
         if "SELECT id, account_id, status, simulation_only" in query:
             return Result([self.deployments[params[0]]] if params[0] in self.deployments else [])
+        if "SELECT *" in query and "FROM strategy_deployments" in query and "simulation_only = TRUE" in query:
+            rows = [row for row in self.deployments.values() if row["status"] == "active" and row["simulation_only"] is True]
+            return Result(rows)
         if "INSERT INTO paper_fills" in query:
             row = {
                 "id": len(self.fills) + 1,
@@ -169,8 +212,17 @@ class FakeConn:
                 "parameters": {},
                 "status": "active",
                 "simulation_only": True,
+                "last_scanned_candle_timestamp": None,
             }
             self.deployments[row["id"]] = row
+            return Result([row])
+        if "UPDATE strategy_deployments" in query and "last_scanned_candle_timestamp" in query:
+            row = self.deployments.get(params[1])
+            if not row or row["status"] != "active" or row["simulation_only"] is not True:
+                return Result([])
+            if row.get("last_scanned_candle_timestamp") == params[2]:
+                return Result([])
+            row["last_scanned_candle_timestamp"] = params[0]
             return Result([row])
         if "UPDATE strategy_deployments" in query:
             row = self.deployments.get(params[0])
@@ -309,3 +361,78 @@ def test_execution_log_payloads_are_json_serializable() -> None:
 
     encoded = jsonable_encoder(payload)
     assert json.loads(json.dumps(encoded)) == {"quantity": 23, "limit_price": 2.0}
+
+
+def test_scheduler_manual_mode_idles_without_scanning() -> None:
+    import asyncio
+    from app.services.paper_scheduler import run_scheduled_scan_once
+
+    conn = FakeConn()
+    conn.scheduler["cadence"] = "manual"
+    conn.scheduler["next_run_at"] = None
+
+    result = asyncio.run(run_scheduled_scan_once(conn))
+
+    assert result["status"] == "idle"
+    assert "disabled or manual" in result["message"]
+    assert not any(log["event_type"] == "paper_scheduler_run_started" for log in conn.logs)
+
+
+def test_scheduler_scans_only_active_simulation_deployments(monkeypatch) -> None:
+    import asyncio
+    from app.services import paper_scheduler
+
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+    active = create_deployment(conn, account["id"], "momentum", "TSLA", "1h", strategy_version="bull_v2")
+    paused = create_deployment(conn, account["id"], "momentum", "TSLA", "1h", strategy_version="bull_v2")
+    conn.deployments[paused["id"]]["status"] = "paused"
+    non_sim = create_deployment(conn, account["id"], "momentum", "TSLA", "1h", strategy_version="bull_v2")
+    conn.deployments[non_sim["id"]]["simulation_only"] = False
+    scanned: list[int] = []
+
+    async def fake_scan(_conn, deployment_id: int):
+        deployment = _conn.deployments[deployment_id]
+        assert deployment["status"] == "active"
+        assert deployment["simulation_only"] is True
+        scanned.append(deployment_id)
+        return {"action": "skipped", "message": "fake simulation scan", "simulation_only": True, "order": None}
+
+    monkeypatch.setattr(paper_scheduler, "run_deployment_scan", fake_scan)
+
+    result = asyncio.run(paper_scheduler.run_scheduled_scan_once(conn, force=True))
+
+    assert scanned == [active["id"]]
+    assert result["simulation_only"] is True
+    assert result["results"][0]["simulation_only"] is True
+    assert any(log["event_type"] == "paper_scheduler_run_finished" for log in conn.logs)
+
+
+def test_deployment_candle_scan_claim_blocks_duplicate_candle() -> None:
+    from app.services.paper_trading import claim_deployment_candle_scan
+
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+    deployment = create_deployment(conn, account["id"], "momentum", "TSLA", "1h", strategy_version="bull_v2")
+    candle_timestamp = datetime(2026, 1, 2, 15, tzinfo=UTC)
+
+    first = claim_deployment_candle_scan(conn, deployment["id"], candle_timestamp)
+    second = claim_deployment_candle_scan(conn, deployment["id"], candle_timestamp)
+
+    assert first is not None
+    assert first["simulation_only"] is True
+    assert second is None
+    assert conn.deployments[deployment["id"]]["last_scanned_candle_timestamp"] == candle_timestamp
+
+
+def test_deployment_candle_scan_claim_requires_active_simulation_deployment() -> None:
+    from app.services.paper_trading import claim_deployment_candle_scan
+
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+    deployment = create_deployment(conn, account["id"], "momentum", "TSLA", "1h", strategy_version="bull_v2")
+    conn.deployments[deployment["id"]]["simulation_only"] = False
+
+    claimed = claim_deployment_candle_scan(conn, deployment["id"], datetime(2026, 1, 2, 15, tzinfo=UTC))
+
+    assert claimed is None

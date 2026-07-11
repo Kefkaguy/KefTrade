@@ -5,9 +5,14 @@ import psycopg
 from fastapi.encoders import jsonable_encoder
 from psycopg.types.json import Jsonb
 
+from app.providers.alpaca import sync_alpaca_candles
+from app.services.features import load_candles, sync_features
+from app.services.strategy import StrategyDecision, get_strategy_definition
+
 FEE_RATE = Decimal("0.001")
 SLIPPAGE_RATE = Decimal("0.0005")
 MAX_ORDER_NOTIONAL_FRACTION = Decimal("0.25")
+PAPER_SCAN_CANDLE_LIMIT = 5000
 
 
 class PaperTradingError(ValueError):
@@ -326,6 +331,263 @@ def create_deployment(
     return dict(row)
 
 
+def find_active_deployment(conn: psycopg.Connection, account_id: int, strategy_name: str, strategy_version: str, symbol: str, timeframe: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM strategy_deployments
+        WHERE account_id = %s
+          AND strategy_name = %s
+          AND strategy_version = %s
+          AND symbol = %s
+          AND timeframe = %s
+          AND status = 'active'
+          AND simulation_only = TRUE
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (account_id, strategy_name, strategy_version, symbol.upper(), timeframe),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def ensure_tsla_momentum_bull_deployment(conn: psycopg.Connection, account_id: int) -> dict[str, Any]:
+    strategy = get_strategy_definition("momentum", "bull_v2")
+    existing = find_active_deployment(conn, account_id, strategy.name, strategy.version, "TSLA", "1h")
+    if existing:
+        log_event(conn, account_id, existing["id"], None, "paper_deployment_exists", "TSLA 1h momentum_bull_v2 deployment already active.", existing)
+        conn.commit()
+        return existing
+    return create_deployment(
+        conn,
+        account_id=account_id,
+        strategy_name=strategy.name,
+        strategy_version=strategy.version,
+        symbol="TSLA",
+        timeframe="1h",
+        parameters=strategy.parameters,
+    )
+
+
+async def run_deployment_scan(conn: psycopg.Connection, deployment_id: int) -> dict[str, Any]:
+    deployment = get_deployment(conn, deployment_id)
+    if deployment["status"] != "active":
+        raise PaperTradingError("only active simulation deployments can be scanned")
+    if not deployment["simulation_only"]:
+        raise PaperTradingError("deployment is not simulation-only")
+
+    account_id = int(deployment["account_id"])
+    symbol = deployment["symbol"]
+    timeframe = deployment["timeframe"]
+    sync_result = await sync_latest_deployment_candles(conn, symbol, timeframe)
+    feature_result = sync_features(conn, symbol=symbol, timeframe=timeframe)
+    processed = process_pending_orders(conn, account_id)
+    deployment = get_deployment(conn, deployment_id)
+    candle = latest_candle(conn, symbol, timeframe)
+    claimed = claim_deployment_candle_scan(conn, deployment_id, candle["timestamp"])
+    if not claimed:
+        message = "Deployment already scanned this candle; skipped duplicate paper decision."
+        payload = {
+            "action": "skipped_duplicate_candle",
+            "candle_timestamp": candle["timestamp"],
+            "sync": {
+                "provider": sync_result.provider,
+                "received": sync_result.received,
+                "upserted": sync_result.upserted,
+                "first_timestamp": sync_result.first_timestamp,
+                "last_timestamp": sync_result.last_timestamp,
+            },
+            "features": feature_result,
+            "processed_pending": processed,
+            "simulation_only": True,
+        }
+        log_event(conn, account_id, deployment_id, None, "paper_scan_duplicate_candle_skipped", message, payload)
+        updated = update_deployment_scan_state(conn, deployment_id, "skipped", message, payload)
+        reconcile = reconcile_account(conn, account_id, repair=False)
+        conn.commit()
+        return {
+            "deployment": updated,
+            "action": "skipped_duplicate_candle",
+            "message": message,
+            "decision": {"signal": "skipped", "explanation": [message]},
+            "sync": payload["sync"],
+            "features": feature_result,
+            "processed_pending": processed,
+            "order": None,
+            "position": get_position(conn, account_id, symbol),
+            "reconciliation": reconcile,
+            "simulation_only": True,
+        }
+    decision = evaluate_deployment_decision(conn, deployment)
+    open_position = get_position(conn, account_id, symbol)
+    pending_orders = pending_deployment_orders(conn, deployment_id)
+    order = None
+    action = "skipped"
+    message = ""
+
+    if decision.signal != "setup":
+        message = "Strategy rules did not produce a setup on the latest stored candle."
+    elif Decimal(open_position.get("quantity") or 0) > 0:
+        message = "Existing simulated long position is open; skipped duplicate entry."
+    elif pending_orders:
+        message = "Pending simulated deployment orders already exist; skipped duplicate entry."
+    else:
+        order = create_deployment_order_from_decision(conn, deployment, decision)
+        action = "order_created" if order["status"] != "rejected" else "order_rejected"
+        message = order.get("rejected_reason") or f"Created simulated {order['status']} order from deployment scan."
+
+    record_equity_snapshot(conn, account_id)
+    payload = {
+        "action": action,
+        "decision": decision_payload(decision),
+        "sync": {
+            "provider": sync_result.provider,
+            "received": sync_result.received,
+            "upserted": sync_result.upserted,
+            "first_timestamp": sync_result.first_timestamp,
+            "last_timestamp": sync_result.last_timestamp,
+        },
+        "features": feature_result,
+        "processed_pending": processed,
+        "order": order,
+        "position": get_position(conn, account_id, symbol),
+    }
+    log_event(conn, account_id, deployment_id, order.get("id") if order else None, "paper_scan_completed", message, payload)
+    updated = update_deployment_scan_state(conn, deployment_id, decision.signal, message, payload)
+    reconcile = reconcile_account(conn, account_id, repair=False)
+    conn.commit()
+    return {
+        "deployment": updated,
+        "action": action,
+        "message": message,
+        "decision": decision_payload(decision),
+        "sync": payload["sync"],
+        "features": feature_result,
+        "processed_pending": processed,
+        "order": order,
+        "position": payload["position"],
+        "reconciliation": reconcile,
+        "simulation_only": True,
+    }
+
+
+def get_deployment(conn: psycopg.Connection, deployment_id: int) -> dict[str, Any]:
+    row = conn.execute("SELECT * FROM strategy_deployments WHERE id = %s", (deployment_id,)).fetchone()
+    if not row:
+        raise PaperTradingError("strategy deployment not found")
+    return dict(row)
+
+
+def claim_deployment_candle_scan(conn: psycopg.Connection, deployment_id: int, candle_timestamp: Any) -> dict[str, Any] | None:
+    row = conn.execute(
+        """
+        UPDATE strategy_deployments
+        SET last_scanned_candle_timestamp = %s,
+            updated_at = NOW()
+        WHERE id = %s
+          AND status = 'active'
+          AND simulation_only = TRUE
+          AND (
+              last_scanned_candle_timestamp IS NULL
+              OR last_scanned_candle_timestamp <> %s
+          )
+        RETURNING *
+        """,
+        (candle_timestamp, deployment_id, candle_timestamp),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+async def sync_latest_deployment_candles(conn: psycopg.Connection, symbol: str, timeframe: str):
+    if symbol.upper() == "TSLA" and timeframe == "1h":
+        return await sync_alpaca_candles(conn, symbol=symbol, timeframe=timeframe, limit=PAPER_SCAN_CANDLE_LIMIT)
+    raise PaperTradingError("paper scan currently supports TSLA 1h Alpaca equity data only")
+
+
+def evaluate_deployment_decision(conn: psycopg.Connection, deployment: dict[str, Any]) -> StrategyDecision:
+    strategy = get_strategy_definition(deployment["strategy_name"], deployment["strategy_version"])
+    candles = load_candles(conn, symbol=deployment["symbol"], timeframe=deployment["timeframe"])
+    if not candles:
+        raise PaperTradingError("No candle data available for deployment scan.")
+    features = conn.execute(
+        """
+        SELECT *
+        FROM features
+        WHERE symbol = %s AND timeframe = %s
+        ORDER BY timestamp ASC
+        """,
+        (deployment["symbol"], deployment["timeframe"]),
+    ).fetchall()
+    if not features:
+        raise PaperTradingError("No feature data available for deployment scan.")
+    feature_by_time = {row["timestamp"]: row for row in features}
+    latest_candle = candles[-1]
+    feature = feature_by_time.get(latest_candle["timestamp"])
+    if feature is None:
+        raise PaperTradingError("No feature row matches the latest deployment candle.")
+    params = {**strategy.parameters, **dict(deployment.get("parameters") or {})}
+    return strategy.decide(latest_candle, feature, candles, params)
+
+
+def pending_deployment_orders(conn: psycopg.Connection, deployment_id: int) -> list[dict[str, Any]]:
+    return list(
+        conn.execute(
+            "SELECT * FROM paper_orders WHERE deployment_id = %s AND status = 'pending' ORDER BY submitted_at",
+            (deployment_id,),
+        ).fetchall()
+    )
+
+
+def create_deployment_order_from_decision(conn: psycopg.Connection, deployment: dict[str, Any], decision: StrategyDecision) -> dict[str, Any]:
+    if decision.stop_loss is None or decision.take_profit is None:
+        raise PaperTradingError("setup decision is missing protective exits")
+    account = account_balances(conn, int(deployment["account_id"]))
+    latest = latest_candle(conn, deployment["symbol"], deployment["timeframe"])
+    reference_price = Decimal(latest["close"])
+    max_notional = Decimal(account["equity"]) * Decimal("0.10")
+    quantity = max_notional / reference_price
+    return create_order(
+        conn,
+        account_id=int(deployment["account_id"]),
+        deployment_id=int(deployment["id"]),
+        symbol=deployment["symbol"],
+        timeframe=deployment["timeframe"],
+        side="buy",
+        order_type="market",
+        quantity=quantity,
+        stop_loss_price=decision.stop_loss,
+        take_profit_price=decision.take_profit,
+    )
+
+
+def decision_payload(decision: StrategyDecision) -> dict[str, Any]:
+    return {
+        "signal": decision.signal,
+        "entry_zone": [str(value) for value in decision.entry_zone] if decision.entry_zone else None,
+        "stop_loss": str(decision.stop_loss) if decision.stop_loss is not None else None,
+        "take_profit": str(decision.take_profit) if decision.take_profit is not None else None,
+        "risk_reward": str(decision.risk_reward) if decision.risk_reward is not None else None,
+        "explanation": decision.explanation,
+    }
+
+
+def update_deployment_scan_state(conn: psycopg.Connection, deployment_id: int, signal: str, check_result: str, payload: dict[str, Any]) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        UPDATE strategy_deployments
+        SET last_scan_at = NOW(),
+            last_signal = %s,
+            last_check_result = %s,
+            last_scan_payload = %s,
+            updated_at = NOW()
+        WHERE id = %s
+        RETURNING *
+        """,
+        (signal, check_result, Jsonb(jsonable_encoder(payload)), deployment_id),
+    ).fetchone()
+    return dict(row)
+
+
 def pause_deployment(conn: psycopg.Connection, deployment_id: int) -> dict[str, Any]:
     row = conn.execute(
         """
@@ -461,17 +723,7 @@ def record_equity_snapshot(conn: psycopg.Connection, account_id: int) -> dict[st
 
 
 def latest_candle(conn: psycopg.Connection, symbol: str, timeframe: str, allow_any_timeframe: bool = False) -> dict[str, Any]:
-    row = conn.execute(
-        """
-        SELECT symbol, timeframe, timestamp, open, high, low, close, volume
-        FROM candles
-        WHERE symbol = %s AND timeframe = %s
-        ORDER BY timestamp DESC
-        LIMIT 1
-        """,
-        (symbol.upper(), timeframe),
-    ).fetchone()
-    if not row and allow_any_timeframe:
+    if allow_any_timeframe:
         row = conn.execute(
             """
             SELECT symbol, timeframe, timestamp, open, high, low, close, volume
@@ -482,6 +734,18 @@ def latest_candle(conn: psycopg.Connection, symbol: str, timeframe: str, allow_a
             """,
             (symbol.upper(),),
         ).fetchone()
+        if row:
+            return dict(row)
+    row = conn.execute(
+        """
+        SELECT symbol, timeframe, timestamp, open, high, low, close, volume
+        FROM candles
+        WHERE symbol = %s AND timeframe = %s
+        ORDER BY timestamp DESC
+        LIMIT 1
+        """,
+        (symbol.upper(), timeframe),
+    ).fetchone()
     if not row:
         raise PaperTradingError("No candle data available for paper fill simulation.")
     return dict(row)

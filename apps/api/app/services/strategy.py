@@ -62,6 +62,8 @@ BASE_PARAMETERS: dict[str, Any] = {
     "risk_per_trade": 0.01,
     "initial_equity": 10000,
     "walk_forward_train_ratio": 0.7,
+    "max_holding_bars": 0,
+    "stop_buffer_pct": 0,
 }
 
 
@@ -81,6 +83,57 @@ def get_strategy_library() -> dict[str, StrategyDefinition]:
             ],
             exit_rules=["Stop at recent swing low.", "Target at configured risk/reward multiple."],
             supported_market_regimes=["bull", "sideways", "normal_volatility"],
+            decide=trend_pullback_decision,
+        ),
+        StrategyDefinition(
+            name="trend_pullback",
+            version="bull_v2",
+            description="Bull-trend-only trend pullback with wider RSI acceptance and time-based exits for more testable samples.",
+            parameters={
+                **BASE_PARAMETERS,
+                "rsi_min": 35,
+                "rsi_max": 68,
+                "volume_change_min": -0.45,
+                "entry_distance_to_ema20_max": 0.035,
+                "risk_reward": 1.8,
+                "swing_lookback": 4,
+                "market_regime_filter": "bull_trend",
+                "max_holding_bars": 20,
+            },
+            entry_rules=[
+                "Close is above EMA50 and five-candle momentum is positive.",
+                "Fast EMA remains above slow EMA.",
+                "RSI allows a wider bull-trend pullback range.",
+                "Price remains near enough to EMA20 for bounded risk.",
+            ],
+            exit_rules=["Stop at recent swing low.", "Target at configured risk/reward multiple.", "Exit after maximum holding bars if neither stop nor target is reached."],
+            supported_market_regimes=["bull_trend", "normal_volatility"],
+            decide=trend_pullback_decision,
+        ),
+        StrategyDefinition(
+            name="trend_pullback",
+            version="loose_v2",
+            description="Less restrictive pullback variant designed to increase sample size while retaining EMA trend and risk controls.",
+            parameters={
+                **BASE_PARAMETERS,
+                "ema_fast": 10,
+                "ema_slow": 50,
+                "rsi_min": 32,
+                "rsi_max": 72,
+                "volume_change_min": -0.75,
+                "entry_distance_to_ema20_max": 0.06,
+                "risk_reward": 1.5,
+                "swing_lookback": 3,
+                "max_holding_bars": 16,
+            },
+            entry_rules=[
+                "Close is above slow EMA.",
+                "Fast EMA is above slow EMA.",
+                "RSI stays inside a broad pullback band.",
+                "Volume is not severely collapsing.",
+            ],
+            exit_rules=["Stop at recent swing low.", "Lower risk/reward target to increase realized exits.", "Exit after maximum holding bars."],
+            supported_market_regimes=["bull_trend", "sideways"],
             decide=trend_pullback_decision,
         ),
         StrategyDefinition(
@@ -125,6 +178,42 @@ def get_strategy_library() -> dict[str, StrategyDefinition]:
             decide=momentum_decision,
         ),
         StrategyDefinition(
+            name="momentum",
+            version="bull_v2",
+            description="Bull-trend momentum variant with lower return threshold, EMA50 regime filter, and time exits to improve sample size.",
+            parameters={
+                **BASE_PARAMETERS,
+                "returns_5_min": 0.008,
+                "risk_reward": 1.6,
+                "swing_lookback": 5,
+                "market_regime_filter": "bull_trend",
+                "max_holding_bars": 12,
+            },
+            entry_rules=[
+                "Close is above EMA50.",
+                "Five-candle return is positive enough for continuation.",
+                "MACD is above signal line.",
+                "Bull-trend regime filter passes.",
+            ],
+            exit_rules=["Stop below recent swing low.", "Target at configured risk/reward multiple.", "Exit after maximum holding bars."],
+            supported_market_regimes=["bull_trend"],
+            decide=momentum_decision,
+        ),
+        StrategyDefinition(
+            name="momentum",
+            version="loose_v2",
+            description="Less restrictive momentum variant that accepts smaller continuation moves but keeps MACD and EMA trend confirmation.",
+            parameters={**BASE_PARAMETERS, "returns_5_min": 0.004, "risk_reward": 1.4, "swing_lookback": 4, "max_holding_bars": 10},
+            entry_rules=[
+                "Close is above EMA50.",
+                "Five-candle return is positive.",
+                "MACD is above signal line.",
+            ],
+            exit_rules=["Stop below recent swing low.", "Closer target to improve realized trade count.", "Exit after maximum holding bars."],
+            supported_market_regimes=["bull_trend", "sideways"],
+            decide=momentum_decision,
+        ),
+        StrategyDefinition(
             name="volatility_breakout",
             version="v1",
             description="Long-only volatility expansion breakout using prior range, recent volatility, and volume confirmation.",
@@ -136,6 +225,49 @@ def get_strategy_library() -> dict[str, StrategyDefinition]:
             ],
             exit_rules=["Stop below prior range midpoint.", "Target at configured risk/reward multiple."],
             supported_market_regimes=["high_volatility", "bull"],
+            decide=volatility_breakout_decision,
+        ),
+        StrategyDefinition(
+            name="volatility_breakout",
+            version="loose_v2",
+            description="Less restrictive volatility breakout variant using a shorter range, lower volume threshold, and time exits.",
+            parameters={
+                **BASE_PARAMETERS,
+                "breakout_lookback": 8,
+                "volatility_20_min": 0.008,
+                "volume_change_min": -0.15,
+                "risk_reward": 1.6,
+                "max_holding_bars": 14,
+            },
+            entry_rules=[
+                "Close breaks above a shorter prior range.",
+                "Recent volatility is above a lower minimum threshold.",
+                "Volume is not materially contracting.",
+            ],
+            exit_rules=["Stop below prior range midpoint.", "Target at configured risk/reward multiple.", "Exit after maximum holding bars."],
+            supported_market_regimes=["high_volatility", "bull_trend", "normal_volatility"],
+            decide=volatility_breakout_decision,
+        ),
+        StrategyDefinition(
+            name="volatility_breakout",
+            version="bull_v2",
+            description="Bull-regime volatility breakout requiring EMA50 trend alignment and moderate volatility expansion.",
+            parameters={
+                **BASE_PARAMETERS,
+                "breakout_lookback": 10,
+                "volatility_20_min": 0.01,
+                "volume_change_min": -0.05,
+                "risk_reward": 1.8,
+                "market_regime_filter": "bull_trend",
+                "max_holding_bars": 18,
+            },
+            entry_rules=[
+                "Bull-trend regime filter passes.",
+                "Close breaks above prior range high.",
+                "Volatility expansion is present.",
+            ],
+            exit_rules=["Stop below prior range midpoint.", "Target at configured risk/reward multiple.", "Exit after maximum holding bars."],
+            supported_market_regimes=["bull_trend", "high_volatility"],
             decide=volatility_breakout_decision,
         ),
         StrategyDefinition(
@@ -175,6 +307,9 @@ def trend_pullback_decision(
     required = ["rsi_14", "volume_change"]
     if any(feature.get(key) is None for key in required):
         return StrategyDecision("avoid", None, None, None, None, ["Not enough historical candles to calculate required indicators."])
+    regime_failure = regime_filter_failure(candle, feature, params)
+    if regime_failure:
+        return StrategyDecision("avoid", None, None, None, None, [regime_failure])
 
     close = Decimal(candle["close"])
     ema_fast_period = int(params["ema_fast"])
@@ -304,6 +439,9 @@ def momentum_decision(
     required = ["ema_50", "returns_5", "macd", "macd_signal"]
     if any(feature.get(key) is None for key in required):
         return StrategyDecision("avoid", None, None, None, None, ["Not enough feature history for momentum confirmation."])
+    regime_failure = regime_filter_failure(candle, feature, params)
+    if regime_failure:
+        return StrategyDecision("avoid", None, None, None, None, [regime_failure])
     close = Decimal(candle["close"])
     if close <= Decimal(feature["ema_50"]):
         return StrategyDecision("avoid", None, None, None, None, ["Close is below EMA50 trend filter."])
@@ -324,6 +462,9 @@ def volatility_breakout_decision(
     required = ["volatility_20", "volume_change"]
     if any(feature.get(key) is None for key in required):
         return StrategyDecision("avoid", None, None, None, None, ["Not enough feature history for volatility breakout."])
+    regime_failure = regime_filter_failure(candle, feature, params)
+    if regime_failure:
+        return StrategyDecision("avoid", None, None, None, None, [regime_failure])
     if Decimal(feature["volatility_20"]) < Decimal(str(params["volatility_20_min"])):
         return StrategyDecision("avoid", None, None, None, None, ["Volatility is below breakout threshold."])
     lookback = int(params["breakout_lookback"])
@@ -379,11 +520,28 @@ def long_decision_from_stop(
 ) -> StrategyDecision:
     if stop is None:
         return StrategyDecision("avoid", None, None, None, None, explanation + ["Stop could not be calculated."])
+    stop_buffer = Decimal(str(params.get("stop_buffer_pct", 0)))
+    if stop_buffer > 0:
+        stop = stop * (Decimal("1") - stop_buffer)
     if stop >= close:
         return StrategyDecision("avoid", None, None, None, None, explanation + ["Stop is not below close."])
     risk_reward = Decimal(str(params["risk_reward"]))
     take_profit = close + ((close - stop) * risk_reward)
     return StrategyDecision("setup", (Decimal(candle["low"]), Decimal(candle["high"])), stop, take_profit, risk_reward, explanation)
+
+
+def regime_filter_failure(candle: dict[str, Any], feature: dict[str, Any], params: dict[str, Any]) -> str | None:
+    regime_filter = params.get("market_regime_filter")
+    if not regime_filter:
+        return None
+    if regime_filter == "bull_trend":
+        if feature.get("ema_50") is None or feature.get("returns_5") is None:
+            return "Bull-trend filter requires EMA50 and five-candle returns."
+        close = Decimal(candle["close"])
+        if close > Decimal(feature["ema_50"]) and Decimal(feature["returns_5"]) > 0:
+            return None
+        return "Bull-trend filter failed."
+    return None
 
 
 def calculate_ema_from_candles(candles: list[dict[str, Any]], period: int) -> Decimal | None:

@@ -84,7 +84,7 @@ export function SimpleResearchFlow() {
 
     const profile = assetProfile(selectedAsset);
     try {
-      await syncCandles({ symbol: selectedAsset, timeframe: profile.timeframe, provider: profile.provider });
+      await syncCandles({ symbol: selectedAsset, timeframe: profile.timeframe, provider: profile.provider, limit: profile.limit });
       setStepIndex(1);
       await syncFeatures({ symbol: selectedAsset, timeframe: profile.timeframe });
       setStepIndex(2);
@@ -159,7 +159,7 @@ export function SimpleResearchFlow() {
             <div className="assetPicker">{ASSETS.map((item) => <motion.button key={item} className={selectedAsset === item ? "selected" : ""} type="button" onClick={() => { setAsset(item); setCustomAsset(""); }} whileHover={reduceMotion ? undefined : { y: -2 }} whileTap={reduceMotion ? undefined : { scale: 0.96 }}><span>{item}</span></motion.button>)}</div>
             <div className="commandInputWrap"><span className="commandPrompt">KT:</span><input id="asset-command" className="largeInput" value={customAsset} onChange={(event) => setCustomAsset(event.target.value)} placeholder="Type any supported symbol" /><span className="commandCursor" /></div>
           </div>
-          <label className="strategyComposer"><span>Research protocol</span><select value={strategy} onChange={(event) => setStrategy(event.target.value)}>{STRATEGIES.map((item) => <option key={item.label} value={item.value}>{item.label}</option>)}</select><small>{strategy ? "Focused single-strategy evidence run" : "KefTrade ranks every deterministic strategy"}</small></label>
+          <label className="strategyComposer"><span>Research protocol</span><select value={strategy} onChange={(event) => setStrategy(event.target.value)}>{STRATEGIES.map((item) => <option key={item.label} value={item.value}>{item.label}</option>)}</select></label>
           <motion.button className="analyzeButton" type="button" onClick={analyze} disabled={loading || !selectedAsset} whileHover={reduceMotion || loading ? undefined : { scale: 1.025 }} whileTap={reduceMotion || loading ? undefined : { scale: 0.98 }}><span>{loading ? `Running ${selectedAsset}` : "Run evidence"}</span>{loading ? <span className="buttonLoader" /> : <ArrowUpRight size={18} />}</motion.button>
         </div>
         <footer className="composerFooter"><span>Provider <strong>{assetProfile(selectedAsset).provider}</strong></span><span>Timeframe <strong>{assetProfile(selectedAsset).timeframe}</strong></span><span>Mode <strong>Research only</strong></span></footer>
@@ -290,8 +290,9 @@ function Metric({ label, value }: { label: string; value: string }) {
 function assetProfile(symbol: string) {
   const isCrypto = symbol.endsWith("USDT");
   return {
-    provider: isCrypto ? "binance_dev" : "yfinance_research",
-    timeframe: isCrypto ? "4h" : "1d"
+    provider: isCrypto ? "binance_dev" : "alpaca_iex",
+    timeframe: isCrypto ? "4h" : "1h",
+    limit: isCrypto ? 1500 : 5000
   };
 }
 

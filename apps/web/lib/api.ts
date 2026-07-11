@@ -60,6 +60,12 @@ export type StrategyResearchRun = {
   trade_explorer: Array<Record<string, unknown>>;
   filter_options: Record<string, string[]>;
   dashboard: Record<string, unknown>;
+  paper_readiness?: {
+    paper_ready?: boolean;
+    failed_reasons?: string[];
+    checks?: Array<{ name: string; passed: boolean; detail: string }>;
+  };
+  why_not_paper_ready?: string[];
   recommendation: "Reject" | "Needs More Research" | "Candidate for Paper Trading";
   markdown_report: string;
   rank_score: number;
@@ -475,12 +481,45 @@ export type StrategyDeployment = {
   simulation_only: boolean;
   created_at?: string;
   paused_at?: string | null;
+  last_scan_at?: string | null;
+  last_signal?: string | null;
+  last_check_result?: string | null;
+  last_scan_payload?: Record<string, unknown>;
+  last_scanned_candle_timestamp?: string | null;
+};
+
+export type PaperSchedulerStatus = {
+  id: boolean;
+  enabled: boolean;
+  cadence: "manual" | "15m" | "30m" | "60m";
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  latest_result?: string | null;
+  latest_error?: string | null;
+  is_running: boolean;
+  running_since?: string | null;
+  updated_at?: string;
+};
+
+export type PaperScanResult = {
+  deployment: StrategyDeployment;
+  action: string;
+  message: string;
+  decision: Record<string, unknown>;
+  sync: Record<string, unknown>;
+  features: Record<string, unknown>;
+  processed_pending: Record<string, unknown>;
+  order?: PaperOrder | null;
+  position: PaperPosition;
+  reconciliation: Record<string, unknown>;
+  simulation_only: boolean;
 };
 
 export type ResearchAssetInput = {
   symbol: string;
   timeframe?: string;
   provider?: string;
+  limit?: number;
 };
 
 export type StrategyResearchInput = ResearchAssetInput & {
@@ -544,7 +583,7 @@ export function syncCandles(input: ResearchAssetInput = { symbol: "BTCUSDT" }) {
     symbol: input.symbol,
     timeframe: input.timeframe ?? "4h",
     provider: input.provider ?? "binance_dev",
-    limit: "1500"
+    limit: String(input.limit ?? 1500)
   });
   return request<Record<string, unknown>>(`/data/sync?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
@@ -738,6 +777,26 @@ export function getStrategyDeployments(accountId?: number) {
 
 export function createStrategyDeployment(payload: { account_id: number; strategy_name: string; symbol: string; timeframe?: string; strategy_version?: string; parameters?: Record<string, unknown> }) {
   return request<StrategyDeployment>("/paper/deployments", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function deployTslaMomentumBull(accountId: number) {
+  return request<StrategyDeployment>(`/paper/deployments/tsla-momentum-bull?account_id=${accountId}`, { method: "POST" });
+}
+
+export function scanStrategyDeployment(deploymentId: number) {
+  return request<PaperScanResult>(`/paper/deployments/${deploymentId}/scan`, { method: "POST", timeoutMs: 180000 });
+}
+
+export function getPaperScheduler() {
+  return request<PaperSchedulerStatus>("/paper/scheduler");
+}
+
+export function updatePaperScheduler(payload: { enabled?: boolean; cadence?: "manual" | "15m" | "30m" | "60m" }) {
+  return request<PaperSchedulerStatus>("/paper/scheduler", { method: "PUT", body: JSON.stringify(payload) });
+}
+
+export function runPaperSchedulerNow() {
+  return request<Record<string, unknown>>("/paper/scheduler/run", { method: "POST", timeoutMs: 180000 });
 }
 
 export function pauseStrategyDeployment(deploymentId: number) {

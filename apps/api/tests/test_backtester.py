@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.services.backtester import calculate_metrics, run_backtest, walk_forward_split
+from app.services.strategy import StrategyDecision
 
 
 PARAMS = {
@@ -89,6 +90,19 @@ def test_same_candle_stop_target_policy_is_stop_first() -> None:
     assert result["trades"][0]["exit_reason"] == "stop_loss_stop_first"
     assert result["trades"][0]["exit_price"] == result["trades"][0]["stop_loss"]
     assert result["metrics"]["max_drawdown"] > 0
+
+
+def test_backtest_can_exit_after_max_holding_bars() -> None:
+    candles, features = make_rows()
+
+    def always_setup(candle, feature, recent_candles, params):
+        close = Decimal(candle["close"])
+        return StrategyDecision("setup", (close, close), close - Decimal("50"), close + Decimal("50"), Decimal("2"), ["test setup"])
+
+    result = run_backtest(candles, features, {**PARAMS, "max_holding_bars": 2}, always_setup)
+
+    assert result["trades"]
+    assert result["trades"][0]["exit_reason"] == "time_exit"
 
 
 def test_expectancy_per_trade_uses_win_loss_asymmetry() -> None:

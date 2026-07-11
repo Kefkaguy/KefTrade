@@ -77,6 +77,7 @@ def run_backtest(
             high = Decimal(future_candle["high"])
             close = Decimal(future_candle["close"])
             mark_price = close
+            max_holding_bars = int(params.get("max_holding_bars") or 0)
 
             # Explicit same-candle policy: when both stop and target are touched
             # inside one OHLC candle, assume the stop filled first.
@@ -92,6 +93,13 @@ def run_backtest(
             if target_touched:
                 exit_price = effective_take_profit * (Decimal("1") - slippage_rate)
                 exit_reason = "take_profit"
+                exit_index = j
+                mark_price = exit_price
+                equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))
+                break
+            if max_holding_bars > 0 and (j - (i + 1)) >= max_holding_bars:
+                exit_price = close * (Decimal("1") - slippage_rate)
+                exit_reason = "time_exit"
                 exit_index = j
                 mark_price = exit_price
                 equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))

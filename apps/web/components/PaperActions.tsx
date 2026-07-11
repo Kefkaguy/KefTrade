@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { cancelPaperOrder, createPaperAccount, createPaperOrder, createStrategyDeployment, pauseStrategyDeployment, processPendingPaperOrders, reconcilePaperAccount } from "@/lib/api";
+import { cancelPaperOrder, createPaperAccount, createPaperOrder, createStrategyDeployment, deployTslaMomentumBull, pauseStrategyDeployment, processPendingPaperOrders, reconcilePaperAccount, scanStrategyDeployment, updatePaperScheduler } from "@/lib/api";
 import { Toast } from "@/components/ResearchUI";
 
 export function CreatePaperAccount() {
@@ -90,7 +90,7 @@ export function CreatePaperOrder({ accountId }: { accountId: number }) {
 export function CancelOrderButton({ orderId }: { orderId: number }) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
-  return <button className="button compact danger" type="button" disabled={busy} onClick={async () => { setBusy(true); try { await cancelPaperOrder(orderId); router.refresh(); } finally { setBusy(false); } }}>{busy ? "Canceling…" : "Cancel"}</button>;
+  return <button className="button compact danger" type="button" disabled={busy} onClick={async () => { setBusy(true); try { await cancelPaperOrder(orderId); router.refresh(); } finally { setBusy(false); } }}>{busy ? "Canceling..." : "Cancel"}</button>;
 }
 
 export function PaperOperations({ accountId }: { accountId: number }) {
@@ -105,6 +105,85 @@ export function PaperOperations({ accountId }: { accountId: number }) {
     catch (error) { setToast({ tone: "error", message: error instanceof Error ? error.message : "Reconciliation failed." }); }
   }
   return <div className="operationBar"><button className="button" type="button" onClick={process}>Process pending</button><button className="button ghost" type="button" onClick={() => reconcile(false)}>Check ledger</button><button className="button ghost" type="button" onClick={() => reconcile(true)}>Repair drift</button><Toast tone={toast.tone} message={toast.message} /></div>;
+}
+
+export function TslaPaperScanControls({ accountId, deploymentId }: { accountId: number; deploymentId?: number }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState<"deploy" | "scan" | null>(null);
+  const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string }>({ tone: "info", message: "" });
+
+  async function deploy() {
+    setBusy("deploy");
+    try {
+      const deployment = await deployTslaMomentumBull(accountId);
+      setToast({ tone: "success", message: `Simulation deployment active: ${deployment.symbol} ${deployment.timeframe} ${deployment.strategy_name}_${deployment.strategy_version}.` });
+      router.refresh();
+    } catch (error) {
+      setToast({ tone: "error", message: error instanceof Error ? error.message : "Could not create TSLA paper deployment." });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function scan() {
+    if (!deploymentId) {
+      setToast({ tone: "error", message: "Create the TSLA simulation deployment before scanning." });
+      return;
+    }
+    setBusy("scan");
+    try {
+      const result = await scanStrategyDeployment(deploymentId);
+      setToast({ tone: "success", message: result.message || `Paper scan ${result.action}.` });
+      router.refresh();
+    } catch (error) {
+      setToast({ tone: "error", message: error instanceof Error ? error.message : "Paper scan failed." });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="operationBar">
+      <button className="button" type="button" disabled={busy !== null} onClick={deploy}>{busy === "deploy" ? "Deploying..." : "Deploy TSLA candidate"}</button>
+      <button className="button secondary" type="button" disabled={busy !== null || !deploymentId} onClick={scan}>{busy === "scan" ? "Scanning..." : "Run paper scan"}</button>
+      <Toast tone={toast.tone} message={toast.message} />
+    </div>
+  );
+}
+
+export function PaperSchedulerControls({ enabled, cadence }: { enabled: boolean; cadence: "manual" | "15m" | "30m" | "60m" }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string }>({ tone: "info", message: "" });
+
+  async function save(next: { enabled?: boolean; cadence?: "manual" | "15m" | "30m" | "60m" }) {
+    setBusy(true);
+    try {
+      const status = await updatePaperScheduler(next);
+      setToast({ tone: "success", message: `Scheduler ${status.enabled ? "enabled" : "disabled"} / ${status.cadence}.` });
+      router.refresh();
+    } catch (error) {
+      setToast({ tone: "error", message: error instanceof Error ? error.message : "Could not update scheduler." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="operationBar">
+      <button className="button ghost" type="button" disabled={busy} onClick={() => save({ enabled: !enabled })}>{enabled ? "Disable scheduler" : "Enable scheduler"}</button>
+      <label className="field schedulerSelect">
+        <span>Cadence</span>
+        <select value={cadence} disabled={busy} onChange={(event) => save({ cadence: event.target.value as "manual" | "15m" | "30m" | "60m" })}>
+          <option value="manual">Manual</option>
+          <option value="15m">15 minutes</option>
+          <option value="30m">30 minutes</option>
+          <option value="60m">60 minutes</option>
+        </select>
+      </label>
+      <Toast tone={toast.tone} message={toast.message} />
+    </div>
+  );
 }
 
 export function CreateDeployment({ accountId }: { accountId: number }) {

@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from app.services.strategy_research import build_parameter_sweep, run_strategy_research
+from app.services.strategy_research import build_parameter_sweep, paper_readiness_report, recommend_strategy, run_strategy_research
 
 
 def test_parameter_sweep_generates_valid_variants() -> None:
@@ -179,9 +179,11 @@ def test_strategy_research_compares_full_strategy_library(monkeypatch) -> None:
 
     report = run_strategy_research(candles=candles, features=features)
 
-    assert report["run_count"] == 6
-    assert len(report["strategy_library"]) == 6
+    assert report["run_count"] == 12
+    assert len(report["strategy_library"]) == 12
     assert report["ranking_table"][0]["recommendation"] == "Candidate for Paper Trading"
+    assert report["ranking_table"][0]["paper_readiness"]["paper_ready"] is True
+    assert report["ranking_table"][0]["why_not_paper_ready"] == []
     assert report["ranking_table"][0]["by_year"][0]["year"] == 2024
     assert report["ranking_table"][0]["by_market_regime"][0]["regime"] == "bull_trend"
     assert report["ranking_table"][0]["by_volatility_regime"][0]["regime"] == "normal_volatility"
@@ -191,3 +193,60 @@ def test_strategy_research_compares_full_strategy_library(monkeypatch) -> None:
     assert "monthly_returns" in report["ranking_table"][0]["dashboard"]
     assert "strategy_heatmap" in report["dashboard"]
     assert "Executive Summary" in report["markdown_report"]
+
+
+def test_recommend_strategy_marks_small_positive_sample_for_more_research() -> None:
+    recommendation = recommend_strategy(
+        {
+            "profit_factor": 1.39,
+            "expectancy_per_trade": 23.4,
+            "max_drawdown": 0.08,
+            "number_of_trades": 18,
+        }
+    )
+
+    assert recommendation == "Needs More Research"
+
+
+def test_recommend_strategy_keeps_weak_samples_rejected() -> None:
+    recommendation = recommend_strategy(
+        {
+            "profit_factor": 0.63,
+            "expectancy_per_trade": -29.2,
+            "max_drawdown": 0.04,
+            "number_of_trades": 11,
+        }
+    )
+
+    assert recommendation == "Reject"
+
+
+def test_paper_readiness_explains_missing_trade_count() -> None:
+    report = paper_readiness_report(
+        {
+            "profit_factor": 1.39,
+            "expectancy_per_trade": 23.4,
+            "max_drawdown": 0.08,
+            "number_of_trades": 18,
+            "walk_forward": {"enabled": True},
+        }
+    )
+
+    assert report["paper_ready"] is False
+    assert any("Trade count 18 must be >= 30" in reason for reason in report["failed_reasons"])
+
+
+def test_paper_readiness_blocks_material_weak_regimes() -> None:
+    report = paper_readiness_report(
+        {
+            "profit_factor": 1.5,
+            "expectancy_per_trade": 20,
+            "max_drawdown": 0.08,
+            "number_of_trades": 40,
+            "walk_forward": {"enabled": True},
+        },
+        by_market_regime=[{"regime": "sideways", "metrics": {"number_of_trades": 8, "profit_factor": 0.8, "expectancy_per_trade": -5}}],
+    )
+
+    assert report["paper_ready"] is False
+    assert any("sideways" in reason for reason in report["failed_reasons"])
