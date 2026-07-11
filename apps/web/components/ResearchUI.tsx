@@ -200,7 +200,7 @@ export function DataTable({ columns, rows }: { columns: string[]; rows: Array<Ar
         </thead>
         <tbody>
           {rows.map((row, index) => (
-            <tr key={index}>
+            <tr key={tableRowKey(row, index)}>
               {row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}
             </tr>
           ))}
@@ -208,6 +208,15 @@ export function DataTable({ columns, rows }: { columns: string[]; rows: Array<Ar
       </table>
     </div>
   );
+}
+
+function tableRowKey(row: Array<React.ReactNode>, index: number) {
+  const primitiveCells = row
+    .filter((cell): cell is string | number => typeof cell === "string" || typeof cell === "number")
+    .slice(0, 4)
+    .join("|");
+
+  return primitiveCells ? `${index}:${primitiveCells}` : String(index);
 }
 
 export function EmptyState({ title, body, action }: { title: string; body: string; action?: React.ReactNode }) {

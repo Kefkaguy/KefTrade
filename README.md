@@ -55,7 +55,10 @@ Any strategy that has not passed alpha validation must be treated as research ev
 - Supports market and limit paper orders filled from stored candle data.
 - Uses explicit assumptions of 0.1% fees and 0.05% slippage.
 - Fills are single-fill per order; partial fills are not modeled.
-- Stop-loss, take-profit, and cancel endpoints are not implemented yet.
+- Supports canceling pending orders and linked OCO stop-loss/take-profit exits.
+- Pending orders can be processed in deterministic candle-based execution cycles.
+- Paper account cash, positions, fills, and equity can be reconciled from the fill ledger.
+- Execution events are available in the paper dashboard audit timeline.
 
 ## Main Web Pages
 

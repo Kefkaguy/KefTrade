@@ -2,6 +2,7 @@ from decimal import Decimal
 from typing import Any
 
 import psycopg
+from fastapi.encoders import jsonable_encoder
 from psycopg.types.json import Jsonb
 
 FEE_RATE = Decimal("0.001")
@@ -51,6 +52,8 @@ def create_order(
     timeframe: str = "1d",
     limit_price: Decimal | None = None,
     deployment_id: int | None = None,
+    stop_loss_price: Decimal | None = None,
+    take_profit_price: Decimal | None = None,
 ) -> dict[str, Any]:
     account = get_account(conn, account_id)
     deployment_block = deployment_block_reason(conn, account_id, deployment_id)
@@ -62,16 +65,22 @@ def create_order(
         raise PaperTradingError("paper trading supports market and limit simulation only")
     if quantity <= 0:
         raise PaperTradingError("quantity must be positive")
+    if side != "buy" and (stop_loss_price is not None or take_profit_price is not None):
+        raise PaperTradingError("protective exits can only be attached to simulated buy orders")
+    if stop_loss_price is not None and stop_loss_price <= 0:
+        raise PaperTradingError("stop_loss_price must be positive")
+    if take_profit_price is not None and take_profit_price <= 0:
+        raise PaperTradingError("take_profit_price must be positive")
     latest = latest_candle(conn, symbol, timeframe)
     blocked = deployment_block or risk_block_reason(conn, account, symbol, side, quantity, latest["close"], limit_price)
     status = "rejected" if blocked else "pending"
     row = conn.execute(
         """
-        INSERT INTO paper_orders(account_id, deployment_id, symbol, timeframe, side, order_type, quantity, limit_price, status, rejected_reason, simulation_only)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+        INSERT INTO paper_orders(account_id, deployment_id, symbol, timeframe, side, order_type, quantity, limit_price, status, rejected_reason, stop_loss_price, take_profit_price, simulation_only)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
         RETURNING *
         """,
-        (account_id, deployment_id, symbol.upper(), timeframe, side, order_type, quantity, limit_price, status, blocked),
+        (account_id, deployment_id, symbol.upper(), timeframe, side, order_type, quantity, limit_price, status, blocked, stop_loss_price, take_profit_price),
     ).fetchone()
     log_event(conn, account_id, deployment_id, row["id"], "paper_order_submitted", "Submitted simulation-only paper order.", dict(row))
     if blocked:
@@ -141,9 +150,22 @@ def simulate_order_fill(conn: psycopg.Connection, order_id: int) -> dict[str, An
     fill_price = simulated_fill_price(order, candle)
     if fill_price is None:
         return dict(order)
+    account = get_account(conn, order["account_id"])
+    blocked = risk_block_reason(conn, account, order["symbol"], order["side"], Decimal(order["quantity"]), fill_price, fill_price)
+    if blocked:
+        rejected = conn.execute(
+            "UPDATE paper_orders SET status = 'rejected', rejected_reason = %s WHERE id = %s RETURNING *",
+            (blocked, order_id),
+        ).fetchone()
+        log_event(conn, order["account_id"], order["deployment_id"], order_id, "paper_order_rejected", f"Pending order failed fill-time risk check: {blocked}", dict(rejected))
+        return dict(rejected)
     fill = apply_fill(conn, dict(order), candle, fill_price)
     conn.execute("UPDATE paper_orders SET status = 'filled', filled_at = %s WHERE id = %s", (fill["filled_at"], order_id))
     log_event(conn, order["account_id"], order["deployment_id"], order_id, "paper_order_filled", "Paper order filled from historical candle data.", fill)
+    if order["side"] == "buy" and (order.get("stop_loss_price") or order.get("take_profit_price")):
+        create_protective_orders(conn, dict(order))
+    if order.get("parent_order_id"):
+        cancel_protective_sibling(conn, dict(order))
     record_equity_snapshot(conn, order["account_id"])
     return dict(conn.execute("SELECT * FROM paper_orders WHERE id = %s", (order_id,)).fetchone())
 
@@ -152,12 +174,78 @@ def simulated_fill_price(order: dict[str, Any], candle: dict[str, Any]) -> Decim
     close = Decimal(candle["close"])
     if order["order_type"] == "market":
         return close * (Decimal("1") + SLIPPAGE_RATE if order["side"] == "buy" else Decimal("1") - SLIPPAGE_RATE)
+    if order["order_type"] == "stop_loss":
+        trigger = Decimal(order["trigger_price"])
+        return trigger if Decimal(candle["low"]) <= trigger else None
+    if order["order_type"] == "take_profit":
+        trigger = Decimal(order["trigger_price"])
+        return trigger if Decimal(candle["high"]) >= trigger else None
     limit = Decimal(order["limit_price"])
     if order["side"] == "buy" and Decimal(candle["low"]) <= limit:
         return limit
     if order["side"] == "sell" and Decimal(candle["high"]) >= limit:
         return limit
     return None
+
+
+def create_protective_orders(conn: psycopg.Connection, parent: dict[str, Any]) -> list[dict[str, Any]]:
+    created = []
+    for order_type, price_key in (("stop_loss", "stop_loss_price"), ("take_profit", "take_profit_price")):
+        trigger = parent.get(price_key)
+        if trigger is None:
+            continue
+        row = conn.execute(
+            """
+            INSERT INTO paper_orders(account_id, deployment_id, symbol, timeframe, side, order_type, quantity, trigger_price, parent_order_id, status, simulation_only)
+            VALUES (%s, %s, %s, %s, 'sell', %s, %s, %s, %s, 'pending', TRUE)
+            RETURNING *
+            """,
+            (parent["account_id"], parent.get("deployment_id"), parent["symbol"], parent["timeframe"], order_type, parent["quantity"], trigger, parent["id"]),
+        ).fetchone()
+        created.append(dict(row))
+        log_event(conn, parent["account_id"], parent.get("deployment_id"), row["id"], "protective_order_created", f"Created {order_type.replace('_', ' ')} protective order.", dict(row))
+    return created
+
+
+def cancel_protective_sibling(conn: psycopg.Connection, filled_order: dict[str, Any]) -> None:
+    rows = conn.execute(
+        """
+        UPDATE paper_orders SET status = 'canceled'
+        WHERE parent_order_id = %s AND id <> %s AND status = 'pending'
+        RETURNING *
+        """,
+        (filled_order["parent_order_id"], filled_order["id"]),
+    ).fetchall()
+    for row in rows:
+        log_event(conn, row["account_id"], row["deployment_id"], row["id"], "protective_order_canceled", "Canceled OCO sibling after protective fill.", dict(row))
+
+
+def cancel_order(conn: psycopg.Connection, order_id: int) -> dict[str, Any]:
+    row = conn.execute(
+        "UPDATE paper_orders SET status = 'canceled' WHERE id = %s AND status = 'pending' RETURNING *",
+        (order_id,),
+    ).fetchone()
+    if not row:
+        existing = conn.execute("SELECT * FROM paper_orders WHERE id = %s", (order_id,)).fetchone()
+        if not existing:
+            raise PaperTradingError("paper order not found")
+        raise PaperTradingError("only pending paper orders can be canceled")
+    log_event(conn, row["account_id"], row["deployment_id"], row["id"], "paper_order_canceled", "Canceled pending simulation-only order.", dict(row))
+    conn.commit()
+    return dict(row)
+
+
+def process_pending_orders(conn: psycopg.Connection, account_id: int | None = None) -> dict[str, Any]:
+    if account_id is None:
+        rows = conn.execute("SELECT * FROM paper_orders WHERE status = 'pending' ORDER BY submitted_at, id").fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM paper_orders WHERE status = 'pending' AND account_id = %s ORDER BY submitted_at, id", (account_id,)).fetchall()
+    results = []
+    for row in rows:
+        results.append(simulate_order_fill(conn, row["id"]))
+    conn.commit()
+    filled = sum(1 for row in results if row["status"] == "filled")
+    return {"processed": len(results), "filled": filled, "pending": len(results) - filled}
 
 
 def apply_fill(conn: psycopg.Connection, order: dict[str, Any], candle: dict[str, Any], fill_price: Decimal) -> dict[str, Any]:
@@ -293,6 +381,63 @@ def list_equity_curve(conn: psycopg.Connection, account_id: int) -> list[dict[st
     return list(conn.execute("SELECT * FROM paper_equity_curve WHERE account_id = %s ORDER BY timestamp ASC", (account_id,)).fetchall())
 
 
+def list_execution_logs(conn: psycopg.Connection, account_id: int, limit: int = 200) -> list[dict[str, Any]]:
+    return list(conn.execute(
+        "SELECT * FROM execution_logs WHERE account_id = %s ORDER BY created_at DESC LIMIT %s",
+        (account_id, limit),
+    ).fetchall())
+
+
+def reconcile_account(conn: psycopg.Connection, account_id: int, repair: bool = False) -> dict[str, Any]:
+    account = get_account(conn, account_id)
+    fills = list_fills(conn, account_id)
+    expected_cash = Decimal(account["starting_cash"])
+    ledgers: dict[str, dict[str, Decimal]] = {}
+    for fill in reversed(fills):
+        symbol = fill["symbol"]
+        ledger = ledgers.setdefault(symbol, {"quantity": Decimal("0"), "average_price": Decimal("0"), "realized_pnl": Decimal("0")})
+        quantity = Decimal(fill["quantity"])
+        price = Decimal(fill["fill_price"])
+        fee = Decimal(fill["fee"])
+        gross = Decimal(fill["gross_amount"])
+        if fill["side"] == "buy":
+            new_quantity = ledger["quantity"] + quantity
+            ledger["average_price"] = ((ledger["quantity"] * ledger["average_price"]) + gross) / new_quantity
+            ledger["quantity"] = new_quantity
+            expected_cash -= gross + fee
+        else:
+            ledger["realized_pnl"] += (price - ledger["average_price"]) * quantity - fee
+            ledger["quantity"] -= quantity
+            if ledger["quantity"] == 0:
+                ledger["average_price"] = Decimal("0")
+            expected_cash += gross - fee
+
+    current_positions = {row["symbol"]: row for row in conn.execute("SELECT * FROM paper_positions WHERE account_id = %s", (account_id,)).fetchall()}
+    issues = []
+    cash_delta = expected_cash - Decimal(account["cash_balance"])
+    if cash_delta != 0:
+        issues.append({"type": "cash", "expected": str(expected_cash), "actual": str(account["cash_balance"]), "delta": str(cash_delta)})
+    for symbol in sorted(set(ledgers) | set(current_positions)):
+        expected = ledgers.get(symbol, {"quantity": Decimal("0"), "average_price": Decimal("0"), "realized_pnl": Decimal("0")})
+        actual = current_positions.get(symbol, {})
+        if any(Decimal(actual.get(key) or 0) != expected[key] for key in ("quantity", "average_price", "realized_pnl")):
+            issues.append({"type": "position", "symbol": symbol, "expected": {key: str(value) for key, value in expected.items()}, "actual": {key: str(actual.get(key) or 0) for key in expected}})
+
+    if repair and issues:
+        conn.execute("UPDATE paper_accounts SET cash_balance = %s, realized_pnl = %s, updated_at = NOW() WHERE id = %s", (expected_cash, sum(row["realized_pnl"] for row in ledgers.values()), account_id))
+        for symbol, ledger in ledgers.items():
+            conn.execute(
+                """INSERT INTO paper_positions(account_id, symbol, quantity, average_price, realized_pnl, simulation_only)
+                VALUES (%s, %s, %s, %s, %s, TRUE)
+                ON CONFLICT(account_id, symbol) DO UPDATE SET quantity = EXCLUDED.quantity, average_price = EXCLUDED.average_price, realized_pnl = EXCLUDED.realized_pnl, updated_at = NOW()""",
+                (account_id, symbol, ledger["quantity"], ledger["average_price"], ledger["realized_pnl"]),
+            )
+        record_equity_snapshot(conn, account_id)
+        log_event(conn, account_id, None, None, "paper_account_reconciled", "Repaired paper ledger from immutable fills.", {"issue_count": len(issues)})
+        conn.commit()
+    return {"account_id": account_id, "healthy": not issues, "repaired": bool(repair and issues), "issue_count": len(issues), "issues": issues, "expected_cash": expected_cash}
+
+
 def account_balances(conn: psycopg.Connection, account_id: int) -> dict[str, Any]:
     account = get_account(conn, account_id)
     positions = list_positions(conn, account_id)
@@ -348,5 +493,5 @@ def log_event(conn: psycopg.Connection, account_id: int | None, deployment_id: i
         INSERT INTO execution_logs(account_id, deployment_id, order_id, event_type, message, payload, simulation_only)
         VALUES (%s, %s, %s, %s, %s, %s, TRUE)
         """,
-        (account_id, deployment_id, order_id, event_type, message, Jsonb(payload)),
+        (account_id, deployment_id, order_id, event_type, message, Jsonb(jsonable_encoder(payload))),
     )

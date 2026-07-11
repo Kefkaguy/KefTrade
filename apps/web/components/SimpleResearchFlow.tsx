@@ -1,6 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { ArrowUpRight, DatabaseZap, ScanSearch, ShieldCheck } from "lucide-react";
+import { useState } from "react";
+import { ResearchConstellation } from "@/components/ResearchConstellation";
 import { EvidenceBadges, Toast } from "@/components/ResearchUI";
 import {
   askCopilot,
@@ -61,6 +64,7 @@ type AnalysisResult = {
 };
 
 export function SimpleResearchFlow() {
+  const reduceMotion = useReducedMotion();
   const [asset, setAsset] = useState("TSLA");
   const [strategy, setStrategy] = useState("");
   const [customAsset, setCustomAsset] = useState("");
@@ -136,68 +140,49 @@ export function SimpleResearchFlow() {
   }
 
   return (
-    <div className="simpleFlow">
-      <section className="analysisHero">
-        <div>
-          <h1>KefTrade</h1>
-          <p>Evidence-based market research</p>
-        </div>
-        <div className="researchOnly">Research only. No buy/sell recommendations.</div>
+    <div className="simpleFlow commandHome">
+      <section className="commandHero">
+        <motion.div className="commandIntro" initial={reduceMotion ? false : { opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}>
+          <div className="heroKicker"><span className="liveDot" /> Quantitative research intelligence</div>
+          <h1><span>Research the market.</span><em>Remove the noise.</em></h1>
+          <p>KefTrade turns raw market history into tested, traceable evidence—before a strategy gets anywhere near execution.</p>
+          <div className="heroFootnotes"><span><ShieldCheck size={14} /> Simulation-only</span><span><DatabaseZap size={14} /> Source-backed</span><span><ScanSearch size={14} /> Deterministic</span></div>
+        </motion.div>
+        <motion.div className="constellationWrap" initial={reduceMotion ? false : { opacity: 0, scale: 0.94 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.75, delay: 0.12 }}><ResearchConstellation /></motion.div>
       </section>
 
-      <section className="analysisCard" aria-label="Start market research">
-        <div className="analysisForm">
-          <div>
-            <span className="sectionLabel">Search or select asset</span>
-            <div className="assetPicker">
-              {ASSETS.map((item) => (
-                <button key={item} className={selectedAsset === item ? "selected" : ""} type="button" onClick={() => { setAsset(item); setCustomAsset(""); }}>
-                  {item}
-                </button>
-              ))}
-            </div>
-            <input className="largeInput" value={customAsset} onChange={(event) => setCustomAsset(event.target.value)} placeholder="Or type a supported symbol" />
+      <motion.section className="researchComposer" aria-label="Start market research" initial={reduceMotion ? false : { opacity: 0, y: 28 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}>
+        <header className="composerHeader"><div><span>01</span><strong>Compose a research run</strong></div><p>Choose the market. KefTrade handles the evidence chain.</p></header>
+        <div className="composerBody">
+          <div className="assetComposer">
+            <label htmlFor="asset-command">Asset universe</label>
+            <div className="assetPicker">{ASSETS.map((item) => <motion.button key={item} className={selectedAsset === item ? "selected" : ""} type="button" onClick={() => { setAsset(item); setCustomAsset(""); }} whileHover={reduceMotion ? undefined : { y: -2 }} whileTap={reduceMotion ? undefined : { scale: 0.96 }}><span>{item}</span></motion.button>)}</div>
+            <div className="commandInputWrap"><span className="commandPrompt">KT:</span><input id="asset-command" className="largeInput" value={customAsset} onChange={(event) => setCustomAsset(event.target.value)} placeholder="Type any supported symbol" /><span className="commandCursor" /></div>
           </div>
-
-          <label className="field">
-            <span className="sectionLabel">Strategy</span>
-            <select value={strategy} onChange={(event) => setStrategy(event.target.value)}>
-              {STRATEGIES.map((item) => (
-                <option key={item.label} value={item.value}>{item.label}</option>
-              ))}
-            </select>
-          </label>
-
-          <button className="analyzeButton" type="button" onClick={analyze} disabled={loading || !selectedAsset}>
-            {loading ? `Researching ${selectedAsset}...` : "Analyze"}
-          </button>
+          <label className="strategyComposer"><span>Research protocol</span><select value={strategy} onChange={(event) => setStrategy(event.target.value)}>{STRATEGIES.map((item) => <option key={item.label} value={item.value}>{item.label}</option>)}</select><small>{strategy ? "Focused single-strategy evidence run" : "KefTrade ranks every deterministic strategy"}</small></label>
+          <motion.button className="analyzeButton" type="button" onClick={analyze} disabled={loading || !selectedAsset} whileHover={reduceMotion || loading ? undefined : { scale: 1.025 }} whileTap={reduceMotion || loading ? undefined : { scale: 0.98 }}><span>{loading ? `Running ${selectedAsset}` : "Run evidence"}</span>{loading ? <span className="buttonLoader" /> : <ArrowUpRight size={18} />}</motion.button>
         </div>
-      </section>
+        <footer className="composerFooter"><span>Provider <strong>{assetProfile(selectedAsset).provider}</strong></span><span>Timeframe <strong>{assetProfile(selectedAsset).timeframe}</strong></span><span>Mode <strong>Research only</strong></span></footer>
+      </motion.section>
 
-      {loading ? <LoadingState asset={selectedAsset} stepIndex={stepIndex} /> : null}
+      <div className="marketMarquee" aria-hidden="true"><div>{[...ASSETS, ...ASSETS].map((item, index) => <span key={`${item}-${index}`}><i />{item}<small>evidence ready</small></span>)}</div></div>
+      <AnimatePresence mode="wait">
+        {loading ? <motion.div key="loading" initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -10 }}><LoadingState asset={selectedAsset} stepIndex={stepIndex} /></motion.div> : null}
+        {!loading && result ? <motion.div key="result" initial={{ opacity: 0, y: 24 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -12 }}><ResearchAnswer result={result} onSave={saveReport} onDownload={downloadReport} onDismiss={() => { setResult(null); setToast({ tone: "info", message: "" }); }} onNew={() => { setResult(null); window.scrollTo({ top: 0, behavior: "smooth" }); }} /></motion.div> : null}
+        {!loading && !result ? <ResearchProcess key="process" /> : null}
+      </AnimatePresence>
       <Toast tone={toast.tone} message={toast.message} />
-      {result ? (
-        <ResearchAnswer
-          result={result}
-          onSave={saveReport}
-          onDownload={downloadReport}
-          onDismiss={() => {
-            setResult(null);
-            setToast({ tone: "info", message: "" });
-          }}
-          onNew={() => {
-            setResult(null);
-            window.scrollTo({ top: 0, behavior: "smooth" });
-          }}
-        />
-      ) : !loading ? (
-        <section className="friendlyEmpty">
-          <strong>Start with one asset.</strong>
-          <p>Pick TSLA, NVDA, SPY, BTCUSDT, or another supported symbol. KefTrade will load data, run evidence checks, and explain the result in plain language.</p>
-        </section>
-      ) : null}
     </div>
   );
+}
+
+function ResearchProcess() {
+  const steps = [
+    { index: "01", icon: DatabaseZap, title: "Ingest", body: "Normalize candle history and technical features from the selected provider." },
+    { index: "02", icon: ScanSearch, title: "Challenge", body: "Run deterministic strategies, backtests, regimes, and evidence gates." },
+    { index: "03", icon: ShieldCheck, title: "Explain", body: "Turn the result into a traceable verdict with cited research evidence." }
+  ];
+  return <motion.section className="researchProcess" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.3 }}><header><span className="sectionLabel">Research architecture</span><h2>From market history to a defensible answer.</h2></header><div>{steps.map((step) => { const Icon = step.icon; return <article key={step.index}><span className="processIndex">{step.index}</span><Icon size={22} /><h3>{step.title}</h3><p>{step.body}</p><span className="processLine" /></article>; })}</div></motion.section>;
 }
 
 function LoadingState({ asset, stepIndex }: { asset: string; stepIndex: number }) {

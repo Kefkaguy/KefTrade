@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { CreatePaperAccount } from "@/components/PaperActions";
+import { CreatePaperAccount, PaperOperations } from "@/components/PaperActions";
 import { Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle } from "@/components/ResearchUI";
 import { getPaperSnapshot } from "@/lib/paper";
 import { money, number } from "@/lib/format";
@@ -12,6 +12,10 @@ export default async function PaperDashboardPage() {
       <PageTitle title="Paper Trading Dashboard" description="Internal simulation architecture for research deployments. No broker connection, live trading, leverage, or real order routing." />
       {snapshot.account ? (
         <>
+          <section className="paperHero">
+            <div><span className="eyebrow">SIMULATION CONTROL CENTER</span><h2>{snapshot.account.name}</h2><p>Run, inspect, and reconcile the full paper execution lifecycle from one workspace.</p></div>
+            <PaperOperations accountId={snapshot.account.id} />
+          </section>
           <div className="metricGrid">
             <MetricCard label="Equity" value={money(snapshot.balances?.equity)} detail="Simulated account value" />
             <MetricCard label="Cash" value={money(snapshot.balances?.cash_balance)} detail="Paper cash only" />
@@ -40,6 +44,11 @@ export default async function PaperDashboardPage() {
             ) : (
               <EmptyState title="No paper orders yet." body="Submit a simulated order from the Paper Orders page." action={<Link className="button" href="/paper/orders">Open orders</Link>} />
             )}
+          </Card>
+          <Card title="Execution activity" eyebrow="Immutable simulation audit trail">
+            {snapshot.logs.length ? (
+              <div className="executionTimeline">{snapshot.logs.slice(0, 12).map((log) => <article key={log.id}><span className="eventDot" /><div><strong>{log.event_type.replaceAll("_", " ")}</strong><p>{log.message}</p><time>{new Date(log.created_at).toLocaleString()}</time></div></article>)}</div>
+            ) : <EmptyState title="No execution events." body="Account, order, fill, cancellation, and reconciliation events will appear here." />}
           </Card>
         </>
       ) : (

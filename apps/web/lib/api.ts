@@ -406,11 +406,26 @@ export type PaperOrder = {
   order_type: string;
   quantity: string | number;
   limit_price?: string | number | null;
+  trigger_price?: string | number | null;
+  parent_order_id?: number | null;
+  stop_loss_price?: string | number | null;
+  take_profit_price?: string | number | null;
   status: string;
   submitted_at?: string;
   filled_at?: string | null;
   rejected_reason?: string | null;
   simulation_only: boolean;
+};
+
+export type ExecutionLog = {
+  id: number;
+  account_id: number;
+  deployment_id?: number | null;
+  order_id?: number | null;
+  event_type: string;
+  message: string;
+  payload: Record<string, unknown>;
+  created_at: string;
 };
 
 export type PaperFill = {
@@ -695,8 +710,24 @@ export function getPaperEquityCurve(accountId: number) {
   return request<PaperEquityPoint[]>(`/paper/accounts/${accountId}/equity-curve`);
 }
 
-export function createPaperOrder(payload: { account_id: number; symbol: string; quantity: number; side?: string; order_type?: string; timeframe?: string; limit_price?: number; deployment_id?: number }) {
+export function createPaperOrder(payload: { account_id: number; symbol: string; quantity: number; side?: string; order_type?: string; timeframe?: string; limit_price?: number; deployment_id?: number; stop_loss_price?: number; take_profit_price?: number }) {
   return request<PaperOrder>("/paper/orders", { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function cancelPaperOrder(orderId: number) {
+  return request<PaperOrder>(`/paper/orders/${orderId}/cancel`, { method: "POST" });
+}
+
+export function processPendingPaperOrders(accountId: number) {
+  return request<{ processed: number; filled: number; pending: number }>(`/paper/orders/process?account_id=${accountId}`, { method: "POST" });
+}
+
+export function getExecutionLogs(accountId: number) {
+  return request<ExecutionLog[]>(`/paper/accounts/${accountId}/execution-logs`);
+}
+
+export function reconcilePaperAccount(accountId: number, repair = false) {
+  return request<{ healthy: boolean; repaired: boolean; issue_count: number; issues: unknown[] }>(`/paper/accounts/${accountId}/reconcile`, { method: "POST", body: JSON.stringify({ repair }) });
 }
 
 export function getStrategyDeployments(accountId?: number) {

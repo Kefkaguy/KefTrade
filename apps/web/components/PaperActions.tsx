@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { createPaperAccount, createPaperOrder, createStrategyDeployment, pauseStrategyDeployment } from "@/lib/api";
+import { cancelPaperOrder, createPaperAccount, createPaperOrder, createStrategyDeployment, pauseStrategyDeployment, processPendingPaperOrders, reconcilePaperAccount } from "@/lib/api";
 import { Toast } from "@/components/ResearchUI";
 
 export function CreatePaperAccount() {
@@ -34,10 +34,27 @@ export function CreatePaperOrder({ accountId }: { accountId: number }) {
   const [symbol, setSymbol] = useState("AAPL");
   const [quantity, setQuantity] = useState(1);
   const [side, setSide] = useState("buy");
+  const [orderType, setOrderType] = useState("market");
+  const [limitPrice, setLimitPrice] = useState(0);
+  const [stopLoss, setStopLoss] = useState(0);
+  const [takeProfit, setTakeProfit] = useState(0);
   const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string }>({ tone: "info", message: "" });
   async function submit() {
+    const entryReference = orderType === "limit" ? limitPrice : 0;
+    if (orderType === "limit" && limitPrice <= 0) {
+      setToast({ tone: "error", message: "Enter a valid limit price." });
+      return;
+    }
+    if (side === "buy" && entryReference > 0 && stopLoss > 0 && stopLoss >= entryReference) {
+      setToast({ tone: "error", message: "Stop loss must be below the entry price." });
+      return;
+    }
+    if (side === "buy" && entryReference > 0 && takeProfit > 0 && takeProfit <= entryReference) {
+      setToast({ tone: "error", message: "Take profit must be above the entry price." });
+      return;
+    }
     try {
-      const order = await createPaperOrder({ account_id: accountId, symbol, quantity, side, order_type: "market", timeframe: symbol.endsWith("USDT") ? "4h" : "1d" });
+      const order = await createPaperOrder({ account_id: accountId, symbol, quantity, side, order_type: orderType, timeframe: symbol.endsWith("USDT") ? "4h" : "1d", ...(orderType === "limit" && limitPrice > 0 ? { limit_price: limitPrice } : {}), ...(side === "buy" && stopLoss > 0 ? { stop_loss_price: stopLoss } : {}), ...(side === "buy" && takeProfit > 0 ? { take_profit_price: takeProfit } : {}) });
       setToast({ tone: order.status === "rejected" ? "error" : "success", message: order.rejected_reason || `Paper order ${order.status}.` });
       router.refresh();
     } catch (error) {
@@ -46,16 +63,48 @@ export function CreatePaperOrder({ accountId }: { accountId: number }) {
   }
   return (
     <div className="formGrid">
-      <input value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} />
-      <select value={side} onChange={(event) => setSide(event.target.value)}>
+      <label className="field"><span>Symbol</span><input value={symbol} onChange={(event) => setSymbol(event.target.value.toUpperCase())} /></label>
+      <label className="field"><span>Side</span><select value={side} onChange={(event) => setSide(event.target.value)}>
         <option value="buy">Buy</option>
         <option value="sell">Sell</option>
-      </select>
-      <input type="number" min={0.0001} step={0.0001} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} />
+      </select></label>
+      <label className="field"><span>Order type</span><select value={orderType} onChange={(event) => setOrderType(event.target.value)}>
+        <option value="market">Market</option>
+        <option value="limit">Limit</option>
+      </select></label>
+      <label className="field"><span>Quantity</span><input type="number" min={0.0001} step={0.0001} value={quantity} onChange={(event) => setQuantity(Number(event.target.value))} /></label>
+      {orderType === "limit" ? <label className="field"><span>Limit price</span><input placeholder="Price to enter" type="number" min={0.0001} step={0.01} value={limitPrice || ""} onChange={(event) => setLimitPrice(Number(event.target.value))} /></label> : null}
+      {side === "buy" ? (
+        <div className="protectiveGrid">
+          <label><span>Stop loss</span><input type="number" min={0.0001} step={0.01} placeholder="Optional" value={stopLoss || ""} onChange={(event) => setStopLoss(Number(event.target.value))} /></label>
+          <label><span>Take profit</span><input type="number" min={0.0001} step={0.01} placeholder="Optional" value={takeProfit || ""} onChange={(event) => setTakeProfit(Number(event.target.value))} /></label>
+        </div>
+      ) : null}
+      <p className="formHint">Protective exits activate only after the buy fills. Stop loss must be below entry; take profit must be above entry.</p>
       <button className="button" type="button" onClick={submit}>Submit simulated order</button>
       <Toast tone={toast.tone} message={toast.message} />
     </div>
   );
+}
+
+export function CancelOrderButton({ orderId }: { orderId: number }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  return <button className="button compact danger" type="button" disabled={busy} onClick={async () => { setBusy(true); try { await cancelPaperOrder(orderId); router.refresh(); } finally { setBusy(false); } }}>{busy ? "Canceling…" : "Cancel"}</button>;
+}
+
+export function PaperOperations({ accountId }: { accountId: number }) {
+  const router = useRouter();
+  const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string }>({ tone: "info", message: "" });
+  async function process() {
+    try { const result = await processPendingPaperOrders(accountId); setToast({ tone: "success", message: `Processed ${result.processed}; filled ${result.filled}; ${result.pending} remain pending.` }); router.refresh(); }
+    catch (error) { setToast({ tone: "error", message: error instanceof Error ? error.message : "Processing failed." }); }
+  }
+  async function reconcile(repair: boolean) {
+    try { const result = await reconcilePaperAccount(accountId, repair); setToast({ tone: result.healthy || result.repaired ? "success" : "error", message: result.healthy ? "Ledger is healthy." : result.repaired ? `Repaired ${result.issue_count} ledger issue(s).` : `Found ${result.issue_count} ledger issue(s).` }); router.refresh(); }
+    catch (error) { setToast({ tone: "error", message: error instanceof Error ? error.message : "Reconciliation failed." }); }
+  }
+  return <div className="operationBar"><button className="button" type="button" onClick={process}>Process pending</button><button className="button ghost" type="button" onClick={() => reconcile(false)}>Check ledger</button><button className="button ghost" type="button" onClick={() => reconcile(true)}>Repair drift</button><Toast tone={toast.tone} message={toast.message} /></div>;
 }
 
 export function CreateDeployment({ accountId }: { accountId: number }) {

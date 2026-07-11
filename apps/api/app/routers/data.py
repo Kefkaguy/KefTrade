@@ -1,6 +1,6 @@
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 import psycopg
 
 from app.db import get_connection
@@ -18,9 +18,12 @@ async def sync_data(
     limit: int = Query(1500, ge=1, le=5000),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
-    market_data_provider = get_market_data_provider(provider)
-    result = await market_data_provider.sync_candles(conn, symbol=symbol, timeframe=timeframe, limit=limit)
-    return result.__dict__
+    try:
+        market_data_provider = get_market_data_provider(provider)
+        result = await market_data_provider.sync_candles(conn, symbol=symbol, timeframe=timeframe, limit=limit)
+        return result.__dict__
+    except (KeyError, RuntimeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @router.get("/candles/{symbol}")

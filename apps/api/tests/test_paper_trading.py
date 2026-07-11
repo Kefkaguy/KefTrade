@@ -2,7 +2,7 @@ from decimal import Decimal
 
 import pytest
 
-from app.services.paper_trading import create_deployment, create_order, create_paper_account, pause_deployment
+from app.services.paper_trading import cancel_order, create_deployment, create_order, create_paper_account, pause_deployment, process_pending_orders
 
 
 class Result:
@@ -74,6 +74,15 @@ class FakeConn:
         if "SELECT symbol, timeframe, timestamp" in query:
             return Result([self.candle])
         if "INSERT INTO paper_orders" in query:
+            if "parent_order_id" in query:
+                row = {
+                    "id": len(self.orders) + 1, "account_id": params[0], "deployment_id": params[1],
+                    "symbol": params[2], "timeframe": params[3], "side": "sell", "order_type": params[4],
+                    "quantity": params[5], "trigger_price": params[6], "parent_order_id": params[7],
+                    "status": "pending", "simulation_only": True,
+                }
+                self.orders[row["id"]] = row
+                return Result([row])
             row = {
                 "id": len(self.orders) + 1,
                 "account_id": params[0],
@@ -86,12 +95,30 @@ class FakeConn:
                 "limit_price": params[7],
                 "status": params[8],
                 "rejected_reason": params[9],
+                "stop_loss_price": params[10],
+                "take_profit_price": params[11],
                 "simulation_only": True,
             }
             self.orders[row["id"]] = row
             return Result([row])
         if "SELECT * FROM paper_orders WHERE id" in query:
             return Result([self.orders[params[0]]] if params[0] in self.orders else [])
+        if "SELECT * FROM paper_orders WHERE status = 'pending'" in query:
+            rows = [row for row in self.orders.values() if row["status"] == "pending"]
+            if params:
+                rows = [row for row in rows if row["account_id"] == params[0]]
+            return Result(rows)
+        if "UPDATE paper_orders SET status = 'canceled'" in query and "parent_order_id" not in query:
+            row = self.orders.get(params[0])
+            if not row or row["status"] != "pending":
+                return Result([])
+            row["status"] = "canceled"
+            return Result([row])
+        if "UPDATE paper_orders SET status = 'canceled'" in query and "parent_order_id" in query:
+            rows = [row for row in self.orders.values() if row.get("parent_order_id") == params[0] and row["id"] != params[1] and row["status"] == "pending"]
+            for row in rows:
+                row["status"] = "canceled"
+            return Result(rows)
         if "SELECT id, account_id, status, simulation_only" in query:
             return Result([self.deployments[params[0]]] if params[0] in self.deployments else [])
         if "INSERT INTO paper_fills" in query:
@@ -139,7 +166,7 @@ class FakeConn:
                 "strategy_version": params[2],
                 "symbol": params[3],
                 "timeframe": params[4],
-                "parameters": params[5],
+                "parameters": {},
                 "status": "active",
                 "simulation_only": True,
             }
@@ -245,3 +272,40 @@ def test_duplicate_fill_call_does_not_create_second_fill() -> None:
     simulate_order_fill(conn, order["id"])
 
     assert len(conn.fills) == 1
+
+
+def test_pending_limit_order_can_be_canceled() -> None:
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+    order = create_order(conn, account["id"], "AAPL", Decimal("1"), order_type="limit", limit_price=Decimal("90"))
+
+    canceled = cancel_order(conn, order["id"])
+
+    assert order["status"] == "pending"
+    assert canceled["status"] == "canceled"
+    assert any(log["event_type"] == "paper_order_canceled" for log in conn.logs)
+
+
+def test_stop_loss_and_take_profit_are_oco_protective_orders() -> None:
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+    create_order(conn, account["id"], "AAPL", Decimal("10"), stop_loss_price=Decimal("95"), take_profit_price=Decimal("110"))
+    protective = [row for row in conn.orders.values() if row.get("parent_order_id")]
+
+    assert {row["order_type"] for row in protective} == {"stop_loss", "take_profit"}
+    conn.candle = {**conn.candle, "high": Decimal("112"), "low": Decimal("100"), "close": Decimal("110")}
+    result = process_pending_orders(conn, account["id"])
+
+    assert result["filled"] == 1
+    assert {row["status"] for row in protective} == {"filled", "canceled"}
+    assert conn.positions[(account["id"], "AAPL")]["quantity"] == Decimal("0")
+
+
+def test_execution_log_payloads_are_json_serializable() -> None:
+    from fastapi.encoders import jsonable_encoder
+    import json
+
+    payload = {"quantity": Decimal("23"), "limit_price": Decimal("2.00")}
+
+    encoded = jsonable_encoder(payload)
+    assert json.loads(json.dumps(encoded)) == {"quantity": 23, "limit_price": 2.0}

@@ -9,6 +9,7 @@ from app.db import get_connection
 from app.services.paper_trading import (
     PaperTradingError,
     account_balances,
+    cancel_order,
     create_deployment,
     create_order,
     create_paper_account,
@@ -16,9 +17,12 @@ from app.services.paper_trading import (
     list_deployments,
     list_equity_curve,
     list_fills,
+    list_execution_logs,
     list_orders,
     list_positions,
     pause_deployment,
+    process_pending_orders,
+    reconcile_account,
 )
 
 router = APIRouter(prefix="/paper", tags=["paper-trading"])
@@ -39,6 +43,12 @@ class PaperOrderCreate(BaseModel):
     timeframe: str = "1d"
     limit_price: Decimal | None = None
     deployment_id: int | None = None
+    stop_loss_price: Decimal | None = Field(default=None, gt=0)
+    take_profit_price: Decimal | None = Field(default=None, gt=0)
+
+
+class ReconcileRequest(BaseModel):
+    repair: bool = False
 
 
 class StrategyDeploymentCreate(BaseModel):
@@ -98,6 +108,8 @@ def submit_order(payload: PaperOrderCreate, conn: psycopg.Connection = Depends(g
             timeframe=payload.timeframe,
             limit_price=payload.limit_price,
             deployment_id=payload.deployment_id,
+            stop_loss_price=payload.stop_loss_price,
+            take_profit_price=payload.take_profit_price,
         )
     except PaperTradingError as error:
         raise paper_error(error) from error
@@ -106,6 +118,35 @@ def submit_order(payload: PaperOrderCreate, conn: psycopg.Connection = Depends(g
 @router.get("/accounts/{account_id}/fills")
 def get_fills(account_id: int, conn: psycopg.Connection = Depends(get_connection)) -> list[dict[str, Any]]:
     return list_fills(conn, account_id)
+
+
+@router.post("/orders/{order_id}/cancel")
+def cancel_pending_order(order_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return cancel_order(conn, order_id)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
+
+
+@router.post("/orders/process")
+def process_orders(account_id: int | None = Query(None), conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return process_pending_orders(conn, account_id)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
+
+
+@router.get("/accounts/{account_id}/execution-logs")
+def get_execution_logs(account_id: int, limit: int = Query(200, ge=1, le=1000), conn: psycopg.Connection = Depends(get_connection)) -> list[dict[str, Any]]:
+    return list_execution_logs(conn, account_id, limit)
+
+
+@router.post("/accounts/{account_id}/reconcile")
+def reconcile_paper_account(account_id: int, payload: ReconcileRequest, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return reconcile_account(conn, account_id, payload.repair)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
 
 
 @router.get("/accounts/{account_id}/equity-curve")
