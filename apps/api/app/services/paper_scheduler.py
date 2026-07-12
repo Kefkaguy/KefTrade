@@ -6,6 +6,7 @@ from typing import Any
 import psycopg
 
 from app.db import connect
+from app.services.evidence_alerts import create_scheduler_error_alert
 from app.services.paper_trading import PaperTradingError, log_event, run_deployment_scan
 
 SCHEDULER_TICK_SECONDS = 60
@@ -121,6 +122,7 @@ async def run_scheduled_scan_once(conn: psycopg.Connection | None = None, *, for
                     message = str(error)
                     errors.append({"deployment_id": deployment["id"], "error": message, "simulation_only": True})
                     log_event(conn, deployment.get("account_id"), deployment.get("id"), None, "paper_scheduler_scan_error", message, errors[-1])
+                    create_scheduler_error_alert(conn, deployment, message)
                     conn.commit()
 
             status = "error" if errors else "completed"

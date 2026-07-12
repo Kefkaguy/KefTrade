@@ -14,6 +14,7 @@ ALPACA_SOURCE = "alpaca_iex"
 ALPACA_STOCK_BARS_ENDPOINT = "/v2/stocks/{symbol}/bars"
 ALPACA_FEED = "iex"
 MAX_PAGE_LIMIT = 10000
+MAX_STOCK_BAR_PAGES = 25
 SUPPORTED_TIMEFRAMES = {
     "15m": "15Min",
     "30m": "30Min",
@@ -97,7 +98,9 @@ async def fetch_stock_bars(symbol: str, timeframe: str, limit: int) -> tuple[int
     request_id: str | None = None
 
     async with httpx.AsyncClient(base_url=settings.alpaca_data_base_url, timeout=30, headers=headers) as client:
-        while len(bars) < requested_limit:
+        page_count = 0
+        while page_count < MAX_STOCK_BAR_PAGES:
+            page_count += 1
             response = await client.get(endpoint, params=params)
             status = response.status_code
             request_id = response.headers.get("X-Request-ID") or request_id
@@ -130,7 +133,7 @@ def start_for_limit(timeframe: str, limit: int) -> datetime:
     else:
         regular_session_bars_per_day = max(1, int((6.5 * 60 * 60) / seconds))
         trading_days = max(252, int(limit / regular_session_bars_per_day) + 30)
-        calendar_days = int(trading_days * 1.6)
+        calendar_days = min(int(trading_days * 1.6), settings.alpaca_intraday_max_lookback_days)
     return datetime.now(tz=UTC) - timedelta(days=calendar_days)
 
 

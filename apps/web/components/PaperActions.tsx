@@ -1,8 +1,21 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { cancelPaperOrder, createPaperAccount, createPaperOrder, createStrategyDeployment, deployTslaMomentumBull, pauseStrategyDeployment, processPendingPaperOrders, reconcilePaperAccount, scanStrategyDeployment, updatePaperScheduler } from "@/lib/api";
+import { acknowledgeEvidenceAlert, addSignalReviewNote, cancelPaperOrder, createPaperAccount, createPaperOrder, createStrategyDeployment, deployTslaMomentumBull, generateSignalReview, ignoreSignalReview, markSignalReviewReviewed, pauseStrategyDeployment, processPendingPaperOrders, reconcilePaperAccount, scanStrategyDeployment, sendSignalReviewToPaperSimulation, updatePaperScheduler, type EvidenceAlert, type SignalReview } from "@/lib/api";
+import {
+  DEFAULT_EVIDENCE_NOTIFICATION_SETTINGS,
+  EVIDENCE_NOTIFICATION_HISTORY_KEY,
+  EVIDENCE_NOTIFICATION_SENT_KEY,
+  EVIDENCE_NOTIFICATION_SETTINGS_KEY,
+  notificationBody,
+  notificationTitle,
+  normalizeNotificationSettings,
+  shouldNotifyAlert,
+  type AlertSeverity,
+  type EvidenceNotificationHistoryItem,
+  type EvidenceNotificationSettings
+} from "@/lib/evidence-notifications";
 import { Toast } from "@/components/ResearchUI";
 
 export function CreatePaperAccount() {
@@ -184,6 +197,230 @@ export function PaperSchedulerControls({ enabled, cadence }: { enabled: boolean;
       <Toast tone={toast.tone} message={toast.message} />
     </div>
   );
+}
+
+export function AcknowledgeAlertButton({ alertId }: { alertId: number }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      className="button compact ghost"
+      type="button"
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await acknowledgeEvidenceAlert(alertId);
+          router.refresh();
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? "Acknowledging..." : "Acknowledge"}
+    </button>
+  );
+}
+
+export function EvidenceNotificationControls({ alerts }: { alerts: EvidenceAlert[] }) {
+  const [settings, setSettings] = useState<EvidenceNotificationSettings>(DEFAULT_EVIDENCE_NOTIFICATION_SETTINGS);
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported">("default");
+  const [history, setHistory] = useState<EvidenceNotificationHistoryItem[]>([]);
+  const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string }>({ tone: "info", message: "" });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setPermission("Notification" in window ? Notification.permission : "unsupported");
+    setSettings(readSettings());
+    setHistory(readHistory());
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !("Notification" in window)) return;
+    if (Notification.permission !== "granted") return;
+    const sent = readSentAlertIds();
+    const nextHistory = readHistory();
+    let changed = false;
+    for (const alert of alerts) {
+      if (!shouldNotifyAlert(alert, settings, sent)) continue;
+      const title = notificationTitle(alert);
+      const body = notificationBody(alert);
+      new Notification(title, { body, tag: `keftrade-alert-${alert.id}` });
+      sent.add(alert.id);
+      nextHistory.unshift({ alert_id: alert.id, title, body, created_at: new Date().toISOString() });
+      changed = true;
+    }
+    if (changed) {
+      writeSentAlertIds(sent);
+      writeHistory(nextHistory.slice(0, 20));
+      setHistory(nextHistory.slice(0, 20));
+    }
+  }, [alerts, settings]);
+
+  async function enableNotifications() {
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      setPermission("unsupported");
+      setToast({ tone: "error", message: "Browser notifications are not supported here." });
+      return;
+    }
+    const result = await Notification.requestPermission();
+    setPermission(result);
+    const next = { ...settings, browser_notifications_enabled: result === "granted" };
+    saveSettings(next);
+    setToast({ tone: result === "granted" ? "success" : "error", message: result === "granted" ? "Browser notifications enabled." : "Notification permission was not granted." });
+  }
+
+  function saveSettings(next: EvidenceNotificationSettings) {
+    setSettings(next);
+    if (typeof window !== "undefined") {
+      localStorage.setItem(EVIDENCE_NOTIFICATION_SETTINGS_KEY, JSON.stringify(next));
+    }
+  }
+
+  function updateSetting<K extends keyof EvidenceNotificationSettings>(key: K, value: EvidenceNotificationSettings[K]) {
+    saveSettings({ ...settings, [key]: value });
+  }
+
+  function sendTestNotification() {
+    if (typeof window === "undefined" || !("Notification" in window) || Notification.permission !== "granted") {
+      setToast({ tone: "error", message: "Enable browser notification permission first." });
+      return;
+    }
+    const title = "Research opportunity detected";
+    const body = "TSLA 1h\nStrategy: momentum_bull_v2\nVerdict: Setup Worth Reviewing\nEvidence score: 4/5\nReason: Notification test.\nResearch-only. No trade executed.";
+    new Notification(title, { body, tag: "keftrade-alert-test" });
+    const testHistoryItem: EvidenceNotificationHistoryItem = { alert_id: "test", title, body, created_at: new Date().toISOString() };
+    const nextHistory: EvidenceNotificationHistoryItem[] = [testHistoryItem, ...history].slice(0, 20);
+    writeHistory(nextHistory);
+    setHistory(nextHistory);
+    setToast({ tone: "success", message: "Sent research-only test notification." });
+  }
+
+  return (
+    <div className="workflowStack">
+      <div className="operationBar">
+        <button className="button" type="button" onClick={enableNotifications}>{settings.browser_notifications_enabled ? "Refresh permission" : "Enable notifications"}</button>
+        <button className="button ghost" type="button" onClick={() => updateSetting("browser_notifications_enabled", false)}>Disable notifications</button>
+        <button className="button secondary" type="button" onClick={sendTestNotification}>Test notification</button>
+        <Toast tone={toast.tone} message={toast.message} />
+      </div>
+      <div className="scoreList">
+        <span>Browser permission <strong>{permission}</strong></span>
+        <span>Notifications enabled <strong>{settings.browser_notifications_enabled ? "Yes" : "No"}</strong></span>
+      </div>
+      <label className="field">
+        <span>Minimum severity</span>
+        <select value={settings.alert_min_severity} onChange={(event) => updateSetting("alert_min_severity", event.target.value as AlertSeverity)}>
+          <option value="info">Info</option>
+          <option value="warning">Warning</option>
+          <option value="critical">Critical</option>
+        </select>
+      </label>
+      <div className="metadataGrid">
+        <Toggle label="Research opportunities" checked={settings.notify_on_research_opportunity} onChange={(checked) => updateSetting("notify_on_research_opportunity", checked)} />
+        <Toggle label="Exit risk" checked={settings.notify_on_exit_risk} onChange={(checked) => updateSetting("notify_on_exit_risk", checked)} />
+        <Toggle label="Scheduler errors" checked={settings.notify_on_scheduler_error} onChange={(checked) => updateSetting("notify_on_scheduler_error", checked)} />
+        <Toggle label="Stale data" checked={settings.notify_on_stale_data} onChange={(checked) => updateSetting("notify_on_stale_data", checked)} />
+      </div>
+      <div className="actionNote">
+        <strong>Notification history</strong>
+        {history.length ? (
+          <div className="list">
+            {history.slice(0, 6).map((item) => <span key={`${item.alert_id}-${item.created_at}`}>{item.title} — {new Date(item.created_at).toLocaleString()}</span>)}
+          </div>
+        ) : <p>No browser notifications sent from this browser yet.</p>}
+      </div>
+    </div>
+  );
+}
+
+export function SignalReviewControls({ review, deploymentId }: { review?: SignalReview | null; deploymentId?: number }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState<string | null>(null);
+  const [note, setNote] = useState(review?.note ?? "");
+  const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string }>({ tone: "info", message: "" });
+
+  async function runAction(action: string, task: () => Promise<unknown>, success: string) {
+    setBusy(action);
+    try {
+      await task();
+      setToast({ tone: "success", message: success });
+      router.refresh();
+    } catch (error) {
+      setToast({ tone: "error", message: error instanceof Error ? error.message : "Signal review action failed." });
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <div className="workflowStack">
+      <div className="operationBar">
+        <button
+          className="button"
+          type="button"
+          disabled={busy !== null || !deploymentId}
+          onClick={() => deploymentId ? runAction("refresh", () => generateSignalReview(deploymentId), "Signal Review refreshed from latest stored evidence.") : undefined}
+        >
+          {busy === "refresh" ? "Refreshing..." : "Refresh Signal Review"}
+        </button>
+        <button className="button ghost" type="button" disabled={busy !== null || !review} onClick={() => review ? runAction("reviewed", () => markSignalReviewReviewed(review.id), "Marked reviewed.") : undefined}>Mark Reviewed</button>
+        <button className="button ghost" type="button" disabled={busy !== null || !review} onClick={() => review ? runAction("ignored", () => ignoreSignalReview(review.id), "Setup ignored for review purposes.") : undefined}>Ignore Setup</button>
+        <button className="button secondary" type="button" disabled={busy !== null || !review} onClick={() => review ? runAction("sent", () => sendSignalReviewToPaperSimulation(review.id), "Sent to internal paper simulation queue. No order was created.") : undefined}>Send to Internal Paper Simulation</button>
+      </div>
+      <div className="formGrid">
+        <label className="field">
+          <span>Add Note</span>
+          <textarea value={note} rows={3} placeholder="Research-only note for this setup review." onChange={(event) => setNote(event.target.value)} />
+        </label>
+        <button className="button compact" type="button" disabled={busy !== null || !review || !note.trim()} onClick={() => review ? runAction("note", () => addSignalReviewNote(review.id, note.trim()), "Signal Review note saved.") : undefined}>Save Note</button>
+      </div>
+      <Toast tone={toast.tone} message={toast.message} />
+    </div>
+  );
+}
+
+function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label>
+      <span>{label}</span>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+    </label>
+  );
+}
+
+function readSettings() {
+  try {
+    return normalizeNotificationSettings(JSON.parse(localStorage.getItem(EVIDENCE_NOTIFICATION_SETTINGS_KEY) || "null"));
+  } catch {
+    return DEFAULT_EVIDENCE_NOTIFICATION_SETTINGS;
+  }
+}
+
+function readSentAlertIds() {
+  try {
+    const values = JSON.parse(localStorage.getItem(EVIDENCE_NOTIFICATION_SENT_KEY) || "[]");
+    return new Set<number>(Array.isArray(values) ? values.map(Number).filter(Number.isFinite) : []);
+  } catch {
+    return new Set<number>();
+  }
+}
+
+function writeSentAlertIds(values: Set<number>) {
+  localStorage.setItem(EVIDENCE_NOTIFICATION_SENT_KEY, JSON.stringify(Array.from(values)));
+}
+
+function readHistory() {
+  try {
+    const values = JSON.parse(localStorage.getItem(EVIDENCE_NOTIFICATION_HISTORY_KEY) || "[]");
+    return Array.isArray(values) ? values as EvidenceNotificationHistoryItem[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeHistory(values: EvidenceNotificationHistoryItem[]) {
+  localStorage.setItem(EVIDENCE_NOTIFICATION_HISTORY_KEY, JSON.stringify(values));
 }
 
 export function CreateDeployment({ accountId }: { accountId: number }) {

@@ -501,6 +501,65 @@ export type PaperSchedulerStatus = {
   updated_at?: string;
 };
 
+export type EvidenceAlert = {
+  id: number;
+  symbol: string;
+  timeframe: string;
+  strategy_id: string;
+  alert_type: "entry_setup_review" | "exit_risk_review" | "avoid_condition" | "stale_data_warning" | "scheduler_error" | "duplicate_candle_skip";
+  severity: "info" | "warning" | "critical";
+  verdict: string;
+  evidence_summary: string;
+  matched_rules: string[];
+  failed_rules: string[];
+  profit_factor?: string | number | null;
+  expectancy?: string | number | null;
+  trade_count?: number | null;
+  max_drawdown?: string | number | null;
+  regime?: string | null;
+  candle_timestamp?: string | null;
+  created_at: string;
+  acknowledged_at?: string | null;
+  simulation_only: boolean;
+};
+
+export type SignalReview = {
+  id: number;
+  account_id?: number | null;
+  deployment_id?: number | null;
+  symbol: string;
+  timeframe: string;
+  strategy_id: string;
+  status: "No Setup" | "Setup Forming" | "Setup Worth Reviewing" | "In Paper Position" | "Exit Risk Worth Reviewing" | "Invalidated" | "Stale Data Blocked";
+  verdict: "No Setup" | "Setup Worth Reviewing" | "Exit Risk Worth Reviewing" | "Stale Data Blocked" | "Invalidated";
+  regime?: string | null;
+  evidence_score: string;
+  matched_rules: string[];
+  failed_rules: string[];
+  profit_factor?: string | number | null;
+  expectancy?: string | number | null;
+  trade_count?: number | null;
+  max_drawdown?: string | number | null;
+  latest_candle_timestamp?: string | null;
+  data_freshness: string;
+  possible_entry_price?: string | number | null;
+  invalidation_level?: string | number | null;
+  risk_target?: string | number | null;
+  exit_zone?: string | number | null;
+  risk_per_share?: string | number | null;
+  reward_per_share?: string | number | null;
+  risk_reward_ratio?: string | number | null;
+  max_holding_bars?: number | null;
+  note?: string | null;
+  reviewed_at?: string | null;
+  ignored_at?: string | null;
+  sent_to_paper_simulation_at?: string | null;
+  created_at: string;
+  updated_at?: string;
+  disclaimer: string;
+  simulation_only: boolean;
+};
+
 export type PaperScanResult = {
   deployment: StrategyDeployment;
   action: string;
@@ -789,6 +848,44 @@ export function scanStrategyDeployment(deploymentId: number) {
 
 export function getPaperScheduler() {
   return request<PaperSchedulerStatus>("/paper/scheduler");
+}
+
+export function getEvidenceAlerts(options?: { limit?: number; includeAcknowledged?: boolean }) {
+  const params = new URLSearchParams();
+  params.set("limit", String(options?.limit ?? 100));
+  params.set("include_acknowledged", String(options?.includeAcknowledged ?? true));
+  return request<EvidenceAlert[]>(`/paper/alerts?${params.toString()}`);
+}
+
+export function getSignalReviews(options?: { accountId?: number; limit?: number }) {
+  const params = new URLSearchParams();
+  if (options?.accountId) params.set("account_id", String(options.accountId));
+  params.set("limit", String(options?.limit ?? 25));
+  return request<SignalReview[]>(`/paper/signal-reviews?${params.toString()}`);
+}
+
+export function generateSignalReview(deploymentId: number) {
+  return request<SignalReview>(`/paper/deployments/${deploymentId}/signal-review`, { method: "POST", timeoutMs: 180000 });
+}
+
+export function markSignalReviewReviewed(reviewId: number) {
+  return request<SignalReview>(`/paper/signal-reviews/${reviewId}/mark-reviewed`, { method: "POST" });
+}
+
+export function ignoreSignalReview(reviewId: number) {
+  return request<SignalReview>(`/paper/signal-reviews/${reviewId}/ignore`, { method: "POST" });
+}
+
+export function sendSignalReviewToPaperSimulation(reviewId: number) {
+  return request<SignalReview>(`/paper/signal-reviews/${reviewId}/send-to-paper-simulation`, { method: "POST" });
+}
+
+export function addSignalReviewNote(reviewId: number, note: string) {
+  return request<SignalReview>(`/paper/signal-reviews/${reviewId}/note`, { method: "POST", body: JSON.stringify({ note }) });
+}
+
+export function acknowledgeEvidenceAlert(alertId: number) {
+  return request<EvidenceAlert>(`/paper/alerts/${alertId}/acknowledge`, { method: "POST" });
 }
 
 export function updatePaperScheduler(payload: { enabled?: boolean; cadence?: "manual" | "15m" | "30m" | "60m" }) {

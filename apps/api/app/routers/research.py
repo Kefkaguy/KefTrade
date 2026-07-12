@@ -6,6 +6,7 @@ import psycopg
 from app.db import get_connection
 from app.domain.assets import DEFAULT_DEV_SYMBOL, DEFAULT_DEV_TIMEFRAME
 from app.services.candidate_lifecycle import METRIC_DEFINITIONS, build_research_portfolio
+from app.services.evidence_alerts import detect_research_report_alert
 from app.services.promising_research import build_promising_research_candidates
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
@@ -50,6 +51,8 @@ def create_strategy_research_report(
             "outcome": outcome or "",
         },
     )
+    detect_research_report_alert(conn, symbol, timeframe, report)
+    conn.commit()
     return {"symbol": symbol, "timeframe": timeframe, **report}
 
 

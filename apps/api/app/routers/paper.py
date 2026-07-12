@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 import psycopg
 
 from app.db import get_connection
+from app.services.evidence_alerts import acknowledge_evidence_alert, list_evidence_alerts
 from app.services.paper_trading import (
     PaperTradingError,
     account_balances,
@@ -14,6 +15,7 @@ from app.services.paper_trading import (
     create_order,
     create_paper_account,
     ensure_tsla_momentum_bull_deployment,
+    get_deployment,
     list_accounts,
     list_deployments,
     list_equity_curve,
@@ -27,6 +29,7 @@ from app.services.paper_trading import (
     run_deployment_scan,
 )
 from app.services.paper_scheduler import get_scheduler_status, run_scheduled_scan_once, update_scheduler_status
+from app.services.signal_reviews import add_signal_review_note, generate_signal_review, latest_signal_review, list_signal_reviews, mark_signal_review
 
 router = APIRouter(prefix="/paper", tags=["paper-trading"])
 
@@ -66,6 +69,10 @@ class StrategyDeploymentCreate(BaseModel):
 class SchedulerUpdate(BaseModel):
     enabled: bool | None = None
     cadence: str | None = None
+
+
+class SignalReviewNote(BaseModel):
+    note: str = Field(min_length=1, max_length=2000)
 
 
 def paper_error(error: PaperTradingError) -> HTTPException:
@@ -210,6 +217,77 @@ def get_deployments(account_id: int | None = Query(None), conn: psycopg.Connecti
 @router.get("/scheduler")
 def get_paper_scheduler(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     return get_scheduler_status(conn)
+
+
+@router.get("/alerts")
+def get_evidence_alerts(
+    limit: int = Query(100, ge=1, le=500),
+    include_acknowledged: bool = Query(True),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> list[dict[str, Any]]:
+    return list_evidence_alerts(conn, limit=limit, include_acknowledged=include_acknowledged)
+
+
+@router.get("/signal-reviews")
+def get_signal_reviews(
+    account_id: int | None = Query(None),
+    limit: int = Query(25, ge=1, le=100),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> list[dict[str, Any]]:
+    return list_signal_reviews(conn, account_id=account_id, limit=limit)
+
+
+@router.get("/signal-reviews/latest")
+def get_latest_signal_review(account_id: int | None = Query(None), conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any] | None:
+    return latest_signal_review(conn, account_id=account_id)
+
+
+@router.post("/deployments/{deployment_id}/signal-review")
+def generate_deployment_signal_review(deployment_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return generate_signal_review(conn, get_deployment(conn, deployment_id))
+    except (PaperTradingError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/signal-reviews/{review_id}/mark-reviewed")
+def mark_reviewed(review_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return mark_signal_review(conn, review_id, "reviewed")
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/signal-reviews/{review_id}/ignore")
+def ignore_review(review_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return mark_signal_review(conn, review_id, "ignored")
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/signal-reviews/{review_id}/send-to-paper-simulation")
+def send_review_to_paper_simulation(review_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return mark_signal_review(conn, review_id, "sent_to_paper_simulation")
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/signal-reviews/{review_id}/note")
+def add_review_note(review_id: int, payload: SignalReviewNote, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return add_signal_review_note(conn, review_id, payload.note)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/alerts/{alert_id}/acknowledge")
+def acknowledge_alert(alert_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return acknowledge_evidence_alert(conn, alert_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @router.put("/scheduler")

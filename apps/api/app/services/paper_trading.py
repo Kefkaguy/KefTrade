@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -6,8 +7,10 @@ from fastapi.encoders import jsonable_encoder
 from psycopg.types.json import Jsonb
 
 from app.providers.alpaca import sync_alpaca_candles
+from app.services.evidence_alerts import candle_is_stale, detect_paper_scan_alert
 from app.services.features import load_candles, sync_features
 from app.services.strategy import StrategyDecision, get_strategy_definition
+from app.settings import settings
 
 FEE_RATE = Decimal("0.001")
 SLIPPAGE_RATE = Decimal("0.0005")
@@ -381,29 +384,73 @@ async def run_deployment_scan(conn: psycopg.Connection, deployment_id: int) -> d
     timeframe = deployment["timeframe"]
     sync_result = await sync_latest_deployment_candles(conn, symbol, timeframe)
     feature_result = sync_features(conn, symbol=symbol, timeframe=timeframe)
-    processed = process_pending_orders(conn, account_id)
     deployment = get_deployment(conn, deployment_id)
     candle = latest_candle(conn, symbol, timeframe)
+    sync_payload = {
+        "provider": sync_result.provider,
+        "received": sync_result.received,
+        "upserted": sync_result.upserted,
+        "first_timestamp": sync_result.first_timestamp,
+        "last_timestamp": sync_result.last_timestamp,
+    }
+    if candle_is_stale(candle):
+        candle_timestamp = candle.get("timestamp")
+        age_hours = None
+        if candle_timestamp:
+            parsed_timestamp = candle_timestamp
+            if isinstance(parsed_timestamp, str):
+                parsed_timestamp = datetime.fromisoformat(parsed_timestamp.replace("Z", "+00:00"))
+            if parsed_timestamp.tzinfo is None:
+                parsed_timestamp = parsed_timestamp.replace(tzinfo=UTC)
+            age_hours = round((datetime.now(UTC) - parsed_timestamp).total_seconds() / 3600, 2)
+        message = "Latest stored candle is stale; skipped strategy evaluation, simulated order creation, and stale candle fills."
+        payload = {
+            "action": "stale_data_warning",
+            "candle_timestamp": candle_timestamp,
+            "candle_age_hours": age_hours,
+            "max_candle_age_hours": settings.paper_scan_max_candle_age_hours,
+            "sync": sync_payload,
+            "features": feature_result,
+            "processed_pending": {"processed": 0, "filled": 0, "canceled": 0, "skipped": True, "reason": "stale_data_gate"},
+            "simulation_only": True,
+        }
+        log_event(conn, account_id, deployment_id, None, "paper_scan_stale_data_skipped", message, payload)
+        detect_paper_scan_alert(conn, deployment=deployment, decision={"signal": "skipped"}, candle=candle, action="stale_data_warning", message=message)
+        updated = update_deployment_scan_state(conn, deployment_id, "stale_data_warning", message, payload)
+        reconcile = reconcile_account(conn, account_id, repair=False)
+        refresh_signal_review(conn, deployment)
+        conn.commit()
+        return {
+            "deployment": updated,
+            "action": "stale_data_warning",
+            "message": message,
+            "decision": {"signal": "skipped", "explanation": [message]},
+            "sync": sync_payload,
+            "features": feature_result,
+            "processed_pending": payload["processed_pending"],
+            "order": None,
+            "position": get_position(conn, account_id, symbol),
+            "reconciliation": reconcile,
+            "simulation_only": True,
+        }
+
+    processed = process_pending_orders(conn, account_id)
     claimed = claim_deployment_candle_scan(conn, deployment_id, candle["timestamp"])
     if not claimed:
         message = "Deployment already scanned this candle; skipped duplicate paper decision."
         payload = {
             "action": "skipped_duplicate_candle",
             "candle_timestamp": candle["timestamp"],
-            "sync": {
-                "provider": sync_result.provider,
-                "received": sync_result.received,
-                "upserted": sync_result.upserted,
-                "first_timestamp": sync_result.first_timestamp,
-                "last_timestamp": sync_result.last_timestamp,
-            },
+            "sync": sync_payload,
             "features": feature_result,
             "processed_pending": processed,
             "simulation_only": True,
         }
         log_event(conn, account_id, deployment_id, None, "paper_scan_duplicate_candle_skipped", message, payload)
+        detect_paper_scan_alert(conn, deployment=deployment, decision={"signal": "skipped"}, candle=candle, action="skipped_duplicate_candle", message=message, duplicate_candle=True)
         updated = update_deployment_scan_state(conn, deployment_id, "skipped", message, payload)
         reconcile = reconcile_account(conn, account_id, repair=False)
+        refresh_signal_review(conn, deployment)
         conn.commit()
         return {
             "deployment": updated,
@@ -440,21 +487,17 @@ async def run_deployment_scan(conn: psycopg.Connection, deployment_id: int) -> d
     payload = {
         "action": action,
         "decision": decision_payload(decision),
-        "sync": {
-            "provider": sync_result.provider,
-            "received": sync_result.received,
-            "upserted": sync_result.upserted,
-            "first_timestamp": sync_result.first_timestamp,
-            "last_timestamp": sync_result.last_timestamp,
-        },
+        "sync": sync_payload,
         "features": feature_result,
         "processed_pending": processed,
         "order": order,
         "position": get_position(conn, account_id, symbol),
     }
     log_event(conn, account_id, deployment_id, order.get("id") if order else None, "paper_scan_completed", message, payload)
+    detect_paper_scan_alert(conn, deployment=deployment, decision=decision, candle=candle, action=action, message=message)
     updated = update_deployment_scan_state(conn, deployment_id, decision.signal, message, payload)
     reconcile = reconcile_account(conn, account_id, repair=False)
+    refresh_signal_review(conn, deployment)
     conn.commit()
     return {
         "deployment": updated,
@@ -476,6 +519,24 @@ def get_deployment(conn: psycopg.Connection, deployment_id: int) -> dict[str, An
     if not row:
         raise PaperTradingError("strategy deployment not found")
     return dict(row)
+
+
+def refresh_signal_review(conn: psycopg.Connection, deployment: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        from app.services.signal_reviews import generate_signal_review
+
+        return generate_signal_review(conn, deployment)
+    except Exception as error:
+        log_event(
+            conn,
+            int(deployment["account_id"]) if deployment.get("account_id") else None,
+            int(deployment["id"]) if deployment.get("id") else None,
+            None,
+            "signal_review_refresh_skipped",
+            f"Signal review refresh skipped: {error}",
+            {"simulation_only": True},
+        )
+        return None
 
 
 def claim_deployment_candle_scan(conn: psycopg.Connection, deployment_id: int, candle_timestamp: Any) -> dict[str, Any] | None:

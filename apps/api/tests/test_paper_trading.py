@@ -148,6 +148,8 @@ class FakeConn:
             if params:
                 rows = [row for row in rows if row["account_id"] == params[0]]
             return Result(rows)
+        if "SELECT * FROM strategy_deployments WHERE id" in query:
+            return Result([self.deployments[params[0]]] if params[0] in self.deployments else [])
         if "UPDATE paper_orders SET status = 'canceled'" in query and "parent_order_id" not in query:
             row = self.orders.get(params[0])
             if not row or row["status"] != "pending":
@@ -215,6 +217,15 @@ class FakeConn:
                 "last_scanned_candle_timestamp": None,
             }
             self.deployments[row["id"]] = row
+            return Result([row])
+        if "UPDATE strategy_deployments" in query and "last_scan_at = NOW()" in query:
+            row = self.deployments.get(params[3])
+            if not row:
+                return Result([])
+            row["last_signal"] = params[0]
+            row["last_check_result"] = params[1]
+            row["last_scan_payload"] = params[2]
+            row["last_scan_at"] = datetime.now(UTC)
             return Result([row])
         if "UPDATE strategy_deployments" in query and "last_scanned_candle_timestamp" in query:
             row = self.deployments.get(params[1])
@@ -436,3 +447,60 @@ def test_deployment_candle_scan_claim_requires_active_simulation_deployment() ->
     claimed = claim_deployment_candle_scan(conn, deployment["id"], datetime(2026, 1, 2, 15, tzinfo=UTC))
 
     assert claimed is None
+
+
+def test_stale_scan_blocks_strategy_evaluation_and_order_creation(monkeypatch) -> None:
+    import asyncio
+    from types import SimpleNamespace
+    from app.services import paper_trading
+
+    conn = FakeConn()
+    account = create_paper_account(conn, "Research Paper", Decimal("10000"))
+    deployment = create_deployment(conn, account["id"], "momentum", "TSLA", "1h", strategy_version="bull_v2")
+    stale_timestamp = datetime.now(UTC) - timedelta(days=10)
+    conn.candle = {
+        "symbol": "TSLA",
+        "timeframe": "1h",
+        "timestamp": stale_timestamp,
+        "open": Decimal("100"),
+        "high": Decimal("101"),
+        "low": Decimal("99"),
+        "close": Decimal("100"),
+        "volume": Decimal("1000"),
+    }
+    alerts: list[dict] = []
+
+    async def fake_sync_latest(_conn, symbol, timeframe):
+        return SimpleNamespace(
+            provider="alpaca_iex",
+            received=0,
+            upserted=0,
+            first_timestamp=None,
+            last_timestamp=stale_timestamp,
+        )
+
+    def fail_evaluate(*args, **kwargs):
+        raise AssertionError("stale data must not evaluate strategy setup")
+
+    def fail_order(*args, **kwargs):
+        raise AssertionError("stale data must not create paper orders")
+
+    def fake_alert(*args, **kwargs):
+        alerts.append(kwargs)
+        return {"alert_type": "stale_data_warning", "simulation_only": True}
+
+    monkeypatch.setattr(paper_trading, "sync_latest_deployment_candles", fake_sync_latest)
+    monkeypatch.setattr(paper_trading, "sync_features", lambda *args, **kwargs: {"updated": 0})
+    monkeypatch.setattr(paper_trading, "evaluate_deployment_decision", fail_evaluate)
+    monkeypatch.setattr(paper_trading, "create_deployment_order_from_decision", fail_order)
+    monkeypatch.setattr(paper_trading, "detect_paper_scan_alert", fake_alert)
+    monkeypatch.setattr(paper_trading, "reconcile_account", lambda *args, **kwargs: {"healthy": True})
+    monkeypatch.setattr(paper_trading, "get_position", lambda *args, **kwargs: None)
+
+    result = asyncio.run(paper_trading.run_deployment_scan(conn, deployment["id"]))
+
+    assert result["action"] == "stale_data_warning"
+    assert result["order"] is None
+    assert result["processed_pending"]["skipped"] is True
+    assert alerts[0]["action"] == "stale_data_warning"
+    assert any(log["event_type"] == "paper_scan_stale_data_skipped" for log in conn.logs)
