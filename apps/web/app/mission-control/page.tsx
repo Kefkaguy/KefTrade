@@ -1,11 +1,15 @@
 import Link from "next/link";
 import { AlertTriangle, ArrowUpRight, ShieldCheck } from "lucide-react";
+import { BulkDeploymentControls, DeploymentControlPanel } from "@/components/DeploymentManagementActions";
 import { Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle } from "@/components/ResearchUI";
-import { getMissionControl, type MissionControlSnapshot, type MissionControlStatus } from "@/lib/api";
+import { getDeploymentManagement, getMissionControl, type DeploymentManagementSnapshot, type MissionControlSnapshot, type MissionControlStatus } from "@/lib/api";
 import { money, number } from "@/lib/format";
 
 export default async function MissionControlPage() {
-  const snapshot = await getMissionControl().catch((error) => ({ error: error instanceof Error ? error.message : "Mission Control unavailable" }));
+  const [snapshot, deploymentManagement] = await Promise.all([
+    getMissionControl().catch((error) => ({ error: error instanceof Error ? error.message : "Mission Control unavailable" })),
+    getDeploymentManagement().catch((error) => ({ error: error instanceof Error ? error.message : "Deployment management unavailable" }))
+  ]);
   if ("error" in snapshot) {
     return (
       <div className="pageStack">
@@ -18,6 +22,7 @@ export default async function MissionControlPage() {
   }
 
   const equityValues = snapshot.paper_account.recent_equity_curve.map((row) => Number(row.equity)).filter(Number.isFinite);
+  const deploymentCenter = "error" in deploymentManagement ? null : deploymentManagement;
   return (
     <div className="pageStack missionControl">
       <PageTitle
@@ -46,6 +51,12 @@ export default async function MissionControlPage() {
           </div>
         </Card>
       ) : null}
+
+      {deploymentCenter ? <DeploymentManagementCenter snapshot={deploymentCenter} /> : (
+        <Card title="Deployment Control Center unavailable" eyebrow="Subsystem warning">
+          <EmptyState title="Unable to load deployment management." body={"error" in deploymentManagement ? deploymentManagement.error : "Unknown deployment management error."} />
+        </Card>
+      )}
 
       <Card title="System Status Header" eyebrow="Current state">
         <div className="metricGrid">
@@ -226,6 +237,114 @@ export default async function MissionControlPage() {
   );
 }
 
+function DeploymentManagementCenter({ snapshot }: { snapshot: DeploymentManagementSnapshot }) {
+  const activeIds = snapshot.deployments.filter((deployment) => deployment.status === "active").map((deployment) => deployment.id);
+  const risk = snapshot.portfolio_risk;
+  return (
+    <>
+      <Card title="Deployment Control Center" eyebrow="Multi-asset simulation portfolio">
+        <div className="metricGrid">
+          <MetricCard label="Deployments" value={snapshot.summary.deployment_count} detail={`${snapshot.summary.active_count} active / ${snapshot.summary.paused_count} paused`} />
+          <MetricCard label="Healthy" value={snapshot.summary.healthy_count} tone={Number(snapshot.summary.error_count) ? "error" : Number(snapshot.summary.warning_count) ? "warning" : "success"} detail={`${snapshot.summary.warning_count} warning / ${snapshot.summary.error_count} error`} />
+          <MetricCard label="Conflicts" value={snapshot.summary.conflict_count} tone={Number(snapshot.summary.conflict_count) ? "warning" : "success"} />
+          <MetricCard label="Gross exposure" value={percent(risk.gross_exposure_pct)} detail="Simulated market value / equity" tone={Number(risk.exposure_limit_breaches) ? "error" : "neutral"} />
+          <MetricCard label="Open positions" value={risk.open_positions} detail="Long-only simulation" />
+          <MetricCard label="Sim equity" value={money(risk.equity)} detail="Paper portfolio" />
+          <MetricCard label="Unrealized PnL" value={money(risk.unrealized_pnl)} detail="Simulated" />
+          <MetricCard label="Realized PnL" value={money(risk.realized_pnl)} detail="Simulated" />
+        </div>
+        <BulkDeploymentControls activeIds={activeIds} />
+        <p className="formHint">{snapshot.safety}</p>
+      </Card>
+
+      <Card title="Managed Deployments" eyebrow="Control plane">
+        {snapshot.deployments.length ? (
+          <DataTable
+            columns={["Deployment", "Health", "Cadence", "Exposure", "Performance", "Conflicts", "Controls"]}
+            rows={snapshot.deployments.map((deployment) => [
+              <span key="deployment" className="assetLink">{deployment.symbol} <small>{deployment.timeframe} / {deployment.strategy_name}_{deployment.strategy_version} / {deployment.status}</small></span>,
+              <span key="health"><StatusBadge status={deployment.health_status} /> <small>{deployment.health_detail}</small></span>,
+              deployment.scan_cadence ?? "scheduler",
+              `${percent(deployment.exposure_pct)} / limit ${percent(deployment.max_simulated_exposure_pct ?? 0.1)}`,
+              <span key="performance">{money(deployment.performance.unrealized_pnl)} unrealized <small>{deployment.performance.orders} orders / {deployment.performance.fills} fills / last {deployment.performance.last_signal ?? "none"}</small></span>,
+              deployment.conflicts.length ? deployment.conflicts.map((conflict) => conflict.type.replaceAll("_", " ")).join(", ") : "none",
+              <DeploymentControlPanel key="controls" deployment={deployment} />
+            ])}
+          />
+        ) : <EmptyState title="No simulation deployments yet." body="Create validated candidates in Paper Lab to manage them here." action={<Link className="button" href="/paper">Open Paper Lab</Link>} />}
+      </Card>
+
+      <div className="dashboardGrid">
+        <Card title="Portfolio-Wide Simulation Risk" eyebrow="Exposure limits">
+          <div className="scoreList">
+            <SummaryLine label="Paper cash" value={money(risk.cash)} />
+            <SummaryLine label="Market value" value={money(risk.market_value)} />
+            <SummaryLine label="Gross exposure" value={percent(risk.gross_exposure_pct)} />
+            <SummaryLine label="Exposure breaches" value={risk.exposure_limit_breaches} />
+            <SummaryLine label="Conflict count" value={risk.conflict_count} />
+          </div>
+          {risk.top_positions.length ? (
+            <DataTable
+              columns={["Symbol", "Qty", "Market value", "Unrealized PnL"]}
+              rows={risk.top_positions.map((position) => [position.symbol, number(position.quantity), money(position.market_value), money(position.unrealized_pnl)])}
+            />
+          ) : <EmptyState title="No open simulated positions." body="Risk summary will populate after simulated fills create positions." />}
+        </Card>
+
+        <Card title="Conflict Detection" eyebrow="Deployment overlap">
+          {snapshot.conflicts.length ? (
+            <div className="warningList">
+              {snapshot.conflicts.slice(0, 10).map((conflict, index) => <span key={`${conflict.deployment_id}-${conflict.type}-${index}`}><AlertTriangle size={14} /> {conflict.severity}: {conflict.message}</span>)}
+            </div>
+          ) : <EmptyState title="No deployment conflicts detected." body="No shared asset/timeframe overlap or simulated exposure-limit breach is currently stored." />}
+        </Card>
+      </div>
+
+      <div className="dashboardGrid">
+        <Card title="Asset Comparison" eyebrow="Deployment performance">
+          {snapshot.asset_comparison.length ? <ComparisonTable rows={snapshot.asset_comparison} /> : <EmptyState title="No asset comparison yet." body="Deployments will be grouped here by symbol." />}
+        </Card>
+        <Card title="Strategy Comparison" eyebrow="Deployment performance">
+          {snapshot.strategy_comparison.length ? <ComparisonTable rows={snapshot.strategy_comparison} /> : <EmptyState title="No strategy comparison yet." body="Deployments will be grouped here by strategy." />}
+        </Card>
+      </div>
+
+      <Card title="Deployment Audit History" eyebrow="Recent control and scheduler events">
+        {snapshot.audit_history.length ? (
+          <div className="executionTimeline compactTimeline">
+            {snapshot.audit_history.slice(0, 16).map((item, index) => (
+              <article key={`${item.event_type}-${item.created_at}-${index}`}>
+                <span className="eventDot" />
+                <div>
+                  <strong>{item.event_type.replaceAll("_", " ")}</strong>
+                  <p>{item.message}</p>
+                  <time>{formatDate(item.created_at)}</time>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : <EmptyState title="No deployment audit events." body="Pause, resume, control updates, scheduler scans, and bulk actions will appear here." />}
+      </Card>
+    </>
+  );
+}
+
+function ComparisonTable({ rows }: { rows: DeploymentManagementSnapshot["asset_comparison"] }) {
+  return (
+    <DataTable
+      columns={["Name", "Deployments", "Health", "Orders/Fills", "Realized", "Unrealized"]}
+      rows={rows.map((row) => [
+        row.name,
+        `${row.active_count} active / ${row.paused_count} paused`,
+        `${row.healthy_count} healthy / ${row.warning_count} warning / ${row.error_count} error`,
+        `${row.orders} / ${row.fills}`,
+        money(row.realized_pnl),
+        money(row.unrealized_pnl)
+      ])}
+    />
+  );
+}
+
 function StatusBadge({ status }: { status: string }) {
   return <span className={`missionBadge ${statusTone(status)}`}>{status}</span>;
 }
@@ -248,6 +367,11 @@ function formatMaybeNumber(value?: string | number | null) {
   return Number.isFinite(numeric) ? numeric.toFixed(4) : String(value);
 }
 
+function percent(value?: string | number | null) {
+  const numeric = Number(value ?? 0);
+  return Number.isFinite(numeric) ? `${(numeric * 100).toFixed(1)}%` : "0.0%";
+}
+
 function tone(status: MissionControlStatus): "neutral" | "success" | "warning" | "error" {
   if (status === "Healthy") return "success";
   if (status === "Error") return "error";
@@ -257,7 +381,7 @@ function tone(status: MissionControlStatus): "neutral" | "success" | "warning" |
 
 function statusTone(status: string) {
   if (["Healthy", "Research Opportunity", "Setup Review"].includes(status)) return "success";
-  if (["Warning", "Stale", "Stale Data", "Scheduler Error"].includes(status)) return "warning";
+  if (["Warning", "Stale", "Stale Data", "Scheduler Error", "Paused"].includes(status)) return "warning";
   if (status === "Error" || status === "Avoid") return "error";
   return "neutral";
 }

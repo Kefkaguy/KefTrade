@@ -7,6 +7,7 @@ import psycopg
 
 from app.db import connect
 from app.services.daily_research_reports import auto_generate_daily_report_after_scheduler_run
+from app.services.deployment_management import deployment_due_for_scheduler
 from app.services.evidence_alerts import create_scheduler_error_alert
 from app.services.paper_trading import PaperTradingError, log_event, run_deployment_scan
 
@@ -75,7 +76,8 @@ def update_scheduler_status(conn: psycopg.Connection, enabled: bool | None = Non
 
 
 def active_simulation_deployments(conn: psycopg.Connection) -> list[dict[str, Any]]:
-    return list(
+    now = datetime.now(UTC)
+    rows = list(
         conn.execute(
             """
             SELECT *
@@ -86,6 +88,7 @@ def active_simulation_deployments(conn: psycopg.Connection) -> list[dict[str, An
             """
         ).fetchall()
     )
+    return [row for row in rows if deployment_due_for_scheduler(dict(row), now)]
 
 
 async def run_scheduled_scan_once(conn: psycopg.Connection | None = None, *, force: bool = False) -> dict[str, Any]:

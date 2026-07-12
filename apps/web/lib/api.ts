@@ -481,6 +481,11 @@ export type StrategyDeployment = {
   simulation_only: boolean;
   created_at?: string;
   paused_at?: string | null;
+  resumed_at?: string | null;
+  scan_cadence?: "scheduler" | "manual" | "15m" | "30m" | "60m" | "daily";
+  max_simulated_exposure_pct?: string | number;
+  health_status?: string;
+  health_checked_at?: string | null;
   last_scan_at?: string | null;
   last_signal?: string | null;
   last_check_result?: string | null;
@@ -743,6 +748,79 @@ export type DailyReportAnalytics = {
     narrative: string;
     simulation_only: boolean;
   };
+};
+
+export type DeploymentConflict = {
+  type: string;
+  severity: "info" | "warning" | "critical" | string;
+  deployment_id: number;
+  symbol?: string;
+  message: string;
+  related_deployment_ids?: number[];
+  exposure_pct?: string | number;
+  limit_pct?: string | number;
+};
+
+export type ManagedDeployment = StrategyDeployment & {
+  health_status: "Healthy" | "Warning" | "Error" | "Paused" | string;
+  health_detail: string;
+  position?: PaperPosition | null;
+  exposure_pct: string | number;
+  orders_count: number;
+  fills_count: number;
+  latest_alert?: EvidenceAlert | null;
+  audit_events: ExecutionLog[];
+  conflicts: DeploymentConflict[];
+  performance: {
+    realized_pnl: string | number;
+    unrealized_pnl: string | number;
+    market_value: string | number;
+    exposure_pct: string | number;
+    orders: number;
+    fills: number;
+    last_signal?: string | null;
+    last_scan_at?: string | null;
+  };
+};
+
+export type DeploymentComparisonRow = {
+  name: string;
+  deployment_count: number;
+  active_count: number;
+  paused_count: number;
+  healthy_count: number;
+  warning_count: number;
+  error_count: number;
+  orders: number;
+  fills: number;
+  realized_pnl: string | number;
+  unrealized_pnl: string | number;
+};
+
+export type DeploymentManagementSnapshot = {
+  generated_at: string;
+  simulation_only: boolean;
+  safety: string;
+  summary: Record<string, string | number>;
+  portfolio_risk: {
+    cash: string | number;
+    equity: string | number;
+    market_value: string | number;
+    realized_pnl: string | number;
+    unrealized_pnl: string | number;
+    gross_exposure_pct: string | number;
+    open_positions: number;
+    active_deployments: number;
+    conflict_count: number;
+    exposure_limit_breaches: number;
+    top_positions: PaperPosition[];
+    simulation_only: boolean;
+  };
+  deployments: ManagedDeployment[];
+  conflicts: DeploymentConflict[];
+  asset_comparison: DeploymentComparisonRow[];
+  strategy_comparison: DeploymentComparisonRow[];
+  audit_history: ExecutionLog[];
 };
 
 export type ResearchAssetInput = {
@@ -1071,8 +1149,28 @@ export function pauseStrategyDeployment(deploymentId: number) {
   return request<StrategyDeployment>(`/paper/deployments/${deploymentId}/pause`, { method: "POST" });
 }
 
+export function resumeStrategyDeployment(deploymentId: number) {
+  return request<StrategyDeployment>(`/paper/deployments/${deploymentId}/resume`, { method: "POST" });
+}
+
+export function updateDeploymentControls(deploymentId: number, payload: { scan_cadence?: string; max_simulated_exposure_pct?: number }) {
+  return request<StrategyDeployment>(`/paper/deployments/${deploymentId}/controls`, { method: "PUT", body: JSON.stringify(payload) });
+}
+
+export function bulkPauseDeployments(deploymentIds?: number[]) {
+  return request<Record<string, unknown>>("/paper/deployments/bulk-pause", { method: "POST", body: JSON.stringify({ deployment_ids: deploymentIds }) });
+}
+
+export function bulkScanDeployments(deploymentIds?: number[]) {
+  return request<Record<string, unknown>>("/paper/deployments/bulk-scan", { method: "POST", body: JSON.stringify({ deployment_ids: deploymentIds }), timeoutMs: 180000 });
+}
+
 export function getMissionControl() {
   return request<MissionControlSnapshot>("/paper/mission-control", { timeoutMs: 60000 });
+}
+
+export function getDeploymentManagement() {
+  return request<DeploymentManagementSnapshot>("/paper/deployment-management", { timeoutMs: 60000 });
 }
 
 export function getDailyResearchReports(limit = 30) {

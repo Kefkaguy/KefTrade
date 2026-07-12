@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 import psycopg
 
 from app.db import get_connection
+from app.services.deployment_management import build_deployment_management, bulk_pause_deployments, bulk_scan_deployments, resume_deployment, update_deployment_controls
 from app.services.daily_research_reports import build_daily_report_analytics, generate_daily_research_report, get_daily_research_report, list_daily_research_reports
 from app.services.evidence_alerts import acknowledge_evidence_alert, list_evidence_alerts
 from app.services.mission_control import get_mission_control
@@ -72,6 +73,15 @@ class StrategyDeploymentCreate(BaseModel):
 class SchedulerUpdate(BaseModel):
     enabled: bool | None = None
     cadence: str | None = None
+
+
+class DeploymentControlsUpdate(BaseModel):
+    scan_cadence: str | None = None
+    max_simulated_exposure_pct: Decimal | None = Field(default=None, gt=0, le=1)
+
+
+class BulkDeploymentAction(BaseModel):
+    deployment_ids: list[int] | None = None
 
 
 class SignalReviewNote(BaseModel):
@@ -212,6 +222,38 @@ def pause_strategy_deployment(deployment_id: int, conn: psycopg.Connection = Dep
         raise paper_error(error) from error
 
 
+@router.post("/deployments/{deployment_id}/resume")
+def resume_strategy_deployment(deployment_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return resume_deployment(conn, deployment_id)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
+
+
+@router.put("/deployments/{deployment_id}/controls")
+def update_strategy_deployment_controls(deployment_id: int, payload: DeploymentControlsUpdate, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return update_deployment_controls(conn, deployment_id, scan_cadence=payload.scan_cadence, max_simulated_exposure_pct=payload.max_simulated_exposure_pct)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
+
+
+@router.post("/deployments/bulk-pause")
+def bulk_pause_strategy_deployments(payload: BulkDeploymentAction, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return bulk_pause_deployments(conn, payload.deployment_ids)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
+
+
+@router.post("/deployments/bulk-scan")
+async def bulk_scan_strategy_deployments(payload: BulkDeploymentAction, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return await bulk_scan_deployments(conn, payload.deployment_ids)
+    except PaperTradingError as error:
+        raise paper_error(error) from error
+
+
 @router.get("/deployments")
 def get_deployments(account_id: int | None = Query(None), conn: psycopg.Connection = Depends(get_connection)) -> list[dict[str, Any]]:
     return list_deployments(conn, account_id)
@@ -234,6 +276,11 @@ def get_evidence_alerts(
 @router.get("/mission-control")
 def get_research_mission_control(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     return get_mission_control(conn)
+
+
+@router.get("/deployment-management")
+def get_multi_asset_deployment_management(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    return build_deployment_management(conn)
 
 
 @router.post("/daily-reports")
