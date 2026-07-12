@@ -1,7 +1,7 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
-from app.services.daily_research_reports import build_daily_summary, generate_daily_research_report
+from app.services.daily_research_reports import auto_generate_daily_report_after_scheduler_run, build_daily_report_analytics, build_daily_summary, generate_daily_research_report
 
 
 class Result:
@@ -46,6 +46,11 @@ class DailyReportConn:
         ]
 
     def execute(self, query, params=None):
+        if "SELECT *" in query and "FROM daily_research_reports" in query and "report_date = %s" in query:
+            row = self.report_rows.get(params[0])
+            return Result([row] if row else [])
+        if "SELECT *" in query and "FROM daily_research_reports" in query and "ORDER BY report_date ASC" in query:
+            return Result(sorted(self.report_rows.values(), key=lambda row: row["report_date"]))
         if "INSERT INTO daily_research_reports" in query:
             row = {
                 "id": 1,
@@ -57,6 +62,9 @@ class DailyReportConn:
             }
             self.report_rows[params[0]] = row
             return Result([row])
+        if "INSERT INTO execution_logs" in query:
+            self.logs.append({"id": len(self.logs) + 1, "event_type": params[0], "message": params[1], "payload": jsonb_value(params[2]), "created_at": datetime.now(UTC), "simulation_only": True})
+            return Result([])
         if "FROM execution_logs" in query:
             return Result([row for row in self.logs if row["simulation_only"] is True])
         if "FROM evidence_alerts" in query and "JOIN monitored" not in query:
@@ -111,3 +119,48 @@ def test_daily_report_is_persisted_as_simulation_only_markdown() -> None:
     assert "Daily Research Report" in report["markdown_report"]
     assert "No live trading" in report["markdown_report"]
     assert conn.commits == 1
+
+
+def test_auto_generation_after_final_scheduled_scan_prevents_duplicates() -> None:
+    conn = DailyReportConn()
+    completed_at = datetime(2026, 7, 12, 23, 45, tzinfo=UTC)
+    next_run_at = datetime(2026, 7, 13, 0, 45, tzinfo=UTC)
+
+    first = auto_generate_daily_report_after_scheduler_run(conn, completed_at=completed_at, next_run_at=next_run_at)
+    second = auto_generate_daily_report_after_scheduler_run(conn, completed_at=completed_at, next_run_at=next_run_at)
+
+    assert first["status"] == "created"
+    assert second["status"] == "exists"
+    assert len(conn.report_rows) == 1
+    assert any(log["event_type"] == "daily_research_report_duplicate_prevented" for log in conn.logs)
+
+
+def test_auto_generation_skips_non_final_scheduled_scan() -> None:
+    conn = DailyReportConn()
+    completed_at = datetime(2026, 7, 12, 12, tzinfo=UTC)
+    next_run_at = datetime(2026, 7, 12, 13, tzinfo=UTC)
+
+    result = auto_generate_daily_report_after_scheduler_run(conn, completed_at=completed_at, next_run_at=next_run_at)
+
+    assert result["status"] == "skipped"
+    assert conn.report_rows == {}
+
+
+def test_daily_report_analytics_builds_trends_comparisons_and_weekly_summary() -> None:
+    conn = DailyReportConn()
+    for offset in range(3):
+        report_date = date(2026, 7, 10 + offset)
+        report = generate_daily_research_report(conn, report_date)
+        report["summary"]["assets_scanned"]["symbols"] = ["TSLA", "AAPL"] if offset else ["TSLA"]
+        report["summary"]["setups_found"]["alerts"] = [{"symbol": "TSLA", "strategy_id": "momentum_bull_v2_007"}]
+        report["summary"]["no_setup_decisions"]["reviews"] = [{"symbol": "AAPL", "strategy_id": "momentum_bull_v2"}]
+        conn.report_rows[report_date] = report
+
+    analytics = build_daily_report_analytics(conn)
+
+    assert len(analytics["series"]) == 3
+    assert analytics["windows"]["7d"]["setups_found"] >= 3
+    assert analytics["asset_comparison"][0]["symbol"] in {"AAPL", "TSLA"}
+    assert analytics["strategy_comparison"]
+    assert analytics["recurring_operational_failures"]
+    assert analytics["weekly_summary"]["simulation_only"] is True

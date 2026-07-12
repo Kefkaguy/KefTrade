@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 import psycopg
 
 from app.db import get_connection
-from app.services.daily_research_reports import generate_daily_research_report, get_daily_research_report, list_daily_research_reports
+from app.services.daily_research_reports import build_daily_report_analytics, generate_daily_research_report, get_daily_research_report, list_daily_research_reports
 from app.services.evidence_alerts import acknowledge_evidence_alert, list_evidence_alerts
 from app.services.mission_control import get_mission_control
 from app.services.paper_trading import (
@@ -244,6 +244,11 @@ def create_daily_research_report(report_date: date | None = Query(None), conn: p
 @router.get("/daily-reports")
 def get_daily_research_reports(limit: int = Query(30, ge=1, le=365), conn: psycopg.Connection = Depends(get_connection)) -> list[dict[str, Any]]:
     return list_daily_research_reports(conn, limit=limit)
+
+
+@router.get("/daily-reports/analytics")
+def get_daily_research_report_analytics(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    return build_daily_report_analytics(conn)
 
 
 @router.get("/daily-reports/{report_date}")

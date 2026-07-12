@@ -20,8 +20,12 @@ SCHEDULER_ERROR_EVENTS = {"paper_scheduler_scan_error", "paper_scheduler_loop_er
 STALE_EVENTS = {"paper_scan_stale_data_skipped"}
 
 
-def generate_daily_research_report(conn: psycopg.Connection, report_date: date | None = None) -> dict[str, Any]:
+def generate_daily_research_report(conn: psycopg.Connection, report_date: date | None = None, *, regenerate: bool = True) -> dict[str, Any]:
     report_date = report_date or datetime.now(UTC).date()
+    if not regenerate:
+        existing = get_daily_research_report(conn, report_date)
+        if existing:
+            return {**existing, "created": False}
     summary = build_daily_summary(conn, report_date)
     markdown = build_markdown_report(summary)
     row = conn.execute(
@@ -38,7 +42,39 @@ def generate_daily_research_report(conn: psycopg.Connection, report_date: date |
         (report_date, Jsonb(jsonable_encoder(summary)), markdown),
     ).fetchone()
     conn.commit()
-    return dict(row)
+    return {**dict(row), "created": True}
+
+
+def auto_generate_daily_report_after_scheduler_run(
+    conn: psycopg.Connection,
+    *,
+    completed_at: datetime | None = None,
+    next_run_at: datetime | None = None,
+) -> dict[str, Any]:
+    completed_at = completed_at or datetime.now(UTC)
+    if completed_at.tzinfo is None:
+        completed_at = completed_at.replace(tzinfo=UTC)
+    else:
+        completed_at = completed_at.astimezone(UTC)
+    if next_run_at is None:
+        return {"status": "skipped", "reason": "next scheduled run is unknown", "simulation_only": True}
+    if next_run_at.tzinfo is None:
+        next_run_at = next_run_at.replace(tzinfo=UTC)
+    else:
+        next_run_at = next_run_at.astimezone(UTC)
+    if next_run_at.date() <= completed_at.date():
+        return {"status": "skipped", "reason": "scheduled run was not the final run of the UTC day", "simulation_only": True}
+
+    report = generate_daily_research_report(conn, completed_at.date(), regenerate=False)
+    status = "created" if report.get("created") else "exists"
+    log_daily_report_event(
+        conn,
+        "daily_research_report_auto_generated" if status == "created" else "daily_research_report_duplicate_prevented",
+        f"Daily research report for {completed_at.date().isoformat()} {status}.",
+        {"report_date": completed_at.date().isoformat(), "status": status, "simulation_only": True},
+    )
+    conn.commit()
+    return {"status": status, "report": report, "simulation_only": True}
 
 
 def list_daily_research_reports(conn: psycopg.Connection, limit: int = 30) -> list[dict[str, Any]]:
@@ -67,6 +103,34 @@ def get_daily_research_report(conn: psycopg.Connection, report_date: date) -> di
         (report_date,),
     ).fetchone()
     return dict(row) if row else None
+
+
+def build_daily_report_analytics(conn: psycopg.Connection) -> dict[str, Any]:
+    reports = list(
+        conn.execute(
+            """
+            SELECT *
+            FROM daily_research_reports
+            WHERE simulation_only = TRUE
+            ORDER BY report_date ASC
+            """
+        ).fetchall()
+    )
+    series = [analytics_row(row) for row in reports]
+    return {
+        "simulation_only": True,
+        "generated_at": datetime.now(UTC),
+        "series": series,
+        "windows": {
+            "7d": aggregate_window(series[-7:]),
+            "30d": aggregate_window(series[-30:]),
+            "all_time": aggregate_window(series),
+        },
+        "asset_comparison": compare_assets(reports),
+        "strategy_comparison": compare_strategies(reports),
+        "recurring_operational_failures": recurring_operational_failures(reports),
+        "weekly_summary": weekly_research_summary(series[-7:], reports[-7:]),
+    }
 
 
 def build_daily_summary(conn: psycopg.Connection, report_date: date) -> dict[str, Any]:
@@ -246,6 +310,162 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
             "## Important Alerts",
             *(f"- {alert['symbol']} / {alert['severity']} / {alert['alert_type']}: {alert['verdict']}" for alert in alerts),
         ]
+    )
+
+
+def analytics_row(report: dict[str, Any]) -> dict[str, Any]:
+    summary = report.get("summary") or {}
+    freshness = summary.get("data_freshness", {}).get("counts", {})
+    return {
+        "report_date": str(report.get("report_date")),
+        "scheduler_uptime": numeric(summary.get("scheduler_uptime")),
+        "stale_data_blocks": int(summary.get("stale_data_blocks", {}).get("count") or 0),
+        "setups_found": int(summary.get("setups_found", {}).get("count") or 0),
+        "no_setup_decisions": int(summary.get("no_setup_decisions", {}).get("count") or 0),
+        "realized_pnl": numeric(summary.get("pnl", {}).get("realized")),
+        "unrealized_pnl": numeric(summary.get("pnl", {}).get("unrealized")),
+        "equity": numeric(summary.get("pnl", {}).get("equity")),
+        "scheduler_errors": int(summary.get("scheduler_errors", {}).get("count") or 0),
+        "paper_orders": int(summary.get("paper_orders", {}).get("count") or 0),
+        "paper_fills": int(summary.get("paper_fills", {}).get("count") or 0),
+        "important_alerts": int(summary.get("important_alerts", {}).get("count") or 0),
+        "fresh_assets": int(freshness.get("Healthy") or 0),
+        "warning_assets": int(freshness.get("Warning") or 0),
+        "stale_assets": int(freshness.get("Stale") or 0),
+    }
+
+
+def aggregate_window(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    if not rows:
+        return {
+            "report_count": 0,
+            "avg_scheduler_uptime": None,
+            "stale_data_blocks": 0,
+            "setups_found": 0,
+            "no_setup_decisions": 0,
+            "scheduler_errors": 0,
+            "paper_orders": 0,
+            "paper_fills": 0,
+            "realized_pnl_change": 0,
+            "unrealized_pnl_change": 0,
+        }
+    uptime_values = [row["scheduler_uptime"] for row in rows if row["scheduler_uptime"] is not None]
+    return {
+        "report_count": len(rows),
+        "avg_scheduler_uptime": round(sum(uptime_values) / len(uptime_values), 2) if uptime_values else None,
+        "stale_data_blocks": sum(row["stale_data_blocks"] for row in rows),
+        "setups_found": sum(row["setups_found"] for row in rows),
+        "no_setup_decisions": sum(row["no_setup_decisions"] for row in rows),
+        "scheduler_errors": sum(row["scheduler_errors"] for row in rows),
+        "paper_orders": sum(row["paper_orders"] for row in rows),
+        "paper_fills": sum(row["paper_fills"] for row in rows),
+        "realized_pnl_change": rows[-1]["realized_pnl"] - rows[0]["realized_pnl"],
+        "unrealized_pnl_change": rows[-1]["unrealized_pnl"] - rows[0]["unrealized_pnl"],
+    }
+
+
+def compare_assets(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    assets: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        summary = report.get("summary") or {}
+        for symbol in summary.get("assets_scanned", {}).get("symbols") or []:
+            row = assets.setdefault(symbol, {"symbol": symbol, "scanned_days": 0, "setups": 0, "stale_blocks": 0, "important_alerts": 0})
+            row["scanned_days"] += 1
+        for item in summary.get("setups_found", {}).get("alerts", []) + summary.get("setups_found", {}).get("reviews", []):
+            symbol = item.get("symbol")
+            if symbol:
+                assets.setdefault(symbol, {"symbol": symbol, "scanned_days": 0, "setups": 0, "stale_blocks": 0, "important_alerts": 0})["setups"] += 1
+        for item in summary.get("stale_data_blocks", {}).get("items", []):
+            symbol = item.get("symbol")
+            if symbol:
+                assets.setdefault(symbol, {"symbol": symbol, "scanned_days": 0, "setups": 0, "stale_blocks": 0, "important_alerts": 0})["stale_blocks"] += 1
+        for item in summary.get("important_alerts", {}).get("items", []):
+            symbol = item.get("symbol")
+            if symbol and symbol != "SYSTEM":
+                assets.setdefault(symbol, {"symbol": symbol, "scanned_days": 0, "setups": 0, "stale_blocks": 0, "important_alerts": 0})["important_alerts"] += 1
+    return sorted(assets.values(), key=lambda row: (-row["stale_blocks"], -row["setups"], row["symbol"]))
+
+
+def compare_strategies(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    strategies: dict[str, dict[str, Any]] = {}
+    for report in reports:
+        summary = report.get("summary") or {}
+        for item in summary.get("setups_found", {}).get("alerts", []) + summary.get("setups_found", {}).get("reviews", []):
+            strategy = item.get("strategy_id") or "unknown"
+            row = strategies.setdefault(strategy, {"strategy": strategy, "setups": 0, "no_setup": 0, "important_alerts": 0})
+            row["setups"] += 1
+        for item in summary.get("no_setup_decisions", {}).get("reviews", []):
+            strategy = item.get("strategy_id") or "unknown"
+            row = strategies.setdefault(strategy, {"strategy": strategy, "setups": 0, "no_setup": 0, "important_alerts": 0})
+            row["no_setup"] += 1
+        for item in summary.get("important_alerts", {}).get("items", []):
+            strategy = item.get("strategy_id") or "unknown"
+            row = strategies.setdefault(strategy, {"strategy": strategy, "setups": 0, "no_setup": 0, "important_alerts": 0})
+            row["important_alerts"] += 1
+    return sorted(strategies.values(), key=lambda row: (-row["important_alerts"], -row["setups"], row["strategy"]))
+
+
+def recurring_operational_failures(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    failures: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for report in reports:
+        summary = report.get("summary") or {}
+        report_date = str(report.get("report_date"))
+        for item in summary.get("stale_data_blocks", {}).get("items", []) + summary.get("scheduler_errors", {}).get("items", []):
+            symbol = item.get("symbol") or "SYSTEM"
+            event_type = item.get("event_type") or "unknown"
+            message = (item.get("message") or "").strip()[:160]
+            key = (symbol, event_type, message)
+            row = failures.setdefault(key, {"symbol": symbol, "event_type": event_type, "message": message, "count": 0, "dates": []})
+            row["count"] += 1
+            if report_date not in row["dates"]:
+                row["dates"].append(report_date)
+    return sorted(failures.values(), key=lambda row: (-row["count"], row["symbol"], row["event_type"]))[:20]
+
+
+def weekly_research_summary(series: list[dict[str, Any]], reports: list[dict[str, Any]]) -> dict[str, Any]:
+    window = aggregate_window(series)
+    failures = recurring_operational_failures(reports)[:5]
+    assets = compare_assets(reports)[:5]
+    strategies = compare_strategies(reports)[:5]
+    return {
+        "window": "last_7_reports",
+        "summary": window,
+        "top_assets": assets,
+        "top_strategies": strategies,
+        "recurring_failures": failures,
+        "narrative": weekly_narrative(window, failures),
+        "simulation_only": True,
+    }
+
+
+def weekly_narrative(window: dict[str, Any], failures: list[dict[str, Any]]) -> str:
+    if not window["report_count"]:
+        return "No stored daily reports are available for the weekly summary."
+    parts = [
+        f"{window['report_count']} stored daily report(s) reviewed.",
+        f"{window['setups_found']} setup review item(s), {window['no_setup_decisions']} no-setup decision(s), and {window['stale_data_blocks']} stale-data block(s) were recorded.",
+    ]
+    if failures:
+        parts.append(f"Most recurring operational issue: {failures[0]['event_type']} on {failures[0]['symbol']} ({failures[0]['count']} occurrence(s)).")
+    return " ".join(parts)
+
+
+def numeric(value: Any) -> float:
+    if value is None:
+        return 0.0
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def log_daily_report_event(conn: psycopg.Connection, event_type: str, message: str, payload: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        INSERT INTO execution_logs(account_id, deployment_id, order_id, event_type, message, payload, simulation_only)
+        VALUES (NULL, NULL, NULL, %s, %s, %s, TRUE)
+        """,
+        (event_type, message, Jsonb(jsonable_encoder(payload))),
     )
 
 

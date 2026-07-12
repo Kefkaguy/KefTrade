@@ -6,6 +6,7 @@ from typing import Any
 import psycopg
 
 from app.db import connect
+from app.services.daily_research_reports import auto_generate_daily_report_after_scheduler_run
 from app.services.evidence_alerts import create_scheduler_error_alert
 from app.services.paper_trading import PaperTradingError, log_event, run_deployment_scan
 
@@ -175,9 +176,10 @@ def mark_scheduler_result(
     errors: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     errors = errors or []
+    completed_at = datetime.now(UTC)
     next_run_at = None
     if state["enabled"] and state["cadence"] != "manual":
-        next_run_at = datetime.now(UTC) + CADENCE_DELTAS[state["cadence"]]
+        next_run_at = completed_at + CADENCE_DELTAS[state["cadence"]]
     latest_error = "; ".join(error["error"] for error in errors) if errors else None
     row = conn.execute(
         """
@@ -196,7 +198,10 @@ def mark_scheduler_result(
     ).fetchone()
     log_event(conn, None, None, None, "paper_scheduler_run_finished", message, {"status": status, "results": results, "errors": errors, "simulation_only": True})
     conn.commit()
-    return {"status": status, "message": message, "results": results, "errors": errors, "scheduler": dict(row), "simulation_only": True}
+    daily_report = None
+    with suppress(Exception):
+        daily_report = auto_generate_daily_report_after_scheduler_run(conn, completed_at=completed_at, next_run_at=next_run_at)
+    return {"status": status, "message": message, "results": results, "errors": errors, "scheduler": dict(row), "daily_report": daily_report, "simulation_only": True}
 
 
 async def scheduler_loop() -> None:

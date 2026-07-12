@@ -710,6 +710,41 @@ export type DailyResearchReport = {
   simulation_only: boolean;
 };
 
+export type DailyReportAnalytics = {
+  simulation_only: boolean;
+  generated_at: string;
+  series: Array<{
+    report_date: string;
+    scheduler_uptime: number | null;
+    stale_data_blocks: number;
+    setups_found: number;
+    no_setup_decisions: number;
+    realized_pnl: number;
+    unrealized_pnl: number;
+    equity: number;
+    scheduler_errors: number;
+    paper_orders: number;
+    paper_fills: number;
+    important_alerts: number;
+    fresh_assets: number;
+    warning_assets: number;
+    stale_assets: number;
+  }>;
+  windows: Record<string, Record<string, number | string | null>>;
+  asset_comparison: Array<Record<string, string | number>>;
+  strategy_comparison: Array<Record<string, string | number>>;
+  recurring_operational_failures: Array<Record<string, unknown>>;
+  weekly_summary: {
+    window: string;
+    summary: Record<string, number | string | null>;
+    top_assets: Array<Record<string, string | number>>;
+    top_strategies: Array<Record<string, string | number>>;
+    recurring_failures: Array<Record<string, unknown>>;
+    narrative: string;
+    simulation_only: boolean;
+  };
+};
+
 export type ResearchAssetInput = {
   symbol: string;
   timeframe?: string;
@@ -1047,4 +1082,8 @@ export function getDailyResearchReports(limit = 30) {
 export function generateDailyResearchReport(reportDate?: string) {
   const suffix = reportDate ? `?report_date=${encodeURIComponent(reportDate)}` : "";
   return request<DailyResearchReport>(`/paper/daily-reports${suffix}`, { method: "POST", timeoutMs: 60000 });
+}
+
+export function getDailyReportAnalytics() {
+  return request<DailyReportAnalytics>("/paper/daily-reports/analytics", { timeoutMs: 60000 });
 }
