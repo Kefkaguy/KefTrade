@@ -7,6 +7,7 @@ import psycopg
 
 from app.db import get_connection
 from app.services.evidence_alerts import acknowledge_evidence_alert, list_evidence_alerts
+from app.services.mission_control import get_mission_control
 from app.services.paper_trading import (
     PaperTradingError,
     account_balances,
@@ -226,6 +227,11 @@ def get_evidence_alerts(
     conn: psycopg.Connection = Depends(get_connection),
 ) -> list[dict[str, Any]]:
     return list_evidence_alerts(conn, limit=limit, include_acknowledged=include_acknowledged)
+
+
+@router.get("/mission-control")
+def get_research_mission_control(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    return get_mission_control(conn)
 
 
 @router.get("/signal-reviews")

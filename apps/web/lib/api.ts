@@ -574,6 +574,117 @@ export type PaperScanResult = {
   simulation_only: boolean;
 };
 
+export type MissionControlStatus = "Healthy" | "Warning" | "Stale" | "Error" | "Disabled";
+
+export type MissionControlAsset = {
+  symbol: string;
+  asset_class: string;
+  timeframe: string;
+  selected_strategy: string;
+  deployment_status: string;
+  status: string;
+  latest_verdict: string;
+  evidence_score: string;
+  profit_factor?: string | number | null;
+  expectancy?: string | number | null;
+  trade_count?: number | null;
+  max_drawdown?: string | number | null;
+  current_regime?: string | null;
+  latest_candle_timestamp?: string | null;
+  data_age_hours?: number | null;
+  data_freshness: MissionControlStatus;
+  data_freshness_detail: string;
+  latest_scan_timestamp?: string | null;
+  alert_severity?: string | null;
+  paper_position_status: string;
+  simulated_unrealized_pnl?: string | number | null;
+  links: Record<string, string>;
+};
+
+export type MissionControlQueueItem = {
+  symbol: string;
+  reason: string;
+  severity: string;
+  timestamp?: string | null;
+  strategy: string;
+  current_verdict: string;
+  priority: number;
+  action: { label: string; href: string };
+};
+
+export type MissionControlDeployment = {
+  id: number;
+  asset: string;
+  timeframe: string;
+  strategy: string;
+  candidate_identifier: string;
+  deployment_state: string;
+  last_scanned_candle?: string | null;
+  last_decision?: string | null;
+  last_successful_scan?: string | null;
+  latest_alert?: EvidenceAlert | null;
+  paper_position?: PaperPosition | null;
+  simulated_unrealized_pnl?: string | number | null;
+  links: Record<string, string>;
+};
+
+export type MissionControlActivity = {
+  event_type: string;
+  symbol?: string | null;
+  description: string;
+  timestamp?: string | null;
+  status: string;
+  link?: string | null;
+};
+
+export type MissionControlSnapshot = {
+  generated_at: string;
+  simulation_only: boolean;
+  safety: {
+    status: string;
+    detail: string;
+    simulation_only: boolean;
+    live_routing_enabled: boolean;
+    broker_order_routing: string;
+  };
+  system_health: {
+    overall_status: MissionControlStatus;
+    research_engine_status: MissionControlStatus;
+    scheduler_status: MissionControlStatus;
+    scheduler_cadence?: string | null;
+    last_successful_scan?: string | null;
+    last_successful_scheduler_run?: string | null;
+    next_scheduled_scan?: string | null;
+    latest_completed_candle?: string | null;
+    overall_data_freshness: MissionControlStatus;
+    active_deployment_count: number;
+    unacknowledged_alert_count: number;
+    simulation_safety_status: string;
+    scheduler_failures: number;
+    duplicate_candle_skips: number;
+  };
+  research_summary: Record<string, string | number | null>;
+  assets: MissionControlAsset[];
+  review_queue: MissionControlQueueItem[];
+  deployments: MissionControlDeployment[];
+  paper_account: {
+    simulation_only: boolean;
+    account_count: number;
+    equity: string | number;
+    cash: string | number;
+    open_positions: number;
+    realized_pnl: string | number;
+    unrealized_pnl: string | number;
+    recent_simulated_orders: PaperOrder[];
+    recent_simulated_fills: PaperFill[];
+    recent_equity_curve: PaperEquityPoint[];
+    label: string;
+  };
+  recent_activity: MissionControlActivity[];
+  daily_summary: Record<string, string | number | null>;
+  subsystem_errors: Array<{ subsystem: string; error: string }>;
+};
+
 export type ResearchAssetInput = {
   symbol: string;
   timeframe?: string;
@@ -898,4 +1009,8 @@ export function runPaperSchedulerNow() {
 
 export function pauseStrategyDeployment(deploymentId: number) {
   return request<StrategyDeployment>(`/paper/deployments/${deploymentId}/pause`, { method: "POST" });
+}
+
+export function getMissionControl() {
+  return request<MissionControlSnapshot>("/paper/mission-control", { timeoutMs: 60000 });
 }

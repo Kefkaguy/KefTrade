@@ -3,11 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { Aperture, ArrowUpRight, BarChart3, Beaker, Bot, BrainCircuit, BriefcaseBusiness, CandlestickChart, ChevronRight, CircleDot, FlaskConical, Grid2X2, Layers3, Menu, Moon, Orbit, PanelLeftClose, Search, Settings, ShieldCheck, Sparkles, Sun, Target, X } from "lucide-react";
+import { Aperture, ArrowUpRight, BarChart3, Beaker, Bot, BrainCircuit, BriefcaseBusiness, CandlestickChart, ChevronRight, CircleDot, FlaskConical, Grid2X2, Layers3, Menu, Moon, Orbit, PanelLeftClose, Radar, Search, Settings, ShieldCheck, Sparkles, Sun, Target, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { CopilotPanel } from "@/components/CopilotPanel";
 
 const primaryItems = [
+  { href: "/mission-control", label: "Mission Control", icon: Radar },
   { href: "/", label: "Command", icon: Aperture },
   { href: "/dashboard", label: "Research", icon: BrainCircuit },
   { href: "/portfolio", label: "Portfolio", icon: BriefcaseBusiness },

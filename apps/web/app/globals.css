@@ -1210,6 +1210,104 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, var(--panel));
 .paperHero h2 { font-size: clamp(35px, 5vw, 66px); font-weight: 490; letter-spacing: -0.065em; }
 .paperHero p { color: rgba(128, 136, 115, 0.78); }
 
+.missionControl .tablePanel table {
+  min-width: 1280px;
+}
+
+.missionHero {
+  align-items: stretch;
+}
+
+.safetyStack {
+  display: grid;
+  gap: 10px;
+  align-content: center;
+  min-width: min(360px, 100%);
+}
+
+.safetyStack span,
+.warningList span,
+.inlineLinks,
+.tableLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.safetyStack span,
+.warningList span {
+  padding: 10px 12px;
+  border: 1px solid rgba(128, 136, 115, 0.2);
+  border-radius: 14px;
+  background: rgba(128, 136, 115, 0.08);
+  color: rgba(128, 136, 115, 0.88);
+  font-size: 12px;
+}
+
+.warningList {
+  display: grid;
+  gap: 8px;
+}
+
+.missionBadge {
+  display: inline-flex;
+  width: max-content;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  padding: 5px 8px;
+  font-family: "JetBrains Mono Variable", monospace;
+  font-size: 9px;
+  line-height: 1;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  background: var(--panel-soft);
+}
+
+.missionBadge.success {
+  border-color: color-mix(in srgb, var(--success) 45%, var(--line));
+  color: var(--success);
+}
+
+.missionBadge.warning {
+  border-color: color-mix(in srgb, var(--warning) 55%, var(--line));
+  color: var(--warning);
+}
+
+.missionBadge.error {
+  border-color: color-mix(in srgb, var(--error) 55%, var(--line));
+  color: var(--error);
+}
+
+.tableLink,
+.inlineLinks a {
+  color: var(--accent);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.inlineLinks {
+  flex-wrap: wrap;
+}
+
+.inlineLinks a {
+  padding: 5px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel-soft);
+}
+
+.compactTimeline {
+  max-height: 560px;
+  overflow: auto;
+  padding-right: 6px;
+}
+
+.metricGrid.twoCol {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .simulationBoundary {
   display: flex;
   align-items: center;
