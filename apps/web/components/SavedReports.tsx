@@ -43,10 +43,10 @@ export function SavedReports() {
   }
 
   return (
-    <div className="pageStack reportsPage">
+    <section className="savedReportsSection">
       <header className="pageHeader simpleHeader">
         <div>
-          <h1>Reports</h1>
+          <h1>Saved Browser Reports</h1>
           <p className="muted">Saved evidence reports from guided analysis. Reports are stored locally in this browser.</p>
         </div>
       </header>
@@ -75,6 +75,6 @@ export function SavedReports() {
       ) : (
         <EmptyState title="No saved reports yet." body="Run an analysis from Home, then save the report when the evidence answer is useful." />
       )}
-    </div>
+    </section>
   );
 }

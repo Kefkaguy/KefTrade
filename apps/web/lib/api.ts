@@ -685,6 +685,31 @@ export type MissionControlSnapshot = {
   subsystem_errors: Array<{ subsystem: string; error: string }>;
 };
 
+export type DailyResearchReport = {
+  id: number;
+  report_date: string;
+  summary: {
+    report_date: string;
+    assets_scanned: { count: number; symbols: string[] };
+    setups_found: { count: number; alerts: Array<Record<string, unknown>>; reviews: Array<Record<string, unknown>> };
+    no_setup_decisions: { count: number; reviews: Array<Record<string, unknown>> };
+    stale_data_blocks: { count: number; items: Array<Record<string, unknown>> };
+    scheduler_errors: { count: number; items: Array<Record<string, unknown>> };
+    paper_orders: { count: number; items: Array<Record<string, unknown>> };
+    paper_fills: { count: number; items: Array<Record<string, unknown>> };
+    pnl: { realized: string | number; unrealized: string | number; equity: string | number; label: string };
+    data_freshness: { counts: Record<string, number>; assets: Array<Record<string, unknown>> };
+    scheduler_uptime: string | number | null;
+    important_alerts: { count: number; items: Array<Record<string, unknown>> };
+    scan_activity: { count: number; items: Array<Record<string, unknown>> };
+    simulation_only: boolean;
+    safety: string;
+  };
+  markdown_report: string;
+  generated_at: string;
+  simulation_only: boolean;
+};
+
 export type ResearchAssetInput = {
   symbol: string;
   timeframe?: string;
@@ -1013,4 +1038,13 @@ export function pauseStrategyDeployment(deploymentId: number) {
 
 export function getMissionControl() {
   return request<MissionControlSnapshot>("/paper/mission-control", { timeoutMs: 60000 });
+}
+
+export function getDailyResearchReports(limit = 30) {
+  return request<DailyResearchReport[]>(`/paper/daily-reports?limit=${limit}`, { timeoutMs: 60000 });
+}
+
+export function generateDailyResearchReport(reportDate?: string) {
+  const suffix = reportDate ? `?report_date=${encodeURIComponent(reportDate)}` : "";
+  return request<DailyResearchReport>(`/paper/daily-reports${suffix}`, { method: "POST", timeoutMs: 60000 });
 }

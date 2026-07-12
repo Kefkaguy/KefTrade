@@ -1308,6 +1308,23 @@ tbody tr:hover { background: color-mix(in srgb, var(--accent) 5%, var(--panel));
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.dailyReportActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.savedReportsSection {
+  display: grid;
+  gap: 18px;
+}
+
+.compactReportBlock {
+  max-height: 420px;
+  overflow: auto;
+}
+
 .simulationBoundary {
   display: flex;
   align-items: center;
