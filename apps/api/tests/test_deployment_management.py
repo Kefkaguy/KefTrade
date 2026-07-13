@@ -87,6 +87,8 @@ class DeploymentConn:
         self.commits = 0
 
     def execute(self, query, params=None):
+        if "ALTER TABLE strategy_deployments" in query or "CREATE INDEX IF NOT EXISTS idx_strategy_deployments_control_center" in query or "DO $$" in query:
+            return Result([])
         if "INSERT INTO execution_logs" in query:
             self.logs.append({"event_type": params[3], "deployment_id": params[1], "message": params[4], "created_at": datetime.now(UTC), "simulation_only": True})
             return Result([])
@@ -167,6 +169,18 @@ def test_update_deployment_controls_validates_bounds() -> None:
         update_deployment_controls(conn, 1, scan_cadence="live", max_simulated_exposure_pct=Decimal("0.20"))
     with pytest.raises(PaperTradingError):
         update_deployment_controls(conn, 1, scan_cadence="30m", max_simulated_exposure_pct=Decimal("1.50"))
+
+
+def test_update_deployment_controls_self_heals_legacy_schema() -> None:
+    conn = DeploymentConn()
+    conn.deployments[0].pop("scan_cadence")
+    conn.deployments[0].pop("max_simulated_exposure_pct")
+
+    updated = update_deployment_controls(conn, 1, scan_cadence="daily", max_simulated_exposure_pct=Decimal("0.12"))
+
+    assert updated["scan_cadence"] == "daily"
+    assert updated["max_simulated_exposure_pct"] == Decimal("0.12")
+    assert any(log["event_type"] == "paper_deployment_controls_updated" for log in conn.logs)
 
 
 def test_bulk_pause_only_active_simulation_deployments() -> None:

@@ -18,6 +18,49 @@ CADENCE_DELTAS = {
 }
 
 
+def ensure_deployment_management_schema(conn: psycopg.Connection) -> None:
+    conn.execute(
+        """
+        ALTER TABLE strategy_deployments
+        ADD COLUMN IF NOT EXISTS scan_cadence TEXT NOT NULL DEFAULT 'scheduler',
+        ADD COLUMN IF NOT EXISTS max_simulated_exposure_pct NUMERIC(8, 6) NOT NULL DEFAULT 0.100000,
+        ADD COLUMN IF NOT EXISTS health_status TEXT NOT NULL DEFAULT 'unknown',
+        ADD COLUMN IF NOT EXISTS health_checked_at TIMESTAMPTZ,
+        ADD COLUMN IF NOT EXISTS resumed_at TIMESTAMPTZ
+        """
+    )
+    conn.execute(
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE strategy_deployments
+            DROP CONSTRAINT IF EXISTS strategy_deployments_scan_cadence_check;
+            ALTER TABLE strategy_deployments
+            ADD CONSTRAINT strategy_deployments_scan_cadence_check
+            CHECK (scan_cadence IN ('scheduler', 'manual', '15m', '30m', '60m', 'daily'));
+        END $$;
+        """
+    )
+    conn.execute(
+        """
+        DO $$
+        BEGIN
+            ALTER TABLE strategy_deployments
+            DROP CONSTRAINT IF EXISTS strategy_deployments_exposure_limit_check;
+            ALTER TABLE strategy_deployments
+            ADD CONSTRAINT strategy_deployments_exposure_limit_check
+            CHECK (max_simulated_exposure_pct > 0 AND max_simulated_exposure_pct <= 1);
+        END $$;
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_strategy_deployments_control_center
+        ON strategy_deployments(status, simulation_only, symbol, timeframe, strategy_name)
+        """
+    )
+
+
 def deployment_due_for_scheduler(deployment: dict[str, Any], now: datetime | None = None) -> bool:
     if deployment.get("status") != "active" or deployment.get("simulation_only") is not True:
         return False
@@ -40,6 +83,7 @@ def deployment_due_for_scheduler(deployment: dict[str, Any], now: datetime | Non
 
 
 def resume_deployment(conn: psycopg.Connection, deployment_id: int) -> dict[str, Any]:
+    ensure_deployment_management_schema(conn)
     row = conn.execute(
         """
         UPDATE strategy_deployments
@@ -66,6 +110,7 @@ def update_deployment_controls(
     scan_cadence: str | None = None,
     max_simulated_exposure_pct: Decimal | None = None,
 ) -> dict[str, Any]:
+    ensure_deployment_management_schema(conn)
     current = conn.execute(
         "SELECT * FROM strategy_deployments WHERE id = %s AND simulation_only = TRUE",
         (deployment_id,),
@@ -147,6 +192,7 @@ async def bulk_scan_deployments(conn: psycopg.Connection, deployment_ids: list[i
 
 
 def build_deployment_management(conn: psycopg.Connection) -> dict[str, Any]:
+    ensure_deployment_management_schema(conn)
     deployments = list_simulation_deployments(conn)
     accounts = list_accounts(conn)
     positions = list_positions(conn)
@@ -228,6 +274,7 @@ def build_deployment_management(conn: psycopg.Connection) -> dict[str, Any]:
 
 
 def list_simulation_deployments(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    ensure_deployment_management_schema(conn)
     return list(conn.execute("SELECT * FROM strategy_deployments WHERE simulation_only = TRUE ORDER BY created_at DESC, id DESC").fetchall())
 
 
