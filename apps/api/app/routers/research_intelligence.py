@@ -4,14 +4,33 @@ from fastapi import APIRouter, Depends, Query
 import psycopg
 
 from app.db import get_connection
-from app.services.research_intelligence import build_archive, build_research_intelligence, collect_evidence, filter_archive
+from app.services.research_intelligence import build_archive, build_research_intelligence, collect_evidence, filter_archive, persist_research_ranking_snapshots
 
 router = APIRouter(tags=["research-intelligence"])
 
 
 @router.get("/research/intelligence")
-def get_research_intelligence(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
-    return build_research_intelligence(*load_research_history(conn))
+def get_research_intelligence(
+    persist_snapshot: bool = Query(False),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    report = build_research_intelligence(*load_research_history(conn), **load_research_context(conn))
+    if persist_snapshot and report.get("rankings"):
+        persist_research_ranking_snapshots(conn, report["rankings"])
+        conn.commit()
+    return report
+
+
+@router.post("/research/intelligence/snapshots")
+def create_research_intelligence_snapshot(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    report = build_research_intelligence(*load_research_history(conn), **load_research_context(conn))
+    persist_research_ranking_snapshots(conn, report["rankings"])
+    conn.commit()
+    return {
+        "created": len(report["rankings"]),
+        "calculation_version": report["score_methodology"]["calculation_version"],
+        "simulation_only": True,
+    }
 
 
 @router.get("/research/knowledge-graph")
@@ -96,3 +115,58 @@ def load_research_history(conn: psycopg.Connection) -> tuple[list[dict[str, Any]
         """
     ).fetchall()
     return list(hypotheses), list(experiments), list(journal_entries), list(validation_runs)
+
+
+def load_research_context(conn: psycopg.Connection) -> dict[str, list[dict[str, Any]]]:
+    alerts = conn.execute(
+        """
+        SELECT *
+        FROM evidence_alerts
+        WHERE simulation_only = TRUE
+        ORDER BY created_at DESC, id DESC
+        LIMIT 500
+        """
+    ).fetchall()
+    reviews = conn.execute(
+        """
+        SELECT *
+        FROM signal_reviews
+        WHERE simulation_only = TRUE
+        ORDER BY created_at DESC, id DESC
+        LIMIT 500
+        """
+    ).fetchall()
+    deployments = conn.execute(
+        """
+        SELECT *
+        FROM strategy_deployments
+        WHERE simulation_only = TRUE
+        ORDER BY created_at DESC, id DESC
+        """
+    ).fetchall()
+    symbols = conn.execute("SELECT * FROM symbols ORDER BY symbol").fetchall()
+    latest_candles = conn.execute(
+        """
+        SELECT DISTINCT ON (symbol, timeframe) symbol, timeframe, timestamp, close, source
+        FROM candles
+        ORDER BY symbol, timeframe, timestamp DESC
+        """
+    ).fetchall()
+    try:
+        previous_snapshots = conn.execute(
+            """
+            SELECT DISTINCT ON (candidate_id) *
+            FROM research_ranking_snapshots
+            ORDER BY candidate_id, created_at DESC, id DESC
+            """
+        ).fetchall()
+    except Exception:
+        previous_snapshots = []
+    return {
+        "alerts": list(alerts),
+        "reviews": list(reviews),
+        "deployments": list(deployments),
+        "symbols": list(symbols),
+        "latest_candles": list(latest_candles),
+        "previous_snapshots": list(previous_snapshots),
+    }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
@@ -143,6 +144,7 @@ def build_daily_summary(conn: psycopg.Connection, report_date: date) -> dict[str
     equity = equity_until(conn, end)
     freshness = data_freshness_snapshot(conn, end)
     scheduler = scheduler_status(conn)
+    research_intelligence = stored_research_intelligence_snapshot(conn, start, end)
 
     scanned_assets = sorted(asset_symbols_from(logs, alerts, reviews))
     important_alerts = important_alert_rows(alerts)
@@ -172,6 +174,7 @@ def build_daily_summary(conn: psycopg.Connection, report_date: date) -> dict[str
         "pnl": {"realized": realized, "unrealized": unrealized, "equity": total_equity, "label": "Simulated paper P&L only"},
         "data_freshness": freshness,
         "scheduler_uptime": scheduler_uptime,
+        "research_intelligence": research_intelligence,
         "important_alerts": {"count": len(important_alerts), "items": compact_alerts(important_alerts[:25])},
         "scan_activity": {"count": len(scan_logs), "items": compact_events(scan_logs[:25])},
         "simulation_only": True,
@@ -301,6 +304,9 @@ def build_markdown_report(summary: dict[str, Any]) -> str:
             f"- Simulated realized P&L: {summary['pnl']['realized']}",
             f"- Simulated unrealized P&L: {summary['pnl']['unrealized']}",
             f"- Scheduler uptime: {format_uptime(summary['scheduler_uptime'])}",
+            f"- Top research candidate: {summary.get('research_intelligence', {}).get('top_ranked_candidate') or 'none'}",
+            f"- Highest review priority: {summary.get('research_intelligence', {}).get('highest_review_priority') or 'none'}",
+            f"- Strongest strategy: {summary.get('research_intelligence', {}).get('strongest_strategy') or 'none'}",
             "",
             "## Data Freshness",
             f"- Healthy: {freshness_counts.get('Healthy', 0)}",
@@ -329,6 +335,7 @@ def analytics_row(report: dict[str, Any]) -> dict[str, Any]:
         "paper_orders": int(summary.get("paper_orders", {}).get("count") or 0),
         "paper_fills": int(summary.get("paper_fills", {}).get("count") or 0),
         "important_alerts": int(summary.get("important_alerts", {}).get("count") or 0),
+        "top_research_candidate": summary.get("research_intelligence", {}).get("top_ranked_candidate"),
         "fresh_assets": int(freshness.get("Healthy") or 0),
         "warning_assets": int(freshness.get("Warning") or 0),
         "stale_assets": int(freshness.get("Stale") or 0),
@@ -432,6 +439,7 @@ def weekly_research_summary(series: list[dict[str, Any]], reports: list[dict[str
         "summary": window,
         "top_assets": assets,
         "top_strategies": strategies,
+        "research_intelligence": [report.get("summary", {}).get("research_intelligence", {}) for report in reports if report.get("summary", {}).get("research_intelligence")],
         "recurring_failures": failures,
         "narrative": weekly_narrative(window, failures),
         "simulation_only": True,
@@ -605,3 +613,63 @@ def format_uptime(value: Any) -> str:
     if value is None:
         return "manual or disabled"
     return f"{value}%"
+
+
+def stored_research_intelligence_snapshot(conn: psycopg.Connection, start: datetime, end: datetime) -> dict[str, Any]:
+    try:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM research_ranking_snapshots
+            WHERE created_at >= %s
+              AND created_at < %s
+            ORDER BY rank ASC, created_at DESC
+            """,
+            (start, end),
+        ).fetchall()
+    except Exception:
+        return {
+            "available": False,
+            "reason": "No stored research ranking snapshots exist for this report period.",
+            "top_ranked_candidate": None,
+            "highest_review_priority": None,
+            "strongest_strategy": None,
+            "score_changes": [],
+            "entries_leaving_top_ranks": [],
+            "new_blocking_issues": [],
+            "concentration_changes": [],
+        }
+    if not rows:
+        return {
+            "available": False,
+            "reason": "No stored research ranking snapshots exist for this report period.",
+            "top_ranked_candidate": None,
+            "highest_review_priority": None,
+            "strongest_strategy": None,
+            "score_changes": [],
+            "entries_leaving_top_ranks": [],
+            "new_blocking_issues": [],
+            "concentration_changes": [],
+        }
+    top = rows[0]
+    strategies = Counter(strategy_from_candidate(row.get("candidate_id")) for row in rows)
+    return {
+        "available": True,
+        "snapshot_count": len(rows),
+        "top_ranked_candidate": top.get("candidate_id"),
+        "top_ranked_score": top.get("research_score"),
+        "highest_review_priority": next((row.get("candidate_id") for row in rows if row.get("review_priority") == "Review first"), top.get("candidate_id")),
+        "strongest_strategy": strategies.most_common(1)[0][0] if strategies else None,
+        "score_changes": [],
+        "candidates_entering_top_ranks": [row.get("candidate_id") for row in rows[:5]],
+        "candidates_leaving_top_ranks": [],
+        "new_blocking_issues": [],
+        "concentration_changes": [],
+        "calculation_version": top.get("calculation_version"),
+    }
+
+
+def strategy_from_candidate(candidate_id: Any) -> str:
+    text = str(candidate_id or "unknown")
+    parts = text.split("_")
+    return "_".join(parts[:2]) if len(parts) >= 2 else text

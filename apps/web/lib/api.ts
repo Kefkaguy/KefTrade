@@ -261,7 +261,26 @@ export type ResearchIntelligence = {
     validation_run_count: number;
     evidence_item_count: number;
     recommendation_count: number;
+    candidates_ranked?: number;
+    high_quality_evidence_count?: number;
+    strong_candidate_count?: number;
+    incomplete_evidence_count?: number;
+    rejected_or_weak_count?: number;
+    active_setup_count?: number;
+    stale_candidate_count?: number;
+    average_research_score?: number;
+    top_ranked_asset?: string | null;
+    top_ranked_strategy?: string | null;
   };
+  rankings: Array<Record<string, any>>;
+  review_priorities: Array<Record<string, any>>;
+  strategy_leaderboard: Array<Record<string, any>>;
+  asset_leaderboard: Array<Record<string, any>>;
+  candidate_comparisons: Array<Record<string, any>>;
+  portfolio_intelligence: Record<string, any>;
+  score_methodology: Record<string, any>;
+  safety: Record<string, any>;
+  subsystem_errors: Array<{ subsystem: string; error: string }>;
   meta_analysis: Record<string, Array<Record<string, unknown>>>;
   recommendations: Array<{
     title: string;

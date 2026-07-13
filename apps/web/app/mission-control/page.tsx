@@ -2,7 +2,7 @@ import Link from "next/link";
 import { AlertTriangle, ArrowUpRight, ShieldCheck } from "lucide-react";
 import { BulkDeploymentControls, DeploymentControlPanel } from "@/components/DeploymentManagementActions";
 import { Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle } from "@/components/ResearchUI";
-import { getDeploymentManagement, getMissionControl, type DeploymentManagementSnapshot, type MissionControlSnapshot, type MissionControlStatus } from "@/lib/api";
+import { getDeploymentManagement, getMissionControl, getResearchIntelligence, type DeploymentManagementSnapshot, type MissionControlSnapshot, type MissionControlStatus } from "@/lib/api";
 import { money, number } from "@/lib/format";
 
 export default async function MissionControlPage() {
@@ -23,6 +23,7 @@ export default async function MissionControlPage() {
 
   const equityValues = snapshot.paper_account.recent_equity_curve.map((row) => Number(row.equity)).filter(Number.isFinite);
   const deploymentCenter = "error" in deploymentManagement ? null : deploymentManagement;
+  const researchIntelligence = await getResearchIntelligence().catch(() => null);
   return (
     <div className="pageStack missionControl">
       <PageTitle
@@ -57,6 +58,30 @@ export default async function MissionControlPage() {
           <EmptyState title="Unable to load deployment management." body={"error" in deploymentManagement ? deploymentManagement.error : "Unknown deployment management error."} />
         </Card>
       )}
+
+      <Card title="Research Intelligence" eyebrow="Stored evidence ranking" action={<Link className="tableLink" href="/research-intelligence">Open full dashboard <ArrowUpRight size={12} /></Link>}>
+        {researchIntelligence ? (
+          <div className="dashboardGrid wideLeft">
+            <DataTable
+              columns={["Rank", "Candidate", "Score", "Classification", "Priority", "Change"]}
+              rows={(researchIntelligence.rankings ?? []).slice(0, 3).map((row) => [
+                String(row.global_rank ?? "n/a"),
+                `${String(row.symbol ?? "n/a")} / ${String(row.timeframe ?? "n/a")} / ${String(row.strategy ?? "n/a")}`,
+                formatMaybeNumber(row.research_score as string | number | null),
+                String(row.classification ?? "n/a"),
+                String(row.review_priority ?? "n/a"),
+                row.rank_change === null || row.rank_change === undefined ? "new/unchanged" : String(row.rank_change)
+              ])}
+            />
+            <div className="scoreList">
+              <SummaryLine label="Top review priority" value={String(researchIntelligence.review_priorities?.[0]?.candidate_id ?? "none")} />
+              <SummaryLine label="Strongest strategy" value={String(researchIntelligence.summary.top_ranked_strategy ?? "none")} />
+              <SummaryLine label="Stale ranking blocks" value={String(researchIntelligence.summary.stale_candidate_count ?? 0)} />
+              <SummaryLine label="Concentration warning" value={String(researchIntelligence.portfolio_intelligence?.warnings?.[0] ?? "none")} />
+            </div>
+          </div>
+        ) : <EmptyState title="Research Intelligence unavailable." body="Mission Control remains available with operations data; open the full dashboard after rankings load." />}
+      </Card>
 
       <Card title="System Status Header" eyebrow="Current state">
         <div className="metricGrid">

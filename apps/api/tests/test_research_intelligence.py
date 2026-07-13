@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from app.services.research_intelligence import build_research_intelligence, filter_archive
+from app.services.research_intelligence import build_research_intelligence, filter_archive, persist_research_ranking_snapshots
 
 
 def candidate(candidate_id: str, score: float, recommendation: str, symbol: str, timeframe: str, regime: str, year: int) -> dict:
@@ -147,3 +147,106 @@ def test_research_archive_filters_by_indicator_asset_regime_and_status() -> None
 
     assert len(rows) == 1
     assert rows[0]["candidate_id"] == "exp_b"
+
+
+def test_research_score_is_deterministic_weighted_and_classified() -> None:
+    row = candidate("tsla_momentum_bull_v2_007", 10, "Research More", "TSLA", "1h", "bull_trend", 2026)
+    row["metrics"] = {
+        "profit_factor": 1.5220,
+        "expectancy_per_trade": 17.2001,
+        "number_of_trades": 56,
+        "max_drawdown": 0.0367,
+        "out_of_sample_score": 0.75,
+        "walk_forward_pass_rate": 0.7,
+        "stability_score": 0.8,
+        "cross_asset_consistency": 0.6,
+        "timeframe_consistency": 0.7,
+    }
+    now = datetime(2026, 7, 6, tzinfo=UTC)
+    context = {
+        "symbols": [{"symbol": "TSLA", "asset_class": "us_equity"}],
+        "latest_candles": [{"symbol": "TSLA", "timeframe": "1h", "timestamp": now}],
+        "snapshot_timestamp": now,
+    }
+    evidence = build_research_intelligence([], [{"id": 1, "result": {"leaderboard": [row]}, "created_at": now, "recommendation": "Research More"}], [], [], **context)
+    ranked = evidence["rankings"][0]
+
+    assert ranked["score"]["calculation_version"] == "research_score_v1"
+    assert ranked["score"]["component_weights"]["performance_quality"] == 20
+    assert ranked["research_score"] == build_research_intelligence([], [{"id": 1, "result": {"leaderboard": [row]}, "created_at": now, "recommendation": "Research More"}], [], [], **context)["rankings"][0]["research_score"]
+    assert ranked["classification"] in {"Strong research candidate", "Promising but incomplete", "High-quality research evidence"}
+
+
+def test_missing_and_insufficient_metrics_are_explicit_not_perfect_or_zero() -> None:
+    row = candidate("incomplete", 1, "Research More", "AAPL", "1h", "sideways", 2026)
+    row["metrics"] = {"profit_factor": None, "expectancy_per_trade": None, "number_of_trades": 8, "max_drawdown": None}
+
+    report = build_research_intelligence([], [{"id": 1, "result": {"leaderboard": [row]}, "created_at": datetime(2026, 7, 6, tzinfo=UTC), "recommendation": "Research More"}], [], [])
+    score = report["rankings"][0]["score"]
+
+    states = {item["state"] for item in score["missing_inputs"]}
+    assert "Missing" in states
+    assert "Insufficient sample" in states
+    assert 0 < score["total_score"] < 100
+
+
+def test_stale_data_and_unhealthy_deployment_lower_review_priority() -> None:
+    now = datetime(2026, 7, 12, tzinfo=UTC)
+    strong = candidate("strong_stale", 10, "Research More", "TSLA", "1h", "bull_trend", 2026)
+    strong["metrics"].update({"profit_factor": 2.2, "expectancy_per_trade": 20, "number_of_trades": 200, "max_drawdown": 0.02, "out_of_sample_score": 0.9})
+    healthy = candidate("healthy_setup", 7, "Research More", "NVDA", "1h", "bull_trend", 2026)
+    healthy["metrics"].update({"profit_factor": 1.3, "expectancy_per_trade": 8, "number_of_trades": 80, "max_drawdown": 0.05, "out_of_sample_score": 0.6})
+
+    report = build_research_intelligence(
+        [],
+        [{"id": 1, "result": {"leaderboard": [strong, healthy]}, "created_at": now, "recommendation": "Research More"}],
+        [],
+        [],
+        symbols=[{"symbol": "TSLA", "asset_class": "us_equity"}, {"symbol": "NVDA", "asset_class": "us_equity"}],
+        latest_candles=[{"symbol": "TSLA", "timeframe": "1h", "timestamp": now - timedelta(days=8)}, {"symbol": "NVDA", "timeframe": "1h", "timestamp": now}],
+        reviews=[{"symbol": "NVDA", "timeframe": "1h", "strategy_id": "generated_alpha_v1", "status": "Setup Worth Reviewing", "verdict": "Setup Worth Reviewing", "created_at": now, "simulation_only": True}],
+        deployments=[{"symbol": "TSLA", "timeframe": "1h", "strategy_name": "generated_alpha", "strategy_version": "v1", "status": "active", "simulation_only": True, "last_signal": "stale_data_warning"}],
+        snapshot_timestamp=now,
+    )
+
+    priorities = {row["candidate_id"]: row for row in report["review_priorities"]}
+    assert priorities["healthy_setup"]["priority_rank"] < priorities["strong_stale"]["priority_rank"]
+    assert "Stale stored market data" in " ".join(priorities["strong_stale"]["blocking_issues"])
+
+
+def test_leaderboards_portfolio_and_snapshot_persistence() -> None:
+    report = build_research_intelligence(*research_history())
+
+    assert report["strategy_leaderboard"]
+    assert report["asset_leaderboard"]
+    assert "research_diversification_score" in report["portfolio_intelligence"]
+    conn = SnapshotConn()
+    persist_research_ranking_snapshots(conn, report["rankings"], datetime(2026, 7, 12, tzinfo=UTC))
+
+    assert len(conn.inserted) == len(report["rankings"])
+    assert conn.inserted[0]["calculation_version"] == "research_score_v1"
+
+
+class SnapshotResult:
+    def fetchall(self):
+        return []
+
+
+class SnapshotConn:
+    def __init__(self):
+        self.inserted = []
+
+    def execute(self, query, params=None):
+        if "INSERT INTO research_ranking_snapshots" in query:
+            self.inserted.append(
+                {
+                    "candidate_id": params[0],
+                    "research_score": params[1],
+                    "rank": params[2],
+                    "classification": params[3],
+                    "review_priority": params[4],
+                    "component_scores": params[5],
+                    "calculation_version": params[6],
+                }
+            )
+        return SnapshotResult()

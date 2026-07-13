@@ -148,6 +148,13 @@ class ExtractiveResearchLLM:
         if not evidence_refs:
             return {"answer": INSUFFICIENT_EVIDENCE, "evidence_refs": [], "confidence": "low"}
         if context.get("recommendations"):
+            if context.get("rankings") and asks_about_ranking(question):
+                top = context["rankings"][0]
+                return {
+                    "answer": f"Stored Research Intelligence ranks {top['candidate_id']} highest with score {top['research_score']} ({top['classification']}). Reason: {top['ranking_reason']}",
+                    "evidence_refs": top["source_evidence_refs"],
+                    "confidence": "medium",
+                }
             recommendation = context["recommendations"][0]
             return {
                 "answer": f"Stored research suggests: {recommendation['finding']} Next research step: {recommendation['recommendation']}",
@@ -299,6 +306,7 @@ def build_copilot_context(
     evidence = collect_evidence(experiments, validation_runs)
     tokens = tokenize(question)
     archive = rank_archive_matches(intelligence["archive"], tokens)[:8]
+    rankings = rank_intelligence_matches(intelligence.get("rankings", []), tokens)[:8]
     recommendations = rank_recommendation_matches(intelligence["recommendations"], tokens)[:5]
     meta = {
         "common_failure_reasons": intelligence["meta_analysis"]["most_common_failure_reasons"][:8],
@@ -319,6 +327,11 @@ def build_copilot_context(
             for ref in row.get("evidence_refs", [])
         }
         | {
+            ref
+            for row in rankings
+            for ref in row.get("source_evidence_refs", [])
+        }
+        | {
             evidence_ref(row)
             for row in evidence
             if evidence_matches_tokens(row, tokens)
@@ -329,6 +342,7 @@ def build_copilot_context(
         "question": question,
         "summary": intelligence["summary"],
         "archive": archive,
+        "rankings": rankings,
         "recommendations": recommendations,
         "meta_analysis": meta,
         "allowed_evidence_refs": evidence_refs,
@@ -366,6 +380,33 @@ def rank_recommendation_matches(recommendations: list[dict[str, Any]], tokens: s
         if score:
             scored.append((score, row))
     return [row for _score, row in sorted(scored, key=lambda item: item[0], reverse=True)]
+
+
+def rank_intelligence_matches(rankings: list[dict[str, Any]], tokens: set[str]) -> list[dict[str, Any]]:
+    if not tokens:
+        return rankings[:5]
+    scored = []
+    for row in rankings:
+        haystack = json.dumps(
+            {
+                "candidate_id": row.get("candidate_id"),
+                "symbol": row.get("symbol"),
+                "strategy": row.get("strategy"),
+                "classification": row.get("classification"),
+                "review_priority": row.get("review_priority"),
+                "blocking_issues": row.get("blocking_issues"),
+            },
+            default=str,
+        ).lower()
+        score = len(tokens & tokenize(haystack))
+        if score:
+            scored.append((score, row))
+    return [row for _score, row in sorted(scored, key=lambda item: item[0], reverse=True)]
+
+
+def asks_about_ranking(question: str) -> bool:
+    lowered = question.lower()
+    return any(term in lowered for term in ("strongest", "ranked", "ranking", "best evidence", "review first", "blocking", "concentrated"))
 
 
 def meta_evidence_refs(meta: dict[str, Any], tokens: set[str]) -> set[str]:
