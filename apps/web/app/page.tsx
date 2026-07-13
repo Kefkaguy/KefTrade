@@ -1,5 +1,5 @@
-import { SimpleResearchFlow } from "@/components/SimpleResearchFlow";
+import { redirect } from "next/navigation";
 
 export default function Home() {
-  return <SimpleResearchFlow />;
+  redirect("/mission-control");
 }

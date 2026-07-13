@@ -3,15 +3,13 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { Aperture, ArrowUpRight, BarChart3, Beaker, Bot, BrainCircuit, BriefcaseBusiness, CandlestickChart, ChevronRight, CircleDot, FlaskConical, Grid2X2, Layers3, Menu, Moon, Orbit, PanelLeftClose, Radar, Search, Settings, ShieldCheck, Sparkles, Sun, Target, Trophy, X } from "lucide-react";
+import { ArrowUpRight, BarChart3, Beaker, Bot, BrainCircuit, CandlestickChart, ChevronRight, CircleDot, FlaskConical, Grid2X2, Layers3, Menu, Moon, Orbit, PanelLeftClose, Radar, Search, Settings, ShieldCheck, Sparkles, Sun, Target, Trophy, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { CopilotPanel } from "@/components/CopilotPanel";
 
 const primaryItems = [
   { href: "/mission-control", label: "Mission Control", icon: Radar },
-  { href: "/", label: "Command", icon: Aperture },
   { href: "/dashboard", label: "Research", icon: BrainCircuit },
-  { href: "/portfolio", label: "Portfolio", icon: BriefcaseBusiness },
   { href: "/paper", label: "Paper lab", icon: CandlestickChart },
   { href: "/copilot", label: "AI Copilot", icon: Bot }
 ] as const;
@@ -21,6 +19,7 @@ const toolGroups = [
     { href: "/research", label: "Strategy research", detail: "Run deterministic evidence", icon: Search },
     { href: "/research-intelligence", label: "Research intelligence", detail: "Rank stored evidence", icon: Trophy },
     { href: "/promising", label: "Promising candidates", detail: "Rank cross-asset ideas", icon: Target },
+    { href: "/portfolio", label: "Candidate lifecycle", detail: "Evidence drift and notebooks", icon: Layers3 },
     { href: "/experiments", label: "Experiments", detail: "Inspect strategy sweeps", icon: FlaskConical },
     { href: "/hypotheses", label: "Hypotheses", detail: "Shape research questions", icon: Beaker }
   ] },
@@ -92,7 +91,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="ambientField" aria-hidden="true"><span className="ambientOrb orbOne" /><span className="ambientOrb orbTwo" /><span className="ambientNoise" /></div>
       <aside className={`sidebar commandRail ${mobileNavOpen ? "mobileOpen" : ""}`}>
         <div className="railHeader">
-          <Link href="/" className="brand" aria-label="KefTrade command center"><span className="brandMark"><CircleDot size={20} /></span><span className="brandCopy"><strong>KefTrade</strong><small>Evidence OS</small></span></Link>
+          <Link href="/mission-control" className="brand" aria-label="KefTrade Mission Control"><span className="brandMark"><CircleDot size={20} /></span><span className="brandCopy"><strong>KefTrade</strong><small>Evidence OS</small></span></Link>
           <button className="railClose" type="button" onClick={() => setMobileNavOpen(false)} aria-label="Close navigation"><PanelLeftClose size={18} /></button>
         </div>
         <div className="railContext"><span>Workspace 01</span><strong>Quant research</strong></div>
@@ -100,11 +99,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span className="navSectionLabel">Core surfaces</span>
           {primaryItems.map((item, index) => {
             const Icon = item.icon;
-            const active = item.href === "/" ? pathname === "/" : pathname === item.href || pathname.startsWith(`${item.href}/`);
+            const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
             return <Link key={item.href} href={item.href} className={active ? "active" : ""}><span className="navIndex">0{index + 1}</span><span className="navIcon"><Icon size={17} /></span><span>{item.label}</span><ChevronRight className="navArrow" size={14} /></Link>;
           })}
         </nav>
-        <button className="toolboxTrigger" type="button" onClick={() => setToolboxOpen(true)}><span className="toolboxIcon"><Grid2X2 size={17} /></span><span><strong>All instruments</strong><small>13 research tools</small></span><span className="keycap">/</span></button>
+        <button className="toolboxTrigger" type="button" onClick={() => setToolboxOpen(true)}><span className="toolboxIcon"><Grid2X2 size={17} /></span><span><strong>All instruments</strong><small>14 research tools</small></span><span className="keycap">/</span></button>
         <div className="sidebarStatus"><span className="statusPulse"><span /></span><div><strong>Simulation protected</strong><span>Live routing is physically disabled</span></div><ShieldCheck size={16} /></div>
       </aside>
 

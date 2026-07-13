@@ -10,6 +10,7 @@ from app.services.evidence_alerts import detect_research_report_alert
 from app.services.promising_research import build_promising_research_candidates
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
+from app.services.research_automation import analyze_research_automation, queue_research_automation, research_automation_status, run_research_automation_batch
 from app.services.strategy_experiments import list_strategy_experiments, run_strategy_experiment
 from app.services.strategy_research import run_strategy_research
 
@@ -125,3 +126,41 @@ def get_research_portfolio(
 @router.get("/research/metric-definitions")
 def get_research_metric_definitions() -> dict[str, Any]:
     return METRIC_DEFINITIONS
+
+
+@router.post("/research/automation/queue")
+def create_research_automation_queue(
+    asset_limit: int = Query(100, ge=1, le=1000),
+    timeframes: list[str] | None = Query(None),
+    max_experiments_per_asset: int = Query(6, ge=1, le=50),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return queue_research_automation(
+        conn,
+        asset_limit=asset_limit,
+        timeframes=timeframes,
+        max_experiments_per_asset=max_experiments_per_asset,
+    )
+
+
+@router.post("/research/automation/run")
+def run_research_automation(
+    batch_size: int = Query(10, ge=1, le=100),
+    max_runs_per_experiment: int = Query(24, ge=1, le=250),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return run_research_automation_batch(
+        conn,
+        batch_size=batch_size,
+        max_runs_per_experiment=max_runs_per_experiment,
+    )
+
+
+@router.get("/research/automation/status")
+def get_research_automation_status(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    return research_automation_status(conn)
+
+
+@router.get("/research/automation/analysis")
+def get_research_automation_analysis(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    return analyze_research_automation(conn)
