@@ -11,6 +11,7 @@ from app.services.promising_research import build_promising_research_candidates
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.research_automation import analyze_research_automation, queue_research_automation, research_automation_status, run_research_automation_batch
+from app.services.strategy_discovery import discovery_dashboard, evolve_discovered_strategies, generate_discovery_candidates, rule_library_payload, run_strategy_discovery
 from app.services.strategy_experiments import list_strategy_experiments, run_strategy_experiment
 from app.services.strategy_research import run_strategy_research
 
@@ -164,3 +165,56 @@ def get_research_automation_status(conn: psycopg.Connection = Depends(get_connec
 @router.get("/research/automation/analysis")
 def get_research_automation_analysis(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     return analyze_research_automation(conn)
+
+
+@router.get("/research/strategy-discovery/rules")
+def get_strategy_discovery_rules() -> dict[str, Any]:
+    return rule_library_payload()
+
+
+@router.post("/research/strategy-discovery/generate")
+def generate_strategy_discovery_candidates(max_candidates: int = Query(100, ge=1, le=5000)) -> dict[str, Any]:
+    candidates = generate_discovery_candidates(max_candidates=max_candidates)
+    return {
+        "generated": len(candidates),
+        "candidates": [
+            {
+                "candidate_id": candidate.candidate_id,
+                "family_id": candidate.family_id,
+                "parent_candidate_id": candidate.parent_candidate_id,
+                "generation": candidate.generation,
+                "blocks": candidate.blocks,
+                "parameters": candidate.parameters,
+                "complexity": candidate.complexity,
+            }
+            for candidate in candidates[:250]
+        ],
+        "truncated": len(candidates) > 250,
+        "safety": "Research-only deterministic generation. No order is routed.",
+    }
+
+
+@router.post("/research/strategy-discovery/run")
+def run_autonomous_strategy_discovery(
+    symbol: str = Query(DEFAULT_DEV_SYMBOL),
+    timeframe: str = Query(DEFAULT_DEV_TIMEFRAME),
+    max_candidates: int = Query(50, ge=1, le=500),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return run_strategy_discovery(conn, symbol=symbol, timeframe=timeframe, max_candidates=max_candidates)
+
+
+@router.post("/research/strategy-discovery/evolve")
+def evolve_autonomous_strategy_discovery(
+    limit: int = Query(20, ge=1, le=100),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return evolve_discovered_strategies(conn, limit=limit)
+
+
+@router.get("/research/strategy-discovery/dashboard")
+def get_autonomous_strategy_discovery_dashboard(
+    limit: int = Query(20, ge=1, le=100),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return discovery_dashboard(conn, limit=limit)

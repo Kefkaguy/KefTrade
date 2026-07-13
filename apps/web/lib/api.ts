@@ -145,6 +145,49 @@ export type AlphaValidationReport = {
   markdown_report: string;
 };
 
+export type StrategyDiscoveryRow = {
+  candidate_id: string;
+  family_id: string;
+  parent_candidate_id?: string | null;
+  symbol: string;
+  timeframe: string;
+  generation: number;
+  blocks: Record<string, string>;
+  metrics: Record<string, unknown>;
+  research_score: number;
+  status: "generated" | "rejected" | "promoted" | "retired";
+  failure_reasons: string[];
+  explanation: string;
+  created_at?: string;
+};
+
+export type StrategyDiscoveryDashboard = {
+  summary: {
+    generated: number;
+    rejected: number;
+    promoted: number;
+    retired: number;
+    families: number;
+  };
+  strongest_discoveries: StrategyDiscoveryRow[];
+  newest_discoveries: StrategyDiscoveryRow[];
+  evolution_history: Array<Record<string, unknown>>;
+  successful_rule_combinations: Array<{ combination: string; count: number; best_score: number | null }>;
+  safety: string;
+};
+
+export type StrategyDiscoveryRun = {
+  run_id: number;
+  symbol: string;
+  timeframe: string;
+  generated: number;
+  evaluated: number;
+  promoted: number;
+  rejected: number;
+  leaderboard: StrategyDiscoveryRow[];
+  safety: string;
+};
+
 export type RiskSettings = {
   account_size: string;
   max_risk_per_trade: string;
@@ -956,6 +999,24 @@ export function runAlphaValidation(input: number | AlphaValidationInput = 50) {
   for (const symbol of normalized.symbols ?? ["BTCUSDT", "ETHUSDT"]) params.append("symbols", symbol);
   for (const timeframe of normalized.timeframes ?? ["4h", "1d"]) params.append("timeframes", timeframe);
   return request<AlphaValidationReport>(`/alpha/validate?${params.toString()}`, { method: "POST", timeoutMs: 180000 });
+}
+
+export function getStrategyDiscoveryDashboard(options?: { limit?: number }) {
+  const params = new URLSearchParams({ limit: String(options?.limit ?? 20) });
+  return request<StrategyDiscoveryDashboard>(`/research/strategy-discovery/dashboard?${params.toString()}`, { timeoutMs: 60000 });
+}
+
+export function runStrategyDiscovery(input: ResearchAssetInput & { maxCandidates?: number } = { symbol: "BTCUSDT", timeframe: "4h" }) {
+  const params = new URLSearchParams({
+    symbol: input.symbol,
+    timeframe: input.timeframe ?? "4h",
+    max_candidates: String(input.maxCandidates ?? 50)
+  });
+  return request<StrategyDiscoveryRun>(`/research/strategy-discovery/run?${params.toString()}`, { method: "POST", timeoutMs: 240000 });
+}
+
+export function evolveStrategyDiscovery(limit = 20) {
+  return request<Record<string, unknown>>(`/research/strategy-discovery/evolve?limit=${limit}`, { method: "POST", timeoutMs: 60000 });
 }
 
 export function getRiskSettings() {

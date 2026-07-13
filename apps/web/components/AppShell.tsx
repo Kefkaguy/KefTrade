@@ -16,6 +16,7 @@ const primaryItems = [
 
 const toolGroups = [
   { label: "Discover", items: [
+    { href: "/strategy-discovery", label: "Strategy discovery", detail: "Generate and evolve rules", icon: Sparkles },
     { href: "/research", label: "Strategy research", detail: "Run deterministic evidence", icon: Search },
     { href: "/research-intelligence", label: "Research intelligence", detail: "Rank stored evidence", icon: Trophy },
     { href: "/promising", label: "Promising candidates", detail: "Rank cross-asset ideas", icon: Target },
@@ -103,7 +104,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             return <Link key={item.href} href={item.href} className={active ? "active" : ""}><span className="navIndex">0{index + 1}</span><span className="navIcon"><Icon size={17} /></span><span>{item.label}</span><ChevronRight className="navArrow" size={14} /></Link>;
           })}
         </nav>
-        <button className="toolboxTrigger" type="button" onClick={() => setToolboxOpen(true)}><span className="toolboxIcon"><Grid2X2 size={17} /></span><span><strong>All instruments</strong><small>14 research tools</small></span><span className="keycap">/</span></button>
+        <button className="toolboxTrigger" type="button" onClick={() => setToolboxOpen(true)}><span className="toolboxIcon"><Grid2X2 size={17} /></span><span><strong>All instruments</strong><small>15 research tools</small></span><span className="keycap">/</span></button>
         <div className="sidebarStatus"><span className="statusPulse"><span /></span><div><strong>Simulation protected</strong><span>Live routing is physically disabled</span></div><ShieldCheck size={16} /></div>
       </aside>
 

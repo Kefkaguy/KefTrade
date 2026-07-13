@@ -147,6 +147,13 @@ class ExtractiveResearchLLM:
         evidence_refs = context.get("allowed_evidence_refs", [])[:5]
         if not evidence_refs:
             return {"answer": INSUFFICIENT_EVIDENCE, "evidence_refs": [], "confidence": "low"}
+        if context.get("strategy_discovery") and asks_about_discovery(question):
+            row = context["strategy_discovery"][0]
+            return {
+                "answer": f"Stored Strategy Discovery evidence shows {row['candidate_id']} is {row['status']} with research score {row['research_score']}. Explanation: {row['explanation']}",
+                "evidence_refs": [row["evidence_ref"]],
+                "confidence": "medium",
+            }
         if context.get("recommendations"):
             if context.get("rankings") and asks_about_ranking(question):
                 top = context["rankings"][0]
@@ -227,6 +234,7 @@ class ResearchCopilot:
         experiments: list[dict[str, Any]],
         journal_entries: list[dict[str, Any]],
         validation_runs: list[dict[str, Any]],
+        discovery_rows: list[dict[str, Any]] | None = None,
     ) -> CopilotResult:
         safety_flags = safety_flags_for_question(question)
         if safety_flags:
@@ -239,7 +247,7 @@ class ResearchCopilot:
                 context_summary={"blocked": True, "reason": "trading_action_request"},
             )
 
-        context = build_copilot_context(question, hypotheses, experiments, journal_entries, validation_runs)
+        context = build_copilot_context(question, hypotheses, experiments, journal_entries, validation_runs, discovery_rows or [])
         logger.warning(
             "research_copilot.context provider=%s model=%s hypotheses=%s experiments=%s journal_entries=%s validation_runs=%s allowed_refs=%s",
             getattr(self.llm, "provider_name", "unknown"),
@@ -301,6 +309,7 @@ def build_copilot_context(
     experiments: list[dict[str, Any]],
     journal_entries: list[dict[str, Any]],
     validation_runs: list[dict[str, Any]],
+    discovery_rows: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     intelligence = build_research_intelligence(hypotheses, experiments, journal_entries, validation_runs)
     evidence = collect_evidence(experiments, validation_runs)
@@ -308,6 +317,7 @@ def build_copilot_context(
     archive = rank_archive_matches(intelligence["archive"], tokens)[:8]
     rankings = rank_intelligence_matches(intelligence.get("rankings", []), tokens)[:8]
     recommendations = rank_recommendation_matches(intelligence["recommendations"], tokens)[:5]
+    discovery = rank_discovery_matches(discovery_rows or [], tokens)[:8]
     meta = {
         "common_failure_reasons": intelligence["meta_analysis"]["most_common_failure_reasons"][:8],
         "common_rejection_rules": intelligence["meta_analysis"]["most_common_rejection_rules"][:8],
@@ -337,6 +347,7 @@ def build_copilot_context(
             if evidence_matches_tokens(row, tokens)
         }
         | meta_evidence_refs(meta, tokens)
+        | {discovery_evidence_ref(row) for row in discovery}
     )
     return {
         "question": question,
@@ -344,9 +355,36 @@ def build_copilot_context(
         "archive": archive,
         "rankings": rankings,
         "recommendations": recommendations,
+        "strategy_discovery": discovery,
         "meta_analysis": meta,
         "allowed_evidence_refs": evidence_refs,
     }
+
+
+def discovery_evidence_ref(row: dict[str, Any]) -> str:
+    return f"strategy_discovery:{row.get('candidate_id')}"
+
+
+def rank_discovery_matches(rows: list[dict[str, Any]], tokens: set[str]) -> list[dict[str, Any]]:
+    scored = []
+    for row in rows:
+        haystack = json.dumps(
+            {
+                "candidate_id": row.get("candidate_id"),
+                "family_id": row.get("family_id"),
+                "blocks": row.get("blocks"),
+                "status": row.get("status"),
+                "failure_reasons": row.get("failure_reasons"),
+                "explanation": row.get("explanation"),
+            },
+            default=str,
+        ).lower()
+        score = len(tokens & tokenize(haystack))
+        if score or not tokens:
+            material = dict(row)
+            material["evidence_ref"] = discovery_evidence_ref(row)
+            scored.append((score, material))
+    return [row for _score, row in sorted(scored, key=lambda item: (item[0], item[1].get("research_score") or 0), reverse=True)]
 
 
 def rank_archive_matches(archive: list[dict[str, Any]], tokens: set[str]) -> list[dict[str, Any]]:
@@ -409,6 +447,11 @@ def asks_about_ranking(question: str) -> bool:
     return any(term in lowered for term in ("strongest", "ranked", "ranking", "best evidence", "review first", "blocking", "concentrated"))
 
 
+def asks_about_discovery(question: str) -> bool:
+    lowered = question.lower()
+    return any(term in lowered for term in ("discovery", "generated", "promoted", "failed", "parent", "evolved", "rule combination"))
+
+
 def meta_evidence_refs(meta: dict[str, Any], tokens: set[str]) -> set[str]:
     refs: set[str] = set()
     for section in meta.values():
@@ -461,6 +504,7 @@ def summarize_context(context: dict[str, Any]) -> dict[str, Any]:
     return {
         "archive_records": len(context.get("archive", [])),
         "recommendations": len(context.get("recommendations", [])),
+        "strategy_discovery_records": len(context.get("strategy_discovery", [])),
         "evidence_refs": len(context.get("allowed_evidence_refs", [])),
         "research_summary": context.get("summary", {}),
     }

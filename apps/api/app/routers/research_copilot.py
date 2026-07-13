@@ -40,7 +40,7 @@ def ask_research_copilot(payload: CopilotQuestion, conn: psycopg.Connection = De
             "validation_runs": len(history[3]),
         },
     )
-    result = copilot.ask(payload.question, *history)
+    result = copilot.ask(payload.question, *history, load_strategy_discovery_context(conn))
     interaction_id = log_copilot_interaction(conn, payload.question, result)
     return {"id": interaction_id, **asdict(result)}
 
@@ -76,6 +76,18 @@ def log_copilot_interaction(conn: psycopg.Connection, question: str, result: Any
     ).fetchone()
     conn.commit()
     return int(row["id"])
+
+
+def load_strategy_discovery_context(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT candidate_id, family_id, parent_candidate_id, blocks, metrics, research_score, status, failure_reasons, explanation, created_at
+        FROM strategy_discovery_strategies
+        ORDER BY research_score DESC, created_at DESC
+        LIMIT 50
+        """
+    ).fetchall()
+    return list(rows)
 
 
 def sanitized_database_target(database_url: str) -> str:
