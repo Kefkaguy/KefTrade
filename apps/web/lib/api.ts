@@ -747,6 +747,9 @@ export type MissionControlSnapshot = {
     recent_equity_curve: PaperEquityPoint[];
     label: string;
   };
+  research_campaigns?: Record<string, any>;
+  research_learning?: Record<string, any>;
+  production_validation?: Record<string, any>;
   recent_activity: MissionControlActivity[];
   daily_summary: Record<string, string | number | null>;
   subsystem_errors: Array<{ subsystem: string; error: string }>;

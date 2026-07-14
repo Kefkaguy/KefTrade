@@ -166,6 +166,43 @@ class MissionConn:
             ("TSLA", "1d"): {"symbol": "TSLA", "timeframe": "1d", "timestamp": now - timedelta(hours=20), "close": Decimal("115"), "source": "alpaca_iex"},
             ("AAPL", "1d"): {"symbol": "AAPL", "timeframe": "1d", "timestamp": now - timedelta(hours=20), "close": Decimal("210"), "source": "alpaca_iex"},
         }
+        self.campaigns = [
+            {
+                "id": 1,
+                "name": "S&P 500 Leaders strategy discovery campaign",
+                "universe_key": "sp500_leaders",
+                "status": "running",
+                "queued_jobs": 100,
+                "completed_jobs": 35,
+                "failed_jobs": 1,
+                "promoted_candidates": 2,
+                "rejected_candidates": 8,
+                "analytics": {"strategies_generated": 10},
+                "started_at": now - timedelta(hours=2),
+                "completed_at": None,
+                "updated_at": now,
+                "simulation_only": True,
+            }
+        ]
+        self.campaign_scheduler = {
+            "id": True,
+            "enabled": True,
+            "cadence_seconds": 300,
+            "last_cycle_at": now - timedelta(minutes=10),
+            "next_cycle_at": now + timedelta(minutes=5),
+            "latest_result": "Processed 4 campaign job(s).",
+            "latest_error": None,
+            "is_running": False,
+            "simulation_only": True,
+        }
+        self.campaign_jobs = [
+            {"id": 1, "status": "running", "worker_id": "worker-1", "heartbeat_at": now, "lease_expires_at": now + timedelta(minutes=10), "created_at": now - timedelta(hours=1), "completed_at": None, "execution_runtime_ms": None, "failure_classification": None},
+            {"id": 2, "status": "blocked_data", "worker_id": None, "heartbeat_at": None, "lease_expires_at": None, "created_at": now - timedelta(hours=2), "completed_at": None, "execution_runtime_ms": None, "failure_classification": "stale_data"},
+            {"id": 3, "status": "promoted", "worker_id": None, "heartbeat_at": None, "lease_expires_at": None, "created_at": now - timedelta(hours=3), "completed_at": now - timedelta(minutes=20), "execution_runtime_ms": 1200, "failure_classification": None},
+        ]
+        self.campaign_workers = [
+            {"worker_id": "worker-1", "hostname": "test-host", "status": "running", "heartbeat_at": now, "started_at": now - timedelta(hours=1), "stopped_at": None, "latest_error": None, "simulation_only": True}
+        ]
 
     def execute(self, query, params=None):
         if "FROM paper_scan_scheduler" in query:
@@ -198,6 +235,36 @@ class MissionConn:
                 if row:
                     rows.append(row)
             return Result(rows)
+        if query.strip().startswith("CREATE TABLE") or query.strip().startswith("ALTER TABLE") or "DROP CONSTRAINT" in query or "ADD CONSTRAINT" in query:
+            return Result([])
+        if "INSERT INTO research_campaign_scheduler" in query:
+            return Result([])
+        if "FROM research_campaign_scheduler" in query:
+            return Result([self.campaign_scheduler])
+        if "FROM research_campaign_workers" in query:
+            return Result(self.campaign_workers)
+        if "FROM research_campaigns" in query:
+            if "completed_at >= NOW()" in query:
+                return Result([{"count": 0}])
+            return Result(self.campaigns)
+        if "FROM research_campaign_jobs" in query:
+            if "GROUP BY COALESCE" in query:
+                return Result([{"classification": "stale_data", "count": 1}])
+            if "COUNT(DISTINCT worker_id)" in query:
+                return Result([{"count": 1}])
+            if "COUNT(*) AS count" in query and "GROUP BY status" in query:
+                counts = {}
+                for row in self.campaign_jobs:
+                    counts[row["status"]] = counts.get(row["status"], 0) + 1
+                return Result([{"status": key, "count": value} for key, value in counts.items()])
+            if "COUNT(*) AS count" in query:
+                return Result([{"count": 1}])
+            if "MIN(created_at)" in query:
+                return Result([{"oldest": self.campaign_jobs[1]["created_at"]}])
+            if "AVG(execution_runtime_ms)" in query:
+                return Result([{"average_runtime": 1200}])
+            if "GROUP BY worker_id" in query:
+                return Result([{"worker_id": "worker-1", "claimed_jobs": 1, "last_heartbeat": self.campaign_jobs[0]["heartbeat_at"], "lease_expires_at": self.campaign_jobs[0]["lease_expires_at"]}])
         raise AssertionError(query)
 
 
@@ -212,6 +279,8 @@ def test_mission_control_aggregates_multi_asset_simulation_state() -> None:
     assert snapshot["research_summary"]["scheduler_failures"] == 0
     assert snapshot["system_health"]["duplicate_candle_skips"] == 1
     assert snapshot["paper_account"]["label"] == "All values are simulated."
+    assert snapshot["research_campaigns"]["active_campaigns"] == 1
+    assert snapshot["research_summary"]["elite_candidates_promoted"] == 2
 
 
 def test_mission_control_prefers_stored_candidate_metrics() -> None:

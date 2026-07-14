@@ -7,6 +7,10 @@ from typing import Any, Callable
 
 import psycopg
 
+from app.services.research_campaigns import campaign_mission_control_summary
+from app.services.production_validation import validation_mission_control_summary
+from app.services.research_learning import research_learning_summary
+
 FRESHNESS_BY_TIMEFRAME_HOURS = {
     "15m": 2,
     "30m": 4,
@@ -55,6 +59,9 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
     reviews = section("signal_reviews", lambda: signal_reviews(conn), [])
     logs = section("execution_logs", lambda: execution_logs(conn), [])
     symbols = section("symbols", lambda: active_symbols(conn), [])
+    campaigns = section("research_campaigns", lambda: campaign_mission_control_summary(conn), {})
+    learning = section("research_learning", lambda: research_learning_summary(conn), {})
+    validation = section("production_validation", lambda: validation_mission_control_summary(conn), {})
 
     asset_keys = monitored_asset_keys(symbols, deployments, alerts, reviews, positions)
     latest_candles = section("market_data", lambda: latest_candles_for(conn, asset_keys), {})
@@ -72,7 +79,7 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
     active_deployments = build_active_deployments(deployments, alerts, positions)
     recent_activity = build_recent_activity(logs, alerts, orders, fills, reviews)
     paper = build_paper_account(accounts, positions, orders, fills, equity)
-    summary = build_research_summary(assets, deployments, alerts, logs, paper)
+    summary = build_research_summary(assets, deployments, alerts, logs, paper, campaigns)
     health = build_system_health(now, scheduler, assets, deployments, alerts, logs, errors)
     daily = build_daily_summary(now, logs, alerts, assets, orders, positions)
 
@@ -92,6 +99,9 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
         "review_queue": review_queue,
         "deployments": active_deployments,
         "paper_account": paper,
+        "research_campaigns": campaigns,
+        "research_learning": learning,
+        "production_validation": validation,
         "recent_activity": recent_activity,
         "daily_summary": daily,
         "subsystem_errors": errors,
@@ -527,7 +537,15 @@ def build_recent_activity(logs: list[dict[str, Any]], alerts: list[dict[str, Any
     return sorted(items, key=lambda row: reverse_time(row.get("timestamp")))[:50]
 
 
-def build_research_summary(assets: list[dict[str, Any]], deployments: list[dict[str, Any]], alerts: list[dict[str, Any]], logs: list[dict[str, Any]], paper: dict[str, Any]) -> dict[str, Any]:
+def build_research_summary(
+    assets: list[dict[str, Any]],
+    deployments: list[dict[str, Any]],
+    alerts: list[dict[str, Any]],
+    logs: list[dict[str, Any]],
+    paper: dict[str, Any],
+    campaigns: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    campaigns = campaigns or {}
     return {
         "assets_monitored": len(assets),
         "active_deployments": sum(1 for row in deployments if row.get("status") == "active" and row.get("simulation_only") is True),
@@ -540,6 +558,11 @@ def build_research_summary(assets: list[dict[str, Any]], deployments: list[dict[
         "total_paper_account_equity": paper["equity"],
         "total_unrealized_pnl": paper["unrealized_pnl"],
         "total_realized_pnl": paper["realized_pnl"],
+        "active_research_campaigns": campaigns.get("active_campaigns", 0),
+        "queued_research_campaigns": campaigns.get("queued_campaigns", 0),
+        "research_campaign_jobs_queued": campaigns.get("queued_jobs", 0),
+        "elite_candidates_promoted": campaigns.get("promoted_candidates", 0),
+        "campaign_rejection_rate": campaigns.get("rejection_rate", 0.0),
     }
 
 
@@ -559,10 +582,10 @@ def build_system_health(
     scan_times = [parsed for parsed in (parse_datetime(row.get("latest_scan_timestamp")) for row in assets) if parsed is not None]
     latest_candle = max(candle_times, default=None)
     latest_successful_scan = max(scan_times, default=None)
-    if errors:
-        overall = "Warning"
-    elif scheduler and scheduler.get("latest_error"):
+    if scheduler and scheduler.get("latest_error"):
         overall = "Error"
+    elif errors:
+        overall = "Warning"
     elif stale_assets:
         overall = "Stale"
     elif scheduler and not scheduler.get("enabled"):

@@ -20,6 +20,7 @@ ALERT_TYPES = {
     "stale_data_warning",
     "scheduler_error",
     "duplicate_candle_skip",
+    "evidence_drift_warning",
 }
 WEAK_REGIMES = {"bear_trend", "unknown"}
 

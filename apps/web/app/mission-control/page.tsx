@@ -83,6 +83,58 @@ export default async function MissionControlPage() {
         ) : <EmptyState title="Research Intelligence unavailable." body="Mission Control remains available with operations data; open the full dashboard after rankings load." />}
       </Card>
 
+      <Card title="Research Learning" eyebrow="Adaptive strategy improvement">
+        {snapshot.research_learning ? (
+          <div className="dashboardGrid wideLeft">
+            <DataTable
+              columns={["Queue", "Item"]}
+              rows={[
+                ["Current priority", String(snapshot.research_learning.current_priorities?.[0] ?? "none")],
+                ["Strongest idea", String(snapshot.research_learning.strongest_emerging_ideas?.[0] ?? "none")],
+                ["Recurring failure", String(snapshot.research_learning.recurring_failures?.[0] ?? "none")],
+                ["Recurring success", String(snapshot.research_learning.recurring_successes?.[0] ?? "none")],
+                ["Evolving family", String(snapshot.research_learning.evolving_strategy_families?.[0] ?? "none")]
+              ]}
+            />
+            <div className="scoreList">
+              <SummaryLine label="Recommendation queue" value={String(snapshot.research_learning.recommendation_queue?.length ?? 0)} />
+              <SummaryLine label="High confidence" value={String(snapshot.research_learning.confidence_distribution?.high ?? 0)} />
+              <SummaryLine label="Medium confidence" value={String(snapshot.research_learning.confidence_distribution?.medium ?? 0)} />
+              <SummaryLine label="Low confidence" value={String(snapshot.research_learning.confidence_distribution?.low ?? 0)} />
+            </div>
+          </div>
+        ) : <EmptyState title="Research learning unavailable." body="Learning summaries appear after completed campaigns contribute evidence to the knowledge base." />}
+      </Card>
+
+      <Card title="Production Validation" eyebrow="Phase 10 readiness proof">
+        {snapshot.production_validation ? (
+          <div className="dashboardGrid wideLeft">
+            <DataTable
+              columns={["Signal", "Value"]}
+              rows={[
+                ["Campaign", String(snapshot.production_validation.current_validation_campaign?.config?.name ?? "not started")],
+                ["Duration", String(snapshot.production_validation.validation_duration ?? "not established")],
+                ["Worker uptime", `${snapshot.production_validation.worker_uptime?.active_workers ?? 0} workers / ${snapshot.production_validation.worker_uptime?.max_hours ?? 0}h max`],
+                ["Scheduler uptime", String(snapshot.production_validation.scheduler_uptime ?? false)],
+                ["Throughput", String(snapshot.production_validation.throughput ?? 0)],
+                ["Failure rate", percent(snapshot.production_validation.failure_rate ?? 0)],
+                ["Retry rate", percent(snapshot.production_validation.retry_rate ?? 0)],
+                ["Data-block rate", percent(snapshot.production_validation.data_block_rate ?? 0)],
+                ["Forward evidence", String(snapshot.production_validation.elite_candidates_collecting_forward_evidence ?? 0)]
+              ]}
+            />
+            <div className="scoreList">
+              <SummaryLine label="Readiness state" value={String(snapshot.production_validation.phase10_readiness_state ?? "not_ready")} />
+              <SummaryLine label="Readiness score" value={formatMaybeNumber(snapshot.production_validation.phase10_readiness_score ?? 0)} />
+              <SummaryLine label="Integrity audit" value={String(snapshot.production_validation.data_integrity_status ?? "unknown")} />
+              <SummaryLine label="Safety audit" value={String(snapshot.production_validation.safety_audit_status ?? "unknown")} />
+              <SummaryLine label="Blocking gates" value={String(snapshot.production_validation.blocking_readiness_gates?.length ?? 0)} />
+              <SummaryLine label="Last assessment" value={formatDate(snapshot.production_validation.last_readiness_assessment_at)} />
+            </div>
+          </div>
+        ) : <EmptyState title="Production validation unavailable." body="Validation status appears after the Milestone 5 validation service can read its tables." />}
+      </Card>
+
       <Card title="System Status Header" eyebrow="Current state">
         <div className="metricGrid">
           <MetricCard label="Research engine" value={snapshot.system_health.research_engine_status} tone={tone(snapshot.system_health.research_engine_status)} />
@@ -110,6 +162,37 @@ export default async function MissionControlPage() {
           <MetricCard label="Unrealized PnL" value={money(metric(snapshot, "total_unrealized_pnl"))} detail="Simulated" />
           <MetricCard label="Realized PnL" value={money(metric(snapshot, "total_realized_pnl"))} detail="Simulated" />
         </div>
+      </Card>
+
+      <Card title="Campaign Worker Scheduler" eyebrow="Large-scale research">
+        <div className="metricGrid">
+          <MetricCard label="Scheduler" value={snapshot.research_campaigns?.scheduler_enabled ? "Enabled" : "Disabled"} tone={snapshot.research_campaigns?.scheduler_enabled ? "success" : "neutral"} />
+          <MetricCard label="Queue depth" value={snapshot.research_campaigns?.queue_depth ?? 0} />
+          <MetricCard label="Active workers" value={snapshot.research_campaigns?.active_worker_count ?? 0} detail={`${snapshot.research_campaigns?.healthy_worker_count ?? 0} healthy / ${snapshot.research_campaigns?.stale_worker_count ?? 0} stale`} tone={Number(snapshot.research_campaigns?.stale_worker_count ?? 0) ? "warning" : "success"} />
+          <MetricCard label="Running jobs" value={snapshot.research_campaigns?.running_jobs ?? 0} />
+          <MetricCard label="Retrying jobs" value={snapshot.research_campaigns?.retrying_jobs ?? 0} tone={Number(snapshot.research_campaigns?.retrying_jobs ?? 0) ? "warning" : "neutral"} />
+          <MetricCard label="Blocked data" value={snapshot.research_campaigns?.blocked_data_jobs ?? 0} tone={Number(snapshot.research_campaigns?.blocked_data_jobs ?? 0) ? "warning" : "success"} />
+          <MetricCard label="Deferred jobs" value={snapshot.research_campaigns?.deferred_jobs ?? 0} />
+          <MetricCard label="Failed jobs" value={snapshot.research_campaigns?.failed_jobs ?? 0} tone={Number(snapshot.research_campaigns?.failed_jobs ?? 0) ? "error" : "success"} />
+          <MetricCard label="Completed 24h" value={snapshot.research_campaigns?.jobs_completed_last_24h ?? 0} />
+          <MetricCard label="Elite promoted" value={snapshot.research_campaigns?.promoted_candidates ?? metric(snapshot, "elite_candidates_promoted")} />
+          <MetricCard label="Worker utilization" value={percent(snapshot.research_campaigns?.worker_utilization ?? 0)} />
+          <MetricCard label="Campaign efficiency" value={percent(snapshot.research_campaigns?.campaign_efficiency ?? 0)} />
+        </div>
+        <p className="formHint">ETA: {snapshot.research_campaigns?.campaign_eta ?? "Unavailable until throughput is established"}</p>
+        {snapshot.research_campaigns?.campaigns?.length ? (
+          <DataTable
+            columns={["Campaign", "Status", "Jobs", "Promoted", "Rejected", "Updated"]}
+            rows={snapshot.research_campaigns.campaigns.slice(0, 6).map((campaign: Record<string, any>) => [
+              String(campaign.name ?? campaign.id),
+              String(campaign.status ?? "unknown"),
+              `${campaign.completed_jobs ?? 0}/${campaign.queued_jobs ?? 0}`,
+              String(campaign.promoted_candidates ?? 0),
+              String(campaign.rejected_candidates ?? 0),
+              formatDate(campaign.updated_at)
+            ])}
+          />
+        ) : <EmptyState title="No research campaigns queued." body="Large-scale campaign worker status will appear here after campaigns are created." />}
       </Card>
 
       <Card title="Multi-Asset Research Table" eyebrow="Monitored assets">

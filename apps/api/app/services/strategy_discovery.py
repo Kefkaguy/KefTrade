@@ -23,6 +23,7 @@ from app.services.strategy_research import (
     paper_readiness_report,
     score_metrics,
 )
+from app.services.research_learning import mutation_options
 
 
 DISCOVERY_VERSION = "strategy_discovery_v1"
@@ -470,10 +471,11 @@ def evolve_discovered_strategies(conn: psycopg.Connection, limit: int = 20) -> d
         """,
         (limit,),
     ).fetchall()
+    pattern_context = load_learning_pattern_context(conn)
     created = []
     for parent_row in parents:
         parent = candidate_from_row(parent_row)
-        for child in generate_child_variants(parent)[:3]:
+        for child, rationale in generate_child_variants(parent, pattern_context)[:3]:
             created.append(child)
             conn.execute(
                 """
@@ -481,10 +483,56 @@ def evolve_discovered_strategies(conn: psycopg.Connection, limit: int = 20) -> d
                 VALUES (%s, %s, 'variant_generated', %s)
                 ON CONFLICT DO NOTHING
                 """,
-                (child.candidate_id, parent.candidate_id, Jsonb(jsonable({"blocks": child.blocks, "parameters": child.parameters, "generation": child.generation}))),
+                (
+                    child.candidate_id,
+                    parent.candidate_id,
+                    Jsonb(
+                        jsonable(
+                            {
+                                "blocks": child.blocks,
+                                "parameters": child.parameters,
+                                "generation": child.generation,
+                                "reason_for_mutation": rationale["reason"],
+                                "supporting_evidence": rationale["supporting_evidence"],
+                                "expected_improvement": rationale["expected_improvement"],
+                                "confidence_score": rationale["confidence_score"],
+                                "calculation_version": "research_learning_v1",
+                            }
+                        )
+                    ),
+                ),
             )
     conn.commit()
     return {"parents": len(parents), "variants_generated": len(created), "variants": [candidate_payload(row) for row in created], "safety": SAFETY_STATEMENT}
+
+
+def load_learning_pattern_context(conn: psycopg.Connection) -> dict[str, set[str]]:
+    try:
+        failures = conn.execute(
+            """
+            SELECT pattern_type, description, recommendation, evidence_refs
+            FROM research_failure_patterns
+            WHERE simulation_only = TRUE
+            ORDER BY frequency DESC, created_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+        successes = conn.execute(
+            """
+            SELECT pattern_type, description, recommendation, evidence_refs
+            FROM research_success_patterns
+            WHERE simulation_only = TRUE
+            ORDER BY frequency DESC, created_at DESC
+            LIMIT 50
+            """
+        ).fetchall()
+    except Exception:
+        failures = []
+        successes = []
+    return {
+        "failures": {str(row.get("description") or row.get("recommendation") or "") for row in failures},
+        "successes": {str(row.get("description") or row.get("recommendation") or "") for row in successes},
+    }
 
 
 def candidate_from_row(row: dict[str, Any]) -> DiscoveryCandidate:
@@ -494,18 +542,62 @@ def candidate_from_row(row: dict[str, Any]) -> DiscoveryCandidate:
     return DiscoveryCandidate(str(row["candidate_id"]), str(row["family_id"]), None, int(row["generation"]), blocks, params, sum(RULE_LIBRARY[cat][0].complexity for cat in []), key)
 
 
-def generate_child_variants(parent: DiscoveryCandidate) -> list[DiscoveryCandidate]:
-    variants: list[DiscoveryCandidate] = []
-    mutation_options = [
-        {"risk_reward": round(float(parent.parameters.get("risk_reward", 2)) + 0.2, 2)},
-        {"volume_change_min": round(float(parent.parameters.get("volume_change_min", 0)) + 0.05, 3)},
-        {"max_holding_bars": max(8, int(parent.parameters.get("max_holding_bars", 12) or 12) + 4)},
+def generate_child_variants(parent: DiscoveryCandidate, pattern_context: dict[str, set[str]] | None = None) -> list[tuple[DiscoveryCandidate, dict[str, Any]]]:
+    variants: list[tuple[DiscoveryCandidate, dict[str, Any]]] = []
+    synthetic_parent = {"candidate_id": parent.candidate_id, "evidence_ref": f"strategy_discovery:{parent.candidate_id}", "parameters": parent.parameters}
+    context = pattern_context or {"failures": set(), "successes": set()}
+    evidence_mutations = mutation_options(synthetic_parent, context.get("failures", set()), context.get("successes", set()))
+    if not evidence_mutations:
+        evidence_mutations = [
+            {
+                "changes": {"risk_reward": round(float(parent.parameters.get("risk_reward", 2)) + 0.2, 2)},
+                "reason": "Local deterministic reward/risk confirmation around promoted parent.",
+                "supporting_evidence": [f"strategy_discovery:{parent.candidate_id}"],
+                "expected_improvement": "Tests nearby reward geometry without changing entry logic.",
+                "confidence_score": 0.5,
+            }
+        ]
+    deterministic_fallbacks = [
+        (
+            {"risk_reward": round(float(parent.parameters.get("risk_reward", 2)) + 0.2, 2)},
+            "Local deterministic reward/risk confirmation around promoted parent.",
+            "Tests nearby reward geometry without changing entry logic.",
+            0.5,
+        ),
+        (
+            {"volume_change_min": round(float(parent.parameters.get("volume_change_min", 0)) + 0.05, 3)},
+            "Local deterministic volume-filter confirmation around promoted parent.",
+            "Tests whether slightly stricter volume confirmation improves evidence quality.",
+            0.48,
+        ),
+        (
+            {"max_holding_bars": max(8, int(parent.parameters.get("max_holding_bars", 12) or 12) + 4)},
+            "Local deterministic holding-period confirmation around promoted parent.",
+            "Tests whether allowing more time improves exit quality without changing entries.",
+            0.46,
+        ),
     ]
-    for mutation in mutation_options:
-        params = {**parent.parameters, **mutation}
+    existing_changes = {repr(row["changes"]) for row in evidence_mutations}
+    for changes, reason, expected, confidence in deterministic_fallbacks:
+        if len(evidence_mutations) >= 3:
+            break
+        if repr(changes) in existing_changes:
+            continue
+        evidence_mutations.append(
+            {
+                "changes": changes,
+                "reason": reason,
+                "supporting_evidence": [f"strategy_discovery:{parent.candidate_id}"],
+                "expected_improvement": expected,
+                "confidence_score": confidence,
+            }
+        )
+    for rationale in evidence_mutations:
+        params = {**parent.parameters, **rationale["changes"]}
         key = canonical_candidate_key(parent.blocks, params, parent.candidate_id)
         variants.append(
-            DiscoveryCandidate(
+            (
+                DiscoveryCandidate(
                 candidate_id=f"sd_{sha256(key.encode()).hexdigest()[:14]}",
                 family_id=parent.family_id,
                 parent_candidate_id=parent.candidate_id,
@@ -514,6 +606,8 @@ def generate_child_variants(parent: DiscoveryCandidate) -> list[DiscoveryCandida
                 parameters=params,
                 complexity=parent.complexity + 1,
                 canonical_key=key,
+                ),
+                rationale,
             )
         )
     return variants
