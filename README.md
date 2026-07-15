@@ -1,5 +1,8 @@
 # KefTrade Quant Research Platform
 
+<img width="1024" height="1024" alt="image" src="https://github.com/user-attachments/assets/420dccf3-2360-4955-9c7d-e4b8794e17ed" />
+
+
 KefTrade is a research-first quantitative strategy platform for deterministic strategy discovery, validation, candidate lifecycle management, and simulation-only forward validation.
 
 The platform is designed around one rule: strategies advance only when stored evidence supports the promotion. Research thresholds, validation gates, elite promotion requirements, and forward-validation requirements are not weakened to force progress.
