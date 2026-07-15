@@ -73,6 +73,25 @@ def test_walk_forward_split_separates_validation_window() -> None:
     assert validation[0]["idx"] == 70
 
 
+def test_backtest_honors_strategy_decision_risk_reward() -> None:
+    candles, features = make_rows(120)
+
+    def decide(candle, feature, recent_candles, params):
+        close = Decimal(candle["close"])
+        return StrategyDecision("setup", (close, close), close - Decimal("1"), close + Decimal("3"), Decimal("3"), ["test"])
+
+    result = run_backtest(
+        candles,
+        features,
+        {**PARAMS, "risk_reward": 1, "walk_forward_train_ratio": .7},
+        decide,
+    )
+
+    assert result["trades"]
+    trade = result["trades"][0]
+    assert trade["take_profit"] - trade["entry_price"] > Decimal("2")
+
+
 def test_backtest_enters_after_signal_candle_to_avoid_lookahead() -> None:
     candles, features = make_rows()
     result = run_backtest(candles, features, PARAMS)
@@ -81,6 +100,17 @@ def test_backtest_enters_after_signal_candle_to_avoid_lookahead() -> None:
     assert result["trades"]
     assert result["trades"][0]["entry_time"] == candles[71]["timestamp"]
     assert result["trades"][0]["entry_price"] == candles[71]["open"]
+
+
+def test_backtest_can_delay_entry_by_additional_bars() -> None:
+    candles, features = make_rows()
+    candles[72]["open"] = Decimal("104")
+
+    result = run_backtest(candles, features, {**PARAMS, "entry_delay_bars": 1})
+
+    assert result["trades"]
+    assert result["trades"][0]["entry_time"] == candles[72]["timestamp"]
+    assert result["trades"][0]["entry_price"] == candles[72]["open"]
 
 
 def test_same_candle_stop_target_policy_is_stop_first() -> None:

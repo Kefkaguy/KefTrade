@@ -19,12 +19,14 @@ SUPPORTED_TIMEFRAMES = {
     "15m": "15Min",
     "30m": "30Min",
     "1h": "1Hour",
+    "4h": "1Hour",
     "1d": "1Day",
 }
 TIMEFRAME_SECONDS = {
     "15m": 15 * 60,
     "30m": 30 * 60,
     "1h": 60 * 60,
+    "4h": 4 * 60 * 60,
     "1d": 24 * 60 * 60,
 }
 
@@ -48,8 +50,12 @@ async def sync_alpaca_candles(conn: psycopg.Connection, symbol: str, timeframe: 
         raise RuntimeError("Set ALPACA_API_KEY and ALPACA_API_SECRET to use the alpaca_iex provider.")
 
     ensure_alpaca_stock_symbol(conn, normalized_symbol)
-    status, raw_bars, request_log, request_id = await fetch_stock_bars(normalized_symbol, timeframe, limit)
-    candles, invalid_ohlc_count = normalize_stock_bars(normalized_symbol, timeframe, raw_bars)
+    fetch_timeframe = "1h" if timeframe == "4h" else timeframe
+    fetch_limit = limit * 4 if timeframe == "4h" else limit
+    status, raw_bars, request_log, request_id = await fetch_stock_bars(normalized_symbol, fetch_timeframe, fetch_limit)
+    candles, invalid_ohlc_count = normalize_stock_bars(normalized_symbol, fetch_timeframe, raw_bars)
+    if timeframe == "4h":
+        candles = aggregate_intraday_candles(candles, target_timeframe="4h")[-limit:]
     candles, incomplete_excluded = exclude_incomplete_latest(candles, timeframe)
     duplicate_count = count_duplicate_bars(raw_bars)
     missing_intervals = detect_missing_intervals(candles, timeframe)
@@ -174,6 +180,35 @@ def normalize_stock_bar(symbol: str, timeframe: str, row: dict[str, Any]) -> dic
         "close": close,
         "volume": volume,
     }
+
+
+def aggregate_intraday_candles(candles: list[dict[str, Any]], *, target_timeframe: str) -> list[dict[str, Any]]:
+    if target_timeframe != "4h":
+        return candles
+    buckets: dict[datetime, list[dict[str, Any]]] = {}
+    for candle in candles:
+        timestamp = candle["timestamp"].astimezone(UTC)
+        bucket_time = timestamp.replace(hour=(timestamp.hour // 4) * 4, minute=0, second=0, microsecond=0)
+        buckets.setdefault(bucket_time, []).append(candle)
+    aggregated = []
+    for bucket_time in sorted(buckets):
+        rows = sorted(buckets[bucket_time], key=lambda item: item["timestamp"])
+        if not rows:
+            continue
+        aggregated.append(
+            {
+                "symbol": rows[0]["symbol"],
+                "source": ALPACA_SOURCE,
+                "timeframe": "4h",
+                "timestamp": bucket_time,
+                "open": rows[0]["open"],
+                "high": max(row["high"] for row in rows),
+                "low": min(row["low"] for row in rows),
+                "close": rows[-1]["close"],
+                "volume": sum((row["volume"] for row in rows), Decimal("0")),
+            }
+        )
+    return aggregated
 
 
 def exclude_incomplete_latest(candles: list[dict[str, Any]], timeframe: str, now: datetime | None = None) -> tuple[list[dict[str, Any]], bool]:

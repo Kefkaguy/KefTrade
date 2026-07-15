@@ -85,6 +85,43 @@ export type StrategyResearchReport = {
   markdown_report: string;
 };
 
+export type ResearchCommandCenterFilters = {
+  campaignId?: number;
+  asset?: string;
+  assetClass?: string;
+  timeframe?: string;
+  strategyFamily?: string;
+  candidateState?: string;
+  validationRule?: string;
+  regime?: string;
+  dateFrom?: string;
+  dateTo?: string;
+};
+
+export type ResearchCommandCenter = {
+  campaign: Record<string, any> | null;
+  campaigns: Array<Record<string, any>>;
+  filters: Record<string, string>;
+  filter_options: Record<string, string[]>;
+  overview: Record<string, number>;
+  candidate_funnel: Array<Record<string, any>>;
+  rejection_analysis: Record<string, any>;
+  near_pass_candidates: Array<Record<string, any>>;
+  strategy_intelligence: { rows: Array<Record<string, any>>; highlights: Record<string, string | null> };
+  asset_intelligence: { rows: Array<Record<string, any>>; highlights: Record<string, string | null> };
+  timeframe_intelligence: { rows: Array<Record<string, any>>; highlights: Record<string, string | null> };
+  regime_analysis: Array<Record<string, any>>;
+  duplicate_analysis: Record<string, any>;
+  experiment_history: Array<Record<string, any>>;
+  recommendations: Array<Record<string, any>>;
+  next_campaign_proposal: Record<string, any> | null;
+  historical_research: Record<string, any>;
+  terminology: Record<string, string>;
+  reconciliation: Record<string, any>;
+  source: Record<string, any>;
+  simulation_only: boolean;
+};
+
 export type AlphaDiscoveryRow = {
   rank: number;
   candidate_id: string;
@@ -468,6 +505,7 @@ export type PaperOrder = {
   id: number;
   account_id: number;
   deployment_id?: number | null;
+  candidate_id?: string | null;
   symbol: string;
   timeframe: string;
   side: string;
@@ -500,6 +538,8 @@ export type PaperFill = {
   id: number;
   order_id: number;
   account_id: number;
+  deployment_id?: number | null;
+  candidate_id?: string | null;
   symbol: string;
   side: string;
   quantity: string | number;
@@ -541,6 +581,13 @@ export type StrategyDeployment = {
   parameters: Record<string, unknown>;
   status: string;
   simulation_only: boolean;
+  campaign_id?: number | null;
+  candidate_id?: string | null;
+  strategy_id?: string | null;
+  forward_validation_started_at?: string | null;
+  evidence_version?: string | null;
+  lifecycle_state?: string | null;
+  deployment_origin?: string | null;
   created_at?: string;
   paused_at?: string | null;
   resumed_at?: string | null;
@@ -573,7 +620,7 @@ export type EvidenceAlert = {
   symbol: string;
   timeframe: string;
   strategy_id: string;
-  alert_type: "entry_setup_review" | "exit_risk_review" | "avoid_condition" | "stale_data_warning" | "scheduler_error" | "duplicate_candle_skip";
+  alert_type: "entry_setup_review" | "exit_risk_review" | "avoid_condition" | "stale_data_warning" | "scheduler_error" | "duplicate_candle_skip" | "evidence_drift_warning";
   severity: "info" | "warning" | "critical";
   verdict: string;
   evidence_summary: string;
@@ -706,6 +753,7 @@ export type MissionControlActivity = {
 
 export type MissionControlSnapshot = {
   generated_at: string;
+  snapshot_version?: string;
   simulation_only: boolean;
   safety: {
     status: string;
@@ -730,6 +778,29 @@ export type MissionControlSnapshot = {
     scheduler_failures: number;
     duplicate_candle_skips: number;
   };
+  health?: Record<string, any>;
+  readiness?: {
+    state: string;
+    score: string | number | null;
+    phase_10_allowed: boolean;
+    blocking_gate_count: number;
+    blocking_gates: Array<Record<string, any>>;
+    passed_gates: Array<Record<string, any>>;
+    gates: Array<Record<string, any>>;
+    last_assessed_at?: string | null;
+    snapshot_source?: string;
+  };
+  campaign?: Record<string, any>;
+  workers?: Record<string, any>;
+  market_data?: Record<string, any>;
+  forward_evidence?: Record<string, any>;
+  diagnostics?: {
+    active: Array<Record<string, any>>;
+    resolved: Array<Record<string, any>>;
+    history: Array<Record<string, any>>;
+    active_count: number;
+  };
+  invariants?: Array<Record<string, any>>;
   research_summary: Record<string, string | number | null>;
   assets: MissionControlAsset[];
   review_queue: MissionControlQueueItem[];
@@ -752,7 +823,7 @@ export type MissionControlSnapshot = {
   production_validation?: Record<string, any>;
   recent_activity: MissionControlActivity[];
   daily_summary: Record<string, string | number | null>;
-  subsystem_errors: Array<{ subsystem: string; error: string }>;
+  subsystem_errors: Array<Record<string, any> & { subsystem: string; error: string }>;
 };
 
 export type DailyResearchReport = {
@@ -886,6 +957,21 @@ export type DeploymentManagementSnapshot = {
   asset_comparison: DeploymentComparisonRow[];
   strategy_comparison: DeploymentComparisonRow[];
   audit_history: ExecutionLog[];
+  accounts?: PaperAccount[];
+  positions?: PaperPosition[];
+  orders?: PaperOrder[];
+  fills?: PaperFill[];
+  alerts?: EvidenceAlert[];
+  logs?: ExecutionLog[];
+  account_snapshots?: Array<{
+    account: PaperAccount;
+    balances: PaperBalance;
+    positions: PaperPosition[];
+    orders: PaperOrder[];
+    fills: PaperFill[];
+    equity: PaperEquityPoint[];
+    logs: ExecutionLog[];
+  }>;
 };
 
 export type ResearchAssetInput = {
@@ -980,6 +1066,22 @@ export function runStrategyResearch(input: StrategyResearchInput = { symbol: "BT
   });
   if (input.strategy) params.set("strategy", input.strategy);
   return request<StrategyResearchReport>(`/research/strategies?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
+}
+
+export function fetchResearchCommandCenter(filters: ResearchCommandCenterFilters = {}) {
+  const params = new URLSearchParams();
+  if (filters.campaignId) params.set("campaign_id", String(filters.campaignId));
+  if (filters.asset) params.set("asset", filters.asset);
+  if (filters.assetClass) params.set("asset_class", filters.assetClass);
+  if (filters.timeframe) params.set("timeframe", filters.timeframe);
+  if (filters.strategyFamily) params.set("strategy_family", filters.strategyFamily);
+  if (filters.candidateState) params.set("candidate_state", filters.candidateState);
+  if (filters.validationRule) params.set("validation_rule", filters.validationRule);
+  if (filters.regime) params.set("regime", filters.regime);
+  if (filters.dateFrom) params.set("date_from", filters.dateFrom);
+  if (filters.dateTo) params.set("date_to", filters.dateTo);
+  const suffix = params.size ? `?${params.toString()}` : "";
+  return request<ResearchCommandCenter>(`/research/command-center${suffix}`, { timeoutMs: 60000 });
 }
 
 export function runAlphaDiscovery(input: number | AlphaDiscoveryInput = 250) {

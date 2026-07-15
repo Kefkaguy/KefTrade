@@ -28,7 +28,13 @@ from app.services.research_campaigns import (
     blocked_campaign_jobs,
     campaign_control,
     campaign_status,
+    create_quality_first_research_campaign,
+    create_overfit_regime_robustness_campaign,
     create_research_campaign,
+    create_single_asset_generalization_campaign,
+    create_strategy_redesign_campaign,
+    create_volatility_adaptive_relative_strength_campaign,
+    create_transferability_sample_size_campaign,
     elite_candidate_forward_details,
     generate_campaign_report,
     get_campaign_analytics,
@@ -45,12 +51,44 @@ from app.services.research_campaigns import (
     update_campaign_scheduling_config,
     upsert_research_universe,
 )
+from app.services.research_command_center import research_command_center
 from app.services.research_learning import get_learning_table, get_strategy_timeline, learn_from_completed_campaign, research_learning_summary
 from app.services.strategy_discovery import discovery_dashboard, evolve_discovered_strategies, generate_discovery_candidates, rule_library_payload, run_strategy_discovery
 from app.services.strategy_experiments import list_strategy_experiments, run_strategy_experiment
 from app.services.strategy_research import run_strategy_research
 
 router = APIRouter(tags=["strategy-research"])
+
+
+@router.get("/research/command-center")
+def get_research_command_center(
+    campaign_id: int | None = Query(None),
+    asset: str | None = Query(None),
+    asset_class: str | None = Query(None),
+    timeframe: str | None = Query(None),
+    strategy_family: str | None = Query(None),
+    candidate_state: str | None = Query(None),
+    validation_rule: str | None = Query(None),
+    regime: str | None = Query(None),
+    date_from: str | None = Query(None),
+    date_to: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return research_command_center(
+        conn,
+        campaign_id=campaign_id,
+        filters={
+            "asset": asset,
+            "asset_class": asset_class,
+            "timeframe": timeframe,
+            "strategy_family": strategy_family,
+            "candidate_state": candidate_state,
+            "validation_rule": validation_rule,
+            "regime": regime,
+            "date_from": date_from,
+            "date_to": date_to,
+        },
+    )
 
 
 class ResearchUniversePayload(BaseModel):
@@ -306,6 +344,92 @@ def create_large_scale_research_campaign(
         max_candidates=max_candidates,
         asset_limit=asset_limit,
         timeframes=timeframes,
+    )
+
+
+@router.post("/research/campaigns/{campaign_id}/quality-follow-up")
+def create_quality_first_campaign_follow_up(
+    campaign_id: int,
+    name: str | None = Query(None),
+    max_variants_per_parent: int = Query(6, ge=1, le=12),
+    asset_limit: int = Query(4, ge=2, le=10),
+    timeframes: list[str] | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return create_quality_first_research_campaign(
+        conn,
+        source_campaign_id=campaign_id,
+        name=name,
+        max_variants_per_parent=max_variants_per_parent,
+        asset_limit=asset_limit,
+        timeframes=timeframes,
+    )
+
+
+@router.post("/research/campaigns/phase-9-8-transferability")
+def create_phase_9_8_transferability_campaign(
+    pullback_campaign_id: int = Query(2, ge=1),
+    trend_source_campaign_id: int = Query(1, ge=1),
+    name: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return create_transferability_sample_size_campaign(
+        conn,
+        pullback_campaign_id=pullback_campaign_id,
+        trend_source_campaign_id=trend_source_campaign_id,
+        name=name,
+    )
+
+
+@router.post("/research/campaigns/phase-9-9-overfit-regime-robustness")
+def create_phase_9_9_overfit_regime_robustness_campaign(
+    source_campaign_id: int = Query(3, ge=1),
+    name: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return create_overfit_regime_robustness_campaign(
+        conn,
+        source_campaign_id=source_campaign_id,
+        name=name,
+    )
+
+
+@router.post("/research/campaigns/phase-9-10-single-asset-generalization")
+def create_phase_9_10_single_asset_generalization_campaign(
+    source_campaign_id: int = Query(4, ge=1),
+    name: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return create_single_asset_generalization_campaign(
+        conn,
+        source_campaign_id=source_campaign_id,
+        name=name,
+    )
+
+
+@router.post("/research/campaigns/phase-9-11-strategy-redesign")
+def create_phase_9_11_strategy_redesign_campaign(
+    source_campaign_id: int = Query(5, ge=1),
+    name: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return create_strategy_redesign_campaign(
+        conn,
+        source_campaign_id=source_campaign_id,
+        name=name,
+    )
+
+
+@router.post("/research/campaigns/phase-9-12-volatility-adaptive-relative-strength")
+def create_phase_9_12_volatility_adaptive_relative_strength_campaign(
+    source_campaign_id: int = Query(6, ge=1),
+    name: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return create_volatility_adaptive_relative_strength_campaign(
+        conn,
+        source_campaign_id=source_campaign_id,
+        name=name,
     )
 
 

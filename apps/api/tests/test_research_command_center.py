@@ -1,0 +1,229 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+import json
+
+from app.services.research_command_center import analyze_campaign
+
+
+CAMPAIGN = {
+    "id": 7,
+    "campaign_key": "campaign_quality_v1",
+    "name": "Candidate quality campaign",
+    "universe_key": "test",
+    "status": "running",
+    "requested_candidates": 20,
+}
+
+
+def job(
+    job_id: int,
+    candidate_id: str,
+    *,
+    symbol: str = "AAPL",
+    timeframe: str = "4h",
+    status: str = "rejected",
+    profit_factor: float = 1.0,
+    expectancy: float = -1.0,
+    trades: int = 20,
+    drawdown: float = 0.1,
+    canonical: str | None = None,
+    parameter: int = 20,
+) -> dict:
+    checks = [
+        {"name": "profit_factor", "passed": profit_factor >= 1.25},
+        {"name": "positive_expectancy", "passed": expectancy > 0},
+        {"name": "drawdown", "passed": drawdown <= 0.2},
+        {"name": "trade_count", "passed": trades >= 30},
+        {"name": "walk_forward_oos", "passed": True},
+        {"name": "regime_stability", "passed": True},
+    ]
+    failures = [check["name"] for check in checks if not check["passed"]]
+    blocks = {"entry": "pullback", "trend": "ema_20_50", "momentum": "rsi_55"}
+    parameters = {"ema_fast": parameter, "risk_reward": 2.0}
+    return {
+        "id": job_id,
+        "campaign_id": 7,
+        "candidate_id": candidate_id,
+        "family_id": "family-1",
+        "strategy_family": "Pullback",
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "status": status,
+        "candidate": {
+            "candidate_id": candidate_id,
+            "canonical_key": canonical or f"canonical-{candidate_id}",
+            "blocks": blocks,
+            "parameters": parameters,
+        },
+        "result": {
+            "metrics": {
+                "profit_factor": profit_factor,
+                "expectancy_per_trade": expectancy,
+                "number_of_trades": trades,
+                "max_drawdown": drawdown,
+                "win_rate": 0.5,
+            },
+            "blocks": blocks,
+            "parameters": parameters,
+            "failure_reasons": failures,
+            "paper_readiness": {
+                "checks": checks,
+                "thresholds": {
+                    "profit_factor": 1.25,
+                    "expectancy_per_trade": 0.0,
+                    "number_of_trades": 30,
+                    "max_drawdown": 0.2,
+                },
+            },
+            "walk_forward_metrics": {"enabled": True},
+            "regime_analysis": {
+                "by_market_regime": [{
+                    "regime": "bull_trend",
+                    "metrics": {
+                        "profit_factor": profit_factor,
+                        "expectancy_per_trade": expectancy,
+                        "number_of_trades": trades,
+                        "max_drawdown": drawdown,
+                        "win_rate": 0.5,
+                    },
+                }],
+            },
+        },
+        "validation_score": profit_factor * 10 + expectancy,
+        "consistency_score": 1.0,
+        "failure_reasons": failures,
+        "created_at": datetime(2026, 7, 14, tzinfo=UTC),
+    }
+
+
+def analyze(rows: list[dict], **kwargs) -> dict:
+    return analyze_campaign(CAMPAIGN, rows, **kwargs)
+
+
+def test_campaign_backed_counts_and_funnel_reconcile() -> None:
+    rows = [
+        job(1, "rejected-a", symbol="AAPL"),
+        job(2, "rejected-a", symbol="MSFT"),
+        job(3, "passed-b", status="promoted", profit_factor=1.4, expectancy=2, trades=40),
+    ]
+    payload = analyze(
+        rows,
+        elite=[{"candidate_id": "passed-b"}],
+        deployments=[{"candidate_id": "passed-b", "status": "active", "lifecycle_state": "active_forward_validation"}],
+    )
+
+    assert payload["overview"] == {
+        "campaign_jobs": 3,
+        "candidates_generated": 2,
+        "candidates_tested": 2,
+        "candidates_rejected": 1,
+        "candidates_completed": 2,
+        "needs_more_evidence": 0,
+        "research_candidates": 1,
+        "elite_candidates": 1,
+        "candidate_linked_deployments": 1,
+    }
+    assert all(payload["reconciliation"].values())
+
+
+def test_legacy_metrics_are_not_mixed_into_current_campaign_analysis() -> None:
+    payload = analyze([job(1, "candidate-a")])
+
+    assert "historical_research" not in payload
+    assert "validated_strategies" not in payload["overview"]
+    assert payload["overview"]["campaign_jobs"] == 1
+
+
+def test_rejection_reasons_are_canonical_and_count_candidates() -> None:
+    payload = analyze([
+        job(1, "candidate-a", symbol="AAPL"),
+        job(2, "candidate-a", symbol="MSFT"),
+        job(3, "candidate-b", symbol="AAPL", profit_factor=1.3),
+    ])
+    rules = {row["name"]: row for row in payload["rejection_analysis"]["validation_rules"]}
+
+    assert rules["minimum_trade_count"]["count"] == 3
+    assert rules["minimum_trade_count"]["candidate_count"] == 2
+    assert rules["profit_factor"]["count"] == 2
+    assert rules["profit_factor"]["candidate_count"] == 1
+
+
+def test_duplicate_detection_distinguishes_exact_and_structural_near_duplicates() -> None:
+    rows = [
+        job(1, "candidate-a", canonical="same", parameter=20),
+        job(2, "candidate-b", canonical="same", parameter=20),
+        job(3, "candidate-c", canonical="different", parameter=30),
+    ]
+    duplicates = analyze(rows)["duplicate_analysis"]
+
+    assert duplicates["candidate_ids"] == 3
+    assert duplicates["unique_candidates"] == 2
+    assert duplicates["exact_duplicates"] == 1
+    assert duplicates["near_duplicates"] == 2
+    assert len(duplicates["redundant_parameter_regions"]) == 1
+
+
+def test_near_pass_uses_stored_threshold_distance() -> None:
+    payload = analyze([job(1, "candidate-a", profit_factor=1.2, expectancy=1, trades=29)])
+    candidate = payload["near_pass_candidates"][0]
+
+    assert candidate["candidate_id"] == "candidate-a"
+    assert {row["name"] for row in candidate["failed_gates"]} == {"profit_factor", "minimum_trade_count"}
+    assert candidate["further_testing_justified"] is True
+    assert candidate["mean_distance"] < 0.05
+
+
+def test_recommendations_reference_evidence_and_campaign_version() -> None:
+    payload = analyze([job(index, f"candidate-{index}") for index in range(1, 5)])
+
+    assert payload["recommendations"]
+    for recommendation in payload["recommendations"]:
+        assert recommendation["evidence_source"]
+        assert recommendation["candidate_count"] > 0
+        assert recommendation["campaign_version"] == CAMPAIGN["campaign_key"]
+        assert recommendation["falsification_test"]
+
+
+def test_experiment_history_groups_candidate_runs_without_dropping_distinct_runs() -> None:
+    payload = analyze([
+        job(1, "candidate-a", symbol="AAPL"),
+        job(2, "candidate-a", symbol="MSFT"),
+        job(3, "candidate-b", symbol="NVDA"),
+    ])
+    history = payload["experiment_history"]
+
+    assert len(history) == 2
+    row = next(item for item in history if item["candidate_id"] == "candidate-a")
+    assert row["distinct_validation_runs"] == 2
+    assert row["assets"] == ["AAPL", "MSFT"]
+
+
+def test_filters_apply_consistently_to_every_campaign_section() -> None:
+    payload = analyze(
+        [job(1, "candidate-a", symbol="AAPL"), job(2, "candidate-b", symbol="MSFT")],
+        filters={"asset": "AAPL", "validation_rule": "profit_factor"},
+    )
+
+    assert payload["overview"]["campaign_jobs"] == 1
+    assert payload["candidate_funnel"][0]["count"] == 1
+    assert [row["name"] for row in payload["rejection_analysis"]["assets"]] == ["AAPL"]
+    assert [row["name"] for row in payload["asset_intelligence"]["rows"]] == ["AAPL"]
+    assert {row["candidate_id"] for row in payload["experiment_history"]} == {"candidate-a"}
+
+
+def test_validation_passed_terminology_never_calls_execution_validated() -> None:
+    payload = analyze([job(1, "candidate-a")])
+    serialized = json.dumps(payload, default=str).lower()
+
+    assert "validated strategy" not in serialized
+    assert payload["terminology"]["completed_job"].startswith("A terminal execution outcome")
+    assert payload["terminology"]["validation_passed"].startswith("All required evidence gates passed")
+
+
+def test_next_campaign_proposal_is_review_only_and_preserves_thresholds() -> None:
+    proposal = analyze([job(index, f"candidate-{index}") for index in range(1, 5)])["next_campaign_proposal"]
+
+    assert proposal["status"] == "review_required"
+    assert proposal["launch_authorized"] is False
+    assert proposal["validation_thresholds_changed"] is False

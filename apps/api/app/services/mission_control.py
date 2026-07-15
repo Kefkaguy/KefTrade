@@ -38,13 +38,14 @@ FILL_EVENT_TYPES = {"paper_order_filled"}
 
 
 def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
-    errors: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
 
     def section(name: str, fn: Callable[[], Any], fallback: Any) -> Any:
         try:
             return fn()
         except Exception as error:  # noqa: BLE001 - endpoint must return partial dashboard data
-            errors.append({"subsystem": name, "error": str(error)})
+            rollback_after_section_error(conn)
+            errors.append(diagnostic_error(name, error))
             return fallback
 
     now = datetime.now(UTC)
@@ -82,9 +83,17 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
     summary = build_research_summary(assets, deployments, alerts, logs, paper, campaigns)
     health = build_system_health(now, scheduler, assets, deployments, alerts, logs, errors)
     daily = build_daily_summary(now, logs, alerts, assets, orders, positions)
+    diagnostics = build_diagnostics(errors, now, validation)
+    readiness = authoritative_readiness(validation, now)
+    campaign = authoritative_campaign(campaigns, validation)
+    workers = authoritative_workers(campaigns, validation)
+    market_data = authoritative_market_data(assets, logs)
+    forward_evidence = authoritative_forward_evidence(validation)
+    invariants = consistency_invariants(readiness, campaign, workers, forward_evidence, diagnostics)
 
     return {
         "generated_at": now,
+        "snapshot_version": "mission_control_v2",
         "simulation_only": True,
         "safety": {
             "status": "Simulation protected",
@@ -94,6 +103,18 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
             "broker_order_routing": "disabled",
         },
         "system_health": health,
+        "health": {
+            "engineering_status": health["overall_status"],
+            "checks": validation.get("health_checks") or [],
+            "status": validation.get("health_check_status") or ("warning" if errors else "unknown"),
+        },
+        "readiness": readiness,
+        "campaign": campaign,
+        "workers": workers,
+        "market_data": market_data,
+        "forward_evidence": forward_evidence,
+        "diagnostics": diagnostics,
+        "invariants": invariants,
         "research_summary": summary,
         "assets": assets,
         "review_queue": review_queue,
@@ -104,8 +125,183 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
         "production_validation": validation,
         "recent_activity": recent_activity,
         "daily_summary": daily,
-        "subsystem_errors": errors,
+        "subsystem_errors": diagnostics["active"],
     }
+
+
+def authoritative_readiness(validation: dict[str, Any], now: datetime) -> dict[str, Any]:
+    gates = list(validation.get("readiness_gates") or [])
+    blocking = [gate for gate in gates if gate.get("mandatory") and not gate.get("passed")]
+    state = validation.get("phase10_readiness_state") or ("unknown" if not gates else "not_ready")
+    score = validation.get("phase10_readiness_score")
+    return {
+        "state": state,
+        "score": score,
+        "phase_10_allowed": state == "ready_for_phase_10" and not blocking,
+        "blocking_gate_count": len(blocking),
+        "blocking_gates": blocking,
+        "passed_gates": [gate for gate in gates if gate.get("passed")],
+        "gates": gates,
+        "last_assessed_at": validation.get("last_readiness_assessment_at") or now,
+        "snapshot_source": "production_validation_readiness_service",
+    }
+
+
+def authoritative_campaign(campaigns: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    current = validation.get("current_validation_campaign") or {}
+    config = current.get("config") or {}
+    state = current.get("status") or campaigns.get("current_experiment") or "unavailable"
+    return {
+        "id": current.get("id"),
+        "state": state,
+        "configuration_version": config.get("strategy_generation_version") or current.get("strategy_generation_version"),
+        "name": config.get("name") or current.get("name"),
+        "started_at": current.get("started_at"),
+        "queue_depth": campaigns.get("queue_depth"),
+        "running_jobs": campaigns.get("running_jobs"),
+        "blocked_data_jobs": campaigns.get("blocked_data_jobs"),
+        "completed_jobs": campaigns.get("completed_jobs"),
+        "rejected_jobs": campaigns.get("rejected_jobs"),
+        "completed_or_rejected_jobs": campaigns.get("completed_or_rejected_jobs"),
+        "failed_jobs": campaigns.get("failed_jobs"),
+        "genuine_failed_jobs": campaigns.get("genuine_failed_jobs"),
+        "recovered_stale_leases": campaigns.get("recovered_stale_leases"),
+        "count_reconciliation": campaigns.get("count_reconciliation"),
+        "completed_last_24h": campaigns.get("jobs_completed_last_24h"),
+        "throughput": validation.get("throughput") or campaigns.get("queue_throughput"),
+        "last_progress_at": campaigns.get("last_scheduler_cycle") or current.get("updated_at") or current.get("started_at"),
+        "eta": campaigns.get("campaign_eta"),
+    }
+
+
+def authoritative_workers(campaigns: dict[str, Any], validation: dict[str, Any]) -> dict[str, Any]:
+    uptime = validation.get("worker_uptime") or {}
+    return {
+        "active": campaigns.get("active_worker_count", uptime.get("active_workers")),
+        "healthy": campaigns.get("healthy_worker_count"),
+        "stale": campaigns.get("stale_worker_count"),
+        "uptime": uptime,
+        "utilization": campaigns.get("worker_utilization"),
+        "workers": campaigns.get("workers") or [],
+    }
+
+
+def authoritative_market_data(assets: list[dict[str, Any]], logs: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "monitored_assets": len(assets),
+        "stale_monitored_assets": sum(1 for asset in assets if asset.get("data_freshness") == "Stale"),
+        "warning_monitored_assets": sum(1 for asset in assets if asset.get("data_freshness") == "Warning"),
+        "market_closed_assets": sum(1 for asset in assets if "Market closed" in str(asset.get("data_freshness_detail"))),
+        "missing_candle_datasets": sum(1 for asset in assets if asset.get("latest_candle_timestamp") is None),
+        "paper_scans_blocked_by_stale_data": count_events(logs, STALE_EVENT_TYPES),
+        "provider_failures": count_events(logs, ERROR_EVENT_TYPES),
+    }
+
+
+def authoritative_forward_evidence(validation: dict[str, Any]) -> dict[str, Any]:
+    evidence = dict(validation.get("forward_evidence") or {})
+    closed = int(evidence.get("closed_trades") or 0)
+    expectancy = evidence.get("expectancy")
+    return {
+        **evidence,
+        "closed_trades": closed,
+        "expectancy": expectancy,
+        "has_data": closed > 0 or int(evidence.get("paper_fills") or 0) > 0,
+        "gate_status": "failed" if closed > 0 and (expectancy is not None and Decimal(str(expectancy)) <= 0) else "pending",
+        "source": "paper_ledger_reconciliation",
+    }
+
+
+def build_diagnostics(errors: list[dict[str, Any]], now: datetime, validation: dict[str, Any] | None = None) -> dict[str, Any]:
+    active = []
+    for error in errors:
+        active.append({
+            **error,
+            "active": True,
+            "first_seen_at": error.get("timestamp") or now,
+            "last_seen_at": error.get("timestamp") or now,
+            "resolved_at": None,
+            "occurrence_count": 1,
+        })
+    for check in (validation or {}).get("health_checks") or []:
+        if check.get("passed"):
+            continue
+        metadata = check.get("metadata") or {}
+        active.append({
+            "subsystem": check.get("source"),
+            "source": check.get("source"),
+            "severity": check.get("severity") or "warning",
+            "timestamp": check.get("timestamp") or now,
+            "error": check.get("detail"),
+            "last_error": (metadata.get("latest_worker") or {}).get("latest_error"),
+            "recommended_fix": check.get("recommended_fix"),
+            "active": True,
+            "first_seen_at": check.get("timestamp") or now,
+            "last_seen_at": check.get("timestamp") or now,
+            "resolved_at": None,
+            "occurrence_count": 1,
+            "metadata": metadata,
+        })
+    return {"active": active, "resolved": [], "history": active, "active_count": len(active)}
+
+
+def consistency_invariants(readiness: dict[str, Any], campaign: dict[str, Any], workers: dict[str, Any], forward_evidence: dict[str, Any], diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
+    running_with_queue_without_worker = (
+        campaign.get("state") == "running"
+        and int(campaign.get("queue_depth") or 0) > 0
+        and int(workers.get("healthy") or workers.get("active") or 0) == 0
+    )
+    count_reconciliation = campaign.get("count_reconciliation") or {}
+    checks = [
+        ("readiness_not_allowed_when_not_ready", readiness["state"] == "ready_for_phase_10" or readiness["phase_10_allowed"] is False),
+        ("blocking_gate_count_matches", readiness["blocking_gate_count"] == len(readiness["blocking_gates"])),
+        ("blocking_gates_present_when_count_positive", readiness["blocking_gate_count"] == 0 or bool(readiness["blocking_gates"])),
+        ("campaign_count_reconciliation", bool(count_reconciliation.get("passed", True))),
+        ("running_campaign_has_started_at", campaign["state"] != "running" or bool(campaign.get("started_at"))),
+        ("running_campaign_has_healthy_worker_when_queue_open", not running_with_queue_without_worker),
+        ("forward_evidence_visible_when_present", not forward_evidence["has_data"] or forward_evidence.get("closed_trades") is not None),
+        ("active_diagnostics_match_count", diagnostics["active_count"] == len(diagnostics["active"])),
+    ]
+    return [{"name": name, "passed": passed, "severity": "critical" if not passed else "info"} for name, passed in checks]
+
+
+def rollback_after_section_error(conn: psycopg.Connection) -> None:
+    rollback = getattr(conn, "rollback", None)
+    if callable(rollback):
+        try:
+            rollback()
+        except Exception:
+            pass
+
+
+def diagnostic_error(subsystem: str, error: Exception) -> dict[str, Any]:
+    message = str(error)
+    if "current transaction is aborted" in message.lower():
+        message = "A previous database operation failed and the transaction was rolled back before continuing."
+    return {
+        "subsystem": subsystem,
+        "source": subsystem,
+        "severity": "critical" if subsystem in {"market_data", "scheduler", "paper_orders", "paper_fills"} else "warning",
+        "timestamp": datetime.now(UTC),
+        "error": message,
+        "last_error": str(error),
+        "recommended_fix": recommended_fix_for(subsystem, str(error)),
+    }
+
+
+def recommended_fix_for(subsystem: str, error: str) -> str:
+    lowered = error.lower()
+    if "current transaction is aborted" in lowered:
+        return "Rollback the failed transaction and inspect the first database error in the service logs."
+    if subsystem == "market_data":
+        return "Verify candle table access, provider ingestion, and latest completed candle queries."
+    if subsystem == "scheduler":
+        return "Check scheduler state, latest_error, and recent paper_scheduler_* execution logs."
+    if subsystem == "research_campaigns":
+        return "Check campaign scheduler, worker leases, and failed campaign job classifications."
+    if subsystem == "production_validation":
+        return "Run readiness health checks and inspect failed validation gates."
+    return "Review the subsystem query and service logs for the first failing operation."
 
 
 def scheduler_status(conn: psycopg.Connection) -> dict[str, Any] | None:
@@ -309,16 +505,16 @@ def classify_candle_freshness(timestamp: Any, timeframe: str, asset_class: str |
     now = now or datetime.now(UTC)
     parsed = parse_datetime(timestamp)
     if parsed is None:
-        return {"classification": "Stale", "age_hours": None, "detail": "No stored candle"}
+        return {"classification": "Warning", "age_hours": None, "detail": "Provider unavailable: no completed candle stored"}
     age_hours = max(0, (now - parsed).total_seconds() / 3600)
     max_age = FRESHNESS_BY_TIMEFRAME_HOURS.get(timeframe, 24)
     if is_equity_asset(asset_class) and within_equity_market_closed_grace(parsed, now):
-        return {"classification": "Healthy", "age_hours": round(age_hours, 2), "detail": "Market closed grace window"}
+        return {"classification": "Healthy", "age_hours": round(age_hours, 2), "detail": "Market closed: latest completed candle is expected"}
     if age_hours <= max_age:
-        return {"classification": "Healthy", "age_hours": round(age_hours, 2), "detail": f"Within {max_age}h freshness window"}
+        return {"classification": "Healthy", "age_hours": round(age_hours, 2), "detail": f"Healthy: latest completed candle within {max_age}h"}
     if age_hours <= max_age * 2:
-        return {"classification": "Warning", "age_hours": round(age_hours, 2), "detail": f"Older than {max_age}h freshness window"}
-    return {"classification": "Stale", "age_hours": round(age_hours, 2), "detail": f"Older than {max_age * 2}h stale threshold"}
+        return {"classification": "Warning", "age_hours": round(age_hours, 2), "detail": f"Needs attention: candle older than {max_age}h"}
+    return {"classification": "Stale", "age_hours": round(age_hours, 2), "detail": f"Stale data: candle older than {max_age * 2}h"}
 
 
 def is_equity_asset(asset_class: str | None) -> bool:

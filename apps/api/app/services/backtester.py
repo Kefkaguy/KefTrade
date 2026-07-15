@@ -42,28 +42,34 @@ def run_backtest(
     risk_per_trade = Decimal(str(params["risk_per_trade"]))
     trades: list[dict[str, Any]] = []
     equity_curve = [equity]
+    entry_delay_bars = max(0, int(params.get("entry_delay_bars") or 0))
+    entry_offset = 1 + entry_delay_bars
+    entry_cooldown_bars = max(0, int(params.get("entry_cooldown_bars") or 0))
 
     start_index = rows.index(execution_rows[0]) if execution_rows else 0
     realized_equity_points = [{"timestamp": rows[start_index]["candle"]["timestamp"], "equity": equity}] if rows else []
     i = max(start_index, 50)
-    while i < len(rows) - 1:
+    while i < len(rows) - entry_offset:
         current = rows[i]
         candle = current["candle"]
         feature = current["feature"]
-        recent_candles = [row["candle"] for row in rows[: i + 1]]
+        recent_window_bars = max(0, int(params.get("recent_candle_window_bars") or 0))
+        recent_start = max(0, i + 1 - recent_window_bars) if recent_window_bars else 0
+        recent_candles = [row["candle"] for row in rows[recent_start : i + 1]]
         decision = strategy_decide(candle, feature, recent_candles, params)
 
         if decision.signal != "setup" or decision.stop_loss is None or decision.take_profit is None:
             i += 1
             continue
 
-        entry_candle = rows[i + 1]["candle"]
+        entry_candle = rows[i + entry_offset]["candle"]
         entry_price = Decimal(entry_candle["open"]) * (Decimal("1") + slippage_rate)
         risk_per_unit = entry_price - decision.stop_loss
         if risk_per_unit <= 0:
             i += 1
             continue
-        effective_take_profit = entry_price + (risk_per_unit * Decimal(str(params["risk_reward"])))
+        effective_risk_reward = decision.risk_reward if decision.risk_reward is not None else Decimal(str(params["risk_reward"]))
+        effective_take_profit = entry_price + (risk_per_unit * effective_risk_reward)
 
         max_risk = equity * risk_per_trade
         quantity = max_risk / risk_per_unit
@@ -71,7 +77,7 @@ def run_backtest(
         exit_reason = "end_of_data"
         exit_index = len(rows) - 1
 
-        for j in range(i + 1, len(rows)):
+        for j in range(i + entry_offset, len(rows)):
             future_candle = rows[j]["candle"]
             low = Decimal(future_candle["low"])
             high = Decimal(future_candle["high"])
@@ -97,7 +103,7 @@ def run_backtest(
                 mark_price = exit_price
                 equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))
                 break
-            if max_holding_bars > 0 and (j - (i + 1)) >= max_holding_bars:
+            if max_holding_bars > 0 and (j - (i + entry_offset)) >= max_holding_bars:
                 exit_price = close * (Decimal("1") - slippage_rate)
                 exit_reason = "time_exit"
                 exit_index = j
@@ -138,7 +144,7 @@ def run_backtest(
                 "indicators": indicator_snapshot(feature),
             }
         )
-        i = exit_index + 1
+        i = max(exit_index + 1, i + entry_cooldown_bars + 1)
 
     metrics = calculate_metrics(initial_equity, equity, trades, equity_curve)
     if train_rows and validation_rows:

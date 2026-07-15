@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from dataclasses import asdict
 
 from app.services import research_campaigns
 from app.services.research_campaigns import (
@@ -10,8 +11,15 @@ from app.services.research_campaigns import (
     data_readiness_for_job,
     forward_validation_state,
     generate_discovery_candidates,
+    passes_cross_validation,
+    overfit_regime_robustness_blueprint,
+    quality_first_campaign_blueprint,
     research_heatmaps,
     run_research_campaign_batch,
+    single_asset_generalization_blueprint,
+    strategy_redesign_blueprint,
+    transferability_sample_size_blueprint,
+    volatility_adaptive_relative_strength_blueprint,
 )
 
 
@@ -375,6 +383,28 @@ def test_evidence_drift_classifies_severe_forward_underperformance() -> None:
     assert "drawdown" in severe
 
 
+def test_evidence_drift_waits_for_a_closed_forward_sample() -> None:
+    elite = {
+        "candidate_id": "sd_test",
+        "profit_factor": 2.0,
+        "expectancy": 10.0,
+        "max_drawdown": 0.05,
+        "validation_history": [],
+    }
+    paper = {
+        "closed_trade_count": 0,
+        "paper_profit_factor": 0,
+        "paper_expectancy": 0,
+        "paper_max_drawdown": 0,
+    }
+
+    drift = calculate_evidence_drift(elite, paper)
+
+    assert drift
+    assert {row["drift_classification"] for row in drift} == {"insufficient_forward_sample"}
+    assert all(row["paper_value"] is None for row in drift)
+
+
 def test_closed_trade_attribution_pairs_simulated_entries_and_exits() -> None:
     fills = [
         {"side": "buy", "quantity": 2, "fill_price": 100, "fee": 1, "slippage": 0.1, "filled_at": "2026-01-01T00:00:00+00:00"},
@@ -402,3 +432,296 @@ def test_research_heatmaps_group_assets_families_and_timeframes() -> None:
     assert heatmaps["asset_heatmap"]
     assert heatmaps["strategy_family_heatmap"]
     assert any(row["x"] == "AAPL" and row["promotion_rate"] == 0.5 for row in heatmaps["asset_heatmap"])
+
+
+def test_quality_first_blueprint_targets_phase_96_survivors_without_relaxing_gates() -> None:
+    parents = generate_discovery_candidates(max_candidates=50)[:50]
+    survivor_ids = {parents[0].candidate_id, parents[1].candidate_id, parents[2].candidate_id}
+    rows = []
+    for index, candidate in enumerate(parents):
+        promoted = candidate.candidate_id in survivor_ids
+        symbol = "AAPL" if promoted else ("LLY" if index % 3 == 0 else "AVGO")
+        rows.append(
+            {
+                "id": index + 1,
+                "campaign_id": 1,
+                "candidate_id": candidate.candidate_id,
+                "family_id": candidate.family_id,
+                "strategy_family": "Pullback" if promoted else "Breakout",
+                "symbol": symbol,
+                "timeframe": "1h",
+                "status": "promoted" if promoted else "rejected",
+                "validation_score": 7.0 if promoted else -20.0,
+                "candidate": asdict(candidate),
+                "result": {
+                    "metrics": {
+                        "profit_factor": 1.6 if promoted or symbol in {"LLY", "AVGO"} else 0.8,
+                        "expectancy_per_trade": 25 if promoted or symbol in {"LLY", "AVGO"} else -4,
+                        "max_drawdown": 0.04,
+                        "number_of_trades": 40 if promoted else 12,
+                        "walk_forward": {"enabled": True},
+                    },
+                    "regime_analysis": {
+                        "by_market_regime": [{"regime": "bull_trend", "metrics": {"profit_factor": 1.2, "expectancy_per_trade": 4, "number_of_trades": 8}}],
+                        "by_volatility_regime": [{"regime": "low_volatility", "metrics": {"profit_factor": 1.1, "expectancy_per_trade": 2, "number_of_trades": 8}}],
+                    },
+                },
+                "failure_reasons": [] if promoted else ["Trade count 12 must be >= 30."],
+            }
+        )
+
+    blueprint = quality_first_campaign_blueprint(rows, max_variants_per_parent=4, asset_limit=3)
+
+    assert blueprint["diagnostics"]["generated_candidates"] == 50
+    assert blueprint["diagnostics"]["candidate_level_failures"] == 47
+    assert blueprint["diagnostics"]["single_market_research_candidates"] == 3
+    assert blueprint["targeting"]["parents"] == sorted(survivor_ids, reverse=True)
+    assert blueprint["targeting"]["assets"][0] == "AAPL"
+    assert {"LLY", "AVGO"}.issubset(set(blueprint["targeting"]["assets"]))
+    assert blueprint["targeting"]["timeframes"] == ["1h"]
+    assert len(blueprint["candidates"]) == 12
+    assert any(candidate.parent_candidate_id in survivor_ids for candidate in blueprint["candidates"])
+
+    single_asset_summary = {
+        "research_score": 7,
+        "profit_factor": 1.6,
+        "expectancy": 25,
+        "max_drawdown": 0.04,
+        "trade_count": 40,
+        "stability": 1.0,
+        "assets_passed": 1,
+        "timeframes_passed": 1,
+    }
+    assert passes_cross_validation(single_asset_summary) is False
+
+
+def test_phase_98_blueprint_is_focused_versioned_and_lineaged() -> None:
+    candidates = generate_discovery_candidates(max_candidates=30)
+    pullback_parent = next(candidate for candidate in candidates if candidate.blocks["entry"] == "pullback")
+    trend_parent = next(candidate for candidate in candidates if candidate.blocks["entry"] == "trend_continuation")
+    pullback_jobs = []
+    for index in range(3):
+        payload = asdict(pullback_parent)
+        payload["candidate_id"] = f"pullback_parent_{index}"
+        pullback_jobs.append(
+            {
+                "id": index + 1,
+                "candidate_id": payload["candidate_id"],
+                "family_id": payload["family_id"],
+                "strategy_family": "Pullback",
+                "symbol": "AAPL",
+                "timeframe": "1h",
+                "status": "promoted",
+                "validation_score": 8 - index,
+                "candidate": payload,
+                "result": {"metrics": {"profit_factor": 1.4, "expectancy_per_trade": 20, "number_of_trades": 40, "max_drawdown": 0.04}},
+            }
+        )
+    trend_jobs = []
+    for index in range(2):
+        payload = asdict(trend_parent)
+        payload["candidate_id"] = f"trend_parent_{index}"
+        trend_jobs.append(
+            {
+                "id": index + 20,
+                "candidate_id": payload["candidate_id"],
+                "family_id": payload["family_id"],
+                "strategy_family": "Trend Following",
+                "symbol": "NVDA",
+                "timeframe": "1h",
+                "status": "rejected",
+                "validation_score": 5 - index,
+                "candidate": payload,
+                "result": {"metrics": {"profit_factor": 1.2, "expectancy_per_trade": 8, "number_of_trades": 20, "max_drawdown": 0.05}},
+            }
+        )
+
+    blueprint = transferability_sample_size_blueprint(pullback_jobs, trend_jobs)
+
+    assert blueprint["targeting"]["assets"] == ["AAPL", "NVDA", "AVGO", "LLY", "GOOGL", "JPM"]
+    assert blueprint["targeting"]["timeframes"] == ["1h", "4h"]
+    assert blueprint["targeting"]["candidate_count"] == 24
+    assert blueprint["targeting"]["job_count"] == 288
+    assert blueprint["tracks"]["breakout_containment"]["included"] is False
+    assert all(row["parent_candidate_id"] for row in blueprint["lineage"])
+    assert all(row["campaign_version"] == "phase_9_8_transferability_sample_size_v1" for row in blueprint["lineage"])
+    assert {"Pullback", "Trend Following"} == {row["strategy_family"] for row in blueprint["lineage"]}
+
+
+def test_phase_99_blueprint_is_overfit_focused_versioned_and_lineaged() -> None:
+    candidates = generate_discovery_candidates(max_candidates=30)
+    pullback_parent = next(candidate for candidate in candidates if candidate.blocks["entry"] == "pullback")
+    trend_parent = next(candidate for candidate in candidates if candidate.blocks["entry"] == "trend_continuation")
+    pullback_payload = asdict(pullback_parent)
+    pullback_payload["candidate_id"] = "sd_7ce7b8ddc81b07"
+    trend_payload = asdict(trend_parent)
+    trend_payload["candidate_id"] = "sd_5cbcdf7c9eabcf"
+    jobs = [
+        {
+            "id": 1,
+            "candidate_id": pullback_payload["candidate_id"],
+            "family_id": pullback_payload["family_id"],
+            "strategy_family": "Pullback",
+            "symbol": "AAPL",
+            "timeframe": "1h",
+            "status": "promoted",
+            "validation_score": 8,
+            "candidate": pullback_payload,
+            "result": {"metrics": {"profit_factor": 1.4, "expectancy_per_trade": 20, "number_of_trades": 40, "max_drawdown": 0.04}},
+        },
+        {
+            "id": 2,
+            "candidate_id": trend_payload["candidate_id"],
+            "family_id": trend_payload["family_id"],
+            "strategy_family": "Trend Following",
+            "symbol": "AAPL",
+            "timeframe": "1h",
+            "status": "rejected",
+            "validation_score": 5,
+            "candidate": trend_payload,
+            "result": {"metrics": {"profit_factor": 1.7, "expectancy_per_trade": 13, "number_of_trades": 141, "max_drawdown": 0.03}},
+        },
+    ]
+
+    blueprint = overfit_regime_robustness_blueprint(jobs)
+
+    assert blueprint["targeting"]["assets"] == ["AAPL", "NVDA"]
+    assert blueprint["targeting"]["timeframes"] == ["1h", "4h"]
+    assert blueprint["targeting"]["candidate_count"] == 24
+    assert blueprint["targeting"]["job_count"] == 96
+    assert blueprint["tracks"]["breakout_containment"]["included"] is False
+    assert blueprint["tracks"]["single_asset_robust_candidate"]["eligible_for_elite"] is False
+    assert all(row["parent_candidate_id"] for row in blueprint["lineage"])
+    assert all(row["hypothesis"] and row["data_window"] and row["regime_scope"] for row in blueprint["lineage"])
+    assert all(row["campaign_version"] == "phase_9_9_overfit_regime_robustness_v1" for row in blueprint["lineage"])
+    assert {"Pullback", "Trend Following"} == {row["strategy_family"] for row in blueprint["lineage"]}
+    assert not any(row["strategy_family"] == "Breakout" for row in blueprint["lineage"])
+
+
+def test_phase_910_blueprint_is_single_asset_generalization_focused_and_lineaged() -> None:
+    candidates = generate_discovery_candidates(max_candidates=30)
+    pullback_parent = next(candidate for candidate in candidates if candidate.blocks["entry"] == "pullback")
+    trend_parent = next(candidate for candidate in candidates if candidate.blocks["entry"] == "trend_continuation")
+    pullback_payload = asdict(pullback_parent)
+    pullback_payload["candidate_id"] = "sd_a8d9508bee3c46"
+    trend_payload = asdict(trend_parent)
+    trend_payload["candidate_id"] = "sd_phase99_trend_parent"
+    jobs = [
+        {
+            "id": 1,
+            "candidate_id": pullback_payload["candidate_id"],
+            "family_id": pullback_payload["family_id"],
+            "strategy_family": "Pullback",
+            "symbol": "AAPL",
+            "timeframe": "1h",
+            "status": "promoted",
+            "validation_score": 80,
+            "candidate": pullback_payload,
+            "result": {"metrics": {"profit_factor": 1.6808, "expectancy_per_trade": 28.2448, "number_of_trades": 115, "max_drawdown": 0.0414}},
+        },
+        {
+            "id": 2,
+            "candidate_id": trend_payload["candidate_id"],
+            "family_id": trend_payload["family_id"],
+            "strategy_family": "Trend Following",
+            "symbol": "AAPL",
+            "timeframe": "1h",
+            "status": "rejected",
+            "validation_score": 5,
+            "candidate": trend_payload,
+            "result": {"metrics": {"profit_factor": 1.2, "expectancy_per_trade": 6, "number_of_trades": 34, "max_drawdown": 0.08}},
+        },
+    ]
+
+    blueprint = single_asset_generalization_blueprint(jobs)
+
+    assert blueprint["targeting"]["assets"] == ["AAPL", "MSFT", "GOOGL", "META", "QQQ", "SPY", "NVDA"]
+    assert blueprint["targeting"]["timeframes"] == ["1h", "4h"]
+    assert blueprint["targeting"]["candidate_count"] == 25
+    assert blueprint["targeting"]["pullback_candidate_count"] == 20
+    assert blueprint["targeting"]["trend_candidate_count"] == 5
+    assert blueprint["targeting"]["job_count"] == 350
+    assert blueprint["tracks"]["breakout_containment"]["included"] is False
+    assert blueprint["diagnostics"]["elite_gate_policy"] == "Informational diagnostics never override passes_cross_validation."
+    assert all(row["parent_candidate_id"] for row in blueprint["lineage"])
+    assert all(row["hypothesis"] and row["temporal_window"] and row["regime_scope"] for row in blueprint["lineage"])
+    assert all(row["normalized_or_fixed_logic"] and row["asset_scope"] and row["timeframe_sampling"] for row in blueprint["lineage"])
+    assert all(row["campaign_version"] == "phase_9_10_single_asset_generalization_v1" for row in blueprint["lineage"])
+    assert {"Pullback", "Trend Following"} == {row["strategy_family"] for row in blueprint["lineage"]}
+    assert not any(row["strategy_family"] == "Breakout" for row in blueprint["lineage"])
+
+
+def test_phase_911_blueprint_is_structural_redesign_not_local_tuning() -> None:
+    candidates = generate_discovery_candidates(max_candidates=30)
+    pullback_parent = next(candidate for candidate in candidates if candidate.blocks["entry"] == "pullback")
+    trend_parent = next(candidate for candidate in candidates if candidate.blocks["entry"] == "trend_continuation")
+    pullback_payload = asdict(pullback_parent)
+    pullback_payload["candidate_id"] = "sd_3ffffc89f82b5c"
+    trend_payload = asdict(trend_parent)
+    trend_payload["candidate_id"] = "sd_phase910_trend_parent"
+    jobs = [
+        {
+            "id": 1,
+            "candidate_id": pullback_payload["candidate_id"],
+            "family_id": pullback_payload["family_id"],
+            "strategy_family": "Pullback",
+            "symbol": "AAPL",
+            "timeframe": "1h",
+            "status": "promoted",
+            "validation_score": 8,
+            "candidate": pullback_payload,
+            "result": {"metrics": {"profit_factor": 1.1861, "expectancy_per_trade": 3.4271, "number_of_trades": 282, "max_drawdown": 0.058}},
+        },
+        {
+            "id": 2,
+            "candidate_id": trend_payload["candidate_id"],
+            "family_id": trend_payload["family_id"],
+            "strategy_family": "Trend Following",
+            "symbol": "AAPL",
+            "timeframe": "1h",
+            "status": "rejected",
+            "validation_score": 0,
+            "candidate": trend_payload,
+            "result": {"metrics": {"profit_factor": 0.9, "expectancy_per_trade": -1, "number_of_trades": 40, "max_drawdown": 0.08}},
+        },
+    ]
+
+    blueprint = strategy_redesign_blueprint(jobs)
+    mix = blueprint["targeting"]["strategy_mix"]
+
+    assert blueprint["targeting"]["candidate_count"] == 30
+    assert blueprint["targeting"]["job_count"] == 210
+    assert blueprint["targeting"]["timeframes"] == ["1h"]
+    assert mix["Pullback"] == 20
+    assert mix["Trend Following"] == 2
+    assert sum(count for family, count in mix.items() if family not in {"Pullback", "Trend Following"}) == 8
+    assert blueprint["tracks"]["trend_following_pause_decision"]["candidate_count"] == 2
+    assert all(row["economic_hypothesis"] and row["new_rule"] and row["falsification_condition"] for row in blueprint["lineage"])
+    assert all(row["added_complexity"]["added_rules"] <= 2 for row in blueprint["lineage"])
+    assert all(row["campaign_version"] == "phase_9_11_strategy_redesign_v1" for row in blueprint["lineage"])
+
+
+def test_phase_912_blueprint_is_focused_and_asset_agnostic() -> None:
+    parent = next(candidate for candidate in generate_discovery_candidates(max_candidates=30) if candidate.blocks["entry"] == "pullback")
+    payload = asdict(parent)
+    jobs = [
+        {
+            "id": 1,
+            "candidate_id": parent.candidate_id,
+            "family_id": parent.family_id,
+            "strategy_family": "Relative Strength Continuation",
+            "symbol": "AAPL",
+            "timeframe": "1h",
+            "status": "rejected",
+            "validation_score": 5,
+            "candidate": payload,
+            "result": {"metrics": {"profit_factor": 1.36, "expectancy_per_trade": 19, "number_of_trades": 34, "max_drawdown": .06}},
+        }
+    ]
+
+    blueprint = volatility_adaptive_relative_strength_blueprint(jobs)
+
+    assert blueprint["targeting"] == {"assets": ["AAPL", "NVDA"], "timeframes": ["1h"], "candidate_count": 12, "job_count": 24}
+    assert all(candidate.parameters["adaptive_volatility_profiles"] is True for candidate in blueprint["candidates"])
+    assert all("symbol" not in candidate.parameters for candidate in blueprint["candidates"])
+    assert all(row["campaign_version"] == "phase_9_12_volatility_adaptive_relative_strength_v1" for row in blueprint["lineage"])

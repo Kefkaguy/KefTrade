@@ -212,6 +212,22 @@ def build_deployment_management(conn: psycopg.Connection) -> dict[str, Any]:
         row["id"]: {**row, "equity": Decimal(row.get("cash_balance") or 0) + market_value_by_account[int(row["id"])]}
         for row in accounts
     }
+    positions_by_account = group_by(positions, "account_id")
+    orders_by_account = group_by(orders, "account_id")
+    fills_by_account = group_by(fills, "account_id")
+    logs_by_account = group_by(logs, "account_id")
+    account_snapshots = [
+        {
+            "account": account,
+            "balances": account_balance_snapshot(account, positions_by_account.get(account.get("id"), [])),
+            "positions": positions_by_account.get(account.get("id"), []),
+            "orders": orders_by_account.get(account.get("id"), []),
+            "fills": fills_by_account.get(account.get("id"), []),
+            "logs": logs_by_account.get(account.get("id"), []),
+            "equity": [],
+        }
+        for account in accounts
+    ]
 
     managed = []
     for deployment in deployments:
@@ -270,6 +286,13 @@ def build_deployment_management(conn: psycopg.Connection) -> dict[str, Any]:
         "asset_comparison": compare_by(managed, "symbol"),
         "strategy_comparison": compare_by(managed, "strategy_name"),
         "audit_history": logs[:30],
+        "accounts": accounts,
+        "positions": positions,
+        "orders": orders,
+        "fills": fills,
+        "alerts": alerts,
+        "logs": logs,
+        "account_snapshots": account_snapshots,
     }
 
 
@@ -350,6 +373,18 @@ def group_by(rows: list[dict[str, Any]], key: str) -> dict[Any, list[dict[str, A
     for row in rows:
         grouped[row.get(key)].append(row)
     return grouped
+
+
+def account_balance_snapshot(account: dict[str, Any], positions: list[dict[str, Any]]) -> dict[str, Any]:
+    market_value = sum((Decimal(row.get("market_value") or 0) for row in positions), Decimal("0"))
+    unrealized_pnl = sum((Decimal(row.get("unrealized_pnl") or 0) for row in positions), Decimal("0"))
+    cash_balance = Decimal(account.get("cash_balance") or 0)
+    return {
+        **account,
+        "market_value": market_value,
+        "unrealized_pnl": unrealized_pnl,
+        "equity": cash_balance + market_value,
+    }
 
 
 def _selected_deployments(deployments: list[dict[str, Any]], deployment_ids: list[int] | None) -> list[dict[str, Any]]:

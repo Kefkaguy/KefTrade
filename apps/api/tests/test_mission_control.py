@@ -182,7 +182,24 @@ class MissionConn:
                 "completed_at": None,
                 "updated_at": now,
                 "simulation_only": True,
-            }
+            },
+            {
+                "id": 4,
+                "name": "phase_9_9_overfit_diagnosis_regime_robustness_v1",
+                "universe_key": "phase_9_9_overfit_diagnosis_regime_robustness_v1",
+                "status": "completed",
+                "requested_candidates": 24,
+                "queued_jobs": 96,
+                "completed_jobs": 96,
+                "failed_jobs": 0,
+                "promoted_candidates": 0,
+                "rejected_candidates": 24,
+                "analytics": {"strategies_generated": 24},
+                "started_at": now - timedelta(hours=8),
+                "completed_at": now - timedelta(hours=1),
+                "updated_at": now - timedelta(hours=1),
+                "simulation_only": True,
+            },
         ]
         self.campaign_scheduler = {
             "id": True,
@@ -200,14 +217,102 @@ class MissionConn:
             {"id": 2, "status": "blocked_data", "worker_id": None, "heartbeat_at": None, "lease_expires_at": None, "created_at": now - timedelta(hours=2), "completed_at": None, "execution_runtime_ms": None, "failure_classification": "stale_data"},
             {"id": 3, "status": "promoted", "worker_id": None, "heartbeat_at": None, "lease_expires_at": None, "created_at": now - timedelta(hours=3), "completed_at": now - timedelta(minutes=20), "execution_runtime_ms": 1200, "failure_classification": None},
         ]
+        self.campaign_jobs.extend(self.phase_99_jobs(now))
         self.campaign_workers = [
             {"worker_id": "worker-1", "hostname": "test-host", "status": "running", "heartbeat_at": now, "started_at": now - timedelta(hours=1), "stopped_at": None, "latest_error": None, "simulation_only": True}
         ]
+        self.rollbacks = 0
+
+    def phase_99_jobs(self, now):
+        rows = []
+        job_id = 100
+        failure_reasons = [
+            "insufficient_trades",
+            "fails_in_sideways",
+            "fails_in_low_volatility",
+            "weak_profit_factor",
+            "poor_expectancy",
+        ]
+
+        def result(candidate_id, strategy_family, metrics):
+            return {
+                "candidate_id": candidate_id,
+                "blocks": {"entry": "pullback" if strategy_family == "Pullback" else "trend_continuation"},
+                "parameters": {"entry": "pullback" if strategy_family == "Pullback" else "trend_continuation"},
+                "metrics": metrics,
+            }
+
+        def add_candidate(candidate_id, strategy_family, promoted, metrics, reasons):
+            nonlocal job_id
+            markets = [("AAPL", "1h"), ("AAPL", "4h"), ("NVDA", "1h"), ("GOOGL", "1h")]
+            for index, (symbol, timeframe) in enumerate(markets):
+                status = "promoted" if promoted and index == 0 else "rejected"
+                rows.append(
+                    {
+                        "id": job_id,
+                        "campaign_id": 4,
+                        "candidate_id": candidate_id,
+                        "family_id": f"family_{strategy_family.lower().replace(' ', '_')}",
+                        "strategy_family": strategy_family,
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "status": status,
+                        "result": result(candidate_id, strategy_family, metrics) if status == "promoted" or not promoted else {},
+                        "failure_reasons": [] if status == "promoted" else reasons,
+                        "validation_score": Decimal("78.5") if status == "promoted" else Decimal("0"),
+                        "worker_id": None,
+                        "heartbeat_at": None,
+                        "lease_expires_at": None,
+                        "created_at": now - timedelta(hours=7),
+                        "completed_at": now - timedelta(hours=2),
+                        "execution_runtime_ms": 1500,
+                        "failure_classification": None,
+                        "latest_error": None,
+                    }
+                )
+                job_id += 1
+
+        best_metrics = {
+            "profit_factor": Decimal("1.6808"),
+            "expectancy_per_trade": Decimal("28.2448"),
+            "number_of_trades": 115,
+            "max_drawdown": Decimal("0.0414"),
+        }
+        add_candidate("sd_a8d9508bee3c46", "Pullback", True, best_metrics, failure_reasons)
+        for index in range(9):
+            add_candidate(
+                f"research_candidate_{index}",
+                "Pullback",
+                True,
+                {
+                    "profit_factor": Decimal("1.30"),
+                    "expectancy_per_trade": Decimal("8.0"),
+                    "number_of_trades": 72,
+                    "max_drawdown": Decimal("0.08"),
+                },
+                failure_reasons[:3],
+            )
+        for index in range(14):
+            add_candidate(
+                f"needs_more_evidence_{index}",
+                "Pullback" if index < 10 else "Trend Following",
+                False,
+                {
+                    "profit_factor": Decimal("1.05"),
+                    "expectancy_per_trade": Decimal("1.0"),
+                    "number_of_trades": 12,
+                    "max_drawdown": Decimal("0.09"),
+                },
+                [failure_reasons[index % len(failure_reasons)]],
+            )
+        return rows
 
     def execute(self, query, params=None):
         if "FROM paper_scan_scheduler" in query:
             return Result([self.scheduler])
         if "FROM strategy_deployments" in query:
+            if "COUNT(1)" in query:
+                return Result([{"count": 0}])
             rows = [row for row in self.deployments if row.get("simulation_only") is True]
             return Result(rows)
         if "FROM paper_accounts" in query:
@@ -243,11 +348,17 @@ class MissionConn:
             return Result([self.campaign_scheduler])
         if "FROM research_campaign_workers" in query:
             return Result(self.campaign_workers)
+        if "FROM elite_research_candidates" in query:
+            if "COUNT(1)" in query:
+                return Result([{"count": 0}])
+            return Result([])
         if "FROM research_campaigns" in query:
             if "completed_at >= NOW()" in query:
                 return Result([{"count": 0}])
             return Result(self.campaigns)
         if "FROM research_campaign_jobs" in query:
+            if "SELECT *" in query and "WHERE campaign_id = %s" in query:
+                return Result([row for row in self.campaign_jobs if row.get("campaign_id") == params[0]])
             if "GROUP BY COALESCE" in query:
                 return Result([{"classification": "stale_data", "count": 1}])
             if "COUNT(DISTINCT worker_id)" in query:
@@ -266,6 +377,9 @@ class MissionConn:
             if "GROUP BY worker_id" in query:
                 return Result([{"worker_id": "worker-1", "claimed_jobs": 1, "last_heartbeat": self.campaign_jobs[0]["heartbeat_at"], "lease_expires_at": self.campaign_jobs[0]["lease_expires_at"]}])
         raise AssertionError(query)
+
+    def rollback(self):
+        self.rollbacks += 1
 
 
 def test_mission_control_aggregates_multi_asset_simulation_state() -> None:
@@ -321,8 +435,28 @@ def test_mission_control_returns_partial_data_when_subsystem_fails() -> None:
     snapshot = get_mission_control(conn)
 
     assert snapshot["subsystem_errors"][0]["subsystem"] == "evidence_alerts"
+    assert snapshot["subsystem_errors"][0]["recommended_fix"]
     assert snapshot["assets"]
     assert snapshot["system_health"]["overall_status"] == "Warning"
+    assert conn.rollbacks >= 1
+
+
+def test_mission_control_rolls_back_aborted_transaction_before_continuing() -> None:
+    conn = MissionConn()
+
+    def failing_execute(query, params=None):
+        if "WITH monitored(symbol, timeframe)" in query:
+            raise RuntimeError("current transaction is aborted, commands ignored until end of transaction block")
+        return MissionConn.execute(conn, query, params)
+
+    conn.execute = failing_execute
+
+    snapshot = get_mission_control(conn)
+
+    assert conn.rollbacks >= 1
+    market_data_error = next(error for error in snapshot["subsystem_errors"] if error["subsystem"] == "market_data")
+    assert "current transaction is aborted" not in market_data_error["error"]
+    assert snapshot["paper_account"]["account_count"] == 1
 
 
 def test_equity_market_closed_freshness_is_not_false_failure() -> None:
@@ -332,7 +466,7 @@ def test_equity_market_closed_freshness_is_not_false_failure() -> None:
     freshness = classify_candle_freshness(friday_close, "1h", "equity", saturday)
 
     assert freshness["classification"] == "Healthy"
-    assert freshness["detail"] == "Market closed grace window"
+    assert freshness["detail"] == "Market closed: latest completed candle is expected"
 
 
 def test_scheduler_disabled_classification() -> None:
@@ -365,3 +499,65 @@ def test_scheduler_error_classification() -> None:
     assert snapshot["system_health"]["scheduler_status"] == "Error"
     assert snapshot["system_health"]["overall_status"] == "Error"
     assert snapshot["research_summary"]["scheduler_failures"] >= 1
+
+
+def test_mission_control_authoritative_snapshot_is_consistent() -> None:
+    snapshot = get_mission_control(MissionConn())
+
+    assert snapshot["snapshot_version"] == "mission_control_v2"
+    assert snapshot["readiness"]["phase_10_allowed"] is (snapshot["readiness"]["state"] == "ready_for_phase_10" and snapshot["readiness"]["blocking_gate_count"] == 0)
+    assert snapshot["readiness"]["blocking_gate_count"] == len(snapshot["readiness"]["blocking_gates"])
+    if snapshot["readiness"]["blocking_gate_count"]:
+        assert snapshot["readiness"]["blocking_gates"]
+    assert snapshot["diagnostics"]["active_count"] == len(snapshot["subsystem_errors"])
+    assert all(error["active"] for error in snapshot["diagnostics"]["active"])
+
+
+def test_latest_completed_campaign_summary_matches_phase_99_lifecycle_totals() -> None:
+    snapshot = get_mission_control(MissionConn())
+
+    latest = snapshot["research_campaigns"]["latest_completed_campaign"]
+    summaries = snapshot["research_campaigns"]["completed_campaign_summaries"]
+    lifecycle = latest["candidate_lifecycle_counts"]
+
+    assert any(row["id"] == latest["id"] for row in summaries)
+    assert latest["name"] == "phase_9_9_overfit_diagnosis_regime_robustness_v1"
+    assert latest["generated_candidates"] == 24
+    assert latest["tested_candidates"] == 24
+    assert lifecycle["research_candidate"] == 10
+    assert lifecycle["needs_more_evidence"] == 14
+    assert lifecycle["elite_candidate"] == 0
+    assert lifecycle["rejected"] == 0
+    assert latest["jobs_executed"] == 96
+    assert latest["jobs_rejected_by_evidence"] == 86
+    assert latest["operationally_failed_jobs"] == 0
+    assert latest["promoted_single_market_jobs"] == 10
+    assert sum(latest["job_status_counts"].values()) == latest["jobs_executed"]
+    assert sum(lifecycle.values()) == latest["generated_candidates"]
+
+    best = latest["best_candidate"]
+    assert best["candidate_id"] == "sd_a8d9508bee3c46"
+    assert best["strategy_family"] == "Pullback"
+    assert best["symbol"] == "AAPL"
+    assert best["timeframe"] == "1h"
+    assert best["profit_factor"] == 1.6808
+    assert best["expectancy"] == 28.2448
+    assert best["trade_count"] == 115
+    assert best["max_drawdown"] == 0.0414
+    assert best["stability"] == 0.25
+
+    reasons = [row["reason"] for row in latest["top_failure_reasons"]]
+    assert "insufficient_trades" in reasons
+    assert "fails_in_sideways" in reasons
+    assert "fails_in_low_volatility" in reasons
+    assert "weak_profit_factor" in reasons
+    assert "poor_expectancy" in reasons
+
+
+def test_forward_evidence_is_present_even_when_failing() -> None:
+    snapshot = get_mission_control(MissionConn())
+
+    assert "closed_trades" in snapshot["forward_evidence"]
+    assert "expectancy" in snapshot["forward_evidence"]
+    if snapshot["forward_evidence"]["closed_trades"] > 0:
+        assert snapshot["forward_evidence"]["has_data"] is True

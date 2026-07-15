@@ -1,0 +1,153 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "KefTrade Phase 9.12 Elite Candidate Report",
+    "description": "Technical audit of the volatility-adaptive relative-strength campaign and elite promotion result.",
+    "generatedAt": "2026-07-15T04:30:00Z",
+    "sources": [
+      {
+        "id": "campaign_summary",
+        "label": "Phase 9.12 campaign and job totals",
+        "query": {
+          "engine": "PostgreSQL",
+          "language": "sql",
+          "executed_at": "2026-07-15T04:30:00Z",
+          "tables_used": ["public.research_campaigns", "public.research_campaign_jobs", "public.elite_research_candidates", "public.strategy_deployments"],
+          "filters": ["research_campaigns.id = 7", "simulation_only = TRUE"],
+          "metric_definitions": [
+            "Strict promotions are campaign jobs that passed the unchanged single-market evidence rules.",
+            "Elite candidates pass the unchanged aggregate cross-validation function.",
+            "Operational failures count jobs with status failed, not evidence rejections."
+          ],
+          "description": "Campaign-level counts reconciled across jobs, elite candidates, and candidate-linked simulation deployments.",
+          "sql": "SELECT c.id, c.requested_candidates, c.completed_jobs, c.failed_jobs, COUNT(*) FILTER (WHERE j.status = 'promoted') AS strict_promotions, COUNT(*) FILTER (WHERE j.status = 'rejected') AS evidence_rejections, (SELECT COUNT(*) FROM elite_research_candidates e WHERE e.campaign_id = c.id AND e.simulation_only = TRUE) AS elite_candidates, (SELECT COUNT(*) FROM strategy_deployments d WHERE d.campaign_id = c.id AND d.candidate_id IS NOT NULL AND d.simulation_only = TRUE) AS candidate_linked_deployments FROM research_campaigns c JOIN research_campaign_jobs j ON j.campaign_id = c.id WHERE c.id = 7 GROUP BY c.id;"
+        }
+      },
+      {
+        "id": "elite_evidence",
+        "label": "Phase 9.12 elite candidate evidence",
+        "query": {
+          "engine": "PostgreSQL",
+          "language": "sql",
+          "executed_at": "2026-07-15T04:30:00Z",
+          "tables_used": ["public.elite_research_candidates"],
+          "filters": ["campaign_id = 7", "simulation_only = TRUE"],
+          "metric_definitions": [
+            "Profit factor is aggregate gross profit divided by aggregate gross loss across campaign markets.",
+            "Stability is the fraction of candidate market jobs that passed every strict single-market rule.",
+            "Assets passed counts distinct assets with strict job promotion."
+          ],
+          "description": "Persisted elite summaries ordered by research score.",
+          "sql": "SELECT candidate_id, profit_factor, expectancy, max_drawdown, trade_count, stability, assets_passed, timeframes_passed, regimes_passed FROM elite_research_candidates WHERE campaign_id = 7 AND simulation_only = TRUE ORDER BY research_score DESC;"
+        }
+      },
+      {
+        "id": "best_market_evidence",
+        "label": "Best candidate market-level evidence",
+        "query": {
+          "engine": "PostgreSQL",
+          "language": "sql",
+          "executed_at": "2026-07-15T04:30:00Z",
+          "tables_used": ["public.research_campaign_jobs"],
+          "filters": ["campaign_id = 7", "candidate_id = 'sd_fd2d45d9ec1dc9'", "timeframe = '1h'"],
+          "description": "AAPL and NVDA strict validation metrics for the highest-ranked elite candidate.",
+          "sql": "SELECT symbol, status, result->'metrics'->>'profit_factor' AS profit_factor, result->'metrics'->>'expectancy_per_trade' AS expectancy, result->'metrics'->>'number_of_trades' AS trades, result->'metrics'->>'max_drawdown' AS drawdown FROM research_campaign_jobs WHERE campaign_id = 7 AND candidate_id = 'sd_fd2d45d9ec1dc9' ORDER BY symbol;"
+        }
+      }
+    ],
+    "cards": [],
+    "charts": [
+      {
+        "id": "elite_pf_chart",
+        "title": "Elite profit factors",
+        "subtitle": "Aggregate validation evidence",
+        "type": "bar",
+        "dataset": "elite_candidates",
+        "sourceId": "elite_evidence",
+        "encodings": {
+          "x": {"field": "candidate_short", "type": "nominal"},
+          "y": {"field": "profit_factor", "type": "quantitative", "format": "number"}
+        },
+        "valueFormat": "number",
+        "layout": "half",
+        "maxRows": 6
+      }
+    ],
+    "tables": [
+      {
+        "id": "best_markets_table",
+        "title": "Best candidate by market",
+        "subtitle": "AAPL and NVDA 1h out-of-sample validation; both strict jobs promoted",
+        "dataset": "best_markets",
+        "sourceId": "best_market_evidence",
+        "defaultSort": {"field": "profit_factor", "direction": "desc"},
+        "density": "spacious",
+        "layout": "full",
+        "columns": [
+          {"field": "symbol", "label": "Asset", "type": "text"},
+          {"field": "status", "label": "Job status", "type": "text"},
+          {"field": "profit_factor", "label": "Profit factor", "format": "number"},
+          {"field": "expectancy", "label": "Expectancy", "format": "number"},
+          {"field": "trades", "label": "Trades", "format": "number"},
+          {"field": "drawdown", "label": "Drawdown", "format": "percent"}
+        ]
+      },
+      {
+        "id": "elite_audit_table",
+        "title": "Elite candidate audit table",
+        "subtitle": "Exact persisted aggregate metrics for all Phase 9.12 elite candidates",
+        "dataset": "elite_candidates",
+        "sourceId": "elite_evidence",
+        "defaultSort": {"field": "profit_factor", "direction": "desc"},
+        "density": "dense",
+        "layout": "full",
+        "columns": [
+          {"field": "candidate_id", "label": "Candidate", "type": "text"},
+          {"field": "profit_factor", "label": "Profit factor", "format": "number"},
+          {"field": "expectancy", "label": "Expectancy", "format": "number"},
+          {"field": "drawdown", "label": "Drawdown", "format": "percent"},
+          {"field": "trade_count", "label": "Trades", "format": "number"},
+          {"field": "stability", "label": "Stability", "format": "percent"},
+          {"field": "assets_passed", "label": "Assets passed", "format": "number"},
+          {"field": "regimes_passed", "label": "Regimes passed", "format": "number"}
+        ]
+      }
+    ],
+    "blocks": [
+      {"id": "technical_summary", "type": "markdown", "layout": "half", "sourceId": "campaign_summary", "body": "## Result\n\nPhase 9.12 produced **6 elite candidates** under unchanged gates: **24 jobs completed**, **17 strict promotions**, **7 evidence rejections**, and **0 operational failures**. Six candidate-linked deployments are simulation-only. Phase 10 was not started; eligible forward trades remain zero."},
+      {"id": "elite_chart_block", "type": "chart", "layout": "half", "chartId": "elite_pf_chart"},
+      {"id": "best_market_block", "type": "table", "layout": "half", "tableId": "best_markets_table"},
+      {"id": "method_and_limits", "type": "markdown", "layout": "half", "sourceId": "elite_evidence", "body": "## Method and Limits\n\nThe **Volatility-Adaptive Relative Strength** family uses one asset-agnostic rule set with observed-volatility profiles and benchmark-relative continuation. The backtester now honors decision-level reward multiples. Existing PF, expectancy, drawdown, trade-count, walk-forward, regime, stability, asset, and timeframe gates are unchanged.\n\n`sd_fd2d45d9ec1dc9` leads with PF **1.3431**, expectancy **19.6157**, drawdown **0.0499**, and **66 trades**. Five additional elite controls have PF **1.2759-1.3220**, **66-73 trades**, and **1.0 stability**. This is deterministic historical evidence, not independent forward proof: selection used the stored history, transfer covers two assets and one execution timeframe, and multiple-testing risk remains. Keep Phase 10 locked and collect untouched simulation-only forward evidence without retuning."}
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-07-15T04:30:00Z",
+    "status": "ready",
+    "datasets": {
+      "headline": [
+        {"candidates_generated": 12, "jobs_executed": 24, "strict_promotions": 17, "evidence_rejections": 7, "operational_failures": 0, "elite_candidates": 6, "candidate_linked_deployments": 6}
+      ],
+      "elite_candidates": [
+        {"candidate_id": "sd_fd2d45d9ec1dc9", "candidate_short": "fd2d45", "profit_factor": 1.3431, "expectancy": 19.6157, "drawdown": 0.0499, "trade_count": 66, "stability": 1.0, "assets_passed": 2, "timeframes_passed": 1, "regimes_passed": 4},
+        {"candidate_id": "sd_ecbaf76b0b675f", "candidate_short": "ecbaf7", "profit_factor": 1.3220, "expectancy": 18.3686, "drawdown": 0.0504, "trade_count": 66, "stability": 1.0, "assets_passed": 2, "timeframes_passed": 1, "regimes_passed": 4},
+        {"candidate_id": "sd_ac5dac1973b785", "candidate_short": "ac5dac", "profit_factor": 1.3138, "expectancy": 18.3165, "drawdown": 0.0484, "trade_count": 73, "stability": 1.0, "assets_passed": 2, "timeframes_passed": 1, "regimes_passed": 4},
+        {"candidate_id": "sd_2da2ad247c748a", "candidate_short": "2da2ad", "profit_factor": 1.3068, "expectancy": 18.0447, "drawdown": 0.0500, "trade_count": 66, "stability": 1.0, "assets_passed": 2, "timeframes_passed": 1, "regimes_passed": 4},
+        {"candidate_id": "sd_ebab92f212848a", "candidate_short": "ebab92", "profit_factor": 1.2850, "expectancy": 17.0491, "drawdown": 0.0576, "trade_count": 71, "stability": 1.0, "assets_passed": 2, "timeframes_passed": 1, "regimes_passed": 4},
+        {"candidate_id": "sd_492fc150b68cf1", "candidate_short": "492fc1", "profit_factor": 1.2759, "expectancy": 16.0696, "drawdown": 0.0504, "trade_count": 67, "stability": 1.0, "assets_passed": 2, "timeframes_passed": 1, "regimes_passed": 4}
+      ],
+      "best_markets": [
+        {"symbol": "AAPL", "status": "promoted", "profit_factor": 1.3699, "expectancy": 20.6411, "trades": 30, "drawdown": 0.0449},
+        {"symbol": "NVDA", "status": "promoted", "profit_factor": 1.3164, "expectancy": 18.5903, "trades": 36, "drawdown": 0.0549}
+      ]
+    },
+    "accessIssues": []
+  },
+  "sources": [
+    {"id": "campaign_summary", "label": "Phase 9.12 campaign and job totals"},
+    {"id": "elite_evidence", "label": "Phase 9.12 elite candidate evidence"},
+    {"id": "best_market_evidence", "label": "Best candidate market-level evidence"}
+  ]
+}

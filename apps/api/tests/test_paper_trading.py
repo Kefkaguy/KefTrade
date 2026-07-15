@@ -402,7 +402,7 @@ def test_scheduler_scans_only_active_simulation_deployments(monkeypatch) -> None
     conn.deployments[non_sim["id"]]["simulation_only"] = False
     scanned: list[int] = []
 
-    async def fake_scan(_conn, deployment_id: int):
+    async def fake_scan(_conn, deployment_id: int, **_kwargs):
         deployment = _conn.deployments[deployment_id]
         assert deployment["status"] == "active"
         assert deployment["simulation_only"] is True
@@ -504,3 +504,24 @@ def test_stale_scan_blocks_strategy_evaluation_and_order_creation(monkeypatch) -
     assert result["processed_pending"]["skipped"] is True
     assert alerts[0]["action"] == "stale_data_warning"
     assert any(log["event_type"] == "paper_scan_stale_data_skipped" for log in conn.logs)
+
+
+def test_candidate_forward_gate_rejects_predeployment_candle() -> None:
+    from app.services.paper_trading import candle_is_forward_eligible_for_deployment
+
+    started = datetime(2026, 7, 15, 4, 27, tzinfo=UTC)
+    deployment = {
+        "campaign_id": 7,
+        "candidate_id": "sd_test",
+        "forward_validation_started_at": started,
+    }
+
+    assert candle_is_forward_eligible_for_deployment(deployment, {"timestamp": started - timedelta(hours=1)}) is False
+    assert candle_is_forward_eligible_for_deployment(deployment, {"timestamp": started}) is False
+    assert candle_is_forward_eligible_for_deployment(deployment, {"timestamp": started + timedelta(hours=1)}) is True
+
+
+def test_manual_simulation_does_not_require_forward_timestamp() -> None:
+    from app.services.paper_trading import candle_is_forward_eligible_for_deployment
+
+    assert candle_is_forward_eligible_for_deployment({}, {"timestamp": None}) is True

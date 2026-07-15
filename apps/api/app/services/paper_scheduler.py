@@ -111,6 +111,7 @@ async def run_scheduled_scan_once(conn: psycopg.Connection | None = None, *, for
 
             results = []
             errors = []
+            synchronized_markets: set[tuple[str, str]] = set()
             log_event(conn, None, None, None, "paper_scheduler_run_started", "Scheduled paper scan started.", {"deployment_count": len(deployments), "simulation_only": True})
             conn.commit()
             for deployment in deployments:
@@ -118,11 +119,18 @@ async def run_scheduled_scan_once(conn: psycopg.Connection | None = None, *, for
                     log_event(conn, deployment.get("account_id"), deployment.get("id"), None, "paper_scheduler_scan_skipped", "Skipped non-active or non-simulation deployment.", deployment)
                     continue
                 try:
-                    result = await run_deployment_scan(conn, int(deployment["id"]))
+                    market_key = (str(deployment["symbol"]), str(deployment["timeframe"]))
+                    result = await run_deployment_scan(
+                        conn,
+                        int(deployment["id"]),
+                        synchronize_market_data=market_key not in synchronized_markets,
+                    )
+                    synchronized_markets.add(market_key)
                     results.append({"deployment_id": deployment["id"], "action": result["action"], "message": result["message"], "simulation_only": result["simulation_only"]})
                     log_event(conn, deployment["account_id"], deployment["id"], result.get("order", {}).get("id") if result.get("order") else None, "paper_scheduler_scan_result", result["message"], results[-1])
                     conn.commit()
                 except Exception as error:  # noqa: BLE001 - scheduler must record and continue
+                    safe_rollback(conn)
                     message = str(error)
                     errors.append({"deployment_id": deployment["id"], "error": message, "simulation_only": True})
                     log_event(conn, deployment.get("account_id"), deployment.get("id"), None, "paper_scheduler_scan_error", message, errors[-1])
@@ -202,9 +210,49 @@ def mark_scheduler_result(
     log_event(conn, None, None, None, "paper_scheduler_run_finished", message, {"status": status, "results": results, "errors": errors, "simulation_only": True})
     conn.commit()
     daily_report = None
-    with suppress(Exception):
+    try:
         daily_report = auto_generate_daily_report_after_scheduler_run(conn, completed_at=completed_at, next_run_at=next_run_at)
-    return {"status": status, "message": message, "results": results, "errors": errors, "scheduler": dict(row), "daily_report": daily_report, "simulation_only": True}
+    except Exception:
+        safe_rollback(conn)
+    forward_validation = None
+    readiness = None
+    monitoring_error = None
+    try:
+        from app.services.production_validation import phase10_readiness_assessment
+        from app.services.research_campaigns import refresh_elite_candidate_forward_evidence
+
+        forward_validation = refresh_elite_candidate_forward_evidence(conn)
+        readiness_result = phase10_readiness_assessment(conn, persist=True)
+        readiness = {
+            "readiness_state": readiness_result.get("readiness_state"),
+            "readiness_score": readiness_result.get("readiness_score"),
+            "blocking_reasons": readiness_result.get("blocking_reasons"),
+        }
+    except Exception as error:
+        safe_rollback(conn)
+        monitoring_error = str(error)
+        log_event(
+            conn,
+            None,
+            None,
+            None,
+            "paper_scheduler_forward_monitoring_error",
+            monitoring_error,
+            {"simulation_only": True},
+        )
+        conn.commit()
+    return {
+        "status": status,
+        "message": message,
+        "results": results,
+        "errors": errors,
+        "scheduler": dict(row),
+        "daily_report": daily_report,
+        "forward_validation": forward_validation,
+        "readiness": readiness,
+        "monitoring_error": monitoring_error,
+        "simulation_only": True,
+    }
 
 
 async def scheduler_loop() -> None:
@@ -215,6 +263,7 @@ async def scheduler_loop() -> None:
             with suppress(Exception):
                 conn = connect()
                 try:
+                    safe_rollback(conn)
                     message = "Paper scheduler loop error."
                     conn.execute(
                         """
@@ -238,6 +287,15 @@ def start_scheduler() -> None:
     global _scheduler_task
     if _scheduler_task is None or _scheduler_task.done():
         _scheduler_task = asyncio.create_task(scheduler_loop())
+
+
+def safe_rollback(conn: psycopg.Connection) -> None:
+    rollback = getattr(conn, "rollback", None)
+    if callable(rollback):
+        try:
+            rollback()
+        except Exception:
+            pass
 
 
 async def stop_scheduler() -> None:

@@ -8,7 +8,11 @@ from app.settings import settings
 
 def get_connection() -> Iterator[psycopg.Connection]:
     with psycopg.connect(settings.database_url, row_factory=dict_row, connect_timeout=3) as conn:
-        yield conn
+        try:
+            yield conn
+        except Exception:
+            conn.rollback()
+            raise
 
 
 def connect() -> psycopg.Connection:

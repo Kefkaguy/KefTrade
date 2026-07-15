@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { RefreshCw } from "lucide-react";
 import { acknowledgeEvidenceAlert, addSignalReviewNote, cancelPaperOrder, createPaperAccount, createPaperOrder, createStrategyDeployment, deployTslaMomentumBull, generateSignalReview, ignoreSignalReview, markSignalReviewReviewed, pauseStrategyDeployment, processPendingPaperOrders, reconcilePaperAccount, scanStrategyDeployment, sendSignalReviewToPaperSimulation, updatePaperScheduler, type EvidenceAlert, type SignalReview } from "@/lib/api";
 import {
   DEFAULT_EVIDENCE_NOTIFICATION_SETTINGS,
@@ -159,6 +160,34 @@ export function TslaPaperScanControls({ accountId, deploymentId }: { accountId: 
     <div className="operationBar">
       <button className="button" type="button" disabled={busy !== null} onClick={deploy}>{busy === "deploy" ? "Deploying..." : "Deploy TSLA candidate"}</button>
       <button className="button secondary" type="button" disabled={busy !== null || !deploymentId} onClick={scan}>{busy === "scan" ? "Scanning..." : "Run paper scan"}</button>
+      <Toast tone={toast.tone} message={toast.message} />
+    </div>
+  );
+}
+
+export function CandidateDeploymentScanButton({ deploymentId }: { deploymentId: number }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [toast, setToast] = useState<{ tone: "success" | "error" | "info"; message: string }>({ tone: "info", message: "" });
+
+  async function scan() {
+    setBusy(true);
+    try {
+      const result = await scanStrategyDeployment(deploymentId);
+      setToast({ tone: "success", message: result.message || `Forward scan ${result.action}.` });
+      router.refresh();
+    } catch (error) {
+      setToast({ tone: "error", message: error instanceof Error ? error.message : "Forward scan failed." });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="candidateScanAction">
+      <button className="iconButton" type="button" disabled={busy} onClick={scan} title="Run candidate forward scan" aria-label="Run candidate forward scan">
+        <RefreshCw size={16} className={busy ? "spinIcon" : undefined} />
+      </button>
       <Toast tone={toast.tone} message={toast.message} />
     </div>
   );

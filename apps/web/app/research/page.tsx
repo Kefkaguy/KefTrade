@@ -1,15 +1,15 @@
-import { StrategyResearchRunner } from "@/components/StrategyResearchRunner";
+import { ResearchCommandCenterDashboard } from "@/components/ResearchCommandCenter";
 
 export default function ResearchPage() {
   return (
-    <div className="grid">
+    <div className="grid researchPage">
       <header className="pageHeader">
         <div>
-          <h1>Strategy Research</h1>
-          <p className="muted">Compare deterministic strategy definitions under identical BTCUSDT 4h research conditions.</p>
+          <h1>Research Command Center</h1>
+          <p className="muted">Phase 9.6 candidate quality optimization from authoritative campaign evidence.</p>
         </div>
       </header>
-      <StrategyResearchRunner />
+      <ResearchCommandCenterDashboard />
     </div>
   );
 }

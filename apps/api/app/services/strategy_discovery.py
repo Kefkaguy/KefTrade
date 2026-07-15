@@ -188,6 +188,8 @@ def make_strategy_definition(candidate: DiscoveryCandidate) -> StrategyDefinitio
 
 
 def discovered_strategy_decision(candle: dict[str, Any], feature: dict[str, Any], recent_candles: list[dict[str, Any]], params: dict[str, Any]) -> StrategyDecision:
+    if params.get("strategy_architecture") == "relative_strength_continuation_v2":
+        return relative_strength_continuation_v2_decision(candle, feature, recent_candles, params)
     close = Decimal(candle["close"])
     if not trend_passes(close, feature, recent_candles, params):
         return avoid("Trend block failed.")
@@ -197,6 +199,10 @@ def discovered_strategy_decision(candle: dict[str, Any], feature: dict[str, Any]
         return avoid("Volatility block failed.")
     if not volume_passes(feature, params):
         return avoid("Volume block failed.")
+    if not regime_filter_passes(feature, params):
+        return avoid("Regime filter failed.")
+    if not structural_context_passes(feature, params):
+        return avoid("Structural context filter failed.")
     if not entry_passes(close, candle, feature, recent_candles, params):
         return avoid("Entry block failed.")
     stop = build_stop(close, feature, recent_candles, params)
@@ -205,6 +211,73 @@ def discovered_strategy_decision(candle: dict[str, Any], feature: dict[str, Any]
     rr = Decimal(str(params.get("risk_reward", 2)))
     take_profit = close + ((close - stop) * rr)
     return StrategyDecision("setup", (Decimal(candle["low"]), Decimal(candle["high"])), stop, take_profit, rr, ["Autonomous discovery setup passed all deterministic rule blocks."])
+
+
+def relative_strength_continuation_v2_decision(
+    candle: dict[str, Any],
+    feature: dict[str, Any],
+    recent_candles: list[dict[str, Any]],
+    params: dict[str, Any],
+) -> StrategyDecision:
+    required = ("ema_20", "ema_50", "rsi_14", "returns_5")
+    if any(feature.get(name) is None for name in required):
+        return avoid("Relative-strength architecture is missing a required feature.")
+    close = Decimal(candle["close"])
+    ema_20 = Decimal(feature["ema_20"])
+    ema_50 = Decimal(feature["ema_50"])
+    volatility = finite_metric(feature.get("volatility_20"))
+    adaptive_profile = None
+    if params.get("adaptive_volatility_profiles"):
+        adaptive_profile = "high_vol" if volatility >= float(params.get("volatility_profile_boundary", 0.006)) else "low_vol"
+
+    def profile_value(name: str, default: Any) -> Any:
+        if adaptive_profile is not None:
+            key = f"{adaptive_profile}_{name}"
+            if key in params:
+                return params[key]
+        return params.get(name, default)
+
+    if close <= ema_50 or ema_20 <= ema_50:
+        return avoid("Relative-strength architecture trend filter failed.")
+    rsi = finite_metric(feature.get("rsi_14"))
+    if not float(profile_value("rsi_min", 50)) <= rsi <= float(profile_value("rsi_max", 80)):
+        return avoid("Relative-strength architecture momentum filter failed.")
+    returns_5 = finite_metric(feature.get("returns_5"))
+    normalize_by_volatility = bool(params.get("normalize_signal_by_volatility"))
+    momentum_signal = returns_5 / volatility if normalize_by_volatility and volatility > 0 else returns_5
+    if momentum_signal < float(profile_value("returns_5_min", 0)):
+        return avoid("Relative-strength architecture continuation filter failed.")
+    relative_return = max(
+        finite_metric(feature.get("context_relative_spy_returns_5")),
+        finite_metric(feature.get("context_relative_qqq_returns_5")),
+    )
+    relative_signal = relative_return / volatility if normalize_by_volatility and volatility > 0 else relative_return
+    if relative_signal < float(profile_value("relative_returns_5_min", 0)):
+        return avoid("Relative-strength architecture market-relative filter failed.")
+    volume_change = feature.get("volume_change")
+    if volume_change is None or finite_metric(volume_change) < float(profile_value("volume_change_min", -0.05)):
+        return avoid("Relative-strength architecture volume filter failed.")
+    if params.get("volatility_normalized_stop") and volatility > 0:
+        stop_distance = max(
+            float(params.get("minimum_stop_distance", 0.006)),
+            min(float(params.get("maximum_stop_distance", 0.04)), volatility * float(params.get("stop_volatility_multiplier", 2.0))),
+        )
+        stop = close * (Decimal("1") - Decimal(str(stop_distance)))
+    else:
+        stop_params = {**params, "swing_lookback": int(profile_value("swing_lookback", 5))}
+        stop = build_stop(close, feature, recent_candles, stop_params)
+    if stop is None or stop >= close:
+        return avoid("Relative-strength architecture produced an invalid stop.")
+    rr = Decimal(str(profile_value("risk_reward", 1.4)))
+    take_profit = close + ((close - stop) * rr)
+    return StrategyDecision(
+        "setup",
+        (Decimal(candle["low"]), Decimal(candle["high"])),
+        stop,
+        take_profit,
+        rr,
+        ["Cross-market relative strength confirmed a long-only continuation setup."],
+    )
 
 
 def avoid(reason: str) -> StrategyDecision:
@@ -234,6 +307,21 @@ def trend_passes(close: Decimal, feature: dict[str, Any], recent_candles: list[d
         return False
     if params.get("trend_requires_positive_returns") and finite_metric(feature.get("returns_5")) <= 0:
         return False
+    slope_min = params.get("phase_9_9_ema_slope_min")
+    if slope_min is not None:
+        previous_fast = moving_average(recent_candles[:-1], int(params["trend_fast"]), str(params.get("trend_method", "ema")))
+        if previous_fast is None or previous_fast == 0:
+            return False
+        slope = (fast - previous_fast) / previous_fast
+        if slope < Decimal(str(slope_min)):
+            return False
+    if params.get("phase_9_11_ema_separation_increasing"):
+        previous_fast = moving_average(recent_candles[:-1], int(params["trend_fast"]), str(params.get("trend_method", "ema")))
+        previous_slow = moving_average(recent_candles[:-1], int(params["trend_slow"]), str(params.get("trend_method", "ema")))
+        if previous_fast is None or previous_slow is None or slow == 0 or previous_slow == 0:
+            return False
+        if ((fast - slow) / slow) <= ((previous_fast - previous_slow) / previous_slow):
+            return False
     return close > slow and fast > slow
 
 
@@ -268,7 +356,68 @@ def volume_passes(feature: dict[str, Any], params: dict[str, Any]) -> bool:
     return volume_change is not None and Decimal(volume_change) >= Decimal(str(params.get("volume_change_min", -1)))
 
 
+def regime_filter_passes(feature: dict[str, Any], params: dict[str, Any]) -> bool:
+    if not (params.get("phase_9_8_regime_filter") or params.get("phase_9_9_regime_filter") or params.get("phase_9_10_high_volatility_block") or params.get("phase_9_11_regime_filter")):
+        return True
+    returns_5 = finite_metric(feature.get("returns_5"))
+    volatility = finite_metric(feature.get("volatility_20"))
+    distance = abs(finite_metric(feature.get("distance_from_ema_50")))
+    if params.get("phase_9_9_bull_trend_only") and returns_5 < float(params.get("phase_9_9_returns_5_min", 0)):
+        return False
+    if params.get("phase_9_9_low_volatility_block") and volatility < float(params.get("phase_9_9_low_volatility_min", 0.008)):
+        return False
+    if params.get("phase_9_10_high_volatility_block") and volatility > float(params.get("phase_9_10_high_volatility_max", 0.035)):
+        return False
+    if params.get("phase_9_11_block_4h_sideways") and str(feature.get("context_4h_trend_regime") or "") == "sideways":
+        return False
+    if params.get("phase_9_11_require_4h_bull") and str(feature.get("context_4h_trend_regime") or "") != "bull_trend":
+        return False
+    if params.get("block_sideways") and distance < float(params.get("sideways_distance_from_ema50_min", 0.01)):
+        return False
+    normal_min = float(params.get("normal_volatility_min", 0.008))
+    normal_max = float(params.get("normal_volatility_max", 0.018))
+    if normal_min <= volatility <= normal_max:
+        rsi = feature.get("rsi_14")
+        volume_change = feature.get("volume_change")
+        if rsi is None or Decimal(rsi) < Decimal(str(params.get("normal_volatility_rsi_min", params.get("rsi_min", 55)))):
+            return False
+        if volume_change is None or Decimal(volume_change) < Decimal(str(params.get("normal_volatility_volume_change_min", params.get("volume_change_min", 0)))):
+            return False
+    if volatility < float(params.get("low_volatility_max", 0.008)):
+        return returns_5 >= float(params.get("low_volatility_returns_5_min", 0))
+    return True
+
+
+def structural_context_passes(feature: dict[str, Any], params: dict[str, Any]) -> bool:
+    if params.get("phase_9_11_require_4h_positive_returns") and finite_metric(feature.get("context_4h_returns_5")) <= 0:
+        return False
+    if params.get("phase_9_11_require_4h_ema_positive") and finite_metric(feature.get("context_4h_distance_from_ema_50")) <= 0:
+        return False
+    if params.get("phase_9_11_require_spy_trend") and finite_metric(feature.get("context_spy_returns_5")) < float(params.get("phase_9_11_market_returns_min", 0)):
+        return False
+    if params.get("phase_9_11_require_qqq_trend") and finite_metric(feature.get("context_qqq_returns_5")) < float(params.get("phase_9_11_market_returns_min", 0)):
+        return False
+    if params.get("phase_9_11_require_relative_spy") and finite_metric(feature.get("context_relative_spy_returns_5")) < float(params.get("phase_9_11_relative_returns_min", 0)):
+        return False
+    if params.get("phase_9_11_require_relative_qqq") and finite_metric(feature.get("context_relative_qqq_returns_5")) < float(params.get("phase_9_11_relative_returns_min", 0)):
+        return False
+    if params.get("phase_9_11_volatility_expansion") and finite_metric(feature.get("volatility_20")) < float(params.get("phase_9_11_volatility_min", 0.008)):
+        return False
+    if params.get("phase_9_11_volatility_contraction") and finite_metric(feature.get("volatility_20")) > float(params.get("phase_9_11_volatility_max", 0.018)):
+        return False
+    return True
+
+
 def entry_passes(close: Decimal, candle: dict[str, Any], feature: dict[str, Any], recent_candles: list[dict[str, Any]], params: dict[str, Any]) -> bool:
+    if params.get("phase_9_11_entry_mode") == "volatility_expansion_continuation":
+        return finite_metric(feature.get("returns_5")) >= float(params.get("returns_5_min", 0.008)) and finite_metric(feature.get("volatility_20")) >= float(params.get("phase_9_11_volatility_min", 0.008))
+    if params.get("phase_9_11_entry_mode") == "relative_strength_continuation":
+        return finite_metric(feature.get("returns_5")) >= float(params.get("returns_5_min", 0.006)) and (
+            finite_metric(feature.get("context_relative_spy_returns_5")) >= float(params.get("phase_9_11_relative_returns_min", 0))
+            or finite_metric(feature.get("context_relative_qqq_returns_5")) >= float(params.get("phase_9_11_relative_returns_min", 0))
+        )
+    if params.get("phase_9_11_entry_mode") == "sideways_transition":
+        return finite_metric(feature.get("distance_from_ema_50")) >= float(params.get("phase_9_11_transition_distance_min", 0.012)) and finite_metric(feature.get("returns_5")) >= float(params.get("returns_5_min", 0.008))
     entry = params.get("entry")
     if entry in {"breakout", "opening_range_proxy"}:
         lookback = int(params.get("breakout_lookback", 20))

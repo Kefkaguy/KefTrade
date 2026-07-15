@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from app.services.production_validation import (
+    forward_evidence_eligibility_audit,
     paper_ledger_reconciliation,
     phase10_readiness_assessment,
     production_validation_campaign_config,
@@ -155,8 +156,100 @@ def test_paper_reconciliation_uses_closed_trade_fifo_and_detects_mismatches() ->
     result = paper_ledger_reconciliation(ValidationConn())
 
     assert result["passed"] is True
-    assert result["summary"]["closed_trades"] == 1
-    assert result["summary"]["expectancy"] > 0
+    assert result["summary"]["all_simulation_closed_trades"] == 1
+    assert result["summary"]["all_simulation_expectancy"] > 0
+    assert result["summary"]["eligible_forward_closed_trades"] == 0
+    assert result["summary"]["eligible_forward_expectancy"] is None
+    assert result["evidence_eligibility"]["excluded_summary"]["fifo_closed_lots"] == 1
+
+
+def test_unattributed_legacy_trades_are_excluded_from_readiness() -> None:
+    result = forward_evidence_eligibility_audit(ValidationConn())
+
+    assert result["all_simulation_summary"]["economic_closed_positions"] == 1
+    assert result["eligible_summary"]["economic_closed_positions"] == 0
+    assert result["excluded_summary"]["economic_closed_positions"] == 1
+    assert result["trades"][0]["classification"] == "unattributed_simulation"
+    assert result["trades"][0]["readiness_eligible"] is False
+    assert "no linked candidate" in result["trades"][0]["exclusion_reason"]
+
+
+def test_candidate_linked_forward_trade_is_readiness_eligible() -> None:
+    conn = ValidationConn()
+    start = datetime(2026, 7, 14, tzinfo=UTC)
+    conn.fills = [
+        {
+            "id": 11,
+            "order_id": 101,
+            "account_id": 1,
+            "symbol": "TSLA",
+            "timeframe": "1h",
+            "side": "buy",
+            "quantity": Decimal("1"),
+            "fill_price": Decimal("100"),
+            "fee": Decimal("0"),
+            "slippage": Decimal("0"),
+            "filled_at": start + timedelta(hours=1),
+            "simulation_only": True,
+            "deployment_id": 7,
+            "campaign_id": 1,
+            "candidate_id": "candidate-a",
+            "strategy_id": "strategy-a",
+            "strategy_version": "v1",
+            "decision_id": "decision-a",
+            "evidence_origin": "candidate_forward_validation",
+            "deployment_created_at": start,
+            "forward_validation_started_at": start,
+            "deployment_lifecycle_state": "active_forward_validation",
+        },
+        {
+            "id": 12,
+            "order_id": 102,
+            "account_id": 1,
+            "symbol": "TSLA",
+            "timeframe": "1h",
+            "side": "sell",
+            "quantity": Decimal("1"),
+            "fill_price": Decimal("110"),
+            "fee": Decimal("0"),
+            "slippage": Decimal("0"),
+            "filled_at": start + timedelta(hours=2),
+            "simulation_only": True,
+            "deployment_id": 7,
+            "campaign_id": 1,
+            "candidate_id": "candidate-a",
+            "strategy_id": "strategy-a",
+            "strategy_version": "v1",
+            "decision_id": "decision-a",
+            "evidence_origin": "candidate_forward_validation",
+            "deployment_created_at": start,
+            "forward_validation_started_at": start,
+            "deployment_lifecycle_state": "active_forward_validation",
+        },
+    ]
+
+    result = forward_evidence_eligibility_audit(conn)
+
+    assert result["eligible_summary"]["economic_closed_positions"] == 1
+    assert result["eligible_summary"]["expectancy"] == 10.0
+    assert result["trades"][0]["classification"] == "eligible_forward_evidence"
+    assert result["trades"][0]["readiness_eligible"] is True
+
+
+def test_fifo_dust_is_preserved_but_not_counted_as_economic_position() -> None:
+    conn = ValidationConn()
+    now = datetime.now(UTC)
+    conn.fills = [
+        {"id": 1, "order_id": 1, "symbol": "AAPL", "side": "buy", "quantity": Decimal("1"), "fill_price": Decimal("100"), "fee": Decimal("0"), "slippage": Decimal("0"), "filled_at": now, "simulation_only": True},
+        {"id": 2, "order_id": 2, "symbol": "AAPL", "side": "buy", "quantity": Decimal("0.0006"), "fill_price": Decimal("100"), "fee": Decimal("0"), "slippage": Decimal("0"), "filled_at": now + timedelta(minutes=1), "simulation_only": True},
+        {"id": 3, "order_id": 3, "symbol": "AAPL", "side": "sell", "quantity": Decimal("1.0006"), "fill_price": Decimal("101"), "fee": Decimal("0"), "slippage": Decimal("0"), "filled_at": now + timedelta(minutes=2), "simulation_only": True},
+    ]
+
+    result = forward_evidence_eligibility_audit(conn)
+
+    assert result["all_simulation_summary"]["fifo_closed_lots"] == 2
+    assert result["all_simulation_summary"]["economic_closed_positions"] == 1
+    assert result["all_simulation_summary"]["dust_fifo_lots"] == 1
 
 
 def test_recommendation_outcomes_do_not_claim_success_without_followup() -> None:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import asdict
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time as dt_time, timedelta
 from decimal import Decimal
 from hashlib import sha256
 import os
@@ -20,6 +20,7 @@ from app.services.research_learning import learn_from_completed_campaign
 from app.services.strategy_discovery import (
     SAFETY_STATEMENT,
     DiscoveryCandidate,
+    canonical_candidate_key,
     evaluate_candidate,
     generate_discovery_candidates,
     jsonable,
@@ -28,6 +29,12 @@ from app.services.strategy_research import build_context_by_time, finite_metric
 
 
 CAMPAIGN_VERSION = "large_scale_research_campaign_v1"
+QUALITY_FIRST_CAMPAIGN_VERSION = "phase_9_7_quality_first_campaign_v1"
+TRANSFER_SAMPLE_SIZE_CAMPAIGN_VERSION = "phase_9_8_transferability_sample_size_v1"
+OVERFIT_REGIME_ROBUSTNESS_CAMPAIGN_VERSION = "phase_9_9_overfit_regime_robustness_v1"
+SINGLE_ASSET_GENERALIZATION_CAMPAIGN_VERSION = "phase_9_10_single_asset_generalization_v1"
+STRATEGY_REDESIGN_CAMPAIGN_VERSION = "phase_9_11_strategy_redesign_v1"
+VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION = "phase_9_12_volatility_adaptive_relative_strength_v1"
 DEFAULT_CAMPAIGN_TIMEFRAMES = ("1h", "4h", "1d")
 WORKER_VERSION = "campaign_worker_v1"
 DEFAULT_BATCH_SIZE = 1000
@@ -354,7 +361,14 @@ def ensure_operations_tables(conn: psycopg.Connection) -> None:
             ADD COLUMN IF NOT EXISTS batch_id BIGINT,
             ADD COLUMN IF NOT EXISTS strategy_family TEXT,
             ADD COLUMN IF NOT EXISTS provider_latency_ms INTEGER,
-            ADD COLUMN IF NOT EXISTS database_latency_ms INTEGER
+            ADD COLUMN IF NOT EXISTS database_latency_ms INTEGER,
+            ADD COLUMN IF NOT EXISTS recovery_classification TEXT,
+            ADD COLUMN IF NOT EXISTS original_worker_id TEXT,
+            ADD COLUMN IF NOT EXISTS original_lease_expires_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS recovery_worker_id TEXT,
+            ADD COLUMN IF NOT EXISTS recovered_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS execution_resumed BOOLEAN,
+            ADD COLUMN IF NOT EXISTS failure_history JSONB NOT NULL DEFAULT '[]'::jsonb
         """
     )
     conn.execute(
@@ -554,6 +568,1545 @@ def create_research_campaign(
     }
 
 
+def create_quality_first_research_campaign(
+    conn: psycopg.Connection,
+    *,
+    source_campaign_id: int,
+    name: str | None = None,
+    max_variants_per_parent: int = 6,
+    asset_limit: int = 4,
+    timeframes: list[str] | None = None,
+) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    source_campaign = get_campaign(conn, source_campaign_id)
+    source_jobs = conn.execute(
+        """
+        SELECT *
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s AND simulation_only = TRUE
+        ORDER BY candidate_id, symbol, timeframe
+        """,
+        (source_campaign_id,),
+    ).fetchall()
+    blueprint = quality_first_campaign_blueprint(
+        [dict(row) for row in source_jobs],
+        max_variants_per_parent=max_variants_per_parent,
+        asset_limit=asset_limit,
+        timeframes=timeframes,
+    )
+    if not blueprint["candidates"]:
+        raise ValueError("quality-first campaign requires at least one promoted or near-pass source candidate")
+    campaign_key = quality_campaign_key(source_campaign_id, blueprint)
+    campaign_name = name or f"Phase 9.7 quality-first follow-up for campaign {source_campaign_id}"
+    row = conn.execute(
+        """
+        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
+        VALUES (%s, %s, %s, 'queued', %s, %s, %s, %s, TRUE)
+        ON CONFLICT(campaign_key) DO UPDATE
+        SET updated_at = NOW()
+        RETURNING *
+        """,
+        (
+            campaign_key,
+            campaign_name,
+            source_campaign["universe_key"],
+            len(blueprint["candidates"]),
+            Jsonb(
+                {
+                    "campaign_version": QUALITY_FIRST_CAMPAIGN_VERSION,
+                    "source_campaign_id": source_campaign_id,
+                    "objective": "Convert existing research candidates into elite candidates through targeted hypothesis testing.",
+                    "candidate_quality_policy": "Queue parent confirmations and local mutations only; validation thresholds and evidence requirements are unchanged.",
+                    "paper_deployment_policy": "Candidate-linked paper deployments are blocked until at least one elite_research_candidates row exists.",
+                    "diagnostics": blueprint["diagnostics"],
+                    "targeting": blueprint["targeting"],
+                }
+            ),
+            Jsonb({**DEFAULT_SCHEDULING_CONFIG, "batch_size": min(12, DEFAULT_SCHEDULING_CONFIG["batch_size"]), "daily_experiment_budget": 60, "max_generated_candidates": len(blueprint["candidates"])}),
+            SAFETY_STATEMENT,
+        ),
+    ).fetchone()
+    campaign_id = int(row["id"])
+    created = queue_campaign_jobs(conn, campaign_id, blueprint["candidates"], blueprint["targeting"]["assets"], blueprint["targeting"]["timeframes"])
+    update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    return {
+        "campaign": jsonable(dict(row)),
+        "source_campaign": {"id": source_campaign_id, "name": source_campaign["name"], "status": source_campaign["status"]},
+        "diagnostics": blueprint["diagnostics"],
+        "targeting": blueprint["targeting"],
+        "candidates_generated": len(blueprint["candidates"]),
+        "jobs_created": created,
+        "campaign_version": QUALITY_FIRST_CAMPAIGN_VERSION,
+        "simulation_only": True,
+        "safety": SAFETY_STATEMENT,
+    }
+
+
+def quality_first_campaign_blueprint(
+    jobs: list[dict[str, Any]],
+    *,
+    max_variants_per_parent: int = 6,
+    asset_limit: int = 4,
+    timeframes: list[str] | None = None,
+) -> dict[str, Any]:
+    diagnostics = phase_campaign_diagnostics(jobs)
+    parent_rows = source_parent_rows(jobs)
+    target_assets = strongest_quality_assets(jobs, parent_rows, asset_limit)
+    target_timeframes = strongest_quality_timeframes(jobs, parent_rows, timeframes)
+    candidates = targeted_quality_candidates(parent_rows, max_variants_per_parent=max_variants_per_parent)
+    return {
+        "diagnostics": diagnostics,
+        "targeting": {
+            "assets": target_assets,
+            "timeframes": target_timeframes,
+            "strategy_families": diagnostics["strongest_strategy_families"],
+            "parameter_ranges": diagnostics["strongest_parameter_ranges"],
+            "market_regimes": diagnostics["strongest_market_regimes"],
+            "parents": [row["candidate_id"] for row in parent_rows],
+        },
+        "candidates": candidates,
+        "simulation_only": True,
+    }
+
+
+def phase_campaign_diagnostics(jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    completed = [row for row in jobs if row.get("status") in {"promoted", "rejected", "failed"}]
+    candidate_ids = {str(row.get("candidate_id")) for row in jobs}
+    candidates_with_single_market_pass = {str(row.get("candidate_id")) for row in jobs if row.get("status") == "promoted"}
+    failure_counter: Counter[str] = Counter()
+    for row in jobs:
+        if row.get("status") not in {"rejected", "failed"}:
+            continue
+        reasons = list(row.get("failure_reasons") or [])
+        if not reasons:
+            reasons = infer_job_failure_reasons(row)
+        for reason in reasons:
+            failure_counter[normalize_failure_reason(reason)] += 1
+    return {
+        "source_jobs": len(jobs),
+        "completed_jobs": len(completed),
+        "generated_candidates": len(candidate_ids),
+        "candidate_level_failures": max(0, len(candidate_ids) - len(candidates_with_single_market_pass)),
+        "single_market_research_candidates": len(candidates_with_single_market_pass),
+        "elite_candidates": 0,
+        "primary_failure_reasons": [{"reason": reason, "count": count} for reason, count in failure_counter.most_common(10)],
+        "why_candidates_failed": "The broad Phase 9.6 sweep produced too many over-restrictive combinations. Most jobs failed trade-count requirements first, then profit-factor and expectancy rules; the only surviving evidence was concentrated in AAPL 1h pullback variants, so no candidate passed cross-asset stability.",
+        "strongest_strategy_families": grouped_quality_rank(jobs, "strategy_family")[:5],
+        "strongest_assets": grouped_quality_rank(jobs, "symbol")[:8],
+        "strongest_timeframes": grouped_quality_rank(jobs, "timeframe")[:4],
+        "strongest_parameter_ranges": strongest_parameter_ranges(jobs),
+        "strongest_market_regimes": strongest_market_regimes(jobs),
+        "quality_campaign_design": "Retest the three single-market survivors and local deterministic variants across the strongest adjacent assets and the validated timeframe before any broad exploration.",
+    }
+
+
+def infer_job_failure_reasons(job: dict[str, Any]) -> list[str]:
+    metrics = ((job.get("result") or {}).get("metrics") or {})
+    reasons = []
+    if finite_metric(metrics.get("number_of_trades")) < 30:
+        reasons.append("insufficient_trades")
+    if finite_metric(metrics.get("profit_factor")) < 1.2:
+        reasons.append("weak_profit_factor")
+    if finite_metric(metrics.get("expectancy_per_trade")) <= 0:
+        reasons.append("poor_expectancy")
+    if finite_metric(metrics.get("max_drawdown")) > 0.12:
+        reasons.append("excessive_drawdown")
+    return reasons or ["validation_rules_failed"]
+
+
+def normalize_failure_reason(reason: Any) -> str:
+    text = str(reason)
+    lowered = text.lower()
+    if "trade count" in lowered or "insufficient_trades" in lowered:
+        return "insufficient_trades"
+    if "profit factor" in lowered or "weak_profit_factor" in lowered:
+        return "weak_profit_factor"
+    if "expectancy" in lowered or "poor_expectancy" in lowered:
+        return "poor_expectancy"
+    if "drawdown" in lowered:
+        return "excessive_drawdown"
+    if "bull_trend" in lowered:
+        return "fails_in_bull_trend"
+    if "sideways" in lowered:
+        return "fails_in_sideways"
+    if "low_volatility" in lowered:
+        return "fails_in_low_volatility"
+    if "normal_volatility" in lowered:
+        return "fails_in_normal_volatility"
+    return text
+
+
+def grouped_quality_rank(jobs: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in jobs:
+        if row.get("status") in {"promoted", "rejected"}:
+            grouped[str(row.get(field) or "unknown")].append(row)
+    rows = []
+    for name, items in grouped.items():
+        metrics = [((row.get("result") or {}).get("metrics") or {}) for row in items]
+        promoted = sum(1 for row in items if row.get("status") == "promoted")
+        rows.append(
+            {
+                "name": name,
+                "tested": len(items),
+                "single_market_passes": promoted,
+                "pass_rate": round(promoted / len(items), 4) if items else 0,
+                "average_profit_factor": average(metric.get("profit_factor") for metric in metrics),
+                "average_expectancy": average(metric.get("expectancy_per_trade") for metric in metrics),
+                "average_drawdown": average(metric.get("max_drawdown") for metric in metrics),
+                "average_trades": average(metric.get("number_of_trades") for metric in metrics),
+            }
+        )
+    return sorted(rows, key=lambda row: (row["single_market_passes"], row["average_profit_factor"], row["average_expectancy"], -row["average_drawdown"]), reverse=True)
+
+
+def strongest_parameter_ranges(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    promoted = [row for row in jobs if row.get("status") == "promoted"]
+    counters: dict[str, Counter[str]] = defaultdict(Counter)
+    for row in promoted:
+        params = dict((row.get("candidate") or {}).get("parameters") or {})
+        for key in ("trend_fast", "trend_slow", "rsi_min", "risk_reward", "atr_multiplier", "volume_change_min", "entry_distance_to_ema20_max"):
+            if key in params:
+                counters[key][str(params[key])] += 1
+    return [{"parameter": key, "values": [{"value": value, "count": count} for value, count in counter.most_common()]} for key, counter in sorted(counters.items())]
+
+
+def strongest_market_regimes(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    regimes: Counter[str] = Counter()
+    for row in jobs:
+        if row.get("status") != "promoted":
+            continue
+        analysis = (row.get("result") or {}).get("regime_analysis") or {}
+        for bucket in ("by_market_regime", "by_volatility_regime"):
+            for item in analysis.get(bucket) or []:
+                metrics = item.get("metrics") or {}
+                if finite_metric(metrics.get("expectancy_per_trade")) > 0 and finite_metric(metrics.get("profit_factor")) >= 1:
+                    regimes[str(item.get("regime") or item.get("condition") or "unknown")] += 1
+    return [{"regime": regime, "supporting_passes": count} for regime, count in regimes.most_common(8)]
+
+
+def source_parent_rows(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    promoted = [row for row in jobs if row.get("status") == "promoted"]
+    if promoted:
+        return best_row_per_candidate(promoted)
+    near_pass = []
+    for row in jobs:
+        metrics = ((row.get("result") or {}).get("metrics") or {})
+        if (
+            finite_metric(metrics.get("profit_factor")) >= 1.1
+            and finite_metric(metrics.get("expectancy_per_trade")) > 0
+            and finite_metric(metrics.get("max_drawdown")) <= 0.12
+            and finite_metric(metrics.get("number_of_trades")) >= 20
+        ):
+            near_pass.append(row)
+    return best_row_per_candidate(near_pass)
+
+
+def best_row_per_candidate(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    best: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = str(row.get("candidate_id"))
+        current = best.get(key)
+        if current is None or finite_metric(row.get("validation_score")) > finite_metric(current.get("validation_score")):
+            best[key] = row
+    return sorted(best.values(), key=lambda row: (finite_metric(row.get("validation_score")), str(row.get("candidate_id"))), reverse=True)
+
+
+def strongest_quality_assets(jobs: list[dict[str, Any]], parents: list[dict[str, Any]], asset_limit: int) -> list[str]:
+    selected: list[str] = []
+    for row in parents:
+        append_unique(selected, str(row.get("symbol", "")).upper())
+    for row in grouped_quality_rank(jobs, "symbol"):
+        if row["average_profit_factor"] >= 1.2 and row["average_expectancy"] > 0 and row["average_drawdown"] <= 0.12:
+            append_unique(selected, row["name"].upper())
+        if len(selected) >= max(2, asset_limit):
+            break
+    return selected[: max(2, asset_limit)]
+
+
+def strongest_quality_timeframes(jobs: list[dict[str, Any]], parents: list[dict[str, Any]], explicit: list[str] | None) -> list[str]:
+    if explicit:
+        return [timeframe for timeframe in explicit if timeframe in DEFAULT_CAMPAIGN_TIMEFRAMES]
+    selected: list[str] = []
+    for row in parents:
+        append_unique(selected, str(row.get("timeframe", "")))
+    return selected or [grouped_quality_rank(jobs, "timeframe")[0]["name"] if grouped_quality_rank(jobs, "timeframe") else "1h"]
+
+
+def targeted_quality_candidates(parent_rows: list[dict[str, Any]], *, max_variants_per_parent: int) -> list[DiscoveryCandidate]:
+    candidates: list[DiscoveryCandidate] = []
+    seen: set[str] = set()
+    for row in parent_rows:
+        parent = candidate_from_payload(row["candidate"])
+        add_candidate(candidates, seen, parent)
+        for variant in local_quality_variants(parent, max(0, max_variants_per_parent - 1)):
+            add_candidate(candidates, seen, variant)
+    return candidates
+
+
+def local_quality_variants(parent: DiscoveryCandidate, limit: int) -> list[DiscoveryCandidate]:
+    params = parent.parameters
+    grids = {
+        "risk_reward": local_numeric_values(float(params.get("risk_reward", 1.5)), [1.4, 1.5, 1.6, 1.8, 2.0, 2.2]),
+        "volume_change_min": local_numeric_values(float(params.get("volume_change_min", 0)), [0.0, 0.05, 0.1, 0.15]),
+        "rsi_min": local_numeric_values(float(params.get("rsi_min", 55)), [52, 55, 58]),
+        "entry_distance_to_ema20_max": local_numeric_values(float(params.get("entry_distance_to_ema20_max", 0.035)), [0.03, 0.035, 0.04]),
+        "atr_multiplier": local_numeric_values(float(params.get("atr_multiplier", 1.5)), [1.25, 1.5, 1.75]),
+    }
+    changes = []
+    max_depth = max((len(values) for values in grids.values()), default=0)
+    for index in range(max_depth):
+        for key, values in grids.items():
+            if index < len(values):
+                changes.append({key: values[index]})
+    variants = []
+    for change in changes:
+        if len(variants) >= limit:
+            break
+        next_params = {**parent.parameters, **change}
+        key = canonical_candidate_key(parent.blocks, next_params, parent.candidate_id)
+        variants.append(
+            DiscoveryCandidate(
+                candidate_id=f"sd_{sha256(key.encode()).hexdigest()[:14]}",
+                family_id=parent.family_id,
+                parent_candidate_id=parent.candidate_id,
+                generation=parent.generation + 1,
+                blocks=parent.blocks,
+                parameters=next_params,
+                complexity=parent.complexity + 1,
+                canonical_key=key,
+            )
+        )
+    return variants
+
+
+def local_numeric_values(current: float, grid: list[float]) -> list[float]:
+    return [value for value in sorted(grid, key=lambda value: (abs(value - current), value)) if value != current]
+
+
+def add_candidate(candidates: list[DiscoveryCandidate], seen: set[str], candidate: DiscoveryCandidate) -> None:
+    if candidate.canonical_key in seen:
+        return
+    seen.add(candidate.canonical_key)
+    candidates.append(candidate)
+
+
+def append_unique(items: list[str], value: str) -> None:
+    if value and value not in items:
+        items.append(value)
+
+
+def quality_campaign_key(source_campaign_id: int, blueprint: dict[str, Any]) -> str:
+    material = {
+        "version": QUALITY_FIRST_CAMPAIGN_VERSION,
+        "source_campaign_id": source_campaign_id,
+        "parents": blueprint["targeting"]["parents"],
+        "assets": blueprint["targeting"]["assets"],
+        "timeframes": blueprint["targeting"]["timeframes"],
+        "candidates": [candidate.candidate_id for candidate in blueprint["candidates"]],
+    }
+    return sha256(repr(material).encode("utf-8")).hexdigest()
+
+
+def create_transferability_sample_size_campaign(
+    conn: psycopg.Connection,
+    *,
+    pullback_campaign_id: int,
+    trend_source_campaign_id: int,
+    name: str | None = None,
+) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    pullback_jobs = list(
+        conn.execute(
+            """
+            SELECT *
+            FROM research_campaign_jobs
+            WHERE campaign_id = %s AND simulation_only = TRUE
+            ORDER BY validation_score DESC, id ASC
+            """,
+            (pullback_campaign_id,),
+        ).fetchall()
+    )
+    trend_jobs = list(
+        conn.execute(
+            """
+            SELECT *
+            FROM research_campaign_jobs
+            WHERE campaign_id = %s
+              AND strategy_family = 'Trend Following'
+              AND simulation_only = TRUE
+            ORDER BY validation_score DESC, id ASC
+            """,
+            (trend_source_campaign_id,),
+        ).fetchall()
+    )
+    blueprint = transferability_sample_size_blueprint([dict(row) for row in pullback_jobs], [dict(row) for row in trend_jobs])
+    source_campaign = get_campaign(conn, pullback_campaign_id)
+    campaign_key = transfer_sample_size_campaign_key(blueprint)
+    campaign_name = name or "Phase 9.8 Transferability and Sample-Size Research"
+    row = conn.execute(
+        """
+        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
+        VALUES (%s, %s, %s, 'queued', %s, %s, %s, %s, TRUE)
+        ON CONFLICT(campaign_key) DO UPDATE
+        SET updated_at = NOW()
+        RETURNING *
+        """,
+        (
+            campaign_key,
+            campaign_name,
+            source_campaign["universe_key"],
+            len(blueprint["candidates"]),
+            Jsonb(
+                {
+                    "campaign_version": TRANSFER_SAMPLE_SIZE_CAMPAIGN_VERSION,
+                    "source_campaigns": {"pullback": pullback_campaign_id, "trend_following": trend_source_campaign_id},
+                    "objective": "Test Pullback transferability and Trend Following sample-size improvement without broad sweeps.",
+                    "candidate_quality_policy": "Focused deterministic parent-child mutations only; validation thresholds and evidence requirements are unchanged.",
+                    "paper_deployment_policy": "Do not create paper deployments unless an elite candidate passes every existing deterministic gate.",
+                    "tracks": blueprint["tracks"],
+                    "lineage": blueprint["lineage"],
+                    "targeting": blueprint["targeting"],
+                }
+            ),
+            Jsonb({**DEFAULT_SCHEDULING_CONFIG, "batch_size": 12, "daily_experiment_budget": 120, "max_generated_candidates": len(blueprint["candidates"])}),
+            SAFETY_STATEMENT,
+        ),
+    ).fetchone()
+    campaign_id = int(row["id"])
+    created = queue_campaign_jobs(conn, campaign_id, blueprint["candidates"], blueprint["targeting"]["assets"], blueprint["targeting"]["timeframes"])
+    update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    return {
+        "campaign": jsonable(dict(row)),
+        "candidates_generated": len(blueprint["candidates"]),
+        "jobs_created": created,
+        "targeting": blueprint["targeting"],
+        "tracks": blueprint["tracks"],
+        "lineage": blueprint["lineage"],
+        "campaign_version": TRANSFER_SAMPLE_SIZE_CAMPAIGN_VERSION,
+        "simulation_only": True,
+        "safety": SAFETY_STATEMENT,
+    }
+
+
+def transferability_sample_size_blueprint(pullback_jobs: list[dict[str, Any]], trend_jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    pullback_parents = best_row_per_candidate([row for row in pullback_jobs if row.get("status") == "promoted"])[:3]
+    if len(pullback_parents) < 3:
+        pullback_parents = best_row_per_candidate(pullback_jobs)[:3]
+    trend_parents = best_row_per_candidate([row for row in trend_jobs if ((row.get("result") or {}).get("metrics") or {}).get("number_of_trades")])[:2]
+    candidates: list[DiscoveryCandidate] = []
+    seen: set[str] = set()
+    lineage: list[dict[str, Any]] = []
+    for parent_row in pullback_parents:
+        parent = candidate_from_payload(parent_row["candidate"])
+        for mutation in pullback_transfer_mutations(parent):
+            child = phase_9_8_child(parent, mutation)
+            add_candidate(candidates, seen, child)
+            lineage.append(lineage_row(child, parent, mutation, parent_row))
+    for parent_row in trend_parents:
+        parent = candidate_from_payload(parent_row["candidate"])
+        for mutation in trend_sample_size_mutations(parent):
+            child = phase_9_8_child(parent, mutation)
+            add_candidate(candidates, seen, child)
+            lineage.append(lineage_row(child, parent, mutation, parent_row))
+    return {
+        "targeting": {
+            "assets": ["AAPL", "NVDA", "AVGO", "LLY", "GOOGL", "JPM"],
+            "timeframes": ["1h", "4h"],
+            "strategy_families": ["Pullback", "Trend Following"],
+            "candidate_count": len(candidates),
+            "job_count": len(candidates) * 12,
+        },
+        "tracks": {
+            "pullback_transferability": {
+                "parents": [row["candidate_id"] for row in pullback_parents],
+                "hypothesis": "AAPL Pullback evidence transfers if RSI, ATR, pullback distance, risk/reward, volume, and regime filters stay near the Phase 9.7 evidence cluster.",
+                "falsification": "Reject transferability if candidates keep passing only AAPL 1h or fail cross-timeframe confirmation.",
+            },
+            "trend_following_sample_size": {
+                "parents": [row["candidate_id"] for row in trend_parents],
+                "hypothesis": "Trend Following can raise trade count through bounded entry and filter relaxation without destroying PF, expectancy, drawdown, or stability.",
+                "falsification": "Reject if trade count improves only by producing weak PF, negative expectancy, excessive drawdown, or unstable regimes.",
+            },
+            "regime_filtering": {
+                "hypothesis": "Deterministic filters can preserve bull-trend/low-volatility setups while reducing sideways and normal-volatility damage.",
+                "comparison": "Every filtered child is compared to its unfiltered parent through normal campaign validation history.",
+            },
+            "breakout_containment": {"included": False, "reason": "No explicit Phase 9.8 Breakout falsification hypothesis was selected."},
+        },
+        "lineage": lineage,
+        "candidates": candidates,
+        "simulation_only": True,
+    }
+
+
+def pullback_transfer_mutations(parent: DiscoveryCandidate) -> list[dict[str, Any]]:
+    base = {"rsi_min": 55, "trend_fast": 20, "trend_slow": 50}
+    return [
+        phase_9_8_mutation("pullback_parent_confirmation", {**base}, "Confirm parent near original parameters across six assets and two timeframes.", "Fails if passes remain isolated to AAPL 1h."),
+        phase_9_8_mutation("pullback_volume_confirm", {**base, "volume_change_min": 0.15, "risk_reward": 1.4}, "Test stricter participation while keeping reward target closer.", "Fails if volume filter reduces transferability or trade count below gates."),
+        phase_9_8_mutation("pullback_wider_depth", {**base, "entry_distance_to_ema20_max": 0.04, "atr_multiplier": 1.5}, "Test whether slightly wider pullback depth transfers beyond AAPL.", "Fails if sideways/normal-volatility losses increase."),
+        phase_9_8_mutation("pullback_regime_filtered", {**base, "phase_9_8_regime_filter": True, "block_sideways": True, "sideways_distance_from_ema50_min": 0.012, "normal_volatility_rsi_min": 58, "normal_volatility_volume_change_min": 0.15, "risk_reward": 1.5}, "Block weak sideways exposure and require more confirmation in normal volatility.", "Fails if out-of-sample evidence does not improve versus parent."),
+    ]
+
+
+def trend_sample_size_mutations(parent: DiscoveryCandidate) -> list[dict[str, Any]]:
+    base = {"trend_fast": 20, "trend_slow": 50, "entry": "trend_continuation"}
+    return [
+        phase_9_8_mutation("trend_parent_confirmation", {}, "Confirm strongest Trend Following parent before changing activation.", "Fails if sample size remains below gates or PF/expectancy deteriorate."),
+        phase_9_8_mutation("trend_lower_activation", {**base, "returns_5_min": 0.008, "volume_change_min": 0.05, "risk_reward": 1.6, "max_holding_bars": 16}, "Increase entry frequency with bounded momentum and volume confirmation.", "Fails if extra trades destroy profit factor or expectancy."),
+        phase_9_8_mutation("trend_rsi_confirmation", {**base, "momentum": "rsi", "rsi_min": 52, "volume_change_min": 0.1, "risk_reward": 1.5, "max_holding_bars": 18}, "Use less lagged momentum confirmation to improve sample size.", "Fails if stability or drawdown gates deteriorate."),
+        phase_9_8_mutation("trend_regime_filtered", {**base, "returns_5_min": 0.008, "volume_change_min": 0.1, "risk_reward": 1.5, "max_holding_bars": 18, "phase_9_8_regime_filter": True, "block_sideways": True, "sideways_distance_from_ema50_min": 0.015, "normal_volatility_rsi_min": 55, "normal_volatility_volume_change_min": 0.1}, "Increase trade count while reducing sideways and normal-volatility damage.", "Fails if filter only improves aggregate history without cross-asset/timeframe evidence."),
+        phase_9_8_mutation("trend_longer_exit", {**base, "returns_5_min": 0.01, "volume_change_min": 0.05, "risk_reward": 1.7, "max_holding_bars": 24}, "Allow longer trend continuation exits without removing risk controls.", "Fails if drawdown or losing-streak behavior weakens."),
+        phase_9_8_mutation("trend_ema_distance", {**base, "returns_5_min": 0.006, "entry_distance_to_ema20_max": 0.045, "volume_change_min": 0.1, "risk_reward": 1.5}, "Increase activation near EMA support while preserving trend controls.", "Fails if trades increase but regime stability fails."),
+    ]
+
+
+def phase_9_8_mutation(mutation_type: str, changes: dict[str, Any], expected: str, falsification: str) -> dict[str, Any]:
+    return {
+        "mutation_type": mutation_type,
+        "changes": changes,
+        "expected_improvement": expected,
+        "falsification_condition": falsification,
+        "evidence_source": "Phase 9.6/9.7 stored campaign evidence",
+        "campaign_version": TRANSFER_SAMPLE_SIZE_CAMPAIGN_VERSION,
+    }
+
+
+def phase_9_8_child(parent: DiscoveryCandidate, mutation: dict[str, Any]) -> DiscoveryCandidate:
+    params = {
+        **parent.parameters,
+        **mutation["changes"],
+        "phase_9_8_mutation_type": mutation["mutation_type"],
+        "phase_9_8_expected_improvement": mutation["expected_improvement"],
+        "phase_9_8_falsification_condition": mutation["falsification_condition"],
+        "phase_9_8_evidence_source": mutation["evidence_source"],
+        "phase_9_8_campaign_version": TRANSFER_SAMPLE_SIZE_CAMPAIGN_VERSION,
+    }
+    key = canonical_candidate_key(parent.blocks, params, parent.candidate_id)
+    return DiscoveryCandidate(
+        candidate_id=f"sd_{sha256(key.encode()).hexdigest()[:14]}",
+        family_id=parent.family_id,
+        parent_candidate_id=parent.candidate_id,
+        generation=parent.generation + 1,
+        blocks=parent.blocks,
+        parameters=params,
+        complexity=parent.complexity + 1,
+        canonical_key=key,
+    )
+
+
+def lineage_row(child: DiscoveryCandidate, parent: DiscoveryCandidate, mutation: dict[str, Any], parent_row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": child.candidate_id,
+        "parent_candidate_id": parent.candidate_id,
+        "family_id": child.family_id,
+        "strategy_family": strategy_family_for_candidate(child),
+        "mutation_type": mutation["mutation_type"],
+        "mutation_value": mutation["changes"],
+        "expected_improvement": mutation["expected_improvement"],
+        "falsification_condition": mutation["falsification_condition"],
+        "evidence_source": mutation["evidence_source"],
+        "source_job": parent_row.get("id"),
+        "source_symbol": parent_row.get("symbol"),
+        "source_timeframe": parent_row.get("timeframe"),
+        "campaign_version": TRANSFER_SAMPLE_SIZE_CAMPAIGN_VERSION,
+    }
+
+
+def transfer_sample_size_campaign_key(blueprint: dict[str, Any]) -> str:
+    material = {
+        "version": TRANSFER_SAMPLE_SIZE_CAMPAIGN_VERSION,
+        "assets": blueprint["targeting"]["assets"],
+        "timeframes": blueprint["targeting"]["timeframes"],
+        "lineage": [(row["parent_candidate_id"], row["mutation_type"], row["mutation_value"]) for row in blueprint["lineage"]],
+    }
+    return sha256(repr(material).encode("utf-8")).hexdigest()
+
+
+def create_overfit_regime_robustness_campaign(
+    conn: psycopg.Connection,
+    *,
+    source_campaign_id: int,
+    name: str | None = None,
+) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    jobs = list(
+        conn.execute(
+            """
+            SELECT *
+            FROM research_campaign_jobs
+            WHERE campaign_id = %s AND simulation_only = TRUE
+            ORDER BY validation_score DESC, id ASC
+            """,
+            (source_campaign_id,),
+        ).fetchall()
+    )
+    blueprint = overfit_regime_robustness_blueprint([dict(row) for row in jobs])
+    source_campaign = get_campaign(conn, source_campaign_id)
+    campaign_key = overfit_regime_robustness_campaign_key(blueprint)
+    campaign_name = name or "Phase 9.9 Overfit Diagnosis and Regime-Robustness Research"
+    row = conn.execute(
+        """
+        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
+        VALUES (%s, %s, %s, 'queued', %s, %s, %s, %s, TRUE)
+        ON CONFLICT(campaign_key) DO UPDATE
+        SET updated_at = NOW()
+        RETURNING *
+        """,
+        (
+            campaign_key,
+            campaign_name,
+            source_campaign["universe_key"],
+            len(blueprint["candidates"]),
+            Jsonb(
+                {
+                    "campaign_version": OVERFIT_REGIME_ROBUSTNESS_CAMPAIGN_VERSION,
+                    "source_campaign": source_campaign_id,
+                    "objective": "Diagnose whether AAPL Pullback is repeatable edge or asset-specific overfit, and test bounded Trend Following stability improvements.",
+                    "candidate_quality_policy": "Small deterministic parent-child mutations only; validation thresholds and evidence requirements are unchanged.",
+                    "paper_deployment_policy": "Do not create paper deployments unless an elite candidate passes every existing deterministic gate.",
+                    "single_asset_robust_candidate_policy": "Informational classification only; never grants elite, Phase 10, or deployment eligibility.",
+                    "tracks": blueprint["tracks"],
+                    "lineage": blueprint["lineage"],
+                    "targeting": blueprint["targeting"],
+                    "overfit_diagnostics": blueprint["overfit_diagnostics"],
+                }
+            ),
+            Jsonb({**DEFAULT_SCHEDULING_CONFIG, "batch_size": 12, "daily_experiment_budget": 96, "max_generated_candidates": len(blueprint["candidates"])}),
+            SAFETY_STATEMENT,
+        ),
+    ).fetchone()
+    campaign_id = int(row["id"])
+    created = queue_campaign_jobs(conn, campaign_id, blueprint["candidates"], blueprint["targeting"]["assets"], blueprint["targeting"]["timeframes"])
+    update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    return {
+        "campaign": jsonable(dict(row)),
+        "candidates_generated": len(blueprint["candidates"]),
+        "jobs_created": created,
+        "targeting": blueprint["targeting"],
+        "tracks": blueprint["tracks"],
+        "lineage": blueprint["lineage"],
+        "overfit_diagnostics": blueprint["overfit_diagnostics"],
+        "campaign_version": OVERFIT_REGIME_ROBUSTNESS_CAMPAIGN_VERSION,
+        "simulation_only": True,
+        "safety": SAFETY_STATEMENT,
+    }
+
+
+def overfit_regime_robustness_blueprint(source_jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    pullback_rows = [
+        row
+        for row in source_jobs
+        if row.get("strategy_family") == "Pullback" and str(row.get("symbol")) == "AAPL" and str(row.get("timeframe")) == "1h"
+    ]
+    trend_rows = [row for row in source_jobs if row.get("strategy_family") == "Trend Following"]
+    pullback_parent_row = best_row_per_candidate([row for row in pullback_rows if row.get("status") == "promoted"] or pullback_rows)[0]
+    trend_parent_row = next((row for row in trend_rows if row.get("candidate_id") == "sd_5cbcdf7c9eabcf"), None)
+    if trend_parent_row is None:
+        trend_parent_row = best_row_per_candidate(trend_rows)[0]
+    pullback_parent = candidate_from_payload(pullback_parent_row["candidate"])
+    trend_parent = candidate_from_payload(trend_parent_row["candidate"])
+    candidates: list[DiscoveryCandidate] = []
+    seen: set[str] = set()
+    lineage: list[dict[str, Any]] = []
+    for mutation in pullback_overfit_mutations():
+        child = phase_9_9_child(pullback_parent, mutation)
+        add_candidate(candidates, seen, child)
+        lineage.append(phase_9_9_lineage_row(child, pullback_parent, mutation, pullback_parent_row))
+    for mutation in trend_robustness_mutations():
+        child = phase_9_9_child(trend_parent, mutation)
+        add_candidate(candidates, seen, child)
+        lineage.append(phase_9_9_lineage_row(child, trend_parent, mutation, trend_parent_row))
+    return {
+        "targeting": {
+            "assets": ["AAPL", "NVDA"],
+            "timeframes": ["1h", "4h"],
+            "strategy_families": ["Pullback", "Trend Following"],
+            "candidate_count": len(candidates),
+            "job_count": len(candidates) * 4,
+            "primary_timeframe": "1h",
+            "diagnostic_timeframe": "4h",
+        },
+        "tracks": {
+            "aapl_pullback_overfit_diagnosis": {
+                "parent": pullback_parent.candidate_id,
+                "hypothesis": "AAPL Pullback evidence is repeatable if the EMA20/50, RSI55, ATR1.5, pullback-distance 0.04, RR1.4, volume 0.15 cluster survives small perturbations and execution stress.",
+                "falsification": "Flag overfit if evidence collapses under nearby parameters, alternate windows, delayed entry, higher costs, or 4h/NVDA diagnostics.",
+            },
+            "single_asset_robust_candidate": {
+                "classification": "informational_only",
+                "eligible_for_elite": False,
+                "eligible_for_phase_10": False,
+                "eligible_for_deployment": False,
+            },
+            "trend_following_stability": {
+                "parent": trend_parent.candidate_id,
+                "hypothesis": "Trend Following can preserve profitability while improving stability through bounded exit, persistence, slope, cooldown, volatility, RR, stop, and volume mutations.",
+                "falsification": "Reject if stability gains come from too few trades or destroy PF, expectancy, drawdown, or regime robustness.",
+            },
+            "sideways_low_volatility_exclusion": {
+                "comparison": "Each filtered child is compared with its parent and fails the hypothesis if filters eliminate nearly all trades.",
+            },
+            "data_execution_sensitivity": {
+                "stressors": ["higher_fees", "higher_slippage", "one_bar_delayed_entry", "post_trade_cooldown", "conservative_same_candle_fill"],
+            },
+            "breakout_containment": {"included": False, "reason": "Phase 9.9 explicitly excludes Breakout."},
+        },
+        "overfit_diagnostics": {
+            "pullback_cluster": {"trend_fast": 20, "trend_slow": 50, "rsi_min": 55, "atr_multiplier": 1.5, "entry_distance_to_ema20_max": 0.04, "risk_reward": 1.4, "volume_change_min": 0.15},
+            "perturbation_ranges": {"rsi_min": [53, 55, 57], "atr_multiplier": [1.4, 1.5, 1.6], "entry_distance_to_ema20_max": [0.035, 0.04, 0.045], "risk_reward": [1.3, 1.4, 1.5], "volume_change_min": [0.10, 0.15, 0.20]},
+            "window_tests": ["default_walk_forward", "anchored_60_train", "anchored_75_train", "4h_diagnostic"],
+            "execution_stress": ["higher_costs", "delayed_entry", "cooldown", "same_candle_stop_first"],
+        },
+        "lineage": lineage,
+        "candidates": candidates,
+        "simulation_only": True,
+    }
+
+
+def pullback_overfit_mutations() -> list[dict[str, Any]]:
+    base = {
+        "trend_fast": 20,
+        "trend_slow": 50,
+        "momentum": "rsi",
+        "rsi_min": 55,
+        "volatility": "atr",
+        "atr_multiplier": 1.5,
+        "entry": "pullback",
+        "entry_distance_to_ema20_max": 0.04,
+        "risk_reward": 1.4,
+        "volume_change_min": 0.15,
+    }
+    return [
+        phase_9_9_mutation("aapl_pullback_parent_confirmation", "AAPL Pullback cluster is repeatable at the Phase 9.8 best point.", base, "Preserve AAPL 1h strength without creating 4h/NVDA collapse.", "Fails if validation remains isolated or core gates deteriorate.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_rsi_53", "Lower RSI threshold keeps edge while improving sample size.", {**base, "rsi_min": 53}, "Increase trades without weakening expectancy.", "Fails if lower activation admits low-quality trades.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_rsi_57", "Higher RSI threshold isolates stronger participation.", {**base, "rsi_min": 57}, "Improve PF and drawdown without starving trades.", "Fails if trade count or stability falls below gates.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_atr_1_4", "Slightly tighter ATR stop preserves edge.", {**base, "atr_multiplier": 1.4}, "Improve drawdown while keeping expectancy positive.", "Fails if stop sensitivity collapses PF.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_atr_1_6", "Slightly wider ATR stop survives noise.", {**base, "atr_multiplier": 1.6}, "Reduce stop-outs without excessive drawdown.", "Fails if drawdown or loss size expands.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_distance_035", "Tighter pullback distance tests parameter sharpness.", {**base, "entry_distance_to_ema20_max": 0.035}, "Preserve quality with less entry looseness.", "Fails if evidence depends on exactly 0.04.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_distance_045", "Wider pullback distance tests local robustness.", {**base, "entry_distance_to_ema20_max": 0.045}, "Hold PF while adding nearby setups.", "Fails if wider depth increases weak regimes.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_rr_1_3", "Lower reward target tests fill realism.", {**base, "risk_reward": 1.3}, "Improve win conversion without negative expectancy.", "Fails if smaller winners erase edge.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_rr_1_5", "Higher reward target tests payoff sensitivity.", {**base, "risk_reward": 1.5}, "Improve PF without starving wins.", "Fails if target sensitivity collapses trades.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_volume_010", "Lower volume confirmation tests sample-size sensitivity.", {**base, "volume_change_min": 0.10}, "Gain trades without weak expectancy.", "Fails if weaker participation admits losers.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_volume_020", "Higher volume confirmation tests participation quality.", {**base, "volume_change_min": 0.20}, "Improve PF and drawdown.", "Fails if trade count collapses.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_high_cost", "AAPL Pullback survives higher execution costs.", {**base, "fee_rate": 0.001, "slippage_rate": 0.001}, "Keep positive expectancy under cost stress.", "Fails if edge disappears after costs.", "default_walk_forward", "all_regimes", {"fee_rate": 0.001, "slippage_rate": 0.001}),
+        phase_9_9_mutation("aapl_pullback_delayed_entry", "AAPL Pullback survives one additional bar of entry delay.", {**base, "entry_delay_bars": 1}, "Preserve gates after delayed entry.", "Fails if timing dependence collapses evidence.", "default_walk_forward", "all_regimes", {"entry_delay_bars": 1}),
+        phase_9_9_mutation("aapl_pullback_anchored_60", "AAPL Pullback is stable under an alternate anchored split.", {**base, "walk_forward_train_ratio": 0.6}, "Preserve validation gates with earlier validation start.", "Fails if window choice explains the edge.", "anchored_60_train", "all_regimes", {}),
+        phase_9_9_mutation("aapl_pullback_sideways_lowvol_filter", "Sideways and low-volatility exclusion improves robustness.", {**base, "phase_9_9_regime_filter": True, "block_sideways": True, "sideways_distance_from_ema50_min": 0.012, "phase_9_9_low_volatility_block": True, "phase_9_9_low_volatility_min": 0.008}, "Reduce weak regimes without eliminating most trades.", "Fails if filters starve evidence or do not improve gates.", "default_walk_forward", "exclude_sideways_low_volatility", {}),
+    ]
+
+
+def trend_robustness_mutations() -> list[dict[str, Any]]:
+    base = {"trend_fast": 20, "trend_slow": 50, "entry": "trend_continuation", "returns_5_min": 0.01, "volume_change_min": 0.05, "risk_reward": 1.7, "max_holding_bars": 24}
+    return [
+        phase_9_9_mutation("trend_parent_confirmation", "Trend parent profitability is reproducible before changing activation.", base, "Preserve PF and expectancy while measuring stability.", "Fails if Phase 9.8 result was not repeatable.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("trend_shorter_exit", "Shorter exit duration reduces unstable holding risk.", {**base, "max_holding_bars": 18}, "Improve drawdown and stability without losing expectancy.", "Fails if exits truncate winners.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("trend_longer_exit", "Longer exit duration captures continuation.", {**base, "max_holding_bars": 30}, "Improve PF while respecting drawdown.", "Fails if longer holds increase losses.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("trend_ema_slope", "EMA slope confirmation improves trend persistence.", {**base, "phase_9_9_ema_slope_min": 0.0004}, "Raise stability without starving trades.", "Fails if sample size becomes insufficient.", "default_walk_forward", "bull_trend_focus", {}),
+        phase_9_9_mutation("trend_entry_cooldown", "Post-trade cooldown removes clustered low-quality signals.", {**base, "entry_cooldown_bars": 3}, "Improve stability with acceptable trade count.", "Fails if cooldown eliminates evidence.", "default_walk_forward", "all_regimes", {"entry_cooldown_bars": 3}),
+        phase_9_9_mutation("trend_lowvol_block", "Low-volatility exclusion improves trend quality.", {**base, "phase_9_9_regime_filter": True, "phase_9_9_low_volatility_block": True, "phase_9_9_low_volatility_min": 0.008}, "Improve PF and expectancy without eliminating most trades.", "Fails if low-vol filter starves trades.", "default_walk_forward", "exclude_low_volatility", {}),
+        phase_9_9_mutation("trend_rr_1_5", "Lower RR improves realized win conversion.", {**base, "risk_reward": 1.5}, "Preserve positive expectancy while improving trade completion.", "Fails if lower target weakens PF.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("trend_stop_1_4", "Tighter stop distance improves risk control.", {**base, "atr_multiplier": 1.4}, "Improve drawdown without reducing expectancy.", "Fails if stops become too tight.", "default_walk_forward", "all_regimes", {}),
+        phase_9_9_mutation("trend_bull_only_volume", "Bull-trend and volume confirmation improves regime stability.", {**base, "phase_9_9_regime_filter": True, "phase_9_9_bull_trend_only": True, "phase_9_9_returns_5_min": 0.01, "volume_change_min": 0.10}, "Improve stability in trend regimes without starving trades.", "Fails if stability improves only by reducing evidence below gates.", "default_walk_forward", "bull_trend_only", {}),
+    ]
+
+
+def phase_9_9_mutation(
+    mutation_type: str,
+    hypothesis: str,
+    changes: dict[str, Any],
+    expected: str,
+    falsification: str,
+    data_window: str,
+    regime_scope: str,
+    execution_stress_config: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "mutation_type": mutation_type,
+        "hypothesis": hypothesis,
+        "changes": changes,
+        "expected_improvement": expected,
+        "falsification_condition": falsification,
+        "data_window": data_window,
+        "regime_scope": regime_scope,
+        "execution_stress_config": execution_stress_config,
+        "evidence_source": "Phase 9.8 stored campaign evidence",
+        "campaign_version": OVERFIT_REGIME_ROBUSTNESS_CAMPAIGN_VERSION,
+    }
+
+
+def phase_9_9_child(parent: DiscoveryCandidate, mutation: dict[str, Any]) -> DiscoveryCandidate:
+    params = {
+        **parent.parameters,
+        **mutation["changes"],
+        "phase_9_9_mutation_type": mutation["mutation_type"],
+        "phase_9_9_hypothesis": mutation["hypothesis"],
+        "phase_9_9_expected_improvement": mutation["expected_improvement"],
+        "phase_9_9_falsification_condition": mutation["falsification_condition"],
+        "phase_9_9_data_window": mutation["data_window"],
+        "phase_9_9_regime_scope": mutation["regime_scope"],
+        "phase_9_9_execution_stress_config": mutation["execution_stress_config"],
+        "phase_9_9_campaign_version": OVERFIT_REGIME_ROBUSTNESS_CAMPAIGN_VERSION,
+    }
+    key = canonical_candidate_key(parent.blocks, params, parent.candidate_id)
+    return DiscoveryCandidate(
+        candidate_id=f"sd_{sha256(key.encode()).hexdigest()[:14]}",
+        family_id=parent.family_id,
+        parent_candidate_id=parent.candidate_id,
+        generation=parent.generation + 1,
+        blocks=parent.blocks,
+        parameters=params,
+        complexity=parent.complexity + 1,
+        canonical_key=key,
+    )
+
+
+def phase_9_9_lineage_row(child: DiscoveryCandidate, parent: DiscoveryCandidate, mutation: dict[str, Any], parent_row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": child.candidate_id,
+        "parent_candidate_id": parent.candidate_id,
+        "family_id": child.family_id,
+        "strategy_family": strategy_family_for_candidate(child),
+        "hypothesis": mutation["hypothesis"],
+        "mutation_type": mutation["mutation_type"],
+        "mutation_value": mutation["changes"],
+        "expected_improvement": mutation["expected_improvement"],
+        "falsification_condition": mutation["falsification_condition"],
+        "data_window": mutation["data_window"],
+        "regime_scope": mutation["regime_scope"],
+        "execution_stress_config": mutation["execution_stress_config"],
+        "evidence_source": mutation["evidence_source"],
+        "source_job": parent_row.get("id"),
+        "source_symbol": parent_row.get("symbol"),
+        "source_timeframe": parent_row.get("timeframe"),
+        "campaign_version": OVERFIT_REGIME_ROBUSTNESS_CAMPAIGN_VERSION,
+    }
+
+
+def overfit_regime_robustness_campaign_key(blueprint: dict[str, Any]) -> str:
+    material = {
+        "version": OVERFIT_REGIME_ROBUSTNESS_CAMPAIGN_VERSION,
+        "assets": blueprint["targeting"]["assets"],
+        "timeframes": blueprint["targeting"]["timeframes"],
+        "lineage": [(row["parent_candidate_id"], row["mutation_type"], row["mutation_value"]) for row in blueprint["lineage"]],
+    }
+    return sha256(repr(material).encode("utf-8")).hexdigest()
+
+
+def create_single_asset_generalization_campaign(
+    conn: psycopg.Connection,
+    *,
+    source_campaign_id: int,
+    name: str | None = None,
+) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    jobs = list(
+        conn.execute(
+            """
+            SELECT *
+            FROM research_campaign_jobs
+            WHERE campaign_id = %s AND simulation_only = TRUE
+            ORDER BY validation_score DESC, id ASC
+            """,
+            (source_campaign_id,),
+        ).fetchall()
+    )
+    blueprint = single_asset_generalization_blueprint([dict(row) for row in jobs])
+    source_campaign = get_campaign(conn, source_campaign_id)
+    campaign_key = single_asset_generalization_campaign_key(blueprint)
+    campaign_name = name or "Phase 9.10 Single-Asset Robustness and Generalization Research"
+    row = conn.execute(
+        """
+        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
+        VALUES (%s, %s, %s, 'queued', %s, %s, %s, %s, TRUE)
+        ON CONFLICT(campaign_key) DO UPDATE
+        SET updated_at = NOW()
+        RETURNING *
+        """,
+        (
+            campaign_key,
+            campaign_name,
+            source_campaign["universe_key"],
+            len(blueprint["candidates"]),
+            Jsonb(
+                {
+                    "campaign_version": SINGLE_ASSET_GENERALIZATION_CAMPAIGN_VERSION,
+                    "source_campaign": source_campaign_id,
+                    "objective": "Determine whether AAPL Pullback is a robust single-asset strategy and whether economically similar assets or alternate sampling support legitimate generalization.",
+                    "candidate_quality_policy": "Targeted hypothesis tests around Phase 9.9 survivors only; validation thresholds and evidence requirements are unchanged.",
+                    "paper_deployment_policy": "Do not create paper deployments unless an elite candidate passes every existing deterministic gate.",
+                    "diagnostic_classification_policy": "single_asset_robust and fragility labels are informational only and never bypass elite gates.",
+                    "tracks": blueprint["tracks"],
+                    "lineage": blueprint["lineage"],
+                    "targeting": blueprint["targeting"],
+                    "diagnostics": blueprint["diagnostics"],
+                }
+            ),
+            Jsonb({**DEFAULT_SCHEDULING_CONFIG, "batch_size": 14, "daily_experiment_budget": 350, "max_generated_candidates": len(blueprint["candidates"])}),
+            SAFETY_STATEMENT,
+        ),
+    ).fetchone()
+    campaign_id = int(row["id"])
+    created = queue_campaign_jobs(conn, campaign_id, blueprint["candidates"], blueprint["targeting"]["assets"], blueprint["targeting"]["timeframes"])
+    update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    return {
+        "campaign": jsonable(dict(row)),
+        "candidates_generated": len(blueprint["candidates"]),
+        "jobs_created": created,
+        "targeting": blueprint["targeting"],
+        "tracks": blueprint["tracks"],
+        "lineage": blueprint["lineage"],
+        "diagnostics": blueprint["diagnostics"],
+        "campaign_version": SINGLE_ASSET_GENERALIZATION_CAMPAIGN_VERSION,
+        "simulation_only": True,
+        "safety": SAFETY_STATEMENT,
+    }
+
+
+def single_asset_generalization_blueprint(source_jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    pullback_rows = [
+        row
+        for row in source_jobs
+        if row.get("strategy_family") == "Pullback" and str(row.get("symbol")) == "AAPL" and str(row.get("timeframe")) == "1h"
+    ]
+    if not pullback_rows:
+        pullback_rows = [row for row in source_jobs if row.get("strategy_family") == "Pullback"]
+    trend_rows = [row for row in source_jobs if row.get("strategy_family") == "Trend Following"]
+    pullback_parent_row = next((row for row in pullback_rows if row.get("candidate_id") == "sd_a8d9508bee3c46"), None)
+    if pullback_parent_row is None:
+        pullback_parent_row = best_row_per_candidate([row for row in pullback_rows if row.get("status") == "promoted"] or pullback_rows)[0]
+    trend_parent_row = best_row_per_candidate(trend_rows)[0] if trend_rows else pullback_parent_row
+    pullback_parent = candidate_from_payload(pullback_parent_row["candidate"])
+    trend_parent = candidate_from_payload(trend_parent_row["candidate"])
+    candidates: list[DiscoveryCandidate] = []
+    seen: set[str] = set()
+    lineage: list[dict[str, Any]] = []
+    for mutation in pullback_single_asset_mutations():
+        child = phase_9_10_child(pullback_parent, mutation)
+        add_candidate(candidates, seen, child)
+        lineage.append(phase_9_10_lineage_row(child, pullback_parent, mutation, pullback_parent_row))
+    for mutation in trend_confirmation_mutations():
+        child = phase_9_10_child(trend_parent, mutation)
+        add_candidate(candidates, seen, child)
+        lineage.append(phase_9_10_lineage_row(child, trend_parent, mutation, trend_parent_row))
+    assets = ["AAPL", "MSFT", "GOOGL", "META", "QQQ", "SPY", "NVDA"]
+    timeframes = ["1h", "4h"]
+    return {
+        "targeting": {
+            "assets": assets,
+            "timeframes": timeframes,
+            "strategy_families": ["Pullback", "Trend Following"],
+            "candidate_count": len(candidates),
+            "pullback_candidate_count": sum(1 for row in lineage if row["strategy_family"] == "Pullback"),
+            "trend_candidate_count": sum(1 for row in lineage if row["strategy_family"] == "Trend Following"),
+            "job_count": len(candidates) * len(assets) * len(timeframes),
+            "primary_asset": "AAPL",
+            "primary_timeframe": "1h",
+            "similar_assets": ["MSFT", "GOOGL", "META", "QQQ", "SPY", "NVDA"],
+        },
+        "tracks": {
+            "aapl_temporal_stability": {
+                "parent": pullback_parent.candidate_id,
+                "hypothesis": "AAPL Pullback remains profitable under alternate walk-forward splits, delayed entry, and conservative execution stress.",
+                "falsification": "Classify as temporally fragile if AAPL 1h quality depends on one split, timing assumption, or narrow recent window.",
+            },
+            "alternate_sampling": {
+                "sampling_methods": ["default_1h", "anchored_60_train", "anchored_75_train", "regular_hours_proxy", "completed_candle_only", "4h_resample_proxy"],
+                "hypothesis": "The edge survives alternate sampling without changing validation thresholds.",
+            },
+            "similar_asset_generalization": {
+                "assets": ["MSFT", "GOOGL", "META", "QQQ", "SPY", "NVDA"],
+                "hypothesis": "Economically similar large-cap/ETF assets provide legitimate generalization if gates pass beyond AAPL.",
+                "falsification": "Classify as cross_asset_fragile if evidence remains AAPL-only.",
+            },
+            "volatility_normalized_pullback": {
+                "hypothesis": "Volatility-normalized pullback distance and ATR stress improve transfer without relaxing gates.",
+            },
+            "regime_containment": {
+                "hypothesis": "Sideways, low-volatility, and high-volatility containment improves robustness without starving sample size.",
+            },
+            "trend_following_confirmation": {
+                "candidate_share_limit": 0.2,
+                "hypothesis": "A small bounded Trend Following track either earns further exploration or remains secondary.",
+            },
+            "breakout_containment": {"included": False, "reason": "Phase 9.10 does not spend candidates on Breakout."},
+        },
+        "diagnostics": {
+            "informational_labels": ["single_asset_robust", "temporally_fragile", "cross_asset_fragile", "regime_fragile", "execution_fragile"],
+            "elite_gate_policy": "Informational diagnostics never override passes_cross_validation.",
+            "stability_decomposition": ["asset_stability", "timeframe_stability", "temporal_window_stability", "regime_stability", "execution_stability"],
+        },
+        "lineage": lineage,
+        "candidates": candidates,
+        "simulation_only": True,
+    }
+
+
+def pullback_single_asset_mutations() -> list[dict[str, Any]]:
+    base = {
+        "trend_fast": 20,
+        "trend_slow": 50,
+        "momentum": "rsi",
+        "rsi_min": 55,
+        "volatility": "atr",
+        "atr_multiplier": 1.5,
+        "entry": "pullback",
+        "entry_distance_to_ema20_max": 0.04,
+        "risk_reward": 1.4,
+        "volume_change_min": 0.15,
+    }
+    return [
+        phase_9_10_mutation("aapl_parent_confirmation", "AAPL Pullback Phase 9.9 survivor remains the anchor.", base, "fixed_parent_logic", "default_1h", "full_oos", "all_regimes", "Reproduce AAPL 1h PF, expectancy, trades, drawdown, and stability.", "Fails if the parent cannot reproduce local evidence."),
+        phase_9_10_mutation("aapl_anchored_60", "Earlier validation start tests temporal dependence.", {**base, "walk_forward_train_ratio": 0.6}, "fixed_logic_alternate_window", "anchored_60_train", "earlier_oos", "all_regimes", "Preserve quality under a 60 percent training split.", "Fails if the edge exists only in the default split."),
+        phase_9_10_mutation("aapl_anchored_75", "Later validation start tests sample-window sensitivity.", {**base, "walk_forward_train_ratio": 0.75}, "fixed_logic_alternate_window", "anchored_75_train", "later_oos", "all_regimes", "Preserve quality under a 75 percent training split.", "Fails if recent-window dependence explains the edge."),
+        phase_9_10_mutation("aapl_conservative_cost", "Higher costs test execution fragility.", {**base, "fee_rate": 0.0015, "slippage_rate": 0.001}, "fixed_logic_execution_stress", "default_1h", "full_oos", "all_regimes", "Keep positive expectancy under conservative cost assumptions.", "Fails if costs erase expectancy."),
+        phase_9_10_mutation("aapl_delayed_entry", "One-bar entry delay tests timing dependence.", {**base, "entry_delay_bars": 1}, "fixed_logic_execution_stress", "completed_candle_only", "full_oos", "all_regimes", "Keep gates after delayed execution.", "Fails if entry timing is overly sharp."),
+        phase_9_10_mutation("aapl_regular_hours_proxy", "Regular-hours proxy tests intraday sampling sensitivity.", {**base, "phase_9_10_regular_hours_proxy": True}, "fixed_logic_alternate_sampling", "regular_hours_proxy", "full_oos", "all_regimes", "Maintain AAPL quality under regular-hours-style sampling metadata.", "Fails if evidence relies on sampling artifacts."),
+        phase_9_10_mutation("aapl_completed_candle_only", "Completed-candle-only execution tests same-candle assumptions.", {**base, "phase_9_10_completed_candle_only": True}, "fixed_logic_execution_stress", "completed_candle_only", "full_oos", "all_regimes", "Reduce execution optimism without destroying edge.", "Fails if same-candle assumptions explain profits."),
+        phase_9_10_mutation("pullback_distance_035", "Tighter pullback distance tests local parameter robustness.", {**base, "entry_distance_to_ema20_max": 0.035}, "local_parameter_mutation", "default_1h", "full_oos", "all_regimes", "Preserve PF with less entry looseness.", "Fails if edge depends on exactly 0.04."),
+        phase_9_10_mutation("pullback_distance_045", "Wider pullback distance tests transfer and sample size.", {**base, "entry_distance_to_ema20_max": 0.045}, "local_parameter_mutation", "default_1h", "full_oos", "all_regimes", "Add legitimate trades without weak regimes dominating.", "Fails if wider depth admits low-quality trades."),
+        phase_9_10_mutation("pullback_volatility_normalized_035", "Volatility-normalized tighter pullback tests scale robustness.", {**base, "entry_distance_to_ema20_max": 0.035, "phase_9_10_volatility_normalized_pullback": True}, "normalized_logic", "default_1h", "full_oos", "all_regimes", "Improve cross-asset comparability.", "Fails if normalization reduces AAPL quality and transfer."),
+        phase_9_10_mutation("pullback_volatility_normalized_045", "Volatility-normalized wider pullback tests transfer breadth.", {**base, "entry_distance_to_ema20_max": 0.045, "phase_9_10_volatility_normalized_pullback": True}, "normalized_logic", "default_1h", "full_oos", "all_regimes", "Improve similar-asset transfer.", "Fails if normalization creates weak PF or drawdown."),
+        phase_9_10_mutation("pullback_atr_14", "Tighter ATR stop decomposes execution stability.", {**base, "atr_multiplier": 1.4}, "local_parameter_mutation", "default_1h", "full_oos", "all_regimes", "Improve drawdown without starving trades.", "Fails if stop sensitivity collapses expectancy."),
+        phase_9_10_mutation("pullback_atr_16", "Wider ATR stop tests noise tolerance.", {**base, "atr_multiplier": 1.6}, "local_parameter_mutation", "default_1h", "full_oos", "all_regimes", "Reduce stop-outs without excessive drawdown.", "Fails if drawdown expands beyond gates."),
+        phase_9_10_mutation("pullback_rr_13", "Lower reward target tests fill realism and win conversion.", {**base, "risk_reward": 1.3}, "local_parameter_mutation", "default_1h", "full_oos", "all_regimes", "Improve completion without negative expectancy.", "Fails if smaller winners weaken PF."),
+        phase_9_10_mutation("pullback_volume_010", "Lower volume confirmation tests sample-size sensitivity.", {**base, "volume_change_min": 0.10}, "local_parameter_mutation", "default_1h", "full_oos", "all_regimes", "Increase trades without degrading expectancy.", "Fails if lower participation admits poor trades."),
+        phase_9_10_mutation("pullback_sideways_filter", "Sideways containment targets the main Phase 9.9 failure mode.", {**base, "phase_9_9_regime_filter": True, "block_sideways": True, "sideways_distance_from_ema50_min": 0.012}, "regime_containment", "default_1h", "full_oos", "exclude_sideways", "Reduce sideways failures without starving trades.", "Fails if filter only removes evidence."),
+        phase_9_10_mutation("pullback_lowvol_filter", "Low-volatility containment targets a repeated failure mode.", {**base, "phase_9_9_regime_filter": True, "phase_9_9_low_volatility_block": True, "phase_9_9_low_volatility_min": 0.008}, "regime_containment", "default_1h", "full_oos", "exclude_low_volatility", "Reduce low-volatility failures.", "Fails if trade count falls below gates."),
+        phase_9_10_mutation("pullback_sideways_lowvol_filter", "Combined sideways/low-volatility containment tests regime robustness.", {**base, "phase_9_9_regime_filter": True, "block_sideways": True, "sideways_distance_from_ema50_min": 0.012, "phase_9_9_low_volatility_block": True, "phase_9_9_low_volatility_min": 0.008}, "regime_containment", "default_1h", "full_oos", "exclude_sideways_low_volatility", "Improve stability without sample starvation.", "Fails if robustness comes only from too few trades."),
+        phase_9_10_mutation("pullback_highvol_filter", "High-volatility containment tests drawdown stability.", {**base, "phase_9_10_high_volatility_block": True, "phase_9_10_high_volatility_max": 0.035}, "regime_containment", "default_1h", "full_oos", "exclude_high_volatility", "Improve drawdown while preserving PF.", "Fails if high-vol filter removes profitable regimes."),
+        phase_9_10_mutation("pullback_similar_asset_transfer", "Similar assets test whether AAPL edge generalizes economically.", {**base, "phase_9_10_transfer_scope": "similar_assets"}, "fixed_logic_transfer", "default_1h_and_4h", "full_oos", "all_regimes", "Pass beyond AAPL without threshold changes.", "Fails if evidence is AAPL-only."),
+    ]
+
+
+def trend_confirmation_mutations() -> list[dict[str, Any]]:
+    base = {"trend_fast": 20, "trend_slow": 50, "entry": "trend_continuation", "returns_5_min": 0.01, "volume_change_min": 0.05, "risk_reward": 1.7, "max_holding_bars": 24}
+    return [
+        phase_9_10_mutation("trend_parent_confirmation", "Trend Following is checked as a bounded secondary track.", base, "fixed_parent_logic", "default_1h", "full_oos", "all_regimes", "Confirm whether Trend deserves more exploration.", "Fails if sample size or stability remains weak."),
+        phase_9_10_mutation("trend_shorter_exit", "Shorter exit tests drawdown and holding-risk containment.", {**base, "max_holding_bars": 18}, "local_parameter_mutation", "default_1h", "full_oos", "all_regimes", "Improve drawdown without destroying expectancy.", "Fails if exits truncate winners."),
+        phase_9_10_mutation("trend_slope_confirmed", "EMA slope confirmation tests persistence quality.", {**base, "phase_9_9_ema_slope_min": 0.0004}, "regime_containment", "default_1h", "full_oos", "bull_trend_focus", "Improve stability without starving trades.", "Fails if fewer trades explain any improvement."),
+        phase_9_10_mutation("trend_lowvol_block", "Low-volatility exclusion tests Trend fragility.", {**base, "phase_9_9_regime_filter": True, "phase_9_9_low_volatility_block": True, "phase_9_9_low_volatility_min": 0.008}, "regime_containment", "default_1h", "full_oos", "exclude_low_volatility", "Reduce weak trend regimes.", "Fails if evidence remains insufficient."),
+        phase_9_10_mutation("trend_rr_15_volume", "Lower RR plus stricter volume tests sample quality.", {**base, "risk_reward": 1.5, "volume_change_min": 0.10}, "local_parameter_mutation", "default_1h", "full_oos", "all_regimes", "Improve realized conversion while preserving PF.", "Fails if lower reward weakens PF or expectancy."),
+    ]
+
+
+def phase_9_10_mutation(
+    mutation_type: str,
+    hypothesis: str,
+    changes: dict[str, Any],
+    normalized_or_fixed_logic: str,
+    sampling_method: str,
+    temporal_window: str,
+    regime_scope: str,
+    expected: str,
+    falsification: str,
+) -> dict[str, Any]:
+    return {
+        "mutation_type": mutation_type,
+        "hypothesis": hypothesis,
+        "changes": changes,
+        "normalized_or_fixed_logic": normalized_or_fixed_logic,
+        "asset_scope": "AAPL primary plus economically similar transfer assets",
+        "timeframe_sampling": sampling_method,
+        "temporal_window": temporal_window,
+        "regime_scope": regime_scope,
+        "expected_improvement": expected,
+        "falsification_condition": falsification,
+        "evidence_source": "Phase 9.9 stored candidate lifecycle evidence",
+        "campaign_version": SINGLE_ASSET_GENERALIZATION_CAMPAIGN_VERSION,
+    }
+
+
+def phase_9_10_child(parent: DiscoveryCandidate, mutation: dict[str, Any]) -> DiscoveryCandidate:
+    params = {
+        **parent.parameters,
+        **mutation["changes"],
+        "phase_9_10_mutation_type": mutation["mutation_type"],
+        "phase_9_10_hypothesis": mutation["hypothesis"],
+        "phase_9_10_normalized_or_fixed_logic": mutation["normalized_or_fixed_logic"],
+        "phase_9_10_asset_scope": mutation["asset_scope"],
+        "phase_9_10_timeframe_sampling": mutation["timeframe_sampling"],
+        "phase_9_10_temporal_window": mutation["temporal_window"],
+        "phase_9_10_regime_scope": mutation["regime_scope"],
+        "phase_9_10_expected_improvement": mutation["expected_improvement"],
+        "phase_9_10_falsification_condition": mutation["falsification_condition"],
+        "phase_9_10_campaign_version": SINGLE_ASSET_GENERALIZATION_CAMPAIGN_VERSION,
+    }
+    key = canonical_candidate_key(parent.blocks, params, parent.candidate_id)
+    return DiscoveryCandidate(
+        candidate_id=f"sd_{sha256(key.encode()).hexdigest()[:14]}",
+        family_id=parent.family_id,
+        parent_candidate_id=parent.candidate_id,
+        generation=parent.generation + 1,
+        blocks=parent.blocks,
+        parameters=params,
+        complexity=parent.complexity + 1,
+        canonical_key=key,
+    )
+
+
+def phase_9_10_lineage_row(child: DiscoveryCandidate, parent: DiscoveryCandidate, mutation: dict[str, Any], parent_row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": child.candidate_id,
+        "parent_candidate_id": parent.candidate_id,
+        "family_id": child.family_id,
+        "strategy_family": strategy_family_for_candidate(child),
+        "hypothesis": mutation["hypothesis"],
+        "mutation_type": mutation["mutation_type"],
+        "mutation_value": mutation["changes"],
+        "normalized_or_fixed_logic": mutation["normalized_or_fixed_logic"],
+        "asset_scope": mutation["asset_scope"],
+        "timeframe_sampling": mutation["timeframe_sampling"],
+        "temporal_window": mutation["temporal_window"],
+        "regime_scope": mutation["regime_scope"],
+        "expected_improvement": mutation["expected_improvement"],
+        "falsification_condition": mutation["falsification_condition"],
+        "evidence_source": mutation["evidence_source"],
+        "source_job": parent_row.get("id"),
+        "source_symbol": parent_row.get("symbol"),
+        "source_timeframe": parent_row.get("timeframe"),
+        "campaign_version": SINGLE_ASSET_GENERALIZATION_CAMPAIGN_VERSION,
+    }
+
+
+def single_asset_generalization_campaign_key(blueprint: dict[str, Any]) -> str:
+    material = {
+        "version": SINGLE_ASSET_GENERALIZATION_CAMPAIGN_VERSION,
+        "assets": blueprint["targeting"]["assets"],
+        "timeframes": blueprint["targeting"]["timeframes"],
+        "lineage": [(row["parent_candidate_id"], row["mutation_type"], row["mutation_value"]) for row in blueprint["lineage"]],
+    }
+    return sha256(repr(material).encode("utf-8")).hexdigest()
+
+
+def create_strategy_redesign_campaign(
+    conn: psycopg.Connection,
+    *,
+    source_campaign_id: int,
+    name: str | None = None,
+) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    jobs = list(
+        conn.execute(
+            """
+            SELECT *
+            FROM research_campaign_jobs
+            WHERE campaign_id = %s AND simulation_only = TRUE
+            ORDER BY validation_score DESC, id ASC
+            """,
+            (source_campaign_id,),
+        ).fetchall()
+    )
+    blueprint = strategy_redesign_blueprint([dict(row) for row in jobs])
+    source_campaign = get_campaign(conn, source_campaign_id)
+    campaign_key = strategy_redesign_campaign_key(blueprint)
+    campaign_name = name or "Phase 9.11 Strategy Redesign and Research-Direction Decision"
+    row = conn.execute(
+        """
+        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
+        VALUES (%s, %s, %s, 'queued', %s, %s, %s, %s, TRUE)
+        ON CONFLICT(campaign_key) DO UPDATE
+        SET updated_at = NOW()
+        RETURNING *
+        """,
+        (
+            campaign_key,
+            campaign_name,
+            source_campaign["universe_key"],
+            len(blueprint["candidates"]),
+            Jsonb(
+                {
+                    "campaign_version": STRATEGY_REDESIGN_CAMPAIGN_VERSION,
+                    "source_campaign": source_campaign_id,
+                    "objective": "Decide whether Pullback can be structurally redesigned for robustness or whether research should shift to new deterministic families.",
+                    "candidate_quality_policy": "Structural changes only; no broad local parameter tuning; validation thresholds and evidence gates are unchanged.",
+                    "paper_deployment_policy": "Create candidate-linked simulation-only deployment only after existing elite gates pass.",
+                    "tracks": blueprint["tracks"],
+                    "lineage": blueprint["lineage"],
+                    "targeting": blueprint["targeting"],
+                    "complexity_policy": blueprint["complexity_policy"],
+                }
+            ),
+            Jsonb({**DEFAULT_SCHEDULING_CONFIG, "batch_size": 15, "daily_experiment_budget": 210, "max_generated_candidates": len(blueprint["candidates"])}),
+            SAFETY_STATEMENT,
+        ),
+    ).fetchone()
+    campaign_id = int(row["id"])
+    created = queue_campaign_jobs(conn, campaign_id, blueprint["candidates"], blueprint["targeting"]["assets"], blueprint["targeting"]["timeframes"])
+    update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    return {
+        "campaign": jsonable(dict(row)),
+        "candidates_generated": len(blueprint["candidates"]),
+        "jobs_created": created,
+        "targeting": blueprint["targeting"],
+        "tracks": blueprint["tracks"],
+        "lineage": blueprint["lineage"],
+        "complexity_policy": blueprint["complexity_policy"],
+        "campaign_version": STRATEGY_REDESIGN_CAMPAIGN_VERSION,
+        "simulation_only": True,
+        "safety": SAFETY_STATEMENT,
+    }
+
+
+def strategy_redesign_blueprint(source_jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    pullback_rows = [row for row in source_jobs if row.get("strategy_family") == "Pullback"]
+    trend_rows = [row for row in source_jobs if row.get("strategy_family") == "Trend Following"]
+    pullback_parent_row = next((row for row in pullback_rows if row.get("candidate_id") == "sd_3ffffc89f82b5c"), None)
+    if pullback_parent_row is None:
+        pullback_parent_row = best_row_per_candidate([row for row in pullback_rows if row.get("status") == "promoted"] or pullback_rows)[0]
+    trend_parent_row = best_row_per_candidate(trend_rows)[0] if trend_rows else pullback_parent_row
+    pullback_parent = candidate_from_payload(pullback_parent_row["candidate"])
+    trend_parent = candidate_from_payload(trend_parent_row["candidate"])
+    candidates: list[DiscoveryCandidate] = []
+    seen: set[str] = set()
+    lineage: list[dict[str, Any]] = []
+    for mutation in pullback_redesign_mutations():
+        child = phase_9_11_child(pullback_parent, mutation)
+        add_candidate(candidates, seen, child)
+        lineage.append(phase_9_11_lineage_row(child, pullback_parent, mutation, pullback_parent_row))
+    for mutation in new_family_pilot_mutations():
+        child = phase_9_11_child(pullback_parent, mutation)
+        add_candidate(candidates, seen, child)
+        lineage.append(phase_9_11_lineage_row(child, pullback_parent, mutation, pullback_parent_row))
+    for mutation in trend_pause_confirmation_mutations():
+        child = phase_9_11_child(trend_parent, mutation)
+        add_candidate(candidates, seen, child)
+        lineage.append(phase_9_11_lineage_row(child, trend_parent, mutation, trend_parent_row))
+    assets = ["AAPL", "MSFT", "GOOGL", "META", "NVDA", "QQQ", "SPY"]
+    return {
+        "targeting": {
+            "assets": assets,
+            "timeframes": ["1h"],
+            "candidate_count": len(candidates),
+            "job_count": len(candidates) * len(assets),
+            "primary_asset": "AAPL",
+            "context_assets": ["SPY", "QQQ"],
+            "context_timeframes": ["4h"],
+            "strategy_mix": dict(Counter(row["strategy_family"] for row in lineage)),
+        },
+        "tracks": {
+            "pullback_architecture_redesign": {"candidate_count": 20, "hypothesis": "Meaningful structural filters can improve robustness where local parameter tuning failed."},
+            "higher_timeframe_context": {"execution_timeframe": "1h", "context_timeframe": "4h", "hypothesis": "4h context improves 1h entries without causing 4h execution sample starvation."},
+            "market_relative_logic": {"context_assets": ["SPY", "QQQ"], "hypothesis": "AAPL pullback quality depends on constructive broad-market or relative-strength context."},
+            "sideways_transition_redesign": {"hypothesis": "Transition recognition can outperform simple sideways exclusion."},
+            "new_family_pilot": {"candidate_count": 8, "families": ["Volatility Expansion", "Relative Strength Continuation", "Sideways Transition", "Regime Adaptive Mean Reversion"]},
+            "trend_following_pause_decision": {"candidate_count": 2, "policy": "Pause if no market-level passes are produced."},
+        },
+        "complexity_policy": {
+            "max_added_rules": 2,
+            "max_added_parameters": 5,
+            "reject_if_improvement_depends_on_excessive_complexity": True,
+        },
+        "lineage": lineage,
+        "candidates": candidates,
+        "simulation_only": True,
+    }
+
+
+def pullback_redesign_mutations() -> list[dict[str, Any]]:
+    base = phase_9_11_pullback_base()
+    return [
+        phase_9_11_mutation("Pullback", "ema_slope_pullback", "Trend-aligned pullback with explicit EMA slope.", {**base, "phase_9_9_ema_slope_min": 0.0003}, "explicit EMA slope", "Improve trend alignment and reduce sideways entries.", "Fails if trade count or cross-asset passes do not improve.", 1, 1),
+        phase_9_11_mutation("Pullback", "adx_proxy_pullback", "Pullback plus trend-strength confirmation.", {**base, "momentum": "adx_proxy", "returns_5_min": 0.008}, "returns-based ADX proxy", "Improve robustness through trend-strength confirmation.", "Fails if momentum proxy starves evidence.", 1, 2),
+        phase_9_11_mutation("Pullback", "volatility_contraction_pullback", "Pullback after volatility contraction.", {**base, "phase_9_11_volatility_contraction": True, "phase_9_11_volatility_max": 0.018}, "volatility contraction filter", "Avoid noisy pullbacks while preserving setups.", "Fails if contraction filter only reduces trades.", 1, 2),
+        phase_9_11_mutation("Pullback", "relative_volume_pullback", "Pullback with stronger relative-volume confirmation.", {**base, "volume_change_min": 0.2}, "relative volume confirmation", "Improve participation quality.", "Fails if higher volume does not improve robustness.", 1, 1),
+        phase_9_11_mutation("Pullback", "context_4h_ema_pullback", "1h entry with positive 4h EMA context.", {**base, "phase_9_11_require_4h_ema_positive": True}, "4h EMA context", "Improve transfer and stability without 4h execution.", "Fails if 4h context reduces trades below gate.", 1, 1, "higher_timeframe_context"),
+        phase_9_11_mutation("Pullback", "context_4h_momentum_pullback", "1h entry with constructive 4h momentum.", {**base, "phase_9_11_require_4h_positive_returns": True}, "4h momentum context", "Improve timing and OOS consistency.", "Fails if 4h momentum does not improve PF/expectancy.", 1, 1, "higher_timeframe_context"),
+        phase_9_11_mutation("Pullback", "context_4h_bull_pullback", "1h entry only when 4h regime is bull trend.", {**base, "phase_9_11_regime_filter": True, "phase_9_11_require_4h_bull": True}, "4h bull-regime context", "Reduce weak 1h regimes.", "Fails if bull filter starves trades.", 1, 2, "higher_timeframe_context"),
+        phase_9_11_mutation("Pullback", "context_4h_sideways_block", "1h entry blocks 4h sideways context.", {**base, "phase_9_11_regime_filter": True, "phase_9_11_block_4h_sideways": True}, "4h sideways block", "Improve sideways robustness.", "Fails if sideways block lacks material improvement.", 1, 2, "higher_timeframe_context"),
+        phase_9_11_mutation("Pullback", "spy_trend_confirmed_pullback", "Pullback requires SPY trend confirmation.", {**base, "phase_9_11_require_spy_trend": True, "phase_9_11_market_returns_min": 0}, "SPY trend confirmation", "Test broad-market dependency.", "Fails if market confirmation does not improve stability.", 1, 2, "market_relative_logic"),
+        phase_9_11_mutation("Pullback", "qqq_trend_confirmed_pullback", "Pullback requires QQQ trend confirmation.", {**base, "phase_9_11_require_qqq_trend": True, "phase_9_11_market_returns_min": 0}, "QQQ trend confirmation", "Test tech-index dependency.", "Fails if QQQ confirmation does not improve transfer.", 1, 2, "market_relative_logic"),
+        phase_9_11_mutation("Pullback", "relative_spy_pullback", "AAPL relative strength versus SPY confirms pullback.", {**base, "phase_9_11_require_relative_spy": True, "phase_9_11_relative_returns_min": 0}, "relative strength vs SPY", "Improve AAPL-specific selection quality.", "Fails if relative strength is not additive.", 1, 2, "market_relative_logic"),
+        phase_9_11_mutation("Pullback", "relative_qqq_pullback", "AAPL relative strength versus QQQ confirms pullback.", {**base, "phase_9_11_require_relative_qqq": True, "phase_9_11_relative_returns_min": 0}, "relative strength vs QQQ", "Improve large-cap tech context.", "Fails if relative strength reduces robustness.", 1, 2, "market_relative_logic"),
+        phase_9_11_mutation("Pullback", "dynamic_atr_distance", "Pullback uses dynamic ATR-normalized distance.", {**base, "entry_distance_to_ema20_max": 0.045, "phase_9_10_volatility_normalized_pullback": True}, "ATR-normalized pullback distance", "Improve cross-asset comparability.", "Fails if transfer remains AAPL-only.", 1, 2),
+        phase_9_11_mutation("Pullback", "regime_adaptive_exit", "Pullback uses lower RR in weak regimes proxy.", {**base, "risk_reward": 1.25, "phase_9_11_regime_filter": True, "phase_9_11_block_4h_sideways": True}, "adaptive conservative exit", "Improve realized conversion and drawdown.", "Fails if lower target weakens PF.", 2, 3),
+        phase_9_11_mutation("Pullback", "multi_bar_momentum_pullback", "Pullback after multi-bar momentum confirmation.", {**base, "returns_5_min": 0.006, "trend_requires_positive_returns": True}, "multi-bar momentum confirmation", "Reduce low-quality pullbacks.", "Fails if momentum filter does not improve stability.", 1, 2),
+        phase_9_11_mutation("Pullback", "sideways_transition_pullback", "Pullback enters after sideways breakout transition.", {**base, "phase_9_11_entry_mode": "sideways_transition", "phase_9_11_transition_distance_min": 0.012, "returns_5_min": 0.008}, "sideways transition entry", "Recognize transitions instead of blocking sideways.", "Fails if transition evidence is too sparse.", 2, 3, "sideways_transition"),
+        phase_9_11_mutation("Pullback", "trend_strength_after_consolidation", "Pullback requires increasing EMA separation.", {**base, "phase_9_11_ema_separation_increasing": True}, "increasing EMA separation", "Capture trend strengthening after consolidation.", "Fails if separation condition is not additive.", 1, 1, "sideways_transition"),
+        phase_9_11_mutation("Pullback", "vol_expansion_after_contraction", "Pullback requires volatility expansion after contraction proxy.", {**base, "phase_9_11_volatility_expansion": True, "phase_9_11_volatility_min": 0.008, "returns_5_min": 0.008}, "volatility expansion transition", "Improve post-consolidation entries.", "Fails if volatility expansion increases drawdown.", 1, 2, "sideways_transition"),
+        phase_9_11_mutation("Pullback", "spy_and_4h_context", "Pullback combines one market and one 4h context rule.", {**base, "phase_9_11_require_spy_trend": True, "phase_9_11_require_4h_ema_positive": True}, "SPY plus 4h context", "Test minimal combined context.", "Fails if two added rules do not improve robustness.", 2, 2),
+        phase_9_11_mutation("Pullback", "qqq_relative_and_4h_context", "Pullback combines QQQ relative strength and 4h momentum.", {**base, "phase_9_11_require_relative_qqq": True, "phase_9_11_require_4h_positive_returns": True}, "QQQ relative plus 4h momentum", "Test tech-relative context.", "Fails if added complexity is not justified.", 2, 2),
+    ]
+
+
+def new_family_pilot_mutations() -> list[dict[str, Any]]:
+    base = phase_9_11_pullback_base()
+    return [
+        phase_9_11_mutation("Volatility Expansion", "volatility_expansion_continuation", "Continuation after volatility expansion.", {**base, "entry": "trend_continuation", "momentum": "roc", "phase_9_11_entry_mode": "volatility_expansion_continuation", "returns_5_min": 0.008, "phase_9_11_volatility_min": 0.008, "phase_9_11_strategy_family": "Volatility Expansion"}, "volatility expansion continuation", "Pilot a distinct expansion family with enough signal frequency.", "Fails if expansion produces weak PF or high drawdown.", 2, 4, "new_family_pilot"),
+        phase_9_11_mutation("Volatility Expansion", "vol_expansion_market_confirmed", "Volatility expansion with SPY confirmation.", {**base, "entry": "trend_continuation", "momentum": "roc", "phase_9_11_entry_mode": "volatility_expansion_continuation", "returns_5_min": 0.006, "phase_9_11_volatility_min": 0.008, "phase_9_11_require_spy_trend": True, "phase_9_11_strategy_family": "Volatility Expansion"}, "expansion plus market confirmation", "Reduce false expansion signals.", "Fails if market filter does not improve quality.", 2, 5, "new_family_pilot"),
+        phase_9_11_mutation("Relative Strength Continuation", "relative_spy_continuation", "Relative-strength continuation versus SPY.", {**base, "entry": "trend_continuation", "momentum": "roc", "phase_9_11_entry_mode": "relative_strength_continuation", "phase_9_11_require_relative_spy": True, "returns_5_min": 0.006, "phase_9_11_strategy_family": "Relative Strength Continuation"}, "relative strength continuation", "Pilot broad-market relative momentum.", "Fails if relative momentum remains AAPL-only.", 2, 4, "new_family_pilot"),
+        phase_9_11_mutation("Relative Strength Continuation", "relative_qqq_continuation", "Relative-strength continuation versus QQQ.", {**base, "entry": "trend_continuation", "momentum": "roc", "phase_9_11_entry_mode": "relative_strength_continuation", "phase_9_11_require_relative_qqq": True, "returns_5_min": 0.006, "phase_9_11_strategy_family": "Relative Strength Continuation"}, "relative strength vs QQQ", "Pilot tech-relative continuation.", "Fails if no market-level passes emerge.", 2, 4, "new_family_pilot"),
+        phase_9_11_mutation("Sideways Transition", "sideways_transition_continuation", "Continuation after sideways transition.", {**base, "entry": "trend_continuation", "momentum": "roc", "phase_9_11_entry_mode": "sideways_transition", "phase_9_11_transition_distance_min": 0.012, "returns_5_min": 0.008, "phase_9_11_strategy_family": "Sideways Transition"}, "sideways transition continuation", "Pilot transition recognition as distinct family.", "Fails if transitions are sparse or unstable.", 2, 4, "new_family_pilot"),
+        phase_9_11_mutation("Multi-Timeframe Momentum", "mtf_momentum", "1h momentum with 4h constructive context.", {**base, "entry": "trend_continuation", "momentum": "roc", "returns_5_min": 0.008, "phase_9_11_require_4h_positive_returns": True, "phase_9_11_strategy_family": "Multi-Timeframe Momentum"}, "multi-timeframe momentum", "Pilot MTF momentum without 4h execution.", "Fails if 4h context starves trades.", 2, 3, "new_family_pilot"),
+        phase_9_11_mutation("Trend-Breakout Hybrid", "ema_separation_continuation", "Trend continuation with increasing EMA separation.", {**base, "entry": "trend_continuation", "momentum": "roc", "returns_5_min": 0.008, "phase_9_11_ema_separation_increasing": True, "phase_9_11_strategy_family": "Trend-Breakout Hybrid"}, "EMA separation continuation", "Pilot deterministic trend-breakout hybrid without broad breakout sweep.", "Fails if it behaves like unstable Trend Following.", 2, 3, "new_family_pilot"),
+        phase_9_11_mutation("Regime Adaptive Mean Reversion", "regime_adaptive_mean_reversion", "Mean reversion only with market trend support.", {**base, "entry": "mean_reversion", "momentum": "stochastic_proxy", "rsi_min": 35, "rsi_max": 55, "rsi_oversold": 42, "phase_9_11_require_spy_trend": True, "phase_9_11_strategy_family": "Regime Adaptive Mean Reversion"}, "regime-adaptive mean reversion", "Pilot distinct deterministic mean reversion in supportive market context.", "Fails if expectancy or drawdown fails gates.", 2, 5, "new_family_pilot"),
+    ]
+
+
+def trend_pause_confirmation_mutations() -> list[dict[str, Any]]:
+    base = {"trend_fast": 20, "trend_slow": 50, "entry": "trend_continuation", "momentum": "roc", "returns_5_min": 0.008, "volume_change_min": 0.05, "risk_reward": 1.5, "atr_multiplier": 1.5}
+    return [
+        phase_9_11_mutation("Trend Following", "trend_context_confirmed", "Final Trend confirmation with SPY and 4h support.", {**base, "phase_9_11_require_spy_trend": True, "phase_9_11_require_4h_positive_returns": True}, "SPY plus 4h trend context", "Give Trend Following one final bounded confirmation.", "Pause if no market-level passes.", 2, 4, "trend_pause_confirmation"),
+        phase_9_11_mutation("Trend Following", "trend_lowvol_block_confirmed", "Final Trend confirmation excluding low-volatility weakness.", {**base, "phase_9_9_regime_filter": True, "phase_9_9_low_volatility_block": True, "phase_9_9_low_volatility_min": 0.008}, "low-volatility block", "Check whether the repeated weakness is removable.", "Pause if still no promotions.", 1, 3, "trend_pause_confirmation"),
+    ]
+
+
+def phase_9_11_pullback_base() -> dict[str, Any]:
+    return {
+        "trend_fast": 20,
+        "trend_slow": 50,
+        "trend_method": "ema",
+        "momentum": "rsi",
+        "rsi_min": 55,
+        "volatility": "atr",
+        "atr_multiplier": 1.5,
+        "entry": "pullback",
+        "entry_distance_to_ema20_max": 0.04,
+        "risk_reward": 1.4,
+        "volume_change_min": 0.15,
+        "fee_rate": 0.001,
+        "slippage_rate": 0.0005,
+    }
+
+
+def phase_9_11_mutation(strategy_family: str, mutation_type: str, hypothesis: str, changes: dict[str, Any], new_rule: str, expected: str, falsification: str, added_rules: int, added_parameters: int, track: str = "pullback_redesign") -> dict[str, Any]:
+    return {
+        "strategy_family": strategy_family,
+        "mutation_type": mutation_type,
+        "hypothesis": hypothesis,
+        "changes": changes,
+        "new_rule": new_rule,
+        "expected_improvement": expected,
+        "falsification_condition": falsification,
+        "added_complexity": {"added_rules": added_rules, "added_parameters": added_parameters},
+        "track": track,
+        "evidence_source": "Phase 9.10 completed campaign evidence",
+        "campaign_version": STRATEGY_REDESIGN_CAMPAIGN_VERSION,
+    }
+
+
+def phase_9_11_child(parent: DiscoveryCandidate, mutation: dict[str, Any]) -> DiscoveryCandidate:
+    blocks = dict(parent.blocks)
+    params = {
+        **parent.parameters,
+        **mutation["changes"],
+        "phase_9_11_mutation_type": mutation["mutation_type"],
+        "phase_9_11_strategy_family": mutation["strategy_family"],
+        "phase_9_11_hypothesis": mutation["hypothesis"],
+        "phase_9_11_new_rule": mutation["new_rule"],
+        "phase_9_11_expected_improvement": mutation["expected_improvement"],
+        "phase_9_11_falsification_condition": mutation["falsification_condition"],
+        "phase_9_11_added_complexity": mutation["added_complexity"],
+        "phase_9_11_track": mutation["track"],
+        "phase_9_11_campaign_version": STRATEGY_REDESIGN_CAMPAIGN_VERSION,
+    }
+    if "entry" in params:
+        blocks["entry"] = str(params["entry"])
+    if "momentum" in params:
+        blocks["momentum"] = str(params["momentum"])
+    key = canonical_candidate_key(blocks, params, parent.candidate_id)
+    return DiscoveryCandidate(
+        candidate_id=f"sd_{sha256(key.encode()).hexdigest()[:14]}",
+        family_id=parent.family_id,
+        parent_candidate_id=parent.candidate_id,
+        generation=parent.generation + 1,
+        blocks=blocks,
+        parameters=params,
+        complexity=parent.complexity + mutation["added_complexity"]["added_rules"],
+        canonical_key=key,
+    )
+
+
+def phase_9_11_lineage_row(child: DiscoveryCandidate, parent: DiscoveryCandidate, mutation: dict[str, Any], parent_row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "candidate_id": child.candidate_id,
+        "parent_candidate_id": parent.candidate_id,
+        "strategy_family": mutation["strategy_family"],
+        "structural_change": mutation["mutation_type"],
+        "economic_hypothesis": mutation["hypothesis"],
+        "new_rule": mutation["new_rule"],
+        "expected_improvement": mutation["expected_improvement"],
+        "falsification_condition": mutation["falsification_condition"],
+        "added_complexity": mutation["added_complexity"],
+        "entry_rule_count": 5 + mutation["added_complexity"]["added_rules"],
+        "filter_count": mutation["added_complexity"]["added_rules"],
+        "exit_rule_count": 1,
+        "parameter_count": len(child.parameters),
+        "track": mutation["track"],
+        "evidence_source": mutation["evidence_source"],
+        "source_job": parent_row.get("id"),
+        "source_symbol": parent_row.get("symbol"),
+        "source_timeframe": parent_row.get("timeframe"),
+        "campaign_version": STRATEGY_REDESIGN_CAMPAIGN_VERSION,
+    }
+
+
+def strategy_redesign_campaign_key(blueprint: dict[str, Any]) -> str:
+    material = {
+        "version": STRATEGY_REDESIGN_CAMPAIGN_VERSION,
+        "assets": blueprint["targeting"]["assets"],
+        "timeframes": blueprint["targeting"]["timeframes"],
+        "lineage": [(row["parent_candidate_id"], row["structural_change"], row["new_rule"]) for row in blueprint["lineage"]],
+    }
+    return sha256(repr(material).encode("utf-8")).hexdigest()
+
+
+def create_volatility_adaptive_relative_strength_campaign(
+    conn: psycopg.Connection,
+    *,
+    source_campaign_id: int,
+    name: str | None = None,
+) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    jobs = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT * FROM research_campaign_jobs
+            WHERE campaign_id = %s AND simulation_only = TRUE
+            ORDER BY validation_score DESC, id ASC
+            """,
+            (source_campaign_id,),
+        ).fetchall()
+    ]
+    blueprint = volatility_adaptive_relative_strength_blueprint(jobs)
+    source_campaign = get_campaign(conn, source_campaign_id)
+    campaign_key = volatility_adaptive_relative_strength_campaign_key(blueprint)
+    row = conn.execute(
+        """
+        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
+        VALUES (%s, %s, %s, 'queued', %s, %s, %s, %s, TRUE)
+        ON CONFLICT(campaign_key) DO UPDATE SET updated_at = NOW()
+        RETURNING *
+        """,
+        (
+            campaign_key,
+            name or "Phase 9.12 Volatility-Adaptive Relative-Strength Validation",
+            source_campaign["universe_key"],
+            len(blueprint["candidates"]),
+            Jsonb(
+                {
+                    "campaign_version": VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION,
+                    "source_campaign": source_campaign_id,
+                    "objective": "Validate one asset-agnostic relative-strength architecture across AAPL and NVDA with volatility-selected parameter profiles.",
+                    "candidate_quality_policy": "Focused falsification around measured volatility regimes; validation thresholds and evidence gates are unchanged.",
+                    "paper_deployment_policy": "Candidate-linked simulation is allowed only after every existing elite gate passes; Phase 10 remains locked.",
+                    "targeting": blueprint["targeting"],
+                    "lineage": blueprint["lineage"],
+                }
+            ),
+            Jsonb({**DEFAULT_SCHEDULING_CONFIG, "batch_size": 24, "daily_experiment_budget": 24, "max_generated_candidates": len(blueprint["candidates"])}),
+            SAFETY_STATEMENT,
+        ),
+    ).fetchone()
+    campaign_id = int(row["id"])
+    created = queue_campaign_jobs(conn, campaign_id, blueprint["candidates"], blueprint["targeting"]["assets"], blueprint["targeting"]["timeframes"])
+    update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    return {
+        "campaign": jsonable(dict(row)),
+        "candidates_generated": len(blueprint["candidates"]),
+        "jobs_created": created,
+        "targeting": blueprint["targeting"],
+        "lineage": blueprint["lineage"],
+        "campaign_version": VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION,
+        "simulation_only": True,
+        "safety": SAFETY_STATEMENT,
+    }
+
+
+def volatility_adaptive_relative_strength_blueprint(source_jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    parents = [row for row in source_jobs if row.get("strategy_family") == "Relative Strength Continuation"]
+    if not parents:
+        raise ValueError("Phase 9.12 requires a Phase 9.11 Relative Strength Continuation parent.")
+    parent_row = best_row_per_candidate(parents)[0]
+    parent = candidate_from_payload(parent_row["candidate"])
+    profiles = [
+        ("balanced_007", .007, .002, -.0075, 1.6, 5, .001, .004, 1.7, 8),
+        ("balanced_006", .006, .003, -.005, 1.6, 3, .001, .004, 1.7, 5),
+        ("momentum_007", .007, .003, -.005, 1.6, 5, 0, .004, 1.8, 8),
+        ("wider_high_reward", .007, .003, -.005, 1.6, 3, 0, .004, 1.9, 8),
+        ("low_boundary", .0065, .003, -.005, 1.6, 3, 0, .003, 1.8, 8),
+        ("high_boundary", .0075, .002, -.0075, 1.6, 5, .001, .004, 1.7, 8),
+        ("relative_003", .007, .002, -.005, 1.6, 5, 0, .003, 1.7, 8),
+        ("relative_005", .007, .002, -.005, 1.6, 5, 0, .005, 1.7, 8),
+        ("high_rr_18", .007, .002, -.0075, 1.6, 5, .001, .004, 1.8, 8),
+        ("low_rr_15", .007, .002, -.0075, 1.5, 5, .001, .004, 1.7, 8),
+        ("short_swing", .007, .002, -.0075, 1.6, 3, .001, .004, 1.7, 8),
+        ("high_swing_5", .007, .002, -.0075, 1.6, 5, .001, .004, 1.7, 5),
+    ]
+    candidates = []
+    lineage = []
+    for name, boundary, low_ret, low_rel, low_rr, low_swing, high_ret, high_rel, high_rr, high_swing in profiles:
+        params = {
+            **parent.parameters,
+            "strategy_architecture": "relative_strength_continuation_v2",
+            "recent_candle_window_bars": 220,
+            "adaptive_volatility_profiles": True,
+            "volatility_profile_boundary": boundary,
+            "rsi_min": 45,
+            "rsi_max": 70,
+            "low_vol_returns_5_min": low_ret,
+            "low_vol_relative_returns_5_min": low_rel,
+            "low_vol_volume_change_min": .1,
+            "low_vol_risk_reward": low_rr,
+            "low_vol_swing_lookback": low_swing,
+            "high_vol_returns_5_min": high_ret,
+            "high_vol_relative_returns_5_min": high_rel,
+            "high_vol_volume_change_min": .1,
+            "high_vol_risk_reward": high_rr,
+            "high_vol_swing_lookback": high_swing,
+            "phase_9_12_profile": name,
+            "phase_9_12_strategy_family": "Volatility-Adaptive Relative Strength",
+            "phase_9_12_campaign_version": VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION,
+        }
+        key = canonical_candidate_key(parent.blocks, params, parent.candidate_id)
+        child = DiscoveryCandidate(
+            candidate_id=f"sd_{sha256(key.encode()).hexdigest()[:14]}",
+            family_id=parent.family_id,
+            parent_candidate_id=parent.candidate_id,
+            generation=parent.generation + 1,
+            blocks=dict(parent.blocks),
+            parameters=params,
+            complexity=parent.complexity + 2,
+            canonical_key=key,
+        )
+        candidates.append(child)
+        lineage.append(
+            {
+                "candidate_id": child.candidate_id,
+                "parent_candidate_id": parent.candidate_id,
+                "strategy_family": "Volatility-Adaptive Relative Strength",
+                "profile": name,
+                "hypothesis": "A volatility-observed profile boundary transfers one relative-strength rule set across AAPL and NVDA.",
+                "falsification_condition": "Reject unless both assets pass every unchanged single-market gate and the aggregate passes every elite gate.",
+                "source_job": parent_row.get("id"),
+                "campaign_version": VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION,
+            }
+        )
+    return {
+        "candidates": candidates,
+        "lineage": lineage,
+        "targeting": {"assets": ["AAPL", "NVDA"], "timeframes": ["1h"], "candidate_count": len(candidates), "job_count": len(candidates) * 2},
+    }
+
+
+def volatility_adaptive_relative_strength_campaign_key(blueprint: dict[str, Any]) -> str:
+    material = {
+        "version": VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION,
+        "assets": blueprint["targeting"]["assets"],
+        "timeframes": blueprint["targeting"]["timeframes"],
+        "candidates": [candidate.candidate_id for candidate in blueprint["candidates"]],
+    }
+    return sha256(repr(material).encode("utf-8")).hexdigest()
+
+
 def get_universe(conn: psycopg.Connection, universe_key: str) -> dict[str, Any]:
     row = conn.execute(
         """
@@ -624,6 +2177,11 @@ def campaign_batch_key(campaign_id: int, batch_number: int) -> str:
 
 def strategy_family_for_candidate(candidate: DiscoveryCandidate | dict[str, Any]) -> str:
     blocks = candidate.blocks if isinstance(candidate, DiscoveryCandidate) else dict(candidate.get("blocks") or {})
+    params = candidate.parameters if isinstance(candidate, DiscoveryCandidate) else dict(candidate.get("parameters") or {})
+    if params.get("phase_9_12_strategy_family"):
+        return str(params["phase_9_12_strategy_family"])
+    if params.get("phase_9_11_strategy_family"):
+        return str(params["phase_9_11_strategy_family"])
     entry = str(blocks.get("entry", ""))
     trend = str(blocks.get("trend", ""))
     momentum = str(blocks.get("momentum", ""))
@@ -667,14 +2225,18 @@ def run_research_campaign_batch(conn: psycopg.Connection, *, campaign_id: int, b
     completed: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     for job in jobs:
+        started = time.perf_counter()
         try:
             readiness = data_readiness_for_job(conn, dict(job))
             if not readiness["ready"]:
                 mark_claimed_job_deferred(conn, dict(job), readiness)
+                best_effort_worker_heartbeat(conn, worker_id, status="running")
                 failed.append({"job_id": job["id"], "candidate_id": job["candidate_id"], "symbol": job["symbol"], "timeframe": job["timeframe"], "deferred": readiness["status"], "reason": readiness["reason"]})
                 continue
             refresh_job_heartbeat(conn, int(job["id"]), worker_id, int(config["worker_lease_seconds"]))
+            best_effort_worker_heartbeat(conn, worker_id, status="running")
             result = run_campaign_job(conn, dict(job))
+            runtime_ms = int((time.perf_counter() - started) * 1000)
             status = "promoted" if passes_single_market_validation(result) else "rejected"
             conn.execute(
                 """
@@ -698,9 +2260,13 @@ def run_research_campaign_batch(conn: psycopg.Connection, *, campaign_id: int, b
                     job["id"],
                 ),
             )
+            record_job_runtime(conn, int(job["id"]), runtime_ms)
+            best_effort_worker_heartbeat(conn, worker_id, status="running")
             completed.append({"job_id": job["id"], "candidate_id": job["candidate_id"], "symbol": job["symbol"], "timeframe": job["timeframe"], "status": status})
         except Exception as error:  # noqa: BLE001 - one failed asset/timeframe must not stop the campaign
+            safe_rollback(conn)
             fail_or_retry_claimed_job(conn, dict(job), error, config)
+            best_effort_worker_heartbeat(conn, worker_id, status="running")
             failed.append({"job_id": job["id"], "candidate_id": job["candidate_id"], "symbol": job["symbol"], "timeframe": job["timeframe"], "error": str(error)})
     analytics = refresh_campaign_analytics(conn, campaign_id)
     remaining = open_job_count(conn, campaign_id)
@@ -759,41 +2325,83 @@ def claim_campaign_jobs(
             heartbeat_at = NOW(),
             started_at = COALESCE(started_at, NOW()),
             attempts = attempts + 1,
+            execution_resumed = CASE WHEN recovery_classification = 'recovered_stale_lease' THEN TRUE ELSE execution_resumed END,
+            recovery_worker_id = CASE WHEN recovery_classification = 'recovered_stale_lease' THEN %s ELSE recovery_worker_id END,
             latest_error = NULL,
             updated_at = NOW()
         FROM claimable
         WHERE j.id = claimable.id
         RETURNING j.*
         """,
-        (campaign_id, retry_limit, batch_size, worker_id, lease_seconds),
+        (campaign_id, retry_limit, batch_size, worker_id, lease_seconds, worker_id),
     ).fetchall()
     return [dict(row) for row in rows]
 
 
-def recover_expired_campaign_jobs(conn: psycopg.Connection, *, campaign_id: int, retry_limit: int) -> dict[str, Any]:
+def record_job_runtime(conn: psycopg.Connection, job_id: int, runtime_ms: int) -> None:
+    try:
+        conn.execute("UPDATE research_campaign_jobs SET execution_runtime_ms = %s WHERE id = %s", (runtime_ms, job_id))
+    except Exception:
+        safe_rollback(conn)
+
+
+def recover_expired_campaign_jobs(conn: psycopg.Connection, *, campaign_id: int, retry_limit: int, recovery_worker_id: str | None = None) -> dict[str, Any]:
     retrying = conn.execute(
         """
         UPDATE research_campaign_jobs
         SET status = 'retrying',
+            original_worker_id = COALESCE(original_worker_id, worker_id),
+            original_lease_expires_at = COALESCE(original_lease_expires_at, lease_expires_at),
+            recovery_worker_id = %s::text,
+            recovered_at = NOW(),
+            recovery_classification = 'recovered_stale_lease',
+            execution_resumed = FALSE,
+            failure_history = COALESCE(failure_history, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
+                'classification', COALESCE(failure_classification, 'worker_timeout'),
+                'recovery_classification', 'recovered_stale_lease',
+                'original_worker_id', worker_id,
+                'lease_expires_at', lease_expires_at,
+                'recovery_worker_id', %s::text,
+                'recovered_at', NOW(),
+                'execution_resumed', FALSE,
+                'latest_error', latest_error
+            )),
             worker_id = NULL,
             lease_expires_at = NULL,
-            failure_classification = 'worker_timeout',
             latest_error = 'Worker lease expired before completion.',
             deferred_until = NOW(),
             updated_at = NOW()
         WHERE campaign_id = %s
           AND status = 'running'
-          AND lease_expires_at IS NOT NULL
-          AND lease_expires_at <= NOW()
+          AND (
+              (lease_expires_at IS NOT NULL AND lease_expires_at <= NOW())
+              OR (heartbeat_at IS NOT NULL AND heartbeat_at <= NOW() - INTERVAL '5 minutes')
+          )
           AND attempts < %s
         RETURNING id
         """,
-        (campaign_id, retry_limit),
+        (recovery_worker_id, recovery_worker_id, campaign_id, retry_limit),
     ).fetchall()
     failed = conn.execute(
         """
         UPDATE research_campaign_jobs
         SET status = 'failed',
+            original_worker_id = COALESCE(original_worker_id, worker_id),
+            original_lease_expires_at = COALESCE(original_lease_expires_at, lease_expires_at),
+            recovery_worker_id = %s::text,
+            recovered_at = NOW(),
+            recovery_classification = 'actual_worker_execution_timeout',
+            execution_resumed = FALSE,
+            failure_history = COALESCE(failure_history, '[]'::jsonb) || jsonb_build_array(jsonb_build_object(
+                'classification', 'worker_timeout',
+                'recovery_classification', 'actual_worker_execution_timeout',
+                'original_worker_id', worker_id,
+                'lease_expires_at', lease_expires_at,
+                'recovery_worker_id', %s::text,
+                'recovered_at', NOW(),
+                'execution_resumed', FALSE,
+                'latest_error', latest_error
+            )),
             worker_id = NULL,
             lease_expires_at = NULL,
             failure_classification = 'worker_timeout',
@@ -802,14 +2410,16 @@ def recover_expired_campaign_jobs(conn: psycopg.Connection, *, campaign_id: int,
             updated_at = NOW()
         WHERE campaign_id = %s
           AND status = 'running'
-          AND lease_expires_at IS NOT NULL
-          AND lease_expires_at <= NOW()
+          AND (
+              (lease_expires_at IS NOT NULL AND lease_expires_at <= NOW())
+              OR (heartbeat_at IS NOT NULL AND heartbeat_at <= NOW() - INTERVAL '5 minutes')
+          )
           AND attempts >= %s
         RETURNING id
         """,
-        (campaign_id, retry_limit),
+        (recovery_worker_id, recovery_worker_id, campaign_id, retry_limit),
     ).fetchall()
-    return {"retrying": len(retrying), "failed": len(failed)}
+    return {"retrying": len(retrying), "failed": len(failed), "recovered_stale_leases": len(retrying), "actual_worker_execution_timeouts": len(failed)}
 
 
 def refresh_job_heartbeat(conn: psycopg.Connection, job_id: int, worker_id: str, lease_seconds: int) -> None:
@@ -899,22 +2509,119 @@ def run_campaign_job(conn: psycopg.Connection, job: dict[str, Any]) -> dict[str,
             (symbol, timeframe),
         ).fetchall()
     )
+    candidate = candidate_from_payload(job["candidate"])
+    if (
+        candidate.parameters.get("phase_9_11_campaign_version") == STRATEGY_REDESIGN_CAMPAIGN_VERSION
+        or candidate.parameters.get("phase_9_12_campaign_version") == VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION
+    ):
+        features = enrich_phase_9_11_context(conn, symbol, timeframe, features)
     regimes = load_regimes(conn, symbol=symbol, timeframe=timeframe)
     context_by_time = build_context_by_time(candles, features, regimes)
-    candidate = candidate_from_payload(job["candidate"])
     row = evaluate_candidate(candidate, candles, features, context_by_time)
     return {**row, "symbol": symbol, "timeframe": timeframe, "campaign_version": CAMPAIGN_VERSION}
+
+
+def enrich_phase_9_11_context(conn: psycopg.Connection, symbol: str, timeframe: str, features: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if timeframe != "1h" or not features:
+        return features
+    context_4h_features = load_context_features(conn, symbol, "4h")
+    context_4h_regimes = load_context_regimes(conn, symbol, "4h")
+    spy_features = load_context_features(conn, "SPY", "1h")
+    qqq_features = load_context_features(conn, "QQQ", "1h")
+    enriched = []
+    context_indexes = {"four_h": -1, "four_h_regime": -1, "spy": -1, "qqq": -1}
+    for row in features:
+        timestamp = row["timestamp"]
+        four_h, context_indexes["four_h"] = advance_context_cursor(context_4h_features, context_indexes["four_h"], timestamp)
+        four_h_regime, context_indexes["four_h_regime"] = advance_context_cursor(context_4h_regimes, context_indexes["four_h_regime"], timestamp)
+        spy, context_indexes["spy"] = advance_context_cursor(spy_features, context_indexes["spy"], timestamp)
+        qqq, context_indexes["qqq"] = advance_context_cursor(qqq_features, context_indexes["qqq"], timestamp)
+        base_returns = finite_metric(row.get("returns_5"))
+        item = dict(row)
+        if four_h:
+            item["context_4h_returns_5"] = four_h.get("returns_5")
+            item["context_4h_distance_from_ema_50"] = four_h.get("distance_from_ema_50")
+        if four_h_regime:
+            item["context_4h_trend_regime"] = four_h_regime.get("trend_regime")
+            item["context_4h_volatility_regime"] = four_h_regime.get("volatility_regime")
+        if spy:
+            spy_returns = finite_metric(spy.get("returns_5"))
+            item["context_spy_returns_5"] = spy.get("returns_5")
+            item["context_relative_spy_returns_5"] = base_returns - spy_returns
+        if qqq:
+            qqq_returns = finite_metric(qqq.get("returns_5"))
+            item["context_qqq_returns_5"] = qqq.get("returns_5")
+            item["context_relative_qqq_returns_5"] = base_returns - qqq_returns
+        enriched.append(item)
+    return enriched
+
+
+def advance_context_cursor(rows: list[dict[str, Any]], index: int, timestamp: Any) -> tuple[dict[str, Any] | None, int]:
+    while index + 1 < len(rows) and rows[index + 1]["timestamp"] <= timestamp:
+        index += 1
+    return (rows[index] if index >= 0 else None), index
+
+
+def load_context_features(conn: psycopg.Connection, symbol: str, timeframe: str) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT *
+            FROM features
+            WHERE symbol = %s AND timeframe = %s
+            ORDER BY timestamp ASC
+            """,
+            (symbol, timeframe),
+        ).fetchall()
+    ]
+
+
+def load_context_regimes(conn: psycopg.Connection, symbol: str, timeframe: str) -> list[dict[str, Any]]:
+    return [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT *
+            FROM market_regimes
+            WHERE symbol = %s AND timeframe = %s
+            ORDER BY timestamp ASC
+            """,
+            (symbol, timeframe),
+        ).fetchall()
+    ]
+
+
+def latest_context_at_or_before(rows: list[dict[str, Any]], timestamp: Any) -> dict[str, Any] | None:
+    latest = None
+    for row in rows:
+        if row["timestamp"] <= timestamp:
+            latest = row
+        else:
+            break
+    return latest
 
 
 def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dict[str, Any]:
     symbol = str(job["symbol"]).upper()
     timeframe = str(job["timeframe"])
-    symbol_row = conn.execute(
-        "SELECT symbol, asset_class, is_active FROM symbols WHERE symbol = %s LIMIT 1",
-        (symbol,),
-    ).fetchone()
+    try:
+        symbol_row = conn.execute(
+            "SELECT symbol, asset_class, provider_symbol, primary_provider, is_active FROM symbols WHERE symbol = %s LIMIT 1",
+            (symbol,),
+        ).fetchone()
+    except Exception:
+        safe_rollback(conn)
+        symbol_row = conn.execute(
+            "SELECT symbol, asset_class, is_active FROM symbols WHERE symbol = %s LIMIT 1",
+            (symbol,),
+        ).fetchone()
+    if not symbol_row:
+        return readiness_block("blocked_data", "unsupported_symbol", "Symbol is not registered in the market-data universe.", retry_after_seconds=86400, job=job, symbol_row=None, preflight_status="unsupported")
     if symbol_row and symbol_row.get("is_active") is False:
-        return readiness_block("blocked_data", "data_unavailable", "Asset is inactive or unsupported.", retry_after_seconds=3600)
+        return readiness_block("blocked_data", "unsupported_symbol", "Asset is inactive or unsupported.", retry_after_seconds=86400, job=job, symbol_row=dict(symbol_row), preflight_status="unsupported")
+    if timeframe not in DEFAULT_CAMPAIGN_TIMEFRAMES:
+        return readiness_block("blocked_data", "unsupported_timeframe", f"Timeframe {timeframe} is not supported by campaign preflight.", retry_after_seconds=86400, job=job, symbol_row=dict(symbol_row), preflight_status="unsupported")
     row = conn.execute(
         """
         SELECT COUNT(*) AS candle_count, MAX(timestamp) AS latest_candle_timestamp
@@ -926,10 +2633,11 @@ def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dic
     candle_count = int((row or {}).get("candle_count") or 0)
     latest = (row or {}).get("latest_candle_timestamp")
     if candle_count < MIN_CAMPAIGN_CANDLES:
-        return readiness_block("blocked_data", "data_unavailable", f"Only {candle_count} candles are available; {MIN_CAMPAIGN_CANDLES} are required.", retry_after_seconds=3600)
+        classification = "missing_dataset" if candle_count == 0 else "insufficient_historical_depth"
+        return readiness_block("blocked_data", classification, f"Only {candle_count} candles are available; {MIN_CAMPAIGN_CANDLES} are required.", retry_after_seconds=3600, job=job, symbol_row=dict(symbol_row), candle_count=candle_count, latest_candle_timestamp=latest)
     freshness = data_freshness(latest, timeframe, (symbol_row or {}).get("asset_class"))
     if freshness["stale"]:
-        return readiness_block("blocked_data", "stale_data", freshness["reason"], retry_after_seconds=1800)
+        return readiness_block("blocked_data", "stale_data", freshness["reason"], retry_after_seconds=1800, job=job, symbol_row=dict(symbol_row), candle_count=candle_count, latest_candle_timestamp=latest, freshness=freshness)
     features = conn.execute(
         """
         SELECT COUNT(*) AS feature_count
@@ -940,25 +2648,133 @@ def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dic
     ).fetchone()
     feature_count = int((features or {}).get("feature_count") or 0)
     if feature_count < MIN_CAMPAIGN_FEATURES:
-        return readiness_block("blocked_data", "data_unavailable", f"Only {feature_count} feature rows are available; {MIN_CAMPAIGN_FEATURES} are required.", retry_after_seconds=1800)
-    return {"ready": True, "status": "ready", "reason": "stored market data and features are ready", "failure_classification": None}
+        return readiness_block("blocked_data", "feature_generation_failure", f"Only {feature_count} feature rows are available; {MIN_CAMPAIGN_FEATURES} are required.", retry_after_seconds=1800, job=job, symbol_row=dict(symbol_row), candle_count=candle_count, feature_count=feature_count, latest_candle_timestamp=latest, freshness=freshness)
+    return {
+        "ready": True,
+        "status": "eligible",
+        "reason": "stored market data and features are ready",
+        "failure_classification": None,
+        "preflight": preflight_detail(job, dict(symbol_row), candle_count, feature_count, latest, freshness, "eligible", "Ready for execution."),
+    }
 
 
-def readiness_block(status: str, classification: str, reason: str, *, retry_after_seconds: int) -> dict[str, Any]:
-    return {"ready": False, "status": status, "reason": reason, "failure_classification": classification, "retry_after_seconds": retry_after_seconds}
+def readiness_block(
+    status: str,
+    classification: str,
+    reason: str,
+    *,
+    retry_after_seconds: int,
+    job: dict[str, Any] | None = None,
+    symbol_row: dict[str, Any] | None = None,
+    candle_count: int = 0,
+    feature_count: int = 0,
+    latest_candle_timestamp: Any = None,
+    freshness: dict[str, Any] | None = None,
+    preflight_status: str | None = None,
+) -> dict[str, Any]:
+    display_status = preflight_status or status
+    return {
+        "ready": False,
+        "status": status,
+        "reason": reason,
+        "failure_classification": classification,
+        "retry_after_seconds": retry_after_seconds,
+        "preflight": preflight_detail(job or {}, symbol_row or {}, candle_count, feature_count, latest_candle_timestamp, freshness or {}, display_status, reason, classification),
+    }
+
+
+def preflight_detail(
+    job: dict[str, Any],
+    symbol_row: dict[str, Any],
+    candle_count: int,
+    feature_count: int,
+    latest_candle_timestamp: Any,
+    freshness: dict[str, Any],
+    status: str,
+    reason: str,
+    classification: str | None = None,
+) -> dict[str, Any]:
+    symbol = str(job.get("symbol") or symbol_row.get("symbol") or "").upper()
+    timeframe = str(job.get("timeframe") or "")
+    required = MIN_CAMPAIGN_CANDLES
+    return {
+        "campaign_job_id": job.get("id"),
+        "symbol": symbol,
+        "asset_class": symbol_row.get("asset_class"),
+        "timeframe": timeframe,
+        "configured_provider": symbol_row.get("primary_provider"),
+        "provider_symbol": symbol_row.get("provider_symbol") or symbol,
+        "latest_stored_candle": latest_candle_timestamp,
+        "latest_expected_completed_candle": freshness.get("expected_completed_candle"),
+        "historical_candles_required": required,
+        "historical_candles_available": candle_count,
+        "missing_candle_count": max(0, required - candle_count),
+        "feature_rows_available": feature_count,
+        "freshness_classification": freshness.get("classification") or classification or status,
+        "preflight_status": status,
+        "exact_block_reason": reason,
+        "retry_eligibility": status not in {"unsupported"},
+        "recommended_remediation": remediation_for_preflight(classification or status, symbol_row.get("primary_provider")),
+    }
+
+
+def remediation_for_preflight(classification: str, provider: str | None) -> str:
+    if classification in {"missing_dataset", "insufficient_historical_depth"}:
+        return f"Backfill candles with {provider or 'the configured provider'} and regenerate features."
+    if classification == "stale_latest_candle":
+        return f"Ingest the latest completed candle with {provider or 'the configured provider'}."
+    if classification == "market_closed":
+        return "No repair required while the market is closed and the expected completed candle is present."
+    if classification == "feature_generation_failure":
+        return "Regenerate feature rows after candle coverage is complete."
+    if classification.startswith("unsupported"):
+        return "Record explicit unsupported-data classification; do not silently remove the asset."
+    return "Inspect provider, candle continuity, and feature-generation logs."
 
 
 def data_freshness(timestamp: Any, timeframe: str, asset_class: str | None) -> dict[str, Any]:
     parsed = parse_timestamp(timestamp)
     if parsed is None:
-        return {"stale": True, "reason": "No completed candle timestamp is available."}
+        return {"stale": True, "classification": "missing_dataset", "reason": "No completed candle timestamp is available.", "expected_completed_candle": None}
+    expected = expected_completed_candle(timeframe, asset_class)
+    if market_closed_for_asset(asset_class) and parsed >= expected - timedelta(hours=4):
+        return {"stale": False, "classification": "market_closed", "reason": "Market closed: latest completed candle is expected.", "expected_completed_candle": expected}
     max_age_hours = {"15m": 2, "30m": 4, "60m": 8, "1h": 8, "4h": 24, "1d": 96}.get(timeframe, 24)
     age_hours = (datetime.now(UTC) - parsed).total_seconds() / 3600
     if asset_class and "equity" in str(asset_class).lower() and parsed.weekday() == 4 and datetime.now(UTC).weekday() in {5, 6, 0}:
         max_age_hours = max(max_age_hours, 96)
     if age_hours > max_age_hours:
-        return {"stale": True, "reason": f"Latest completed candle is {age_hours:.1f}h old; max allowed for {timeframe} is {max_age_hours}h."}
-    return {"stale": False, "reason": "Latest completed candle is fresh."}
+        return {"stale": True, "classification": "stale_latest_candle", "reason": f"Latest completed candle is {age_hours:.1f}h old; max allowed for {timeframe} is {max_age_hours}h.", "expected_completed_candle": expected}
+    classification = "market_closed" if market_closed_for_asset(asset_class) else "healthy"
+    return {"stale": False, "classification": classification, "reason": "Latest completed candle is fresh.", "expected_completed_candle": expected}
+
+
+def market_closed_for_asset(asset_class: str | None) -> bool:
+    if not asset_class or "equity" not in str(asset_class).lower():
+        return False
+    now = datetime.now(UTC)
+    return now.weekday() >= 5 or not (dt_time(14, 30) <= now.time() <= dt_time(21, 0))
+
+
+def expected_completed_candle(timeframe: str, asset_class: str | None) -> datetime:
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    if asset_class and "equity" in str(asset_class).lower() and market_closed_for_asset(asset_class):
+        expected = now
+        if now.time() < dt_time(14, 30):
+            expected -= timedelta(days=1)
+        while expected.weekday() >= 5:
+            expected -= timedelta(days=1)
+        close_hour = 20 if timeframe in {"1h", "60m"} else 16 if timeframe == "4h" else 0
+        return expected.replace(hour=close_hour, minute=0)
+    if timeframe in {"1h", "60m"}:
+        expected = now.replace(minute=0)
+    elif timeframe == "4h":
+        expected = now.replace(hour=(now.hour // 4) * 4, minute=0)
+    elif timeframe == "1d":
+        expected = now.replace(hour=0, minute=0)
+    else:
+        expected = now
+    return expected
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -1123,6 +2939,7 @@ def run_campaign_scheduler_cycle(conn: psycopg.Connection, *, force: bool = Fals
         conn.commit()
         return {"worker_id": worker, "processed": total_processed, "campaigns": results, "simulation_only": True}
     except Exception as error:
+        safe_rollback(conn)
         conn.execute(
             """
             UPDATE research_campaign_scheduler
@@ -1167,6 +2984,13 @@ def heartbeat_campaign_worker(conn: psycopg.Connection, worker_id: str, *, statu
         """,
         (status, worker_id),
     )
+
+
+def best_effort_worker_heartbeat(conn: psycopg.Connection, worker_id: str, *, status: str = "running") -> None:
+    try:
+        heartbeat_campaign_worker(conn, worker_id, status=status)
+    except Exception:
+        safe_rollback(conn)
 
 
 def mark_campaign_worker_idle(conn: psycopg.Connection, worker_id: str, processed_jobs: int = 0) -> None:
@@ -1315,28 +3139,140 @@ def worker_status(conn: psycopg.Connection) -> dict[str, Any]:
         """
     ).fetchall()
     claimed_by_worker = {row["worker_id"]: dict(row) for row in claimed_rows}
+    try:
+        current_job_rows = conn.execute(
+            """
+            SELECT DISTINCT ON (worker_id)
+                   worker_id, id AS job_id, campaign_id, symbol, timeframe, status, claimed_at, heartbeat_at, lease_expires_at
+            FROM research_campaign_jobs
+            WHERE worker_id IS NOT NULL
+            ORDER BY worker_id, claimed_at DESC NULLS LAST, id DESC
+            """
+        ).fetchall()
+    except Exception:
+        safe_rollback(conn)
+        current_job_rows = []
+    current_jobs = {row["worker_id"]: dict(row) for row in current_job_rows}
     now = datetime.now(UTC)
     workers = []
     seen = set()
     for registry in registry_rows:
         row = dict(registry)
         claimed = claimed_by_worker.get(row["worker_id"], {})
+        current = current_jobs.get(row["worker_id"])
         heartbeat = parse_timestamp(row.get("heartbeat_at"))
+        registered = parse_timestamp(row.get("registered_at"))
         healthy = heartbeat is not None and (now - heartbeat) <= timedelta(minutes=5) and row.get("status") not in {"stopped", "error"}
-        workers.append({**jsonable(row), "claimed_jobs": int(claimed.get("claimed_jobs") or 0), "health": "healthy" if healthy else "stale"})
+        heartbeat_age = round((now - heartbeat).total_seconds(), 2) if heartbeat else None
+        uptime_seconds = round((now - registered).total_seconds(), 2) if registered and row.get("status") not in {"stopped"} else 0
+        workers.append({
+            **jsonable(row),
+            "state": row.get("status"),
+            "start_time": row.get("registered_at"),
+            "uptime_seconds": uptime_seconds,
+            "heartbeat_age_seconds": heartbeat_age,
+            "lease_state": lease_state(current, now),
+            "current_job": jsonable(current) if current else None,
+            "claimed_jobs": int(claimed.get("claimed_jobs") or 0),
+            "completed_job_count": int(row.get("processed_jobs") or 0),
+            "retry_count": retry_count_for_worker(conn, row["worker_id"]),
+            "provider_latency_ms": worker_latency(conn, row["worker_id"], "provider_latency_ms"),
+            "database_latency_ms": worker_latency(conn, row["worker_id"], "database_latency_ms"),
+            "last_error": row.get("latest_error"),
+            "last_successful_job": last_successful_job(conn, row["worker_id"]),
+            "health": "healthy" if healthy else "stale",
+        })
         seen.add(row["worker_id"])
     for worker_id, claimed in claimed_by_worker.items():
         if worker_id in seen:
             continue
         lease = parse_timestamp(claimed.get("lease_expires_at"))
         healthy = lease is not None and lease > now
-        workers.append({**jsonable(claimed), "status": "running", "health": "healthy" if healthy else "stale"})
+        current = current_jobs.get(worker_id)
+        heartbeat = parse_timestamp(claimed.get("last_heartbeat"))
+        workers.append({
+            **jsonable(claimed),
+            "status": "running",
+            "state": "running",
+            "heartbeat_age_seconds": round((now - heartbeat).total_seconds(), 2) if heartbeat else None,
+            "lease_state": lease_state(current or claimed, now),
+            "current_job": jsonable(current) if current else None,
+            "completed_job_count": 0,
+            "retry_count": retry_count_for_worker(conn, worker_id),
+            "provider_latency_ms": worker_latency(conn, worker_id, "provider_latency_ms"),
+            "database_latency_ms": worker_latency(conn, worker_id, "database_latency_ms"),
+            "last_error": None,
+            "last_successful_job": last_successful_job(conn, worker_id),
+            "health": "healthy" if healthy else "stale",
+        })
     return {
         "active_worker_count": sum(1 for row in workers if row["health"] == "healthy"),
         "healthy_worker_count": sum(1 for row in workers if row["health"] == "healthy"),
         "stale_worker_count": sum(1 for row in workers if row["health"] == "stale"),
         "workers": workers,
     }
+
+
+def lease_state(job: dict[str, Any] | None, now: datetime) -> str:
+    if not job:
+        return "idle"
+    lease = parse_timestamp(job.get("lease_expires_at"))
+    if lease and lease > now:
+        return "leased"
+    if lease and lease <= now:
+        return "expired"
+    return "unleased"
+
+
+def retry_count_for_worker(conn: psycopg.Connection, worker_id: str) -> int:
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(GREATEST(attempts - 1, 0)), 0) AS count FROM research_campaign_jobs WHERE worker_id = %s",
+            (worker_id,),
+        ).fetchone()
+        return int((row or {}).get("count") or 0)
+    except Exception:
+        safe_rollback(conn)
+        return 0
+
+
+def worker_latency(conn: psycopg.Connection, worker_id: str, column: str) -> float:
+    if column not in {"provider_latency_ms", "database_latency_ms"}:
+        return 0
+    try:
+        row = conn.execute(f"SELECT AVG({column}) AS value FROM research_campaign_jobs WHERE worker_id = %s AND {column} IS NOT NULL", (worker_id,)).fetchone()
+        return round(finite_metric((row or {}).get("value")), 2)
+    except Exception:
+        safe_rollback(conn)
+        return 0
+
+
+def last_successful_job(conn: psycopg.Connection, worker_id: str) -> dict[str, Any] | None:
+    try:
+        row = conn.execute(
+            """
+            SELECT id AS job_id, campaign_id, symbol, timeframe, status, completed_at
+            FROM research_campaign_jobs
+            WHERE worker_id = %s
+              AND status IN ('completed', 'promoted', 'rejected')
+            ORDER BY completed_at DESC NULLS LAST, id DESC
+            LIMIT 1
+            """,
+            (worker_id,),
+        ).fetchone()
+        return jsonable(dict(row)) if row else None
+    except Exception:
+        safe_rollback(conn)
+        return None
+
+
+def safe_rollback(conn: psycopg.Connection) -> None:
+    rollback = getattr(conn, "rollback", None)
+    if callable(rollback):
+        try:
+            rollback()
+        except Exception:
+            pass
 
 
 def deterministic_worker_id(campaign_id: int) -> str:
@@ -1618,39 +3554,59 @@ def persist_elite_candidate(conn: psycopg.Connection, campaign_id: int, summary:
 
 
 def promote_elite_to_paper_simulation(conn: psycopg.Connection, campaign_id: int, summary: dict[str, Any]) -> None:
-    account = conn.execute(
+    elite_count = conn.execute(
         """
-        SELECT *
-        FROM paper_accounts
-        WHERE status = 'active' AND simulation_only = TRUE
-        ORDER BY created_at ASC
-        LIMIT 1
-        """
+        SELECT COUNT(*) AS count
+        FROM elite_research_candidates
+        WHERE campaign_id = %s AND simulation_only = TRUE
+        """,
+        (campaign_id,),
     ).fetchone()
-    if not account or not summary["passed_markets"]:
+    if int((elite_count or {}).get("count") or 0) < 1:
         return
-    market = summary["passed_markets"][0]
     existing = conn.execute(
         """
         SELECT id
         FROM strategy_deployments
-        WHERE account_id = %s
-          AND strategy_name = %s
-          AND strategy_version = %s
-          AND symbol = %s
-          AND timeframe = %s
+        WHERE campaign_id = %s
+          AND candidate_id = %s
           AND status = 'active'
           AND simulation_only = TRUE
         LIMIT 1
         """,
-        (account["id"], summary["strategy_name"], summary["strategy_version"], market["symbol"], market["timeframe"]),
+        (campaign_id, summary["candidate_id"]),
     ).fetchone()
-    if existing:
+    if existing or not summary["passed_markets"]:
         return
+    candidate_row = conn.execute(
+        """
+        SELECT candidate
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s
+          AND candidate_id = %s
+          AND simulation_only = TRUE
+        ORDER BY id
+        LIMIT 1
+        """,
+        (campaign_id, summary["candidate_id"]),
+    ).fetchone()
+    if not candidate_row or not candidate_row.get("candidate"):
+        return
+    candidate_payload = dict(candidate_row["candidate"])
+    candidate_parameters = dict(candidate_payload.get("parameters") or {})
+    account = ensure_candidate_forward_account(
+        conn,
+        summary["candidate_id"],
+        Decimal(str(candidate_parameters.get("initial_equity", 10000))),
+    )
+    market = summary["passed_markets"][0]
     deployment = conn.execute(
         """
-        INSERT INTO strategy_deployments(account_id, strategy_name, strategy_version, symbol, timeframe, parameters, status, simulation_only)
-        VALUES (%s, %s, %s, %s, %s, %s, 'active', TRUE)
+        INSERT INTO strategy_deployments(
+            account_id, strategy_name, strategy_version, symbol, timeframe, parameters, status, simulation_only,
+            campaign_id, candidate_id, forward_validation_started_at, evidence_version, lifecycle_state, deployment_origin
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, 'active', TRUE, %s, %s, NOW(), %s, 'active_forward_validation', 'elite_candidate_campaign')
         RETURNING id
         """,
         (
@@ -1659,7 +3615,17 @@ def promote_elite_to_paper_simulation(conn: psycopg.Connection, campaign_id: int
             summary["strategy_version"],
             market["symbol"],
             market["timeframe"],
-            Jsonb({"campaign_id": campaign_id, "candidate_id": summary["candidate_id"], "simulation_only": True}),
+            Jsonb(
+                {
+                    **candidate_parameters,
+                    "campaign_id": campaign_id,
+                    "candidate_id": summary["candidate_id"],
+                    "simulation_only": True,
+                }
+            ),
+            campaign_id,
+            summary["candidate_id"],
+            "candidate_linked_forward_evidence_v1",
         ),
     ).fetchone()
     conn.execute(
@@ -1682,6 +3648,36 @@ def promote_elite_to_paper_simulation(conn: psycopg.Connection, campaign_id: int
             Jsonb({"campaign_id": campaign_id, "candidate_id": summary["candidate_id"], "market": market}),
         ),
     )
+
+
+def ensure_candidate_forward_account(
+    conn: psycopg.Connection,
+    candidate_id: str,
+    starting_cash: Decimal,
+) -> dict[str, Any]:
+    name = f"Candidate {candidate_id} Forward Validation"
+    row = conn.execute(
+        """
+        SELECT *
+        FROM paper_accounts
+        WHERE name = %s
+          AND simulation_only = TRUE
+        ORDER BY id
+        LIMIT 1
+        """,
+        (name,),
+    ).fetchone()
+    if row:
+        return dict(row)
+    row = conn.execute(
+        """
+        INSERT INTO paper_accounts(name, base_currency, starting_cash, cash_balance, status, simulation_only)
+        VALUES (%s, 'USD', %s, %s, 'active', TRUE)
+        RETURNING *
+        """,
+        (name, starting_cash, starting_cash),
+    ).fetchone()
+    return dict(row)
 
 
 def refresh_elite_candidate_forward_evidence(conn: psycopg.Connection, *, elite_candidate_id: int | None = None) -> dict[str, Any]:
@@ -1758,9 +3754,10 @@ def calculate_elite_paper_rollup(conn: psycopg.Connection, elite: dict[str, Any]
         SELECT *
         FROM paper_positions
         WHERE simulation_only = TRUE
+          AND account_id = ANY(%s)
           AND symbol = ANY(%s)
         """,
-        ([row["symbol"] for row in deployments],),
+        ([row["account_id"] for row in deployments], [row["symbol"] for row in deployments]),
     ).fetchall()
     first_deployment = min((parse_timestamp(row.get("created_at")) for row in deployments), default=None)
     last_activity = max(
@@ -1892,6 +3889,19 @@ def calculate_evidence_drift(elite: dict[str, Any], paper: dict[str, Any]) -> li
         "average_holding_period": (historical_metric(elite, "average_holding_period"), 0),
         "slippage": (historical_metric(elite, "slippage"), paper.get("average_simulated_slippage")),
     }
+    if paper.get("closed_trade_count") == 0:
+        return [
+            {
+                "metric_name": metric,
+                "historical_value": finite_metric(historical),
+                "paper_value": None,
+                "absolute_difference": None,
+                "percentage_difference": None,
+                "drift_classification": "insufficient_forward_sample",
+                "detected_at": datetime.now(UTC).isoformat(),
+            }
+            for metric, (historical, _paper_value) in comparisons.items()
+        ]
     drift = []
     for metric, (historical, paper_value) in comparisons.items():
         h = finite_metric(historical)
@@ -1999,6 +4009,8 @@ def max_drift_classification(rows: list[dict[str, Any]]) -> str:
         return "severe"
     if any(row["drift_classification"] == "warning" for row in rows):
         return "warning"
+    if rows and all(row["drift_classification"] == "insufficient_forward_sample" for row in rows):
+        return "insufficient_forward_sample"
     return "normal"
 
 
@@ -2022,13 +4034,23 @@ def closed_trade_attribution(fills: list[dict[str, Any]]) -> dict[str, Any]:
         slippage = Decimal(str(fill.get("slippage") or 0))
         timestamp = parse_timestamp(fill.get("filled_at"))
         if side == "buy":
-            open_lots.append({"quantity": quantity, "price": price, "fee": fee, "slippage": slippage, "timestamp": timestamp})
+            open_lots.append(
+                {
+                    "quantity": quantity,
+                    "original_quantity": quantity,
+                    "price": price,
+                    "fee": fee,
+                    "slippage": slippage,
+                    "timestamp": timestamp,
+                    "fill": fill,
+                }
+            )
             continue
         remaining = quantity
         while remaining > 0 and open_lots:
             lot = open_lots[0]
             matched = min(remaining, lot["quantity"])
-            entry_fee = lot["fee"] * (matched / lot["quantity"]) if lot["quantity"] else Decimal("0")
+            entry_fee = lot["fee"] * (matched / lot["original_quantity"]) if lot["original_quantity"] else Decimal("0")
             pnl = (price - lot["price"]) * matched - entry_fee - fee * (matched / quantity if quantity else Decimal("0"))
             duration = 0.0
             if timestamp and lot["timestamp"]:
@@ -2042,6 +4064,30 @@ def closed_trade_attribution(fills: list[dict[str, Any]]) -> dict[str, Any]:
                     "holding_period_hours": round(duration, 4),
                     "slippage": float(lot["slippage"] + slippage),
                     "commission": float(entry_fee + fee),
+                    "symbol": fill.get("symbol") or (lot["fill"] or {}).get("symbol"),
+                    "timeframe": fill.get("timeframe") or (lot["fill"] or {}).get("timeframe"),
+                    "account_id": fill.get("account_id") or (lot["fill"] or {}).get("account_id"),
+                    "entry_order_id": (lot["fill"] or {}).get("order_id"),
+                    "exit_order_id": fill.get("order_id"),
+                    "entry_fill_id": (lot["fill"] or {}).get("id"),
+                    "exit_fill_id": fill.get("id"),
+                    "entry_timestamp": lot["timestamp"],
+                    "exit_timestamp": timestamp,
+                    "entry_candle_timestamp": (lot["fill"] or {}).get("candle_timestamp"),
+                    "exit_candle_timestamp": fill.get("candle_timestamp"),
+                    "deployment_id": fill.get("deployment_id") or (lot["fill"] or {}).get("deployment_id"),
+                    "campaign_id": fill.get("campaign_id") or (lot["fill"] or {}).get("campaign_id"),
+                    "candidate_id": fill.get("candidate_id") or (lot["fill"] or {}).get("candidate_id"),
+                    "strategy_id": fill.get("strategy_id") or (lot["fill"] or {}).get("strategy_id"),
+                    "strategy_version": fill.get("strategy_version") or (lot["fill"] or {}).get("strategy_version"),
+                    "decision_id": fill.get("decision_id") or (lot["fill"] or {}).get("decision_id"),
+                    "signal_timestamp": fill.get("signal_timestamp") or (lot["fill"] or {}).get("signal_timestamp"),
+                    "evidence_origin": fill.get("evidence_origin") or (lot["fill"] or {}).get("evidence_origin"),
+                    "deployment_created_at": fill.get("deployment_created_at") or (lot["fill"] or {}).get("deployment_created_at"),
+                    "forward_validation_started_at": fill.get("forward_validation_started_at") or (lot["fill"] or {}).get("forward_validation_started_at"),
+                    "deployment_lifecycle_state": fill.get("deployment_lifecycle_state") or (lot["fill"] or {}).get("deployment_lifecycle_state"),
+                    "deployment_origin": fill.get("deployment_origin") or (lot["fill"] or {}).get("deployment_origin"),
+                    "simulation_only": bool(fill.get("simulation_only", True) and (lot["fill"] or {}).get("simulation_only", True)),
                 }
             )
             lot["quantity"] -= matched
@@ -2584,8 +4630,10 @@ def campaign_mission_control_summary(conn: psycopg.Connection) -> dict[str, Any]
         """
     ).fetchall()
     rows = [dict(row) for row in campaigns]
+    latest_completed_campaign = latest_completed_campaign_summary(conn, rows)
     active = [row for row in rows if row["status"] in {"queued", "running", "paused"}]
     completed = [row for row in rows if row["status"] == "completed"]
+    completed_campaign_summaries = [summary for summary in (latest_completed_campaign_summary(conn, [row]) for row in completed) if summary]
     queued_jobs = sum(int(row.get("queued_jobs") or 0) - int(row.get("completed_jobs") or 0) - int(row.get("failed_jobs") or 0) for row in active)
     workers = worker_status(conn)
     ops = campaign_worker_observability(conn)
@@ -2604,11 +4652,17 @@ def campaign_mission_control_summary(conn: psycopg.Connection) -> dict[str, Any]
         "claimed_jobs": ops["claimed_jobs"],
         "running_jobs": ops["running_jobs"],
         "completed_jobs": ops["completed_jobs"],
+        "rejected_jobs": ops["rejected_jobs"],
+        "completed_or_rejected_jobs": ops["completed_or_rejected_jobs"],
         "retrying_jobs": ops["retrying_jobs"],
         "deferred_jobs": ops["deferred_jobs"],
         "blocked_data_jobs": ops["blocked_data_jobs"],
         "failed_jobs": ops["failed_jobs"],
+        "genuine_failed_jobs": ops["genuine_failed_jobs"],
+        "recovered_stale_leases": ops["recovered_stale_leases"],
         "queue_depth": ops["queue_depth"],
+        "status_counts": ops["status_counts"],
+        "count_reconciliation": ops["count_reconciliation"],
         "oldest_queued_job_age_hours": ops["oldest_queued_job_age_hours"],
         "average_job_runtime_ms": ops["average_job_runtime_ms"],
         "jobs_completed_last_24h": ops["jobs_completed_last_24h"],
@@ -2625,6 +4679,8 @@ def campaign_mission_control_summary(conn: psycopg.Connection) -> dict[str, Any]
         "research_heatmaps": first_analytics(rows, "heatmaps", {}),
         "recent_promotions": first_analytics(rows, "recent_promotions", []),
         "recent_forward_validation_failures": first_analytics(rows, "recent_forward_validation_failures", []),
+        "latest_completed_campaign": latest_completed_campaign,
+        "completed_campaign_summaries": completed_campaign_summaries,
         "current_experiment": current_campaign_label(active),
         "generated_candidates": sum(int(((row.get("analytics") or {}).get("strategies_generated") or 0)) for row in rows),
         "promoted_candidates": sum(int(row.get("promoted_candidates") or 0) for row in rows),
@@ -2633,6 +4689,135 @@ def campaign_mission_control_summary(conn: psycopg.Connection) -> dict[str, Any]
         "campaigns": [jsonable(row) for row in rows],
         "simulation_only": True,
     }
+
+
+def latest_completed_campaign_summary(conn: psycopg.Connection, rows: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    completed = [row for row in (rows or []) if row.get("status") == "completed"]
+    if completed:
+        campaign = sorted(completed, key=lambda row: (row.get("completed_at") or row.get("updated_at") or datetime.min.replace(tzinfo=UTC), int(row.get("id") or 0)), reverse=True)[0]
+    else:
+        row = conn.execute(
+            """
+            SELECT id, name, universe_key, status, requested_candidates, queued_jobs, completed_jobs, failed_jobs,
+                   promoted_candidates, rejected_candidates, analytics, controls, started_at, completed_at, updated_at
+            FROM research_campaigns
+            WHERE simulation_only = TRUE AND status = 'completed'
+            ORDER BY completed_at DESC NULLS LAST, updated_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if not row:
+            return None
+        campaign = dict(row)
+    campaign_id = int(campaign["id"])
+    jobs = [dict(row) for row in conn.execute("SELECT * FROM research_campaign_jobs WHERE campaign_id = %s ORDER BY candidate_id, symbol, timeframe", (campaign_id,)).fetchall()]
+    summaries = candidate_consistency_summaries(jobs)
+    lifecycle_rows = [candidate_lifecycle_summary(row) for row in summaries]
+    lifecycle_counts = Counter(row["lifecycle"] for row in lifecycle_rows)
+    elite_count = int((conn.execute("SELECT COUNT(1) AS count FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE", (campaign_id,)).fetchone() or {}).get("count") or 0)
+    deployment_count = int((conn.execute("SELECT COUNT(1) AS count FROM strategy_deployments WHERE campaign_id = %s AND simulation_only = TRUE", (campaign_id,)).fetchone() or {}).get("count") or 0)
+    failure_counter: Counter[str] = Counter()
+    for job in jobs:
+        if job.get("status") != "rejected":
+            continue
+        reasons = list(job.get("failure_reasons") or [])
+        if not reasons:
+            reasons = infer_job_failure_reasons(job)
+        for reason in reasons:
+            failure_counter[normalize_failure_reason(reason)] += 1
+    terminal_jobs = [job for job in jobs if job.get("status") in {"promoted", "rejected", "failed"}]
+    job_status_counts = Counter(str(job.get("status")) for job in jobs)
+    return {
+        "id": campaign_id,
+        "name": campaign.get("name"),
+        "campaign_key": campaign.get("campaign_key"),
+        "universe_key": campaign.get("universe_key"),
+        "status": campaign.get("status"),
+        "requested_candidates": int(campaign.get("requested_candidates") or len(summaries)),
+        "generated_candidates": len(summaries),
+        "tested_candidates": len({job["candidate_id"] for job in terminal_jobs}),
+        "candidate_lifecycle_counts": {
+            "rejected": lifecycle_counts.get("rejected", 0),
+            "needs_more_evidence": lifecycle_counts.get("needs_more_evidence", 0),
+            "research_candidate": lifecycle_counts.get("research_candidate", 0),
+            "elite_candidate": elite_count,
+        },
+        "cross_validation_rejected_candidates": int(campaign.get("rejected_candidates") or 0),
+        "queued_jobs": int(campaign.get("queued_jobs") or len(jobs)),
+        "jobs_executed": len(terminal_jobs),
+        "jobs_rejected_by_evidence": job_status_counts.get("rejected", 0),
+        "operationally_failed_jobs": job_status_counts.get("failed", 0),
+        "promoted_single_market_jobs": job_status_counts.get("promoted", 0),
+        "job_status_counts": dict(job_status_counts),
+        "best_candidate": best_simple_candidate(lifecycle_rows),
+        "top_failure_reasons": [{"reason": reason, "count": count} for reason, count in failure_counter.most_common(10)],
+        "elite_candidates": elite_count,
+        "candidate_linked_deployments": deployment_count,
+        "started_at": campaign.get("started_at"),
+        "completed_at": campaign.get("completed_at"),
+        "updated_at": campaign.get("updated_at"),
+        "simulation_only": True,
+    }
+
+
+def candidate_lifecycle_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    if passes_cross_validation(summary):
+        lifecycle = "elite_candidate"
+    elif summary.get("passed_markets"):
+        lifecycle = "research_candidate"
+    elif finite_metric(summary.get("profit_factor")) >= 1.0 and finite_metric(summary.get("trade_count")) > 0:
+        lifecycle = "needs_more_evidence"
+    else:
+        lifecycle = "rejected"
+    return {
+        "candidate_id": summary["candidate_id"],
+        "lifecycle": lifecycle,
+        "research_score": summary.get("research_score"),
+        "profit_factor": summary.get("profit_factor"),
+        "expectancy": summary.get("expectancy"),
+        "max_drawdown": summary.get("max_drawdown"),
+        "trade_count": summary.get("trade_count"),
+        "stability": summary.get("stability"),
+        "assets_passed": summary.get("assets_passed"),
+        "timeframes_passed": summary.get("timeframes_passed"),
+        "passed_markets": summary.get("passed_markets") or [],
+        "failure_reasons": summary.get("failure_reasons") or [],
+        "strategy_family": strategy_family_from_history(summary),
+    }
+
+
+def best_simple_candidate(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            row["lifecycle"] == "elite_candidate",
+            row["lifecycle"] == "research_candidate",
+            finite_metric(row.get("stability")),
+            finite_metric(row.get("research_score")),
+            finite_metric(row.get("profit_factor")),
+        ),
+        reverse=True,
+    )
+    best = dict(ranked[0])
+    first_pass = (best.get("passed_markets") or [{}])[0]
+    best["symbol"] = first_pass.get("symbol")
+    best["timeframe"] = first_pass.get("timeframe")
+    return best
+
+
+def strategy_family_from_history(summary: dict[str, Any]) -> str | None:
+    for row in summary.get("validation_history") or []:
+        blocks = row.get("blocks") or {}
+        entry = blocks.get("entry") or ((row.get("parameters") or {}).get("entry"))
+        if entry == "pullback":
+            return "Pullback"
+        if entry in {"trend_continuation", "gap_proxy"}:
+            return "Trend Following"
+        if entry in {"breakout", "opening_range_proxy"}:
+            return "Breakout"
+    return None
 
 
 def first_analytics(rows: list[dict[str, Any]], key: str, default: Any) -> Any:
@@ -2665,6 +4850,16 @@ def campaign_worker_observability(conn: psycopg.Connection) -> dict[str, Any]:
         """
     ).fetchall()
     counts = {row["status"]: int(row["count"]) for row in status_rows}
+    total_jobs = sum(counts.values())
+    terminal_completed = counts.get("completed", 0)
+    terminal_rejected = counts.get("rejected", 0)
+    terminal_promoted = counts.get("promoted", 0)
+    recovered_stale_leases = count_rows(conn, "research_campaign_jobs", "recovery_classification = 'recovered_stale_lease'")
+    genuine_failures = count_rows(
+        conn,
+        "research_campaign_jobs",
+        "status = 'failed' AND COALESCE(recovery_classification, '') <> 'recovered_stale_lease'",
+    )
     oldest = conn.execute(
         """
         SELECT MIN(created_at) AS oldest
@@ -2697,7 +4892,7 @@ def campaign_worker_observability(conn: psycopg.Connection) -> dict[str, Any]:
         """
         SELECT COALESCE(failure_classification, 'unknown_error') AS classification, COUNT(*) AS count
         FROM research_campaign_jobs
-        WHERE status = 'failed' OR failure_classification IS NOT NULL
+        WHERE status IN ('failed', 'blocked_data', 'deferred_rate_limit', 'retrying')
         GROUP BY COALESCE(failure_classification, 'unknown_error')
         ORDER BY count DESC
         LIMIT 10
@@ -2707,17 +4902,46 @@ def campaign_worker_observability(conn: psycopg.Connection) -> dict[str, Any]:
     return {
         "claimed_jobs": sum(counts.get(status, 0) for status in ("running",)),
         "running_jobs": counts.get("running", 0),
-        "completed_jobs": counts.get("completed", 0) + counts.get("promoted", 0) + counts.get("rejected", 0),
+        "completed_jobs": terminal_completed + terminal_promoted,
+        "rejected_jobs": terminal_rejected,
+        "completed_or_rejected_jobs": terminal_completed + terminal_promoted + terminal_rejected,
         "retrying_jobs": counts.get("retrying", 0),
         "deferred_jobs": counts.get("deferred_rate_limit", 0),
         "blocked_data_jobs": counts.get("blocked_data", 0),
         "failed_jobs": counts.get("failed", 0),
+        "genuine_failed_jobs": genuine_failures,
+        "recovered_stale_leases": recovered_stale_leases,
         "queue_depth": sum(counts.get(status, 0) for status in ("queued", "retrying", "blocked_data", "deferred_rate_limit")),
+        "status_counts": counts,
+        "count_reconciliation": campaign_count_reconciliation(counts, total_jobs),
         "oldest_queued_job_age_hours": round((datetime.now(UTC) - oldest_time).total_seconds() / 3600, 2) if oldest_time else 0,
         "average_job_runtime_ms": round(finite_metric((runtime or {}).get("average_runtime")), 2),
         "jobs_completed_last_24h": int((completed_24h or {}).get("count") or 0),
         "campaigns_completed_last_24h": int((campaigns_24h or {}).get("count") or 0),
         "worker_error_summary": [{"classification": row["classification"], "count": int(row["count"])} for row in errors],
+    }
+
+
+def campaign_count_reconciliation(counts: dict[str, int], total_jobs: int) -> dict[str, Any]:
+    components = {
+        "queued": counts.get("queued", 0),
+        "claimed": 0,
+        "running": counts.get("running", 0),
+        "completed": counts.get("completed", 0) + counts.get("promoted", 0),
+        "rejected": counts.get("rejected", 0),
+        "retrying": counts.get("retrying", 0),
+        "deferred": counts.get("deferred_rate_limit", 0),
+        "blocked_data": counts.get("blocked_data", 0),
+        "failed": counts.get("failed", 0),
+        "canceled": counts.get("canceled", 0),
+    }
+    component_total = sum(components.values())
+    return {
+        "total_jobs": total_jobs,
+        "components": components,
+        "component_total": component_total,
+        "mismatch": total_jobs - component_total,
+        "passed": total_jobs == component_total,
     }
 
 
@@ -2748,3 +4972,12 @@ def research_job_key(campaign_id: int, candidate_id: str, symbol: str, timeframe
 def average(values: Any) -> float:
     parsed = [finite_metric(value) for value in values if value is not None]
     return round(sum(parsed) / len(parsed), 4) if parsed else 0.0
+
+
+def count_rows(conn: psycopg.Connection, table: str, where: str = "TRUE") -> int:
+    try:
+        row = conn.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {where}").fetchone()
+        return int((row or {}).get("count") or 0)
+    except Exception:
+        safe_rollback(conn)
+        return 0
