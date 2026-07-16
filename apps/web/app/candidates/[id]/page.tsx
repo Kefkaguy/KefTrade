@@ -24,7 +24,7 @@ export default async function CandidateDetailPage({ params }: { params: Promise<
       <PageTitle
         title={candidate.candidate_id}
         description="Research candidate drilldown with lifecycle state, cross-asset evidence, out-of-sample behavior, drift, and notebook."
-        actions={<Link className="button ghost" href="/portfolio">Back to portfolio</Link>}
+        actions={<Link className="button secondary" href="/research-intelligence">Back to candidates</Link>}
       />
       <div className="metricGrid">
         <MetricCard label="Lifecycle" value={candidate.lifecycle_status} detail={candidate.validation_status} />

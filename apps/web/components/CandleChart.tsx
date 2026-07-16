@@ -35,11 +35,11 @@ export function CandleChart({ candles }: CandleChartProps) {
         const x = pad + index * step + step / 2;
         const yOpen = scaleY(open);
         const yClose = scaleY(close);
-        const color = close >= open ? "#16735f" : "#a33a3a";
+        const color = close >= open ? "#93e4ee" : "#629aaf";
         const bodyTop = Math.min(yOpen, yClose);
         const bodyHeight = Math.max(2, Math.abs(yClose - yOpen));
         return (
-          <g key={`${candle.timestamp}-${index}`}>
+          <g key={candle.timestamp}>
             <line x1={x} x2={x} y1={scaleY(high)} y2={scaleY(low)} stroke={color} strokeWidth="1.5" />
             <rect x={x - Math.max(2, step * 0.28)} y={bodyTop} width={Math.max(4, step * 0.56)} height={bodyHeight} fill={color} rx="1" />
           </g>

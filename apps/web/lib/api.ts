@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8002";
 
 export type Candle = {
   timestamp: string;
@@ -99,6 +99,7 @@ export type ResearchCommandCenterFilters = {
 };
 
 export type ResearchCommandCenter = {
+  live_evidence?: boolean;
   campaign: Record<string, any> | null;
   campaigns: Array<Record<string, any>>;
   filters: Record<string, string>;
@@ -1002,23 +1003,221 @@ type ApiRequestInit = RequestInit & {
   timeoutMs?: number;
 };
 
+export type ResearchUniverseInput = {
+  universe_key: string;
+  name: string;
+  description: string;
+  assets: string[];
+  default_timeframes: string[];
+  metadata: Record<string, unknown>;
+};
+
+export type AlpacaStockAsset = {
+  id: string;
+  symbol: string;
+  name: string;
+  exchange: string;
+  asset_class: "us_equity";
+  status: "active";
+  tradable: true;
+  marginable: boolean;
+  shortable: boolean;
+  fractionable: boolean;
+};
+
+export type AlpacaAssetCatalog = {
+  assets: AlpacaStockAsset[];
+  total: number;
+  imported: number;
+  source: "alpaca";
+};
+
+export type ResearchCampaignRecord = {
+  id: number;
+  name: string;
+  status: string;
+  requested_candidates?: number;
+  queued_jobs?: number;
+  completed_jobs?: number;
+  failed_jobs?: number;
+  promoted_candidates?: number;
+  rejected_candidates?: number;
+  [key: string]: unknown;
+};
+
+export type ResearchCampaignAnalytics = {
+  jobs_total?: number;
+  completion_percentage?: number;
+  jobs_by_status?: Record<string, number>;
+  promoted?: number;
+  rejected?: number;
+  [key: string]: unknown;
+};
+
+export type ResearchCampaignCreateResult = {
+  campaign: ResearchCampaignRecord;
+  assets: string[];
+  timeframes: string[];
+  candidates_generated: number;
+  jobs_created: number;
+  campaign_version: string;
+  simulation_only: boolean;
+  safety: string;
+};
+
+export type ResearchCampaignStatus = {
+  campaign: ResearchCampaignRecord;
+  analytics: ResearchCampaignAnalytics;
+  recent_jobs: Array<Record<string, unknown>>;
+  elite_candidates: Array<Record<string, unknown>>;
+  simulation_only: boolean;
+};
+
+export type ResearchCampaignBatchResult = {
+  campaign_id: number;
+  processed: number;
+  completed: number;
+  failed: number;
+  remaining: number;
+  analytics: ResearchCampaignAnalytics;
+  simulation_only: boolean;
+};
+
+export type ResearchCampaignPreflight = {
+  ready: boolean;
+  assets_total: number;
+  timeframes: string[];
+  datasets_total: number;
+  eligible_datasets: number;
+  blocked_datasets: number;
+  classifications: Record<string, number>;
+  issues: Array<{
+    symbol: string;
+    timeframe: string;
+    classification: string;
+    reason: string;
+    candle_count: number;
+    feature_count: number;
+    provider?: string | null;
+  }>;
+  issues_truncated: boolean;
+  simulation_only: boolean;
+};
+
+export type ResearchCampaignPreparation = {
+  ready: boolean;
+  prepared: Array<{ symbol: string; timeframe: string; provider: string; candles: number; features: number }>;
+  errors: Array<{ symbol: string; timeframe: string; reason: string }>;
+  readiness: ResearchCampaignPreflight;
+  simulation_only: boolean;
+};
+
+export type ResearchCampaignListRow = {
+  id: number;
+  name: string;
+  universe_key: string;
+  status: string;
+  requested_candidates: number;
+  total_jobs: number;
+  queued_jobs: number;
+  running_jobs: number;
+  blocked_jobs: number;
+  deferred_jobs: number;
+  terminal_jobs: number;
+  promoted_jobs: number;
+  rejected_jobs: number;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  updated_at: string;
+};
+
+export type ResearchCampaignList = {
+  campaigns: ResearchCampaignListRow[];
+  summary: {
+    running: number;
+    queued: number;
+    paused: number;
+  };
+  simulation_only: boolean;
+};
+
+export type ResearchCampaignProfile = {
+  campaign_id: number;
+  profiled_jobs: number;
+  average_ms: {
+    total: number;
+    loading_market_data: number;
+    calculating_indicators: number;
+    running_simulation: number;
+    writing_results: number;
+    database_queue_operations: number;
+  };
+  dataset_cache_hit_rate: number;
+  runtime: {
+    active_parallel_workers: number;
+    active_parallel_jobs: number;
+    configured_parallel_workers: number;
+    preloaded_datasets: number;
+    resident_memory_mb: number;
+    worker_limit: number;
+  };
+  simulation_only: boolean;
+};
+
+const API_TIMING_ENABLED = process.env.NODE_ENV !== "production";
+
 async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
   const controller = new AbortController();
   const { timeoutMs = 3500, ...fetchOptions } = options ?? {};
+  const startedAt = now();
+  const method = fetchOptions.method ?? "GET";
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  const response = await fetch(`${API_URL}${path}`, {
-    ...fetchOptions,
-    cache: "no-store",
-    signal: controller.signal,
-    headers: {
-      "Content-Type": "application/json",
-      ...(fetchOptions.headers ?? {})
+  let responseLogged = false;
+  try {
+    const response = await fetch(`${API_URL}${path}`, {
+      ...fetchOptions,
+      cache: "no-store",
+      signal: controller.signal,
+      headers: {
+        "Content-Type": "application/json",
+        ...(fetchOptions.headers ?? {})
+      }
+    });
+    logApiTiming(path, method, startedAt, response.status);
+    responseLogged = true;
+    if (!response.ok) {
+      let detail = "";
+      try {
+        const payload = await response.json() as { detail?: unknown };
+        detail = typeof payload.detail === "string" ? `: ${payload.detail}` : "";
+      } catch {
+        // Some upstream failures do not return JSON.
+      }
+      throw new Error(`${response.status} ${response.statusText}${detail}`);
     }
-  }).finally(() => clearTimeout(timeout));
-  if (!response.ok) {
-    throw new Error(`${response.status} ${response.statusText}`);
+    return response.json() as Promise<T>;
+  } catch (error) {
+    if (!responseLogged) logApiTiming(path, method, startedAt, "error", error);
+    throw error;
+  } finally {
+    clearTimeout(timeout);
   }
-  return response.json() as Promise<T>;
+}
+
+function now() {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
+}
+
+function logApiTiming(path: string, method: string, startedAt: number, status: number | "error", error?: unknown) {
+  if (!API_TIMING_ENABLED) return;
+  const durationMs = Math.round(now() - startedAt);
+  const prefix = `[api] ${method} ${path} -> ${status} in ${durationMs}ms`;
+  if (status === "error") {
+    console.warn(prefix, error instanceof Error ? error.message : error);
+    return;
+  }
+  console.info(prefix);
 }
 
 export function getCandles(limit = 220, input: ResearchAssetInput = { symbol: "BTCUSDT", timeframe: "4h" }) {
@@ -1179,6 +1378,99 @@ export function getResearchArchive() {
 
 export function getResearchIntelligence() {
   return request<ResearchIntelligence>("/research/intelligence");
+}
+
+export function saveResearchUniverse(payload: ResearchUniverseInput) {
+  return request<Record<string, unknown>>("/research/universes", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    timeoutMs: 30000
+  });
+}
+
+export function syncAlpacaAssetCatalog() {
+  return request<AlpacaAssetCatalog>("/data/alpaca/assets/sync", {
+    method: "POST",
+    timeoutMs: 60000
+  });
+}
+
+export function createResearchCampaign(options: {
+  universeKey: string;
+  name: string;
+  maxCandidates: number;
+  assetLimit: number;
+  timeframes: string[];
+}) {
+  const params = new URLSearchParams({
+    universe_key: options.universeKey,
+    name: options.name,
+    max_candidates: String(options.maxCandidates),
+    asset_limit: String(options.assetLimit)
+  });
+  for (const timeframe of options.timeframes) params.append("timeframes", timeframe);
+  return request<ResearchCampaignCreateResult>(`/research/campaigns?${params.toString()}`, {
+    method: "POST",
+    timeoutMs: 300000
+  });
+}
+
+export function preflightResearchCampaign(assets: string[], timeframes: string[]) {
+  return request<ResearchCampaignPreflight>("/research/campaigns/preflight", {
+    method: "POST",
+    body: JSON.stringify({ assets, timeframes }),
+    timeoutMs: 60000
+  });
+}
+
+export function prepareResearchCampaign(assets: string[], timeframes: string[]) {
+  return request<ResearchCampaignPreparation>("/research/campaigns/prepare", {
+    method: "POST",
+    body: JSON.stringify({ assets, timeframes }),
+    timeoutMs: 600000
+  });
+}
+
+export function runResearchCampaignBatch(campaignId: number, batchSize = 50) {
+  const params = new URLSearchParams({ batch_size: String(batchSize) });
+  return request<ResearchCampaignBatchResult>(`/research/campaigns/${campaignId}/run?${params.toString()}`, {
+    method: "POST",
+    timeoutMs: 300000
+  });
+}
+
+export function getResearchCampaign(campaignId: number) {
+  return request<ResearchCampaignStatus>(`/research/campaigns/${campaignId}`, { timeoutMs: 60000 });
+}
+
+export function getResearchCampaigns(limit = 50) {
+  return request<ResearchCampaignList>(`/research/campaigns?limit=${limit}`, { timeoutMs: 60000 });
+}
+
+export function controlResearchCampaign(campaignId: number, action: "pause" | "resume") {
+  return request<ResearchCampaignStatus>(`/research/campaigns/${campaignId}/control?action=${action}`, {
+    method: "POST",
+    timeoutMs: 60000
+  });
+}
+
+export function deleteResearchCampaign(campaignId: number, force = false) {
+  return request<{ deleted: boolean; campaign_id: number; name: string; deleted_jobs: number; deleted_evidence_jobs: number; forced: boolean }>(`/research/campaigns/${campaignId}?force=${force}`, {
+    method: "DELETE",
+    timeoutMs: 60000
+  });
+}
+
+export function getResearchCampaignProfile(campaignId: number) {
+  return request<ResearchCampaignProfile>(`/research/campaigns/${campaignId}/profile`, { timeoutMs: 60000 });
+}
+
+export function runParallelResearchCampaign(campaignId: number, workers: number, jobsPerWorker = 10) {
+  const params = new URLSearchParams({ workers: String(workers), jobs_per_worker: String(jobsPerWorker) });
+  return request<{ campaign_id: number; started: boolean; workers: number; jobs_per_worker: number; remaining: number }>(`/research/campaigns/${campaignId}/run-parallel?${params.toString()}`, {
+    method: "POST",
+    timeoutMs: 600000
+  });
 }
 
 export function getValidationRuns() {

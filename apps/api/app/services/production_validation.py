@@ -47,9 +47,17 @@ SIMULATION_TABLES = (
     "research_campaign_jobs",
     "elite_research_candidates",
 )
+_VALIDATION_SCHEMA_READY = False
+_FORWARD_EVIDENCE_SCHEMA_READY = False
 
 
 def ensure_validation_tables(conn: psycopg.Connection) -> None:
+    global _VALIDATION_SCHEMA_READY
+    if _VALIDATION_SCHEMA_READY:
+        return
+    if validation_schema_ready(conn):
+        _VALIDATION_SCHEMA_READY = True
+        return
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS production_validation_runs (
@@ -142,6 +150,52 @@ def ensure_validation_tables(conn: psycopg.Connection) -> None:
             ADD COLUMN IF NOT EXISTS calculation_version TEXT NOT NULL DEFAULT 'production_validation_v1'
         """
     )
+    conn.commit()
+    _VALIDATION_SCHEMA_READY = True
+
+
+def validation_schema_ready(conn: psycopg.Connection) -> bool:
+    try:
+        tables = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.tables
+            WHERE table_name IN (
+                'production_validation_runs',
+                'production_soak_snapshots',
+                'production_fault_injection_results',
+                'production_integrity_audit_results',
+                'production_paper_reconciliation_results',
+                'production_recommendation_outcomes',
+                'production_learning_quality_snapshots',
+                'production_safety_audit_results',
+                'production_readiness_snapshots'
+            )
+            """
+        ).fetchone()
+        if int((tables or {}).get("count") or 0) < 9:
+            return False
+        readiness_columns = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.columns
+            WHERE table_name = 'production_readiness_snapshots'
+              AND column_name IN (
+                'validation_run_id',
+                'readiness_key',
+                'readiness_state',
+                'readiness_score',
+                'category_scores',
+                'gates',
+                'blocking_reasons',
+                'calculation',
+                'calculation_version'
+              )
+            """
+        ).fetchone()
+        return int((readiness_columns or {}).get("count") or 0) >= 9
+    except Exception:
+        return False
 
 
 def verify_migrations(migration_dir: str | Path | None = None) -> dict[str, Any]:
@@ -528,6 +582,12 @@ def paper_ledger_reconciliation(conn: psycopg.Connection, persist: bool = False)
 
 
 def ensure_forward_evidence_tables(conn: psycopg.Connection) -> None:
+    global _FORWARD_EVIDENCE_SCHEMA_READY
+    if _FORWARD_EVIDENCE_SCHEMA_READY:
+        return
+    if forward_evidence_schema_ready(conn):
+        _FORWARD_EVIDENCE_SCHEMA_READY = True
+        return
     statements = [
         """
         ALTER TABLE strategy_deployments
@@ -594,6 +654,70 @@ def ensure_forward_evidence_tables(conn: psycopg.Connection) -> None:
             conn.execute(statement)
         except Exception:
             safe_rollback(conn)
+    conn.commit()
+    _FORWARD_EVIDENCE_SCHEMA_READY = True
+
+
+def forward_evidence_schema_ready(conn: psycopg.Connection) -> bool:
+    try:
+        deployment_columns = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.columns
+            WHERE table_name = 'strategy_deployments'
+              AND column_name IN (
+                'campaign_id',
+                'candidate_id',
+                'strategy_id',
+                'forward_validation_started_at',
+                'evidence_version',
+                'lifecycle_state',
+                'deployment_origin'
+              )
+            """
+        ).fetchone()
+        order_columns = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.columns
+            WHERE table_name = 'paper_orders'
+              AND column_name IN (
+                'campaign_id',
+                'candidate_id',
+                'strategy_id',
+                'strategy_version',
+                'decision_id',
+                'signal_timestamp',
+                'evidence_origin'
+              )
+            """
+        ).fetchone()
+        fill_columns = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.columns
+            WHERE table_name = 'paper_fills'
+              AND column_name IN (
+                'campaign_id',
+                'candidate_id',
+                'deployment_id',
+                'strategy_id',
+                'strategy_version',
+                'decision_id',
+                'signal_timestamp',
+                'evidence_origin'
+              )
+            """
+        ).fetchone()
+        evidence_table = conn.execute("SELECT to_regclass('paper_closed_trade_evidence') AS table_name").fetchone()
+        return (
+            int((deployment_columns or {}).get("count") or 0) >= 7
+            and int((order_columns or {}).get("count") or 0) >= 7
+            and int((fill_columns or {}).get("count") or 0) >= 8
+            and bool((evidence_table or {}).get("table_name"))
+        )
+    except Exception:
+        return False
 
 
 def forward_evidence_eligibility_audit(conn: psycopg.Connection, persist: bool = False) -> dict[str, Any]:

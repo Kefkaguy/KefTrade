@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from app.services.backtester import calculate_metrics, run_backtest, walk_forward_split
+from app.services.backtester import calculate_metrics, count_setup_opportunities, run_backtest, walk_forward_split
 from app.services.strategy import StrategyDecision
 
 
@@ -133,6 +133,20 @@ def test_backtest_can_exit_after_max_holding_bars() -> None:
 
     assert result["trades"]
     assert result["trades"][0]["exit_reason"] == "time_exit"
+
+
+def test_frequency_screen_counts_raw_validation_opportunities_without_simulating_positions() -> None:
+    candles, features = make_rows()
+
+    def always_setup(candle, feature, recent_candles, params):
+        close = Decimal(candle["close"])
+        return StrategyDecision("setup", (close, close), close - Decimal("1"), close + Decimal("2"), Decimal("2"), ["screen"])
+
+    result = count_setup_opportunities(candles, features, PARAMS, always_setup)
+
+    assert result["walk_forward_enabled"] is True
+    assert result["execution_rows"] == 30
+    assert result["opportunities"] == 29
 
 
 def test_expectancy_per_trade_uses_win_loss_asymmetry() -> None:

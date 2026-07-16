@@ -1,6 +1,7 @@
+import { AlertTriangle, Archive, CalendarDays, CheckCircle2, ChevronRight, FileText, ShieldCheck } from "lucide-react";
 import { SavedReports } from "@/components/SavedReports";
 import { GenerateDailyReportButton } from "@/components/DailyReportActions";
-import { Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle } from "@/components/ResearchUI";
+import { DataTable, EmptyState, LineChart } from "@/components/ResearchUI";
 import { getDailyReportAnalytics, getDailyResearchReports } from "@/lib/api";
 import { money, number } from "@/lib/format";
 
@@ -11,170 +12,126 @@ export default async function ReportsPage() {
   ]);
   const latest = dailyReports[0] ?? null;
   const series = analytics?.series ?? [];
+
   return (
-    <div className="pageStack reportsPage">
-      <PageTitle
-        title="Research Reports"
-        description="Persisted daily research operations reports plus browser-local saved evidence reports."
-        actions={<GenerateDailyReportButton />}
-      />
-      <Card title="Daily Research Report System" eyebrow="Stored operations summaries">
-        {latest ? (
-          <>
-            <div className="metricGrid">
-              <MetricCard label="Report date" value={latest.report_date} detail={`Generated ${formatDate(latest.generated_at)}`} />
-              <MetricCard label="Assets scanned" value={latest.summary.assets_scanned.count} detail={latest.summary.assets_scanned.symbols.join(", ") || "No assets scanned"} />
-              <MetricCard label="Setups found" value={latest.summary.setups_found.count} />
-              <MetricCard label="No-setup decisions" value={latest.summary.no_setup_decisions.count} />
-              <MetricCard label="Stale-data blocks" value={latest.summary.stale_data_blocks.count} tone={latest.summary.stale_data_blocks.count ? "warning" : "success"} />
-              <MetricCard label="Scheduler errors" value={latest.summary.scheduler_errors.count} tone={latest.summary.scheduler_errors.count ? "error" : "success"} />
-              <MetricCard label="Paper orders" value={latest.summary.paper_orders.count} detail="Simulated only" />
-              <MetricCard label="Paper fills" value={latest.summary.paper_fills.count} detail="Simulated only" />
-              <MetricCard label="Realized P&L" value={money(latest.summary.pnl.realized)} detail="Simulated" />
-              <MetricCard label="Unrealized P&L" value={money(latest.summary.pnl.unrealized)} detail="Simulated" />
-              <MetricCard label="Scheduler uptime" value={formatUptime(latest.summary.scheduler_uptime)} />
-              <MetricCard label="Important alerts" value={latest.summary.important_alerts.count} tone={latest.summary.important_alerts.count ? "warning" : "success"} />
+    <div className="reportLibrary">
+      <header className="reportLibraryHero">
+        <div>
+          <span className="eyebrow">Research archive</span>
+          <h1>Research reports</h1>
+          <p>A durable record of what KefTrade examined, what it found, and where evidence remains incomplete.</p>
+        </div>
+        <GenerateDailyReportButton />
+      </header>
+
+      {latest ? (
+        <div className="reportReaderLayout">
+          <aside className="reportIndex" aria-label="Report index">
+            <div className="reportIndexHeading">
+              <Archive size={17} />
+              <div><strong>Daily archive</strong><span>{dailyReports.length} stored report{dailyReports.length === 1 ? "" : "s"}</span></div>
             </div>
-            <div className="dashboardGrid">
-              <div className="scoreList">
-                <span>Fresh data <strong>{latest.summary.data_freshness.counts.Healthy ?? 0}</strong></span>
-                <span>Warning data <strong>{latest.summary.data_freshness.counts.Warning ?? 0}</strong></span>
-                <span>Stale data <strong>{latest.summary.data_freshness.counts.Stale ?? 0}</strong></span>
-                <span>Safety <strong>{latest.summary.safety}</strong></span>
+            <nav>
+              {dailyReports.slice(0, 12).map((report, index) => (
+                <a href={index === 0 ? "#current-report" : "#report-history"} className={index === 0 ? "active" : undefined} key={report.report_date}>
+                  <span>{report.report_date}</span><small>{report.summary.assets_scanned.count} assets</small><ChevronRight size={13} />
+                </a>
+              ))}
+            </nav>
+            <div className="reportArchiveSafety"><ShieldCheck size={15} /><span>Simulation evidence only</span></div>
+          </aside>
+
+          <main className="reportReader" id="current-report">
+            <header className="reportDocumentHeader">
+              <div className="reportDocumentIcon"><FileText size={22} /></div>
+              <div>
+                <span>Daily research record</span>
+                <h2>{latest.report_date}</h2>
+                <p>Generated {formatDate(latest.generated_at)}</p>
               </div>
-              <pre className="reportBlock compactReportBlock">{latest.markdown_report}</pre>
-            </div>
-          </>
-        ) : (
-          <EmptyState title="No daily research reports yet." body="Generate today’s report to persist the day’s stored scan, alert, scheduler, paper simulation, P&L, and freshness summary." action={<GenerateDailyReportButton />} />
-        )}
-      </Card>
+              <div className={`reportHealth ${latest.summary.scheduler_errors.count ? "warning" : "healthy"}`}>
+                {latest.summary.scheduler_errors.count ? <AlertTriangle size={15} /> : <CheckCircle2 size={15} />}
+                {latest.summary.scheduler_errors.count ? "Review required" : "Operations stable"}
+              </div>
+            </header>
 
-      <Card title="Historical Performance Analytics" eyebrow="7-day / 30-day / all-time">
-        {analytics && series.length ? (
-          <>
-            <div className="metricGrid">
-              <MetricCard label="7d setups" value={String(analytics.windows["7d"]?.setups_found ?? 0)} detail={`${analytics.windows["7d"]?.no_setup_decisions ?? 0} no-setup decisions`} />
-              <MetricCard label="7d stale blocks" value={String(analytics.windows["7d"]?.stale_data_blocks ?? 0)} tone={Number(analytics.windows["7d"]?.stale_data_blocks ?? 0) ? "warning" : "success"} />
-              <MetricCard label="7d scheduler uptime" value={formatUptime(analytics.windows["7d"]?.avg_scheduler_uptime as number | null)} />
-              <MetricCard label="7d realized P&L Δ" value={money(analytics.windows["7d"]?.realized_pnl_change)} detail="Simulated" />
-              <MetricCard label="30d setups" value={String(analytics.windows["30d"]?.setups_found ?? 0)} detail={`${analytics.windows["30d"]?.scheduler_errors ?? 0} scheduler errors`} />
-              <MetricCard label="All-time reports" value={String(analytics.windows.all_time?.report_count ?? 0)} detail="Stored daily reports" />
-            </div>
-            <div className="dashboardGrid">
-              <Card title="Scheduler uptime" eyebrow="Percent">
-                <LineChart values={series.map((row) => Number(row.scheduler_uptime ?? 0))} label="Scheduler uptime over stored daily reports" />
-              </Card>
-              <Card title="Stale-data frequency" eyebrow="Blocks">
-                <LineChart values={series.map((row) => row.stale_data_blocks)} label="Stale-data blocks over stored daily reports" />
-              </Card>
-            </div>
-            <div className="dashboardGrid">
-              <Card title="Setups found" eyebrow="Review items">
-                <LineChart values={series.map((row) => row.setups_found)} label="Setups found over stored daily reports" />
-              </Card>
-              <Card title="No-setup decisions" eyebrow="Review items">
-                <LineChart values={series.map((row) => row.no_setup_decisions)} label="No-setup decisions over stored daily reports" />
-              </Card>
-            </div>
-            <div className="dashboardGrid">
-              <Card title="Simulated P&L over time" eyebrow="Paper only">
-                <LineChart values={series.map((row) => row.realized_pnl + row.unrealized_pnl)} label="Combined simulated realized and unrealized P&L" />
-              </Card>
-              <Card title="Paper equity over time" eyebrow="Simulated">
-                <LineChart values={series.map((row) => row.equity)} label="Simulated paper equity over stored reports" />
-              </Card>
-            </div>
-          </>
-        ) : (
-          <EmptyState title="No historical analytics yet." body="Generate daily reports across multiple dates to populate trend charts and comparisons." />
-        )}
-      </Card>
+            <section className="reportKeyFindings" aria-label="Key report findings">
+              <ReportFact label="Markets examined" value={latest.summary.assets_scanned.count} detail={latest.summary.assets_scanned.symbols.join(", ") || "None scanned"} />
+              <ReportFact label="Setups retained" value={latest.summary.setups_found.count} detail={`${latest.summary.no_setup_decisions.count} rejected or no setup`} />
+              <ReportFact label="Data warnings" value={latest.summary.data_freshness.counts.Warning ?? 0} detail={`${latest.summary.data_freshness.counts.Stale ?? 0} stale`} />
+              <ReportFact label="Scheduler uptime" value={formatUptime(latest.summary.scheduler_uptime)} detail={`${latest.summary.scheduler_errors.count} errors`} />
+            </section>
 
-      <div className="dashboardGrid">
-        <Card title="Asset comparison" eyebrow="All stored daily reports">
-          {analytics?.asset_comparison.length ? (
-            <DataTable
-              columns={["Asset", "Scanned days", "Setups", "Stale blocks", "Important alerts"]}
-              rows={analytics.asset_comparison.slice(0, 12).map((row) => [String(row.symbol), row.scanned_days, row.setups, row.stale_blocks, row.important_alerts])}
-            />
-          ) : <EmptyState title="No asset comparison yet." body="Asset rankings will appear after reports contain scan, setup, stale-data, and alert history." />}
-        </Card>
-        <Card title="Strategy comparison" eyebrow="All stored daily reports">
-          {analytics?.strategy_comparison.length ? (
-            <DataTable
-              columns={["Strategy", "Setups", "No setup", "Important alerts"]}
-              rows={analytics.strategy_comparison.slice(0, 12).map((row) => [String(row.strategy), row.setups, row.no_setup, row.important_alerts])}
-            />
-          ) : <EmptyState title="No strategy comparison yet." body="Strategy summaries will appear when setup and no-setup review records are present." />}
-        </Card>
-      </div>
+            <section className="reportNarrative">
+              <div className="reportSectionHeading"><span>01</span><div><h3>Research record</h3><p>The complete persisted daily summary.</p></div></div>
+              <pre>{latest.markdown_report}</pre>
+            </section>
 
-      <Card title="Recurring Operational Failures" eyebrow="Grouped stale-data and scheduler issues">
-        {analytics?.recurring_operational_failures.length ? (
-          <DataTable
-            columns={["Symbol", "Type", "Count", "Dates", "Message"]}
-            rows={analytics.recurring_operational_failures.slice(0, 12).map((row) => [
-              String(row.symbol ?? "SYSTEM"),
-              String(row.event_type ?? "unknown"),
-              String(row.count ?? 0),
-              Array.isArray(row.dates) ? row.dates.join(", ") : "",
-              String(row.message ?? "")
-            ])}
-          />
-        ) : <EmptyState title="No recurring failures detected." body="Recurring operational issues are grouped from stored stale-data blocks and scheduler errors." />}
-      </Card>
+            <section className="reportEvidenceLedger">
+              <div className="reportSectionHeading"><span>02</span><div><h3>Evidence ledger</h3><p>Operational and simulation totals behind this report.</p></div></div>
+              <dl>
+                <LedgerRow label="Fresh market datasets" value={latest.summary.data_freshness.counts.Healthy ?? 0} />
+                <LedgerRow label="Stale-data blocks" value={latest.summary.stale_data_blocks.count} />
+                <LedgerRow label="Important alerts" value={latest.summary.important_alerts.count} />
+                <LedgerRow label="Simulated orders / fills" value={`${latest.summary.paper_orders.count} / ${latest.summary.paper_fills.count}`} />
+                <LedgerRow label="Simulated realized P&L" value={money(latest.summary.pnl.realized)} />
+                <LedgerRow label="Simulated unrealized P&L" value={money(latest.summary.pnl.unrealized)} />
+              </dl>
+              <p><ShieldCheck size={14} />{latest.summary.safety}</p>
+            </section>
 
-      <Card title="Weekly Research Summary" eyebrow="Last 7 stored reports">
-        {analytics ? (
-          <div className="dashboardGrid wideLeft">
-            <div className="scoreList">
-              <span>Reports reviewed <strong>{String(analytics.weekly_summary.summary.report_count ?? 0)}</strong></span>
-              <span>Setups found <strong>{String(analytics.weekly_summary.summary.setups_found ?? 0)}</strong></span>
-              <span>No-setup decisions <strong>{String(analytics.weekly_summary.summary.no_setup_decisions ?? 0)}</strong></span>
-              <span>Stale-data blocks <strong>{String(analytics.weekly_summary.summary.stale_data_blocks ?? 0)}</strong></span>
-              <span>Scheduler errors <strong>{String(analytics.weekly_summary.summary.scheduler_errors ?? 0)}</strong></span>
-              <span>Paper orders <strong>{String(analytics.weekly_summary.summary.paper_orders ?? 0)}</strong></span>
-            </div>
-            <div className="actionNote">
-              <strong>Summary</strong>
-              <p>{analytics.weekly_summary.narrative}</p>
-              <p className="formHint">Research-only weekly summary. All paper values are simulated.</p>
-            </div>
-          </div>
-        ) : <EmptyState title="No weekly summary yet." body="Weekly summaries are derived from stored daily reports." />}
-      </Card>
+            <ReportAppendix title="Historical evidence" meta={`${analytics?.windows.all_time?.report_count ?? 0} reports`}>
+              {analytics && series.length ? (
+                <>
+                  <div className="reportWindowStrip">
+                    <ReportFact label="7d setups" value={analytics.windows["7d"]?.setups_found ?? 0} detail={`${analytics.windows["7d"]?.no_setup_decisions ?? 0} no-setup`} />
+                    <ReportFact label="7d stale blocks" value={analytics.windows["7d"]?.stale_data_blocks ?? 0} detail="Data readiness" />
+                    <ReportFact label="30d setups" value={analytics.windows["30d"]?.setups_found ?? 0} detail={`${analytics.windows["30d"]?.scheduler_errors ?? 0} scheduler errors`} />
+                    <ReportFact label="7d simulated P&L change" value={money(analytics.windows["7d"]?.realized_pnl_change)} detail="Paper evidence" />
+                  </div>
+                  <div className="reportChartGrid">
+                    <ReportChart title="Scheduler uptime"><LineChart values={series.map((row) => Number(row.scheduler_uptime ?? 0))} label="Scheduler uptime over stored daily reports" /></ReportChart>
+                    <ReportChart title="Stale-data frequency"><LineChart values={series.map((row) => row.stale_data_blocks)} label="Stale-data blocks over stored daily reports" /></ReportChart>
+                    <ReportChart title="Setups retained"><LineChart values={series.map((row) => row.setups_found)} label="Setups found over stored daily reports" /></ReportChart>
+                    <ReportChart title="No-setup decisions"><LineChart values={series.map((row) => row.no_setup_decisions)} label="No-setup decisions over stored daily reports" /></ReportChart>
+                    <ReportChart title="Simulated P&L"><LineChart values={series.map((row) => row.realized_pnl + row.unrealized_pnl)} label="Combined simulated P&L over stored reports" /></ReportChart>
+                    <ReportChart title="Paper equity"><LineChart values={series.map((row) => row.equity)} label="Simulated paper equity over stored reports" /></ReportChart>
+                  </div>
+                </>
+              ) : <EmptyState title="History begins with this report" body="Additional daily reports will reveal evidence and operations trends." />}
+            </ReportAppendix>
 
-      <Card title="Recent daily reports" eyebrow="History">
-        {dailyReports.length ? (
-          <DataTable
-            columns={["Date", "Assets", "Setups", "No setup", "Stale", "Scheduler errors", "Orders", "Fills", "Realized", "Unrealized"]}
-            rows={dailyReports.map((report) => [
-              report.report_date,
-              report.summary.assets_scanned.count,
-              report.summary.setups_found.count,
-              report.summary.no_setup_decisions.count,
-              report.summary.stale_data_blocks.count,
-              report.summary.scheduler_errors.count,
-              report.summary.paper_orders.count,
-              report.summary.paper_fills.count,
-              money(report.summary.pnl.realized),
-              money(report.summary.pnl.unrealized)
-            ])}
-          />
-        ) : <EmptyState title="No report history." body="Daily research reports will appear here after generation." />}
-      </Card>
+            <ReportAppendix title="Comparisons and exceptions" meta="Stored evidence">
+              <div className="reportComparisonGrid">
+                <div><h4>Assets</h4>{analytics?.asset_comparison.length ? <DataTable columns={["Asset", "Days", "Setups", "Stale", "Alerts"]} rows={analytics.asset_comparison.slice(0, 12).map((row) => [String(row.symbol), row.scanned_days, row.setups, row.stale_blocks, row.important_alerts])} /> : <EmptyState title="No asset comparison" body="Asset evidence appears after markets are scanned across reports." />}</div>
+                <div><h4>Strategies</h4>{analytics?.strategy_comparison.length ? <DataTable columns={["Strategy", "Setups", "No setup", "Alerts"]} rows={analytics.strategy_comparison.slice(0, 12).map((row) => [String(row.strategy), row.setups, row.no_setup, row.important_alerts])} /> : <EmptyState title="No strategy comparison" body="Strategy evidence appears after setup reviews are stored." />}</div>
+              </div>
+              <div className="reportExceptionTable">
+                <h4>Recurring operational failures</h4>
+                {analytics?.recurring_operational_failures.length ? <DataTable columns={["Symbol", "Type", "Count", "Dates", "Message"]} rows={analytics.recurring_operational_failures.slice(0, 12).map((row) => [String(row.symbol ?? "SYSTEM"), String(row.event_type ?? "unknown"), String(row.count ?? 0), Array.isArray(row.dates) ? row.dates.join(", ") : "", String(row.message ?? "")])} /> : <EmptyState title="No recurring failures" body="No repeated stale-data or scheduler issue is present in stored reports." />}
+              </div>
+            </ReportAppendix>
+
+            <ReportAppendix title="Weekly synthesis" meta="Last 7 reports">
+              {analytics ? <div className="weeklySynthesis"><div><CalendarDays size={18} /><strong>{String(analytics.weekly_summary.summary.report_count ?? 0)} reports reviewed</strong></div><p>{analytics.weekly_summary.narrative}</p><span>{String(analytics.weekly_summary.summary.setups_found ?? 0)} setups · {String(analytics.weekly_summary.summary.no_setup_decisions ?? 0)} no-setup decisions · {String(analytics.weekly_summary.summary.scheduler_errors ?? 0)} scheduler errors</span></div> : <EmptyState title="No weekly synthesis" body="The synthesis is derived from stored daily reports." />}
+            </ReportAppendix>
+
+            <section className="reportHistory" id="report-history">
+              <div className="reportSectionHeading"><span>03</span><div><h3>Report history</h3><p>Every persisted daily research record.</p></div></div>
+              <DataTable columns={["Date", "Assets", "Setups", "No setup", "Stale", "Errors", "Orders", "Fills", "Realized", "Unrealized"]} rows={dailyReports.map((report) => [report.report_date, report.summary.assets_scanned.count, report.summary.setups_found.count, report.summary.no_setup_decisions.count, report.summary.stale_data_blocks.count, report.summary.scheduler_errors.count, report.summary.paper_orders.count, report.summary.paper_fills.count, money(report.summary.pnl.realized), money(report.summary.pnl.unrealized)])} />
+            </section>
+          </main>
+        </div>
+      ) : <div className="reportFirstRun"><FileText size={28} /><EmptyState title="Create the first research record" body="Generate today's report to persist scan, evidence, scheduler, paper simulation, P&L, and data-readiness history." action={<GenerateDailyReportButton />} /></div>}
 
       <SavedReports />
     </div>
   );
 }
 
-function formatDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : "Never";
-}
-
-function formatUptime(value: string | number | null) {
-  if (value === null || value === undefined) return "manual/disabled";
-  return `${number(value, 2)}%`;
-}
+function ReportFact({ label, value, detail }: { label: string; value: string | number; detail: string }) { return <div className="reportFact"><span>{label}</span><strong>{value}</strong><small>{detail}</small></div>; }
+function LedgerRow({ label, value }: { label: string; value: string | number }) { return <div><dt>{label}</dt><dd>{value}</dd></div>; }
+function ReportAppendix({ title, meta, children }: { title: string; meta: string; children: React.ReactNode }) { return <details className="reportAppendix"><summary><span>{title}</span><small>{meta}</small><ChevronRight size={16} /></summary><div>{children}</div></details>; }
+function ReportChart({ title, children }: { title: string; children: React.ReactNode }) { return <div className="reportChart"><h4>{title}</h4>{children}</div>; }
+function formatDate(value?: string | null) { return value ? new Date(value).toLocaleString() : "Never"; }
+function formatUptime(value: string | number | null) { return value === null || value === undefined ? "Manual" : `${number(value, 2)}%`; }

@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+import "@fontsource-variable/manrope";
+import "@fontsource-variable/jetbrains-mono";
 import { AppShell } from "@/components/AppShell";
 import "./globals.css";
 

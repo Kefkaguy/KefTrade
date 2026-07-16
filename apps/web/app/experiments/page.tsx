@@ -22,13 +22,13 @@ export default async function ExperimentsPage() {
           <div className="actionNote">
             <strong>Hypothesis experiment</strong>
             <p>Create or choose a hypothesis, then run deterministic generated candidates against validation datasets.</p>
-            <Link className="button compact" href="/hypotheses">Open hypotheses</Link>
+            <Link className="button compact" href="/research">Open campaigns</Link>
           </div>
           <div className="actionNote">
             <strong>Alpha discovery and validation</strong>
             <p>Generate candidates in discovery, then validate candidates through evidence gates before asking the copilot about results.</p>
             <div className="toolbar">
-              <Link className="button compact" href="/alpha">Discovery</Link>
+              <Link className="button compact" href="/research">Discovery</Link>
               <Link className="button compact secondary" href="/validation">Validation</Link>
             </div>
           </div>
@@ -65,7 +65,7 @@ export default async function ExperimentsPage() {
           <EmptyState
             title="No experiments yet."
             body="Run alpha discovery or validation to create the first experiment record."
-            action={<Link className="button" href="/alpha">Run alpha discovery</Link>}
+            action={<Link className="button" href="/research">Start research</Link>}
           />
         )}
       </Card>

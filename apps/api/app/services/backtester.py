@@ -3,6 +3,8 @@ from decimal import Decimal
 from statistics import mean, pstdev
 from typing import Any
 
+import numpy as np
+
 from app.services.strategy import StrategyFn, trend_pullback_decision
 
 SAME_CANDLE_EXIT_POLICY = "stop_first"
@@ -30,8 +32,10 @@ def run_backtest(
     features: list[dict[str, Any]],
     params: dict[str, Any],
     strategy_decide: StrategyFn = trend_pullback_decision,
+    market_arrays: dict[str, np.ndarray] | None = None,
 ) -> dict[str, Any]:
     rows = combine_candles_features(candles, features)
+    arrays = market_arrays if market_arrays is not None and len(market_arrays["low"]) == len(rows) else build_market_arrays(rows)
     train_rows, validation_rows = walk_forward_split(rows, float(params["walk_forward_train_ratio"]))
     execution_rows = validation_rows or rows
 
@@ -73,45 +77,25 @@ def run_backtest(
 
         max_risk = equity * risk_per_trade
         quantity = max_risk / risk_per_unit
-        exit_price = None
-        exit_reason = "end_of_data"
-        exit_index = len(rows) - 1
+        exit_index, exit_reason = find_exit_index(
+            rows,
+            arrays,
+            start_index=i + entry_offset,
+            stop_loss=decision.stop_loss,
+            take_profit=effective_take_profit,
+            max_holding_bars=int(params.get("max_holding_bars") or 0),
+        )
+        exit_candle = rows[exit_index]["candle"]
+        if exit_reason.startswith("stop_loss"):
+            exit_price = decision.stop_loss * (Decimal("1") - slippage_rate)
+        elif exit_reason == "take_profit":
+            exit_price = effective_take_profit * (Decimal("1") - slippage_rate)
+        else:
+            exit_price = Decimal(exit_candle["close"]) * (Decimal("1") - slippage_rate)
 
-        for j in range(i + entry_offset, len(rows)):
-            future_candle = rows[j]["candle"]
-            low = Decimal(future_candle["low"])
-            high = Decimal(future_candle["high"])
-            close = Decimal(future_candle["close"])
-            mark_price = close
-            max_holding_bars = int(params.get("max_holding_bars") or 0)
-
-            # Explicit same-candle policy: when both stop and target are touched
-            # inside one OHLC candle, assume the stop filled first.
-            stop_touched = low <= decision.stop_loss
-            target_touched = high >= effective_take_profit
-            if stop_touched:
-                exit_price = decision.stop_loss * (Decimal("1") - slippage_rate)
-                exit_reason = "stop_loss" if not target_touched else f"stop_loss_{SAME_CANDLE_EXIT_POLICY}"
-                exit_index = j
-                mark_price = exit_price
-                equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))
-                break
-            if target_touched:
-                exit_price = effective_take_profit * (Decimal("1") - slippage_rate)
-                exit_reason = "take_profit"
-                exit_index = j
-                mark_price = exit_price
-                equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))
-                break
-            if max_holding_bars > 0 and (j - (i + entry_offset)) >= max_holding_bars:
-                exit_price = close * (Decimal("1") - slippage_rate)
-                exit_reason = "time_exit"
-                exit_index = j
-                mark_price = exit_price
-                equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))
-                break
-            exit_price = close * (Decimal("1") - slippage_rate)
-            equity_curve.append(mark_to_market_equity(equity, entry_price, exit_price, quantity))
+        for mark_index in range(i + entry_offset, exit_index + 1):
+            mark_price = exit_price if mark_index == exit_index else Decimal(rows[mark_index]["candle"]["close"])
+            equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))
 
         if exit_price is None:
             i += 1
@@ -165,6 +149,67 @@ def run_backtest(
         "drawdown_curve": build_drawdown_curve(realized_equity_points),
         "equity_curve_summary": summarize_equity_curve(equity_curve),
     }
+
+
+def count_setup_opportunities(
+    candles: list[dict[str, Any]],
+    features: list[dict[str, Any]],
+    params: dict[str, Any],
+    strategy_decide: StrategyFn,
+) -> dict[str, Any]:
+    rows = combine_candles_features(candles, features)
+    _train_rows, validation_rows = walk_forward_split(rows, float(params["walk_forward_train_ratio"]))
+    execution_rows = validation_rows or rows
+    start_index = rows.index(execution_rows[0]) if execution_rows else 0
+    count = 0
+    for index in range(max(start_index, 50), max(0, len(rows) - 1)):
+        current = rows[index]
+        recent_window_bars = max(0, int(params.get("recent_candle_window_bars") or 0))
+        recent_start = max(0, index + 1 - recent_window_bars) if recent_window_bars else 0
+        recent_candles = [row["candle"] for row in rows[recent_start : index + 1]]
+        decision = strategy_decide(current["candle"], current["feature"], recent_candles, params)
+        if decision.signal == "setup" and decision.stop_loss is not None and decision.take_profit is not None:
+            count += 1
+    return {
+        "opportunities": count,
+        "execution_rows": len(execution_rows),
+        "walk_forward_enabled": bool(validation_rows),
+    }
+
+
+def build_market_arrays(rows: list[dict[str, Any]]) -> dict[str, np.ndarray]:
+    return {
+        "low": np.fromiter((float(row["candle"]["low"]) for row in rows), dtype=np.float64, count=len(rows)),
+        "high": np.fromiter((float(row["candle"]["high"]) for row in rows), dtype=np.float64, count=len(rows)),
+    }
+
+
+def find_exit_index(
+    rows: list[dict[str, Any]],
+    arrays: dict[str, np.ndarray],
+    *,
+    start_index: int,
+    stop_loss: Decimal,
+    take_profit: Decimal,
+    max_holding_bars: int,
+) -> tuple[int, str]:
+    final_index = len(rows) - 1
+    search_end = min(final_index, start_index + max_holding_bars) if max_holding_bars > 0 else final_index
+    lows = arrays["low"][start_index : search_end + 1]
+    highs = arrays["high"][start_index : search_end + 1]
+    hit_offsets = np.flatnonzero((lows <= float(stop_loss)) | (highs >= float(take_profit)))
+    for offset in hit_offsets:
+        index = start_index + int(offset)
+        candle = rows[index]["candle"]
+        stop_touched = Decimal(candle["low"]) <= stop_loss
+        target_touched = Decimal(candle["high"]) >= take_profit
+        if stop_touched:
+            return index, "stop_loss" if not target_touched else f"stop_loss_{SAME_CANDLE_EXIT_POLICY}"
+        if target_touched:
+            return index, "take_profit"
+    if max_holding_bars > 0 and search_end < final_index:
+        return search_end, "time_exit"
+    return final_index, "end_of_data"
 
 
 def mark_to_market_equity(equity_before_trade: Decimal, entry_price: Decimal, mark_price: Decimal, quantity: Decimal) -> Decimal:

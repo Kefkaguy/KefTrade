@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import UTC, date, datetime, time as dt_time, timedelta
 from decimal import Decimal
 from hashlib import sha256
 import os
 import socket
+from threading import Lock, Thread
 import time
 from typing import Any
 
@@ -14,6 +16,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.services.evidence_alerts import create_evidence_alert
+from app.services.backtester import build_market_arrays, combine_candles_features
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.research_learning import learn_from_completed_campaign
@@ -22,6 +25,7 @@ from app.services.strategy_discovery import (
     DiscoveryCandidate,
     canonical_candidate_key,
     evaluate_candidate,
+    generate_balanced_discovery_candidates,
     generate_discovery_candidates,
     jsonable,
 )
@@ -67,6 +71,10 @@ DEFAULT_FORWARD_THRESHOLDS: dict[str, Any] = {
     "maximum_execution_error_rate": 0.05,
     "maximum_stale_data_block_rate": 0.20,
 }
+_CAMPAIGN_SCHEMA_LOCK = Lock()
+_CAMPAIGN_SCHEMA_READY = False
+_PARALLEL_POOLS_LOCK = Lock()
+_PARALLEL_POOLS: dict[int, dict[str, Any]] = {}
 DRIFT_THRESHOLDS: dict[str, dict[str, float]] = {
     "profit_factor": {"warning": 0.30, "severe": 0.55},
     "expectancy": {"warning": 0.35, "severe": 0.65},
@@ -121,7 +129,7 @@ DEFAULT_UNIVERSES: tuple[dict[str, Any], ...] = (
 )
 
 
-def ensure_campaign_tables(conn: psycopg.Connection) -> None:
+def _ensure_campaign_tables(conn: psycopg.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS research_universes (
@@ -201,12 +209,11 @@ def ensure_campaign_tables(conn: psycopg.Connection) -> None:
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
-            CONSTRAINT research_campaign_jobs_status_check CHECK (status IN ('queued', 'running', 'completed', 'rejected', 'promoted', 'failed', 'canceled')),
+            CONSTRAINT research_campaign_jobs_status_check CHECK (status IN ('queued', 'running', 'completed', 'rejected', 'promoted', 'failed', 'canceled', 'blocked_data', 'deferred_rate_limit', 'retrying')),
             CONSTRAINT research_campaign_jobs_simulation_only_check CHECK (simulation_only = TRUE)
         )
         """
     )
-    conn.execute("ALTER TABLE research_campaign_jobs DROP CONSTRAINT IF EXISTS research_campaign_jobs_status_check")
     conn.execute(
         """
         ALTER TABLE research_campaign_jobs
@@ -217,13 +224,8 @@ def ensure_campaign_tables(conn: psycopg.Connection) -> None:
             ADD COLUMN IF NOT EXISTS failure_classification TEXT,
             ADD COLUMN IF NOT EXISTS deferred_until TIMESTAMPTZ,
             ADD COLUMN IF NOT EXISTS blocked_reason TEXT,
-            ADD COLUMN IF NOT EXISTS execution_runtime_ms INTEGER
-        """
-    )
-    conn.execute(
-        """
-        ALTER TABLE research_campaign_jobs ADD CONSTRAINT research_campaign_jobs_status_check
-        CHECK (status IN ('queued', 'running', 'completed', 'rejected', 'promoted', 'failed', 'canceled', 'blocked_data', 'deferred_rate_limit', 'retrying'))
+            ADD COLUMN IF NOT EXISTS execution_runtime_ms INTEGER,
+            ADD COLUMN IF NOT EXISTS execution_profile JSONB NOT NULL DEFAULT '{}'::jsonb
         """
     )
     conn.execute(
@@ -444,6 +446,20 @@ def ensure_operations_tables(conn: psycopg.Connection) -> None:
     )
 
 
+def ensure_campaign_tables(conn: psycopg.Connection) -> None:
+    global _CAMPAIGN_SCHEMA_READY
+    is_real_connection = conn.__class__.__module__.startswith("psycopg")
+    if is_real_connection and _CAMPAIGN_SCHEMA_READY:
+        return
+    with _CAMPAIGN_SCHEMA_LOCK:
+        if is_real_connection and _CAMPAIGN_SCHEMA_READY:
+            return
+        _ensure_campaign_tables(conn)
+        if is_real_connection:
+            conn.commit()
+            _CAMPAIGN_SCHEMA_READY = True
+
+
 def seed_default_universes(conn: psycopg.Connection) -> None:
     ensure_campaign_tables(conn)
     for universe in DEFAULT_UNIVERSES:
@@ -531,7 +547,7 @@ def create_research_campaign(
     universe = get_universe(conn, universe_key)
     assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
     selected_timeframes = list(timeframes or universe.get("default_timeframes") or DEFAULT_CAMPAIGN_TIMEFRAMES)
-    candidates = generate_discovery_candidates(max_candidates=max_candidates)
+    candidates = generate_balanced_discovery_candidates(max_candidates=max_candidates)
     campaign_key = research_campaign_key(universe_key, assets, selected_timeframes, max_candidates)
     campaign_name = name or f"{universe['name']} strategy discovery campaign"
     row = conn.execute(
@@ -547,7 +563,13 @@ def create_research_campaign(
             campaign_name,
             universe_key,
             max_candidates,
-            Jsonb({"asset_limit": asset_limit, "timeframes": selected_timeframes, "campaign_version": CAMPAIGN_VERSION}),
+            Jsonb({
+                "asset_limit": asset_limit,
+                "timeframes": selected_timeframes,
+                "campaign_version": CAMPAIGN_VERSION,
+                "candidate_generation": "family_balanced_frequency_hypotheses_v1",
+                "validation_policy": "All existing trade-count, quality, walk-forward, and cross-market gates remain unchanged.",
+            }),
             Jsonb(DEFAULT_SCHEDULING_CONFIG),
             SAFETY_STATEMENT,
         ),
@@ -2198,22 +2220,35 @@ def strategy_family_for_candidate(candidate: DiscoveryCandidate | dict[str, Any]
     return "Other"
 
 
-def run_research_campaign_batch(conn: psycopg.Connection, *, campaign_id: int, batch_size: int = 50, worker_id: str | None = None) -> dict[str, Any]:
-    ensure_campaign_tables(conn)
+def run_research_campaign_batch(
+    conn: psycopg.Connection,
+    *,
+    campaign_id: int,
+    batch_size: int = 50,
+    worker_id: str | None = None,
+    ensure_tables: bool = True,
+    coordinate_campaign: bool = True,
+    dataset_cache: dict[tuple[str, str, bool], dict[str, Any]] | None = None,
+    allowed_dataset_keys: list[str] | None = None,
+) -> dict[str, Any]:
+    if ensure_tables:
+        ensure_campaign_tables(conn)
     campaign = get_campaign(conn, campaign_id)
     if campaign["status"] in {"paused", "canceled", "completed"}:
         return {"campaign_id": campaign_id, "status": campaign["status"], "processed": 0, "simulation_only": True}
     config = scheduling_config(campaign)
-    recover_expired_campaign_jobs(conn, campaign_id=campaign_id, retry_limit=int(config["retry_limit"]))
-    conn.execute(
-        """
-        UPDATE research_campaigns
-        SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
-        WHERE id = %s AND status IN ('queued', 'running', 'failed')
-        """,
-        (campaign_id,),
-    )
+    if coordinate_campaign:
+        recover_expired_campaign_jobs(conn, campaign_id=campaign_id, retry_limit=int(config["retry_limit"]))
+        conn.execute(
+            """
+            UPDATE research_campaigns
+            SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+            WHERE id = %s AND status IN ('queued', 'running', 'failed')
+            """,
+            (campaign_id,),
+        )
     worker_id = worker_id or deterministic_worker_id(campaign_id)
+    claim_started = time.perf_counter()
     jobs = claim_campaign_jobs(
         conn,
         campaign_id=campaign_id,
@@ -2221,9 +2256,12 @@ def run_research_campaign_batch(conn: psycopg.Connection, *, campaign_id: int, b
         batch_size=min(batch_size, int(config["batch_size"])),
         lease_seconds=int(config["worker_lease_seconds"]),
         retry_limit=int(config["retry_limit"]),
+        allowed_dataset_keys=allowed_dataset_keys,
     )
+    queue_claim_ms = round((time.perf_counter() - claim_started) * 1000, 3)
     completed: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
+    worker_dataset_cache = dataset_cache if dataset_cache is not None else {}
     for job in jobs:
         started = time.perf_counter()
         try:
@@ -2235,9 +2273,13 @@ def run_research_campaign_batch(conn: psycopg.Connection, *, campaign_id: int, b
                 continue
             refresh_job_heartbeat(conn, int(job["id"]), worker_id, int(config["worker_lease_seconds"]))
             best_effort_worker_heartbeat(conn, worker_id, status="running")
-            result = run_campaign_job(conn, dict(job))
+            job_payload = {**dict(job), "_dataset_cache": worker_dataset_cache}
+            result = run_campaign_job(conn, job_payload)
             runtime_ms = int((time.perf_counter() - started) * 1000)
             status = "promoted" if passes_single_market_validation(result) else "rejected"
+            profile = dict(result.pop("execution_profile", {}))
+            profile["queue_operations_ms"] = round(queue_claim_ms / max(1, len(jobs)), 3)
+            write_started = time.perf_counter()
             conn.execute(
                 """
                 UPDATE research_campaign_jobs
@@ -2260,7 +2302,8 @@ def run_research_campaign_batch(conn: psycopg.Connection, *, campaign_id: int, b
                     job["id"],
                 ),
             )
-            record_job_runtime(conn, int(job["id"]), runtime_ms)
+            profile["writing_results_ms"] = round((time.perf_counter() - write_started) * 1000, 3)
+            record_job_runtime(conn, int(job["id"]), runtime_ms, profile)
             best_effort_worker_heartbeat(conn, worker_id, status="running")
             completed.append({"job_id": job["id"], "candidate_id": job["candidate_id"], "symbol": job["symbol"], "timeframe": job["timeframe"], "status": status})
         except Exception as error:  # noqa: BLE001 - one failed asset/timeframe must not stop the campaign
@@ -2268,13 +2311,14 @@ def run_research_campaign_batch(conn: psycopg.Connection, *, campaign_id: int, b
             fail_or_retry_claimed_job(conn, dict(job), error, config)
             best_effort_worker_heartbeat(conn, worker_id, status="running")
             failed.append({"job_id": job["id"], "candidate_id": job["candidate_id"], "symbol": job["symbol"], "timeframe": job["timeframe"], "error": str(error)})
-    analytics = refresh_campaign_analytics(conn, campaign_id)
     remaining = open_job_count(conn, campaign_id)
-    if remaining == 0:
-        finalize_research_campaign(conn, campaign_id)
-        analytics = refresh_campaign_analytics(conn, campaign_id)
-    else:
-        update_campaign_counts(conn, campaign_id)
+    analytics: dict[str, Any] = {}
+    if coordinate_campaign:
+        if remaining == 0:
+            analytics = finalize_research_campaign(conn, campaign_id)
+        else:
+            update_campaign_counts(conn, campaign_id)
+            analytics = campaign_progress_analytics(conn, campaign_id)
     conn.commit()
     return {
         "campaign_id": campaign_id,
@@ -2299,15 +2343,24 @@ def claim_campaign_jobs(
     batch_size: int,
     lease_seconds: int,
     retry_limit: int,
+    allowed_dataset_keys: list[str] | None = None,
 ) -> list[dict[str, Any]]:
+    dataset_filter = ""
+    params: tuple[Any, ...]
+    if allowed_dataset_keys:
+        dataset_filter = "AND (symbol || '|' || timeframe) = ANY(%s::text[])"
+        params = (campaign_id, retry_limit, allowed_dataset_keys, batch_size, worker_id, lease_seconds, worker_id)
+    else:
+        params = (campaign_id, retry_limit, batch_size, worker_id, lease_seconds, worker_id)
     rows = conn.execute(
-        """
+        f"""
         WITH claimable AS (
             SELECT id
             FROM research_campaign_jobs
             WHERE campaign_id = %s
               AND simulation_only = TRUE
               AND attempts < %s
+              {dataset_filter}
               AND (
                   status = 'queued'
                   OR (status IN ('retrying', 'blocked_data', 'deferred_rate_limit') AND (deferred_until IS NULL OR deferred_until <= NOW()))
@@ -2333,14 +2386,17 @@ def claim_campaign_jobs(
         WHERE j.id = claimable.id
         RETURNING j.*
         """,
-        (campaign_id, retry_limit, batch_size, worker_id, lease_seconds, worker_id),
+        params,
     ).fetchall()
     return [dict(row) for row in rows]
 
 
-def record_job_runtime(conn: psycopg.Connection, job_id: int, runtime_ms: int) -> None:
+def record_job_runtime(conn: psycopg.Connection, job_id: int, runtime_ms: int, profile: dict[str, Any] | None = None) -> None:
     try:
-        conn.execute("UPDATE research_campaign_jobs SET execution_runtime_ms = %s WHERE id = %s", (runtime_ms, job_id))
+        conn.execute(
+            "UPDATE research_campaign_jobs SET execution_runtime_ms = %s, execution_profile = %s WHERE id = %s",
+            (runtime_ms, Jsonb(jsonable(profile or {})), job_id),
+        )
     except Exception:
         safe_rollback(conn)
 
@@ -2493,9 +2549,44 @@ def fail_or_retry_claimed_job(conn: psycopg.Connection, job: dict[str, Any], err
     )
 
 
-def run_campaign_job(conn: psycopg.Connection, job: dict[str, Any]) -> dict[str, Any]:
+def run_campaign_job(
+    conn: psycopg.Connection,
+    job: dict[str, Any],
+) -> dict[str, Any]:
     symbol = job["symbol"]
     timeframe = job["timeframe"]
+    candidate = candidate_from_payload(job["candidate"])
+    needs_enriched_context = (
+        candidate.parameters.get("phase_9_11_campaign_version") == STRATEGY_REDESIGN_CAMPAIGN_VERSION
+        or candidate.parameters.get("phase_9_12_campaign_version") == VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION
+    )
+    provided_cache = job.get("_dataset_cache")
+    cache = provided_cache if isinstance(provided_cache, dict) else {}
+    cache_key = (str(symbol), str(timeframe), needs_enriched_context)
+    dataset = cache.get(cache_key)
+    cache_hit = dataset is not None
+    if dataset is None:
+        dataset = load_campaign_dataset(conn, symbol, timeframe, needs_enriched_context)
+        cache[cache_key] = dataset
+    simulation_started = time.perf_counter()
+    row = evaluate_candidate(
+        candidate,
+        dataset["candles"],
+        dataset["features"],
+        dataset["context_by_time"],
+        market_arrays=dataset["market_arrays"],
+    )
+    row["execution_profile"] = {
+        "data_loading_ms": 0 if cache_hit else dataset["data_loading_ms"],
+        "indicator_calculation_ms": 0 if cache_hit else dataset["indicator_calculation_ms"],
+        "simulation_ms": round((time.perf_counter() - simulation_started) * 1000, 3),
+        "dataset_cache_hit": cache_hit,
+    }
+    return {**row, "symbol": symbol, "timeframe": timeframe, "campaign_version": CAMPAIGN_VERSION}
+
+
+def load_campaign_dataset(conn: psycopg.Connection, symbol: str, timeframe: str, enriched_context: bool) -> dict[str, Any]:
+    load_started = time.perf_counter()
     sync_market_regimes(conn, symbol=symbol, timeframe=timeframe)
     candles = load_candles(conn, symbol, timeframe)
     features = list(
@@ -2509,16 +2600,21 @@ def run_campaign_job(conn: psycopg.Connection, job: dict[str, Any]) -> dict[str,
             (symbol, timeframe),
         ).fetchall()
     )
-    candidate = candidate_from_payload(job["candidate"])
-    if (
-        candidate.parameters.get("phase_9_11_campaign_version") == STRATEGY_REDESIGN_CAMPAIGN_VERSION
-        or candidate.parameters.get("phase_9_12_campaign_version") == VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION
-    ):
-        features = enrich_phase_9_11_context(conn, symbol, timeframe, features)
     regimes = load_regimes(conn, symbol=symbol, timeframe=timeframe)
+    data_loading_ms = round((time.perf_counter() - load_started) * 1000, 3)
+    indicator_started = time.perf_counter()
+    if enriched_context:
+        features = enrich_phase_9_11_context(conn, symbol, timeframe, features)
     context_by_time = build_context_by_time(candles, features, regimes)
-    row = evaluate_candidate(candidate, candles, features, context_by_time)
-    return {**row, "symbol": symbol, "timeframe": timeframe, "campaign_version": CAMPAIGN_VERSION}
+    rows = combine_candles_features(candles, features)
+    return {
+        "candles": candles,
+        "features": features,
+        "context_by_time": context_by_time,
+        "market_arrays": build_market_arrays(rows),
+        "data_loading_ms": data_loading_ms,
+        "indicator_calculation_ms": round((time.perf_counter() - indicator_started) * 1000, 3),
+    }
 
 
 def enrich_phase_9_11_context(conn: psycopg.Connection, symbol: str, timeframe: str, features: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2658,6 +2754,107 @@ def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dic
     }
 
 
+def research_campaign_preflight(conn: psycopg.Connection, *, assets: list[str], timeframes: list[str]) -> dict[str, Any]:
+    normalized_assets = sorted({str(asset).strip().upper() for asset in assets if str(asset).strip()})
+    normalized_timeframes = sorted({str(timeframe).strip() for timeframe in timeframes if str(timeframe).strip()})
+    if not normalized_assets:
+        raise ValueError("campaign preflight requires at least one asset")
+    if not normalized_timeframes:
+        raise ValueError("campaign preflight requires at least one timeframe")
+
+    symbol_rows = conn.execute(
+        """
+        SELECT symbol, asset_class, provider_symbol, primary_provider, is_active
+        FROM symbols
+        WHERE symbol = ANY(%s)
+        """,
+        (normalized_assets,),
+    ).fetchall()
+    symbols = {str(row["symbol"]): dict(row) for row in symbol_rows}
+    candle_rows = conn.execute(
+        """
+        SELECT symbol, timeframe, COUNT(*) AS candle_count, MAX(timestamp) AS latest_candle_timestamp
+        FROM candles
+        WHERE symbol = ANY(%s) AND timeframe = ANY(%s)
+        GROUP BY symbol, timeframe
+        """,
+        (normalized_assets, normalized_timeframes),
+    ).fetchall()
+    candles = {(str(row["symbol"]), str(row["timeframe"])): dict(row) for row in candle_rows}
+    feature_rows = conn.execute(
+        """
+        SELECT symbol, timeframe, COUNT(*) AS feature_count
+        FROM features
+        WHERE symbol = ANY(%s) AND timeframe = ANY(%s)
+        GROUP BY symbol, timeframe
+        """,
+        (normalized_assets, normalized_timeframes),
+    ).fetchall()
+    features = {(str(row["symbol"]), str(row["timeframe"])): int(row["feature_count"] or 0) for row in feature_rows}
+
+    issues: list[dict[str, Any]] = []
+    classifications: Counter[str] = Counter()
+    eligible_datasets = 0
+    for symbol in normalized_assets:
+        symbol_row = symbols.get(symbol)
+        for timeframe in normalized_timeframes:
+            classification: str | None = None
+            reason: str | None = None
+            candle_row = candles.get((symbol, timeframe), {})
+            candle_count = int(candle_row.get("candle_count") or 0)
+            feature_count = features.get((symbol, timeframe), 0)
+
+            if not symbol_row or symbol_row.get("is_active") is False:
+                classification = "unsupported_symbol"
+                reason = "Symbol is not registered as an active market-data asset."
+            elif timeframe not in DEFAULT_CAMPAIGN_TIMEFRAMES:
+                classification = "unsupported_timeframe"
+                reason = f"Timeframe {timeframe} is not supported by campaign preflight."
+            elif candle_count < MIN_CAMPAIGN_CANDLES:
+                classification = "missing_dataset" if candle_count == 0 else "insufficient_historical_depth"
+                reason = f"Only {candle_count} candles are available; {MIN_CAMPAIGN_CANDLES} are required."
+            else:
+                freshness = data_freshness(candle_row.get("latest_candle_timestamp"), timeframe, symbol_row.get("asset_class"))
+                if freshness["stale"]:
+                    classification = "stale_data"
+                    reason = str(freshness["reason"])
+                elif feature_count < MIN_CAMPAIGN_FEATURES:
+                    classification = "feature_generation_failure"
+                    reason = f"Only {feature_count} feature rows are available; {MIN_CAMPAIGN_FEATURES} are required."
+
+            if classification:
+                classifications[classification] += 1
+                if len(issues) < 100:
+                    issues.append(
+                        {
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "classification": classification,
+                            "reason": reason,
+                            "candle_count": candle_count,
+                            "feature_count": feature_count,
+                            "provider": symbol_row.get("primary_provider") if symbol_row else None,
+                        }
+                    )
+            else:
+                eligible_datasets += 1
+
+    dataset_count = len(normalized_assets) * len(normalized_timeframes)
+    blocked_datasets = dataset_count - eligible_datasets
+    return {
+        "ready": blocked_datasets == 0,
+        "assets_total": len(normalized_assets),
+        "timeframes": normalized_timeframes,
+        "datasets_total": dataset_count,
+        "eligible_datasets": eligible_datasets,
+        "blocked_datasets": blocked_datasets,
+        "classifications": dict(classifications),
+        "issues": issues,
+        "issues_truncated": blocked_datasets > len(issues),
+        "simulation_only": True,
+    }
+
+
 def readiness_block(
     status: str,
     classification: str,
@@ -2741,7 +2938,7 @@ def data_freshness(timestamp: Any, timeframe: str, asset_class: str | None) -> d
         return {"stale": False, "classification": "market_closed", "reason": "Market closed: latest completed candle is expected.", "expected_completed_candle": expected}
     max_age_hours = {"15m": 2, "30m": 4, "60m": 8, "1h": 8, "4h": 24, "1d": 96}.get(timeframe, 24)
     age_hours = (datetime.now(UTC) - parsed).total_seconds() / 3600
-    if asset_class and "equity" in str(asset_class).lower() and parsed.weekday() == 4 and datetime.now(UTC).weekday() in {5, 6, 0}:
+    if is_equity_market_asset(asset_class) and parsed.weekday() == 4 and datetime.now(UTC).weekday() in {5, 6, 0}:
         max_age_hours = max(max_age_hours, 96)
     if age_hours > max_age_hours:
         return {"stale": True, "classification": "stale_latest_candle", "reason": f"Latest completed candle is {age_hours:.1f}h old; max allowed for {timeframe} is {max_age_hours}h.", "expected_completed_candle": expected}
@@ -2750,7 +2947,7 @@ def data_freshness(timestamp: Any, timeframe: str, asset_class: str | None) -> d
 
 
 def market_closed_for_asset(asset_class: str | None) -> bool:
-    if not asset_class or "equity" not in str(asset_class).lower():
+    if not is_equity_market_asset(asset_class):
         return False
     now = datetime.now(UTC)
     return now.weekday() >= 5 or not (dt_time(14, 30) <= now.time() <= dt_time(21, 0))
@@ -2758,7 +2955,7 @@ def market_closed_for_asset(asset_class: str | None) -> bool:
 
 def expected_completed_candle(timeframe: str, asset_class: str | None) -> datetime:
     now = datetime.now(UTC).replace(second=0, microsecond=0)
-    if asset_class and "equity" in str(asset_class).lower() and market_closed_for_asset(asset_class):
+    if is_equity_market_asset(asset_class) and market_closed_for_asset(asset_class):
         expected = now
         if now.time() < dt_time(14, 30):
             expected -= timedelta(days=1)
@@ -2775,6 +2972,11 @@ def expected_completed_candle(timeframe: str, asset_class: str | None) -> dateti
     else:
         expected = now
     return expected
+
+
+def is_equity_market_asset(asset_class: str | None) -> bool:
+    normalized = str(asset_class or "").lower()
+    return "equity" in normalized or normalized == "etf"
 
 
 def parse_timestamp(value: Any) -> datetime | None:
@@ -4465,10 +4667,477 @@ def get_campaign(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
     return dict(row)
 
 
+def campaign_progress_analytics(
+    conn: psycopg.Connection,
+    campaign_id: int,
+    stored_analytics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return live campaign progress without loading candidate or result payloads."""
+    rows = conn.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s AND simulation_only = TRUE
+        GROUP BY status
+        """,
+        (campaign_id,),
+    ).fetchall()
+    statuses = {str(row["status"]): int(row["count"]) for row in rows}
+    generated = conn.execute(
+        """
+        SELECT COUNT(DISTINCT candidate_id) AS count
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s AND simulation_only = TRUE
+        """,
+        (campaign_id,),
+    ).fetchone()
+    total_jobs = sum(statuses.values())
+    tested = sum(statuses.get(status, 0) for status in ("completed", "rejected", "promoted"))
+    terminal = tested + statuses.get("failed", 0) + statuses.get("canceled", 0)
+    promoted = statuses.get("promoted", 0)
+    rejected = statuses.get("rejected", 0)
+    analytics = dict(stored_analytics or {})
+    analytics.update(
+        {
+            "strategies_generated": int((generated or {}).get("count") or 0),
+            "strategies_tested": tested,
+            "jobs_total": total_jobs,
+            "completion_percentage": round((terminal / total_jobs) * 100, 2) if total_jobs else 0,
+            "estimated_remaining_jobs": sum(
+                statuses.get(status, 0)
+                for status in ("queued", "running", "retrying", "blocked_data", "deferred_rate_limit")
+            ),
+            "jobs_by_status": statuses,
+            "validation_pass_rate": round(promoted / tested, 4) if tested else 0,
+            "rejection_rate": round(rejected / tested, 4) if tested else 0,
+            "rejected": rejected,
+            "promoted": promoted,
+        }
+    )
+    return analytics
+
+
+def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    rows = conn.execute(
+        """
+        SELECT
+            c.id,
+            c.name,
+            c.universe_key,
+            c.status,
+            c.requested_candidates,
+            c.created_at,
+            c.started_at,
+            c.completed_at,
+            c.updated_at,
+            COUNT(j.id) AS total_jobs,
+            COUNT(j.id) FILTER (WHERE j.status = 'queued') AS queued_jobs,
+            COUNT(j.id) FILTER (WHERE j.status = 'running') AS running_jobs,
+            COUNT(j.id) FILTER (WHERE j.status = 'blocked_data') AS blocked_jobs,
+            COUNT(j.id) FILTER (WHERE j.status = 'deferred_rate_limit') AS deferred_jobs,
+            COUNT(j.id) FILTER (WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')) AS terminal_jobs,
+            COUNT(j.id) FILTER (WHERE j.status = 'promoted') AS promoted_jobs,
+            COUNT(j.id) FILTER (WHERE j.status = 'rejected') AS rejected_jobs
+        FROM research_campaigns c
+        LEFT JOIN research_campaign_jobs j ON j.campaign_id = c.id
+        WHERE c.simulation_only = TRUE
+        GROUP BY c.id
+        ORDER BY c.updated_at DESC, c.id DESC
+        LIMIT %s
+        """,
+        (limit,),
+    ).fetchall()
+    campaigns = [jsonable(dict(row)) for row in rows]
+    return {
+        "campaigns": campaigns,
+        "summary": {
+            "running": sum(1 for row in campaigns if row["status"] == "running"),
+            "queued": sum(1 for row in campaigns if row["status"] == "queued"),
+            "paused": sum(1 for row in campaigns if row["status"] == "paused"),
+        },
+        "simulation_only": True,
+    }
+
+
+def get_campaign_performance_profile(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    get_campaign(conn, campaign_id)
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS profiled_jobs,
+            AVG(execution_runtime_ms) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS total_runtime_ms,
+            AVG(COALESCE((execution_profile->>'data_loading_ms')::double precision, 0)) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS data_loading_ms,
+            AVG(COALESCE((execution_profile->>'indicator_calculation_ms')::double precision, 0)) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS indicator_calculation_ms,
+            AVG(COALESCE((execution_profile->>'simulation_ms')::double precision, 0)) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS simulation_ms,
+            AVG(COALESCE((execution_profile->>'writing_results_ms')::double precision, 0)) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS writing_results_ms,
+            AVG(COALESCE((execution_profile->>'queue_operations_ms')::double precision, 0)) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS queue_operations_ms,
+            AVG(CASE WHEN execution_profile->>'dataset_cache_hit' = 'true' THEN 1.0 ELSE 0.0 END) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS dataset_cache_hit_rate,
+            COUNT(DISTINCT worker_id) FILTER (
+                WHERE status = 'running'
+                  AND LEFT(worker_id, 9) = 'parallel_'
+                  AND lease_expires_at > NOW()
+            ) AS active_parallel_workers,
+            COUNT(*) FILTER (
+                WHERE status = 'running'
+                  AND LEFT(worker_id, 9) = 'parallel_'
+                  AND lease_expires_at > NOW()
+            ) AS active_parallel_jobs
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s
+        """,
+        (campaign_id,),
+    ).fetchone() or {}
+    pool = parallel_pool_snapshot(campaign_id)
+    active_parallel_workers = max(int(row.get("active_parallel_workers") or 0), int(pool.get("live_workers") or 0))
+    return {
+        "campaign_id": campaign_id,
+        "profiled_jobs": int(row.get("profiled_jobs") or 0),
+        "average_ms": {
+            "total": round(finite_metric(row.get("total_runtime_ms")), 3),
+            "loading_market_data": round(finite_metric(row.get("data_loading_ms")), 3),
+            "calculating_indicators": round(finite_metric(row.get("indicator_calculation_ms")), 3),
+            "running_simulation": round(finite_metric(row.get("simulation_ms")), 3),
+            "writing_results": round(finite_metric(row.get("writing_results_ms")), 3),
+            "database_queue_operations": round(finite_metric(row.get("queue_operations_ms")), 3),
+        },
+        "dataset_cache_hit_rate": round(finite_metric(row.get("dataset_cache_hit_rate")), 4),
+        "runtime": {
+            "active_parallel_workers": active_parallel_workers,
+            "active_parallel_jobs": int(row.get("active_parallel_jobs") or 0),
+            "configured_parallel_workers": int(pool.get("workers") or active_parallel_workers),
+            "preloaded_datasets": int(pool.get("preloaded_datasets") or 0),
+            "resident_memory_mb": round(process_resident_memory_bytes() / (1024 * 1024), 1),
+            "worker_limit": 8,
+        },
+        "simulation_only": True,
+    }
+
+
+def process_resident_memory_bytes() -> int:
+    try:
+        if os.name == "nt":
+            import ctypes
+            from ctypes import wintypes
+
+            class ProcessMemoryCounters(ctypes.Structure):
+                _fields_ = [
+                    ("cb", wintypes.DWORD),
+                    ("page_fault_count", wintypes.DWORD),
+                    ("peak_working_set_size", ctypes.c_size_t),
+                    ("working_set_size", ctypes.c_size_t),
+                    ("quota_peak_paged_pool_usage", ctypes.c_size_t),
+                    ("quota_paged_pool_usage", ctypes.c_size_t),
+                    ("quota_peak_non_paged_pool_usage", ctypes.c_size_t),
+                    ("quota_non_paged_pool_usage", ctypes.c_size_t),
+                    ("pagefile_usage", ctypes.c_size_t),
+                    ("peak_pagefile_usage", ctypes.c_size_t),
+                ]
+
+            counters = ProcessMemoryCounters()
+            counters.cb = ctypes.sizeof(counters)
+            get_current_process = ctypes.windll.kernel32.GetCurrentProcess
+            get_current_process.restype = wintypes.HANDLE
+            get_process_memory_info = ctypes.windll.psapi.GetProcessMemoryInfo
+            get_process_memory_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessMemoryCounters), wintypes.DWORD]
+            get_process_memory_info.restype = wintypes.BOOL
+            process = get_current_process()
+            if get_process_memory_info(process, ctypes.byref(counters), counters.cb):
+                return int(counters.working_set_size)
+        elif os.path.exists("/proc/self/statm"):
+            with open("/proc/self/statm", encoding="ascii") as statm:
+                resident_pages = int(statm.read().split()[1])
+            return resident_pages * int(os.sysconf("SC_PAGE_SIZE"))
+    except (AttributeError, OSError, TypeError, ValueError):
+        return 0
+    return 0
+
+
+def run_parallel_campaign_batch(
+    conn: psycopg.Connection,
+    *,
+    campaign_id: int,
+    workers: int,
+    jobs_per_worker: int,
+) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    campaign = get_campaign(conn, campaign_id)
+    if campaign["status"] in {"paused", "canceled", "completed"}:
+        raise ValueError(f"Campaign must be queued or running before parallel execution; current status is {campaign['status']}.")
+    worker_count = max(1, min(8, int(workers)))
+    batch_size = max(1, min(100, int(jobs_per_worker)))
+
+    with _PARALLEL_POOLS_LOCK:
+        existing = _PARALLEL_POOLS.get(campaign_id)
+        if existing and int(existing.get("live_workers") or 0) > 0:
+            raise ValueError("A parallel worker pool is already active for this campaign.")
+
+        config = scheduling_config(campaign)
+        recover_expired_campaign_jobs(conn, campaign_id=campaign_id, retry_limit=int(config["retry_limit"]), recovery_worker_id=f"parallel_coordinator_{campaign_id}")
+        conn.execute(
+            """
+            UPDATE research_campaigns
+            SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+            WHERE id = %s AND status IN ('queued', 'running', 'failed')
+            """,
+            (campaign_id,),
+        )
+        conn.commit()
+        pool_id = f"parallel_pool_{campaign_id}_{int(time.time() * 1000)}"
+        _PARALLEL_POOLS[campaign_id] = {
+            "pool_id": pool_id,
+            "workers": worker_count,
+            "live_workers": worker_count,
+            "jobs_per_worker": batch_size,
+            "preloaded_datasets": 0,
+            "started_at": datetime.now(UTC).isoformat(),
+        }
+
+    try:
+        Thread(
+            target=_run_persistent_parallel_pool,
+            name=f"campaign-{campaign_id}-coordinator",
+            kwargs={
+                "pool_id": pool_id,
+                "campaign_id": campaign_id,
+                "worker_count": worker_count,
+                "batch_size": batch_size,
+            },
+            daemon=True,
+        ).start()
+    except Exception:
+        with _PARALLEL_POOLS_LOCK:
+            _PARALLEL_POOLS.pop(campaign_id, None)
+        raise
+
+    return {
+        "campaign_id": campaign_id,
+        "started": True,
+        "workers": worker_count,
+        "jobs_per_worker": batch_size,
+        "remaining": open_job_count(conn, campaign_id),
+        "simulation_only": True,
+    }
+
+
+def parallel_pool_snapshot(campaign_id: int) -> dict[str, Any]:
+    with _PARALLEL_POOLS_LOCK:
+        return dict(_PARALLEL_POOLS.get(campaign_id) or {})
+
+
+def _run_persistent_parallel_pool(*, pool_id: str, campaign_id: int, worker_count: int, batch_size: int) -> None:
+    from app.db import connect
+
+    with connect() as assignment_conn:
+        dataset_rows = assignment_conn.execute(
+            """
+            SELECT
+                symbol,
+                timeframe,
+                BOOL_OR(
+                    COALESCE(candidate->'parameters'->>'phase_9_11_campaign_version', '') = %s
+                    OR COALESCE(candidate->'parameters'->>'phase_9_12_campaign_version', '') = %s
+                ) AS enriched_context
+            FROM research_campaign_jobs
+            WHERE campaign_id = %s
+            GROUP BY symbol, timeframe
+            ORDER BY symbol, timeframe
+            """,
+            (STRATEGY_REDESIGN_CAMPAIGN_VERSION, VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION, campaign_id),
+        ).fetchall()
+    datasets = [dict(row) for row in dataset_rows]
+    worker_datasets = [datasets[index::worker_count] for index in range(worker_count)]
+    if datasets:
+        for index, assigned in enumerate(worker_datasets):
+            if not assigned:
+                worker_datasets[index] = [datasets[index % len(datasets)]]
+
+    def execute(worker_index: int) -> dict[str, Any]:
+        totals = {"processed": 0, "completed": 0, "failed": 0}
+        worker_id = f"parallel_{campaign_id}_{worker_index}_{pool_id.rsplit('_', 1)[-1]}"
+        assigned_datasets = worker_datasets[worker_index]
+        allowed_dataset_keys = [f"{row['symbol']}|{row['timeframe']}" for row in assigned_datasets]
+        worker_cache: dict[tuple[str, str, bool], dict[str, Any]] = {}
+        try:
+            with connect() as worker_conn:
+                for dataset in assigned_datasets:
+                    symbol = str(dataset["symbol"])
+                    timeframe = str(dataset["timeframe"])
+                    enriched_context = bool(dataset.get("enriched_context"))
+                    worker_cache[(symbol, timeframe, enriched_context)] = load_campaign_dataset(worker_conn, symbol, timeframe, enriched_context)
+                worker_conn.commit()
+                with _PARALLEL_POOLS_LOCK:
+                    state = _PARALLEL_POOLS.get(campaign_id)
+                    if state and state.get("pool_id") == pool_id:
+                        state["preloaded_datasets"] = int(state.get("preloaded_datasets") or 0) + len(worker_cache)
+                while True:
+                    result = run_research_campaign_batch(
+                        worker_conn,
+                        campaign_id=campaign_id,
+                        batch_size=batch_size,
+                        worker_id=worker_id,
+                        ensure_tables=False,
+                        coordinate_campaign=False,
+                        dataset_cache=worker_cache,
+                        allowed_dataset_keys=allowed_dataset_keys,
+                    )
+                    for key in totals:
+                        totals[key] += int(result.get(key) or 0)
+                    if result.get("status") in {"paused", "canceled", "completed"} or int(result.get("processed") or 0) == 0:
+                        break
+        finally:
+            with _PARALLEL_POOLS_LOCK:
+                state = _PARALLEL_POOLS.get(campaign_id)
+                if state and state.get("pool_id") == pool_id:
+                    state["live_workers"] = max(0, int(state.get("live_workers") or 0) - 1)
+        return totals
+
+    worker_errors: list[str] = []
+    try:
+        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix=f"campaign-{campaign_id}") as executor:
+            futures = [executor.submit(execute, index) for index in range(worker_count)]
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as error:
+                    worker_errors.append(str(error))
+
+        with connect() as coordinator_conn:
+            remaining = open_job_count(coordinator_conn, campaign_id)
+            if remaining == 0:
+                finalize_research_campaign(coordinator_conn, campaign_id)
+            else:
+                update_campaign_counts(coordinator_conn, campaign_id)
+            refresh_campaign_analytics(coordinator_conn, campaign_id)
+            coordinator_conn.commit()
+    finally:
+        with _PARALLEL_POOLS_LOCK:
+            state = _PARALLEL_POOLS.get(campaign_id)
+            if state and state.get("pool_id") == pool_id:
+                if worker_errors:
+                    state["worker_errors"] = worker_errors
+                _PARALLEL_POOLS.pop(campaign_id, None)
+
+
+def _run_parallel_campaign_batch(
+    conn: psycopg.Connection,
+    *,
+    campaign_id: int,
+    workers: int,
+    jobs_per_worker: int,
+) -> dict[str, Any]:
+    """Run one bounded parallel batch for internal and diagnostic callers."""
+    ensure_campaign_tables(conn)
+    campaign = get_campaign(conn, campaign_id)
+    if campaign["status"] in {"paused", "canceled", "completed"}:
+        raise ValueError(f"Campaign must be queued or running before parallel execution; current status is {campaign['status']}.")
+    worker_count = max(1, min(8, int(workers)))
+    batch_size = max(1, min(100, int(jobs_per_worker)))
+    config = scheduling_config(campaign)
+    recover_expired_campaign_jobs(conn, campaign_id=campaign_id, retry_limit=int(config["retry_limit"]), recovery_worker_id=f"parallel_coordinator_{campaign_id}")
+    conn.execute(
+        """
+        UPDATE research_campaigns
+        SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
+        WHERE id = %s AND status IN ('queued', 'running', 'failed')
+        """,
+        (campaign_id,),
+    )
+    conn.commit()
+
+    from app.db import connect
+
+    def execute_bounded(worker_index: int) -> dict[str, Any]:
+        with connect() as worker_conn:
+            return run_research_campaign_batch(
+                worker_conn,
+                campaign_id=campaign_id,
+                batch_size=batch_size,
+                worker_id=f"parallel_{campaign_id}_{worker_index}_{int(time.time() * 1000)}",
+                ensure_tables=False,
+                coordinate_campaign=False,
+            )
+
+    results = []
+    worker_errors = []
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix=f"campaign-{campaign_id}") as executor:
+        futures = [executor.submit(execute_bounded, index) for index in range(worker_count)]
+        for future in as_completed(futures):
+            try:
+                results.append(future.result())
+            except Exception as error:
+                worker_errors.append(str(error))
+    remaining = open_job_count(conn, campaign_id)
+    analytics = refresh_campaign_analytics(conn, campaign_id)
+    if remaining == 0:
+        finalize_research_campaign(conn, campaign_id)
+        analytics = refresh_campaign_analytics(conn, campaign_id)
+    else:
+        update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    return {
+        "campaign_id": campaign_id,
+        "workers": worker_count,
+        "jobs_per_worker": batch_size,
+        "processed": sum(int(result.get("processed") or 0) for result in results),
+        "completed": sum(int(result.get("completed") or 0) for result in results),
+        "failed": sum(int(result.get("failed") or 0) for result in results),
+        "remaining": remaining,
+        "analytics": analytics,
+        "worker_errors": worker_errors,
+        "worker_results": results,
+        "simulation_only": True,
+    }
+
+
+def delete_research_campaign(conn: psycopg.Connection, campaign_id: int, *, force: bool = False) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    campaign = get_campaign(conn, campaign_id)
+    if campaign["status"] == "running":
+        raise ValueError("Pause the campaign before deleting it.")
+    if campaign["status"] == "completed" and not force:
+        raise ValueError("Completed campaign evidence cannot be deleted.")
+
+    counts = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS job_count,
+            COUNT(*) FILTER (WHERE status IN ('completed', 'promoted', 'rejected')) AS evidence_job_count
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s
+        """,
+        (campaign_id,),
+    ).fetchone()
+    elite_count = conn.execute(
+        "SELECT COUNT(*) AS count FROM elite_research_candidates WHERE campaign_id = %s",
+        (campaign_id,),
+    ).fetchone()
+    if not force and (int((counts or {}).get("evidence_job_count") or 0) > 0 or int((elite_count or {}).get("count") or 0) > 0):
+        raise ValueError("Campaigns with completed or promoted evidence cannot be deleted.")
+
+    deleted = conn.execute(
+        "DELETE FROM research_campaigns WHERE id = %s AND simulation_only = TRUE RETURNING id, name",
+        (campaign_id,),
+    ).fetchone()
+    if not deleted:
+        raise ValueError("Research campaign was not found.")
+    conn.commit()
+    return {
+        "deleted": True,
+        "campaign_id": int(deleted["id"]),
+        "name": str(deleted["name"]),
+        "deleted_jobs": int((counts or {}).get("job_count") or 0),
+        "deleted_evidence_jobs": int((counts or {}).get("evidence_job_count") or 0),
+        "forced": force,
+        "simulation_only": True,
+    }
+
+
 def campaign_status(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
     ensure_campaign_tables(conn)
     campaign = get_campaign(conn, campaign_id)
-    analytics = refresh_campaign_analytics(conn, campaign_id)
+    analytics = campaign_progress_analytics(conn, campaign_id, campaign.get("analytics") or {})
     jobs = conn.execute(
         """
         SELECT id, candidate_id, symbol, timeframe, status, validation_score, consistency_score, failure_reasons, latest_error, updated_at
@@ -4485,6 +5154,7 @@ def campaign_status(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any
         FROM elite_research_candidates
         WHERE campaign_id = %s AND simulation_only = TRUE
         ORDER BY research_score DESC, created_at DESC
+        LIMIT 50
         """,
         (campaign_id,),
     ).fetchall()
@@ -4611,7 +5281,7 @@ def campaign_control(conn: psycopg.Connection, *, campaign_id: int, action: str)
         )
     else:
         raise ValueError("unsupported campaign control action")
-    refresh_campaign_analytics(conn, campaign_id)
+    update_campaign_counts(conn, campaign_id)
     conn.commit()
     return campaign_status(conn, campaign_id)
 

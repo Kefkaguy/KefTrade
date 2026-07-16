@@ -5,9 +5,18 @@ import psycopg
 
 from app.db import get_connection
 from app.domain.assets import DEFAULT_DEV_PROVIDER, DEFAULT_DEV_SYMBOL, DEFAULT_DEV_TIMEFRAME
+from app.providers.alpaca import sync_alpaca_stock_assets
 from app.providers.registry import get_market_data_provider
 
 router = APIRouter(tags=["market-data"])
+
+
+@router.post("/data/alpaca/assets/sync")
+async def sync_alpaca_assets(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return await sync_alpaca_stock_assets(conn)
+    except (RuntimeError, ValueError) as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
 
 
 @router.post("/data/sync")

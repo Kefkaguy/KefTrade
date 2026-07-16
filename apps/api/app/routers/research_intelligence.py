@@ -4,7 +4,14 @@ from fastapi import APIRouter, Depends, Query
 import psycopg
 
 from app.db import get_connection
-from app.services.research_intelligence import build_archive, build_research_intelligence, collect_evidence, filter_archive, persist_research_ranking_snapshots
+from app.services.research_intelligence import (
+    build_archive,
+    build_research_intelligence,
+    collect_evidence,
+    ensure_research_snapshot_table,
+    filter_archive,
+    persist_research_ranking_snapshots,
+)
 
 router = APIRouter(tags=["research-intelligence"])
 
@@ -152,16 +159,14 @@ def load_research_context(conn: psycopg.Connection) -> dict[str, list[dict[str, 
         ORDER BY symbol, timeframe, timestamp DESC
         """
     ).fetchall()
-    try:
-        previous_snapshots = conn.execute(
-            """
-            SELECT DISTINCT ON (candidate_id) *
-            FROM research_ranking_snapshots
-            ORDER BY candidate_id, created_at DESC, id DESC
-            """
-        ).fetchall()
-    except Exception:
-        previous_snapshots = []
+    ensure_research_snapshot_table(conn)
+    previous_snapshots = conn.execute(
+        """
+        SELECT DISTINCT ON (candidate_id) *
+        FROM research_ranking_snapshots
+        ORDER BY candidate_id, created_at DESC, id DESC
+        """
+    ).fetchall()
     return {
         "alerts": list(alerts),
         "reviews": list(reviews),

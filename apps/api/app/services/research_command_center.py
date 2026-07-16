@@ -30,7 +30,7 @@ def research_command_center(
     campaigns = [dict(row) for row in conn.execute(
         """
         SELECT id, campaign_key, name, universe_key, status, requested_candidates,
-               created_at, started_at, completed_at, updated_at
+               analytics, created_at, started_at, completed_at, updated_at
         FROM research_campaigns
         WHERE simulation_only = TRUE
         ORDER BY created_at DESC, id DESC
@@ -43,6 +43,9 @@ def research_command_center(
     campaign = next((row for row in campaigns if int(row["id"]) == selected_id), None)
     if not campaign:
         raise ValueError("research campaign not found")
+
+    if str(campaign.get("status") or "").lower() != "completed":
+        return live_campaign_command_center(conn, campaign, campaigns, filters or {})
 
     jobs = [dict(row) for row in conn.execute(
         """
@@ -101,6 +104,104 @@ def research_command_center(
         "refreshed_at": datetime.now(UTC),
     }
     payload["simulation_only"] = True
+    return payload
+
+
+def live_campaign_command_center(
+    conn: psycopg.Connection,
+    campaign: dict[str, Any],
+    campaigns: list[dict[str, Any]],
+    filters: dict[str, Any],
+) -> dict[str, Any]:
+    """Build an operational view without materializing every job's evidence JSON."""
+    campaign_id = int(campaign["id"])
+    overview = dict(conn.execute(
+        """
+        SELECT
+            COUNT(*) AS campaign_jobs,
+            COUNT(DISTINCT candidate_id) AS candidates_generated,
+            COUNT(DISTINCT candidate_id) FILTER (
+                WHERE status IN ('completed', 'rejected', 'promoted')
+            ) AS candidates_tested,
+            COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'rejected') AS candidates_rejected,
+            COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'promoted') AS research_candidates,
+            COUNT(*) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS terminal_jobs
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s AND simulation_only = TRUE
+        """,
+        (campaign_id,),
+    ).fetchone() or {})
+    dimensions = conn.execute(
+        """
+        SELECT
+            ARRAY_AGG(DISTINCT symbol ORDER BY symbol) AS assets,
+            ARRAY_AGG(DISTINCT timeframe ORDER BY timeframe) AS timeframes,
+            ARRAY_AGG(DISTINCT strategy_family ORDER BY strategy_family) AS strategy_families,
+            ARRAY_AGG(DISTINCT status ORDER BY status) AS candidate_states
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s AND simulation_only = TRUE
+        """,
+        (campaign_id,),
+    ).fetchone() or {}
+    elite_count = int(conn.execute(
+        "SELECT COUNT(DISTINCT candidate_id) AS count FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE",
+        (campaign_id,),
+    ).fetchone()["count"])
+    deployment_count = int(conn.execute(
+        "SELECT COUNT(*) AS count FROM strategy_deployments WHERE campaign_id = %s AND candidate_id IS NOT NULL AND simulation_only = TRUE",
+        (campaign_id,),
+    ).fetchone()["count"])
+    generated = int(overview.get("candidates_generated") or 0)
+    tested = int(overview.get("candidates_tested") or 0)
+    rejected = int(overview.get("candidates_rejected") or 0)
+    promoted = int(overview.get("research_candidates") or 0)
+    overview_payload = {
+        "campaign_jobs": int(overview.get("campaign_jobs") or 0),
+        "candidates_generated": generated,
+        "candidates_tested": tested,
+        "candidates_rejected": rejected,
+        "candidates_completed": 0,
+        "needs_more_evidence": max(0, tested - rejected - promoted),
+        "research_candidates": promoted,
+        "elite_candidates": elite_count,
+        "candidate_linked_deployments": deployment_count,
+    }
+    funnel = [
+        {"key": "generated", "label": "Generated", "count": generated},
+        {"key": "tested", "label": "Tested", "count": tested},
+        {"key": "rejected", "label": "Rejected", "count": rejected},
+        {"key": "needs_more_evidence", "label": "Needs More Evidence", "count": overview_payload["needs_more_evidence"]},
+        {"key": "research_candidate", "label": "Research Candidate", "count": promoted},
+        {"key": "elite_candidate", "label": "Elite Candidate", "count": elite_count},
+        {"key": "paper_deployed", "label": "Paper Deployed", "count": deployment_count},
+    ]
+    payload = empty_command_center(filters)
+    payload.update(
+        {
+            "campaign": campaign,
+            "campaigns": campaigns,
+            "overview": overview_payload,
+            "candidate_funnel": funnel,
+            "filter_options": {
+                "assets": list(dimensions.get("assets") or []),
+                "asset_classes": ["equity"],
+                "timeframes": list(dimensions.get("timeframes") or []),
+                "strategy_families": list(dimensions.get("strategy_families") or []),
+                "candidate_states": list(dimensions.get("candidate_states") or []),
+                "validation_rules": [],
+                "regimes": [],
+            },
+            "historical_research": historical_research(conn),
+            "terminology": terminology(),
+            "reconciliation": {},
+            "source": {
+                "authoritative_tables": ["research_campaigns", "research_campaign_jobs"],
+                "refreshed_at": datetime.now(UTC),
+            },
+            "live_evidence": True,
+            "simulation_only": True,
+        }
+    )
     return payload
 
 

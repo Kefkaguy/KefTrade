@@ -20,7 +20,7 @@ from app.domain.market_data import MarketDataSyncResult
 
 YFINANCE_SOURCE = "yfinance"
 YFINANCE_ENDPOINT = "Ticker.history"
-SUPPORTED_TIMEFRAMES = {"1d"}
+SUPPORTED_TIMEFRAMES = {"1h", "4h", "1d"}
 MARKET_CLOSE = time(16, 0)
 EASTERN = ZoneInfo("America/New_York")
 
@@ -68,17 +68,21 @@ class YFinanceMarketDataProvider:
 
 def sync_yfinance_candles(conn: psycopg.Connection, symbol: str, timeframe: str = "1d", limit: int = 1500) -> MarketDataSyncResult:
     if timeframe not in SUPPORTED_TIMEFRAMES:
-        raise ValueError("yfinance_research supports 1d candles only.")
+        raise ValueError("yfinance_research supports 1h, 4h, and 1d candles.")
     if symbol not in STATIC_STOCK_METADATA:
         supported = ", ".join(sorted(STATIC_STOCK_METADATA))
         raise ValueError(f"Unsupported yfinance research symbol '{symbol}'. Supported symbols: {supported}")
 
     ensure_stock_symbol(conn, symbol)
-    raw = fetch_yfinance_history(symbol, limit)
+    fetch_timeframe = "1h" if timeframe == "4h" else timeframe
+    fetch_limit = limit * 4 if timeframe == "4h" else limit
+    raw = fetch_yfinance_history(symbol, fetch_limit, fetch_timeframe)
     duplicate_count = count_duplicate_timestamps(raw)
-    candles, invalid_ohlc_count = normalize_history(symbol, timeframe, raw)
-    candles, incomplete_excluded = exclude_incomplete_latest_daily(candles)
-    missing_sessions = detect_missing_trading_sessions(candles)
+    candles, invalid_ohlc_count = normalize_history(symbol, fetch_timeframe, raw)
+    if timeframe == "4h":
+        candles = aggregate_intraday_candles(candles)[-limit:]
+    candles, incomplete_excluded = exclude_incomplete_latest(candles, timeframe)
+    missing_sessions = detect_missing_trading_sessions(candles) if timeframe == "1d" else 0
     log_yfinance_response(conn, symbol, timeframe, limit, raw)
     upserted = upsert_candles(conn, candles)
     conn.commit()
@@ -98,15 +102,16 @@ def sync_yfinance_candles(conn: psycopg.Connection, symbol: str, timeframe: str 
     )
 
 
-def fetch_yfinance_history(symbol: str, limit: int) -> pd.DataFrame:
+def fetch_yfinance_history(symbol: str, limit: int, timeframe: str = "1d") -> pd.DataFrame:
     try:
         import yfinance as yf
     except ImportError as exc:
         raise RuntimeError("Install yfinance to use the yfinance_research provider.") from exc
 
-    period = "max" if limit > 1000 else "5y"
+    period = "730d" if timeframe == "1h" else "max" if limit > 1000 else "5y"
+    interval = "60m" if timeframe == "1h" else "1d"
     ticker = yf.Ticker(symbol)
-    history = ticker.history(period=period, interval="1d", auto_adjust=False, actions=False)
+    history = ticker.history(period=period, interval=interval, auto_adjust=False, actions=False)
     if history.empty:
         return history
     return history.tail(limit)
@@ -178,6 +183,42 @@ def exclude_incomplete_latest_daily(candles: list[dict[str, Any]], now: datetime
     if latest_local == now_local.date() and now_local.time() < MARKET_CLOSE:
         return candles[:-1], True
     return candles, False
+
+
+def exclude_incomplete_latest(candles: list[dict[str, Any]], timeframe: str, now: datetime | None = None) -> tuple[list[dict[str, Any]], bool]:
+    if timeframe == "1d":
+        return exclude_incomplete_latest_daily(candles, now=now)
+    if not candles:
+        return candles, False
+    duration = timedelta(hours=4 if timeframe == "4h" else 1)
+    now = now or datetime.now(tz=UTC)
+    if candles[-1]["timestamp"] + duration > now:
+        return candles[:-1], True
+    return candles, False
+
+
+def aggregate_intraday_candles(candles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    buckets: dict[tuple[Any, int], list[dict[str, Any]]] = {}
+    for candle in candles:
+        local = candle["timestamp"].astimezone(EASTERN)
+        minutes_from_open = max(0, local.hour * 60 + local.minute - (9 * 60 + 30))
+        buckets.setdefault((local.date(), minutes_from_open // 240), []).append(candle)
+
+    aggregated = []
+    for rows in buckets.values():
+        rows = sorted(rows, key=lambda row: row["timestamp"])
+        aggregated.append({
+            "symbol": rows[0]["symbol"],
+            "source": YFINANCE_SOURCE,
+            "timeframe": "4h",
+            "timestamp": rows[0]["timestamp"],
+            "open": rows[0]["open"],
+            "high": max(row["high"] for row in rows),
+            "low": min(row["low"] for row in rows),
+            "close": rows[-1]["close"],
+            "volume": sum((row["volume"] for row in rows), Decimal("0")),
+        })
+    return sorted(aggregated, key=lambda row: row["timestamp"])
 
 
 def count_duplicate_timestamps(history: pd.DataFrame) -> int:

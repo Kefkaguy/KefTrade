@@ -1,18 +1,24 @@
 "use client";
 
+import Link from "next/link";
+import { motion, useReducedMotion } from "framer-motion";
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
   AlertTriangle,
+  ArrowRight,
   BarChart3,
   Beaker,
   Copy,
+  Database,
   Filter,
   FlaskConical,
   Layers3,
   RefreshCw,
+  Search,
   Target,
 } from "lucide-react";
+import { CampaignActivity } from "@/components/CampaignActivity";
 import {
   fetchResearchCommandCenter,
   type ResearchCommandCenter,
@@ -25,6 +31,7 @@ type SelectFilter = keyof Pick<ResearchCommandCenterFilters, "asset" | "assetCla
 const EMPTY_FILTERS: ResearchCommandCenterFilters = {};
 
 export function ResearchCommandCenterDashboard() {
+  const reduceMotion = useReducedMotion();
   const [data, setData] = useState<ResearchCommandCenter | null>(null);
   const [filters, setFilters] = useState<ResearchCommandCenterFilters>(EMPTY_FILTERS);
   const [loading, setLoading] = useState(true);
@@ -73,9 +80,29 @@ export function ResearchCommandCenterDashboard() {
   const overview = data.overview ?? {};
   const duplicates = data.duplicate_analysis ?? {};
   const proposal = data.next_campaign_proposal;
+  const hasEvidence = Number(overview.campaign_jobs ?? 0) > 0 || Number(overview.candidates_generated ?? 0) > 0;
+
+  if (!hasEvidence) {
+    return <ResearchStartingWorkspace campaignCount={data.campaigns.length} reduceMotion={Boolean(reduceMotion)} />;
+  }
 
   return (
     <div className="researchCommandCenter">
+      <motion.header className="researchEvidenceHero" initial={reduceMotion ? false : { opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }}>
+        <div>
+          <span className="eyebrow">Authoritative campaign evidence</span>
+          <h1>Research evidence</h1>
+          <p>Trace how strategy ideas moved from generation through validation, rejection, and promotion.</p>
+        </div>
+        <Link className="button" href="/#research-builder">Start another campaign <ArrowRight size={16} /></Link>
+      </motion.header>
+
+      {data.live_evidence ? (
+        <div className="researchLiveEvidence" role="status">
+          <RefreshCw className="spin" size={17} />
+          <div><strong>Campaign evidence is still forming</strong><span>Live counts are available now. Candidate-level rejection, regime, duplicate, and recommendation analysis will finalize when the campaign completes.</span></div>
+        </div>
+      ) : null}
       <section className="researchFilterBand" aria-label="Research filters">
         <div className="researchFilterTitle">
           <Filter size={16} />
@@ -230,24 +257,9 @@ export function ResearchCommandCenterDashboard() {
             <ProposalList title="Deprioritize timeframes" values={proposal.timeframes_to_deprioritize} />
           </div>
           <div className="proposalFooter"><span>Candidate count <strong>{proposal.candidate_count}</strong></span><span>Expected duplicate reduction <strong>{formatPercent(proposal.expected_duplicate_work_reduction)}</strong></span><span>Hypothesis tests <strong>{proposal.new_hypothesis_tests.length}</strong></span></div>
-          <details className="researchDetails"><summary>Falsifiable hypothesis tests</summary><ol className="hypothesisList">{proposal.new_hypothesis_tests.map((value: string, index: number) => <li key={`${value}-${index}`}>{value}</li>)}</ol></details>
+          <details className="researchDetails"><summary>Falsifiable hypothesis tests</summary><ol className="hypothesisList">{proposal.new_hypothesis_tests.map((value: string) => <li key={value}>{value}</li>)}</ol></details>
         </> : <EmptyState title="No campaign proposal available" body="Select a campaign with stored validation evidence." />}
       </ResearchSection>
-
-      <details className="historicalResearch">
-        <summary>Historical Research <span>Separated from campaign evidence</span></summary>
-        <div className="duplicateStrip">
-          <MetricCard label="Legacy validation runs" value={data.historical_research?.alpha_validation_run_count ?? 0} />
-          <MetricCard label="Legacy experiments" value={data.historical_research?.strategy_experiment_count ?? 0} />
-        </div>
-        <DataTable
-          columns={["Type", "ID", "Name", "Result", "Created"]}
-          rows={[
-            ...(data.historical_research?.alpha_validation_runs ?? []).map((row: any) => ["Alpha validation", row.id, `${row.candidate_count} candidates`, "Historical", formatDate(row.created_at)]),
-            ...(data.historical_research?.strategy_experiments ?? []).map((row: any) => ["Strategy experiment", row.id, row.name, row.recommendation, formatDate(row.created_at)]),
-          ]}
-        />
-      </details>
 
       <details className="historicalResearch">
         <summary>Research terminology</summary>
@@ -256,6 +268,43 @@ export function ResearchCommandCenterDashboard() {
     </div>
   );
 }
+
+function ResearchStartingWorkspace({ campaignCount, reduceMotion }: { campaignCount: number; reduceMotion: boolean }) {
+  const steps = [
+    { number: "01", title: "Prepare the market", detail: "KefTrade checks candle depth and calculates the features required for deterministic research.", icon: <Database size={18} /> },
+    { number: "02", title: "Search strategy space", detail: "Thousands of strategy variations are tested across the selected assets and timeframes.", icon: <Search size={18} /> },
+    { number: "03", title: "Build the evidence record", detail: "Weak ideas are rejected while repeatable candidates advance into validation.", icon: <Target size={18} /> },
+  ];
+  return (
+    <motion.div className="researchStartingWorkspace" initial={reduceMotion ? false : "hidden"} animate="visible" variants={{ visible: { transition: { staggerChildren: 0.08 } } }}>
+      <motion.header className="researchArchiveHero" variants={researchReveal}>
+        <div>
+          <span className="eyebrow">Research archive</span>
+          <h1>Your evidence starts here.</h1>
+          <p>Campaign results will form a readable research record: what KefTrade tested, what failed, what survived, and why.</p>
+          <Link className="button researchArchiveAction" href="/#research-builder">Start Research Campaign <ArrowRight size={17} /></Link>
+        </div>
+        <div className="researchArchiveSignal" aria-label={`${campaignCount} saved campaigns with no completed evidence`}>
+          <span>Evidence state</span>
+          <strong>Waiting for results</strong>
+          <p>{campaignCount ? `${campaignCount} saved ${campaignCount === 1 ? "campaign is" : "campaigns are"} available to manage below.` : "Choose a market scope to begin deterministic research."}</p>
+          <i />
+        </div>
+      </motion.header>
+
+      <motion.section className="researchEvidencePath" variants={researchReveal} aria-label="How research evidence is created">
+        {steps.map((step) => <article key={step.number}><span>{step.number}</span><i>{step.icon}</i><div><strong>{step.title}</strong><p>{step.detail}</p></div></article>)}
+      </motion.section>
+
+      <CampaignActivity />
+    </motion.div>
+  );
+}
+
+const researchReveal = {
+  hidden: { opacity: 0, y: 18 },
+  visible: { opacity: 1, y: 0 },
+};
 
 function ResearchSection({ id, title, eyebrow, icon, children }: { id: string; title: string; eyebrow: string; icon: React.ReactNode; children: React.ReactNode }) {
   return <section className="panel researchSection" id={id}><div className="panelHeader"><div><span className="sectionLabel">{eyebrow}</span><h2>{icon}{title}</h2></div></div>{children}</section>;

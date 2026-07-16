@@ -296,6 +296,32 @@ def test_campaign_lifecycle_promotes_only_cross_validated_candidates(monkeypatch
     assert conn.jobs[0]["consistency_score"] == 1.0
 
 
+def test_worker_dataset_cache_survives_multiple_claim_batches(monkeypatch) -> None:
+    conn = CampaignConn()
+    shared_cache = {}
+    observed_caches = []
+
+    def fake_campaign_job(_conn, job):
+        observed_caches.append(job["_dataset_cache"])
+        return {
+            "candidate_id": job["candidate_id"],
+            "family_id": job["family_id"],
+            "metrics": {"profit_factor": 0, "expectancy_per_trade": 0, "max_drawdown": 0, "number_of_trades": 0, "walk_forward": {"enabled": True}},
+            "paper_readiness": {"paper_ready": False},
+            "regime_analysis": {},
+            "research_score": 0,
+            "failure_reasons": ["insufficient_trades"],
+        }
+
+    monkeypatch.setattr(research_campaigns, "run_campaign_job", fake_campaign_job)
+    created = create_research_campaign(conn, universe_key="sp500_leaders", max_candidates=1, asset_limit=2, timeframes=["1h"])
+
+    run_research_campaign_batch(conn, campaign_id=created["campaign"]["id"], batch_size=1, dataset_cache=shared_cache)
+    run_research_campaign_batch(conn, campaign_id=created["campaign"]["id"], batch_size=1, dataset_cache=shared_cache)
+
+    assert observed_caches == [shared_cache, shared_cache]
+
+
 def test_consistency_summary_records_failure_causes() -> None:
     rows = [
         {"candidate_id": "sd_1", "family_id": "family_1", "symbol": "AAPL", "timeframe": "1h", "status": "rejected", "validation_score": 0, "failure_reasons": ["poor_expectancy"], "result": {}},

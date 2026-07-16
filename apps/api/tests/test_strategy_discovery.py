@@ -6,6 +6,7 @@ from app.services.strategy_discovery import (
     discovery_dashboard,
     discovered_strategy_decision,
     evolve_discovered_strategies,
+    generate_balanced_discovery_candidates,
     generate_discovery_candidates,
     run_strategy_discovery,
 )
@@ -31,6 +32,8 @@ class DiscoveryConn:
         self.commits = 0
 
     def execute(self, query, params=None):
+        if "CREATE TABLE IF NOT EXISTS strategy_discovery_" in query or "CREATE INDEX IF NOT EXISTS strategy_discovery_" in query:
+            return Result([])
         if "SELECT *" in query and "FROM features" in query:
             return Result(self.features)
         if "INSERT INTO strategy_discovery_runs" in query:
@@ -100,6 +103,20 @@ def test_generate_discovery_candidates_is_deterministic_and_filtered() -> None:
     assert [row.candidate_id for row in first] == [row.candidate_id for row in second]
     assert len({row.canonical_key for row in first}) == len(first)
     assert all(row.complexity <= 10 for row in first)
+
+
+def test_balanced_generation_covers_entry_families_and_frequency_hypotheses() -> None:
+    candidates = generate_balanced_discovery_candidates(max_candidates=120)
+
+    assert len(candidates) == 120
+    assert {candidate.parameters["entry"] for candidate in candidates} == {
+        "trend_continuation", "pullback", "breakout", "mean_reversion", "opening_range_proxy", "gap_proxy"
+    }
+    assert {candidate.parameters["frequency_hypothesis"] for candidate in candidates} == {
+        "baseline", "entry_frequency", "momentum_frequency", "volume_frequency", "holding_frequency"
+    }
+    assert all(candidate.parameters["momentum"] == "rsi_oversold" for candidate in candidates if candidate.parameters["entry"] == "mean_reversion")
+    assert all(candidate.parameters["max_holding_bars"] == 8 for candidate in candidates if candidate.parameters["frequency_hypothesis"] == "holding_frequency")
 
 
 def test_discovered_strategy_decision_uses_rule_blocks() -> None:

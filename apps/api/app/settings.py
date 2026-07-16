@@ -17,7 +17,8 @@ class Settings(BaseSettings):
     alpaca_api_key: str | None = None
     alpaca_api_secret: str | None = None
     alpaca_data_base_url: str = "https://data.alpaca.markets"
-    alpaca_intraday_max_lookback_days: int = 420
+    alpaca_trading_base_url: str = "https://paper-api.alpaca.markets"
+    alpaca_intraday_max_lookback_days: int = 1825
     paper_scan_max_candle_age_hours: int = 96
 
     model_config = SettingsConfigDict(env_file=ROOT_DIR / ".env", env_file_encoding="utf-8", extra="ignore")

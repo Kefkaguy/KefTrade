@@ -10,6 +10,7 @@ from fastapi.encoders import jsonable_encoder
 from psycopg.types.json import Jsonb
 
 from app.services.mission_control import classify_candle_freshness
+from app.services.research_intelligence import ensure_research_snapshot_table
 
 SETUP_ALERT_TYPES = {"entry_setup_review"}
 STALE_ALERT_TYPES = {"stale_data_warning"}
@@ -617,6 +618,7 @@ def format_uptime(value: Any) -> str:
 
 def stored_research_intelligence_snapshot(conn: psycopg.Connection, start: datetime, end: datetime) -> dict[str, Any]:
     try:
+        ensure_research_snapshot_table(conn)
         rows = conn.execute(
             """
             SELECT *
@@ -628,6 +630,8 @@ def stored_research_intelligence_snapshot(conn: psycopg.Connection, start: datet
             (start, end),
         ).fetchall()
     except Exception:
+        if hasattr(conn, "rollback"):
+            conn.rollback()
         return {
             "available": False,
             "reason": "No stored research ranking snapshots exist for this report period.",

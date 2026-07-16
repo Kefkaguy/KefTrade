@@ -12,6 +12,7 @@ from app.settings import settings
 
 ALPACA_SOURCE = "alpaca_iex"
 ALPACA_STOCK_BARS_ENDPOINT = "/v2/stocks/{symbol}/bars"
+ALPACA_ASSETS_ENDPOINT = "/v2/assets"
 ALPACA_FEED = "iex"
 MAX_PAGE_LIMIT = 10000
 MAX_STOCK_BAR_PAGES = 25
@@ -43,9 +44,6 @@ async def sync_alpaca_candles(conn: psycopg.Connection, symbol: str, timeframe: 
     if timeframe not in SUPPORTED_TIMEFRAMES:
         supported = ", ".join(sorted(SUPPORTED_TIMEFRAMES))
         raise ValueError(f"alpaca_iex supports these timeframes only: {supported}")
-    if normalized_symbol not in STATIC_STOCK_METADATA:
-        supported = ", ".join(sorted(STATIC_STOCK_METADATA))
-        raise ValueError(f"Unsupported Alpaca stock symbol '{symbol}'. Supported symbols: {supported}")
     if not settings.alpaca_api_key or not settings.alpaca_api_secret:
         raise RuntimeError("Set ALPACA_API_KEY and ALPACA_API_SECRET to use the alpaca_iex provider.")
 
@@ -77,6 +75,90 @@ async def sync_alpaca_candles(conn: psycopg.Connection, symbol: str, timeframe: 
         last_timestamp=candles[-1]["timestamp"] if candles else None,
         invalid_ohlc_count=invalid_ohlc_count,
     )
+
+
+async def sync_alpaca_stock_assets(conn: psycopg.Connection) -> dict[str, Any]:
+    assets = await fetch_stock_assets()
+    imported = import_alpaca_stock_assets(conn, assets)
+    return {
+        "assets": assets,
+        "total": len(assets),
+        "imported": imported,
+        "source": "alpaca",
+    }
+
+
+async def fetch_stock_assets() -> list[dict[str, Any]]:
+    if not settings.alpaca_api_key or not settings.alpaca_api_secret:
+        raise RuntimeError("Set ALPACA_API_KEY and ALPACA_API_SECRET to import the Alpaca stock universe.")
+    headers = {
+        "APCA-API-KEY-ID": settings.alpaca_api_key,
+        "APCA-API-SECRET-KEY": settings.alpaca_api_secret,
+    }
+    params = {"status": "active", "asset_class": "us_equity"}
+    try:
+        async with httpx.AsyncClient(base_url=settings.alpaca_trading_base_url, timeout=30, headers=headers) as client:
+            response = await client.get(ALPACA_ASSETS_ENDPOINT, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPError as error:
+        raise RuntimeError(f"Alpaca asset import failed: {error}") from error
+
+    normalized = [normalize_alpaca_asset(row) for row in payload if isinstance(row, dict)]
+    assets = [asset for asset in normalized if asset is not None]
+    return sorted(assets, key=lambda asset: asset["symbol"])
+
+
+def normalize_alpaca_asset(row: dict[str, Any]) -> dict[str, Any] | None:
+    symbol = str(row.get("symbol") or "").strip().upper()
+    asset_class = str(row.get("class") or row.get("asset_class") or "").lower()
+    status = str(row.get("status") or "").lower()
+    if not symbol or asset_class != "us_equity" or status != "active" or row.get("tradable") is not True:
+        return None
+    return {
+        "id": str(row.get("id") or symbol),
+        "symbol": symbol,
+        "name": str(row.get("name") or symbol).strip(),
+        "exchange": str(row.get("exchange") or "UNKNOWN").upper(),
+        "asset_class": "us_equity",
+        "status": status,
+        "tradable": True,
+        "marginable": bool(row.get("marginable")),
+        "shortable": bool(row.get("shortable")),
+        "fractionable": bool(row.get("fractionable")),
+    }
+
+
+def import_alpaca_stock_assets(conn: psycopg.Connection, assets: list[dict[str, Any]]) -> int:
+    if not assets:
+        return 0
+    conn.executemany(
+        """
+        INSERT INTO symbols(symbol, asset_class, exchange, currency, name, provider_symbol, primary_provider, index_membership, is_active)
+        VALUES (%s, 'us_equity', %s, 'USD', %s, %s, 'alpaca_iex', %s, TRUE)
+        ON CONFLICT (symbol)
+        DO UPDATE SET
+            asset_class = CASE WHEN symbols.asset_class = 'etf' THEN symbols.asset_class ELSE EXCLUDED.asset_class END,
+            exchange = EXCLUDED.exchange,
+            currency = EXCLUDED.currency,
+            name = EXCLUDED.name,
+            provider_symbol = EXCLUDED.provider_symbol,
+            primary_provider = EXCLUDED.primary_provider,
+            is_active = TRUE
+        """,
+        [
+            (
+                asset["symbol"],
+                asset["exchange"],
+                asset["name"],
+                asset["symbol"],
+                Jsonb([]),
+            )
+            for asset in assets
+        ],
+    )
+    conn.commit()
+    return len(assets)
 
 
 async def fetch_stock_bars(symbol: str, timeframe: str, limit: int) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], str | None]:
@@ -246,6 +328,15 @@ def detect_missing_intervals(candles: list[dict[str, Any]], timeframe: str) -> i
 
 
 def ensure_alpaca_stock_symbol(conn: psycopg.Connection, symbol: str) -> None:
+    if symbol not in STATIC_STOCK_METADATA:
+        registered = conn.execute(
+            "SELECT symbol FROM symbols WHERE symbol = %s AND primary_provider = 'alpaca_iex' AND is_active = TRUE",
+            (symbol,),
+        ).fetchone()
+        if registered:
+            return
+        raise ValueError(f"Unsupported Alpaca stock symbol '{symbol}'. Import the Alpaca asset catalog first.")
+
     metadata = STATIC_STOCK_METADATA[symbol]
     conn.execute(
         """

@@ -46,7 +46,8 @@ export function SavedReports() {
     <section className="savedReportsSection">
       <header className="pageHeader simpleHeader">
         <div>
-          <h1>Saved Browser Reports</h1>
+          <span className="eyebrow">Personal archive</span>
+          <h2>Saved browser reports</h2>
           <p className="muted">Saved evidence reports from guided analysis. Reports are stored locally in this browser.</p>
         </div>
       </header>

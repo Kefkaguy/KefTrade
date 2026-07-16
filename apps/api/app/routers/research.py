@@ -22,6 +22,9 @@ from app.services.production_validation import (
     start_validation_campaign,
 )
 from app.services.features import load_candles
+from app.services.features import sync_features
+from app.providers.registry import get_market_data_provider
+from app.settings import settings
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.research_automation import analyze_research_automation, queue_research_automation, research_automation_status, run_research_automation_batch
 from app.services.research_campaigns import (
@@ -40,13 +43,18 @@ from app.services.research_campaigns import (
     get_campaign_analytics,
     get_campaign_intelligence,
     get_campaign_report,
+    get_campaign_performance_profile,
     get_campaign_scheduler_status,
     list_campaign_jobs,
+    list_research_campaigns,
     list_research_universes,
     refresh_elite_candidate_forward_evidence,
+    research_campaign_preflight,
     retry_campaign_job,
     run_campaign_scheduler_cycle,
+    run_parallel_campaign_batch,
     run_research_campaign_batch,
+    delete_research_campaign,
     update_campaign_scheduler,
     update_campaign_scheduling_config,
     upsert_research_universe,
@@ -98,6 +106,11 @@ class ResearchUniversePayload(BaseModel):
     assets: list[str]
     default_timeframes: list[str]
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ResearchCampaignPreflightPayload(BaseModel):
+    assets: list[str]
+    timeframes: list[str]
 
 
 class CampaignSchedulingPayload(BaseModel):
@@ -333,7 +346,7 @@ def create_large_scale_research_campaign(
     universe_key: str = Query("sp500_leaders"),
     name: str | None = Query(None),
     max_candidates: int = Query(1000, ge=1, le=5000),
-    asset_limit: int = Query(100, ge=1, le=100),
+    asset_limit: int = Query(100, ge=1, le=50000),
     timeframes: list[str] | None = Query(None),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
@@ -345,6 +358,59 @@ def create_large_scale_research_campaign(
         asset_limit=asset_limit,
         timeframes=timeframes,
     )
+
+
+@router.get("/research/campaigns")
+def get_research_campaigns(
+    limit: int = Query(50, ge=1, le=200),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return list_research_campaigns(conn, limit=limit)
+
+
+@router.post("/research/campaigns/preflight")
+def preflight_large_scale_research_campaign(
+    payload: ResearchCampaignPreflightPayload,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    try:
+        return research_campaign_preflight(conn, assets=payload.assets, timeframes=payload.timeframes)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/research/campaigns/prepare")
+async def prepare_large_scale_research_campaign(
+    payload: ResearchCampaignPreflightPayload,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    prepared: list[dict[str, Any]] = []
+    errors: list[dict[str, str]] = []
+    for symbol in payload.assets:
+        provider_name = "binance_dev" if symbol.upper().endswith("USDT") else "alpaca_iex" if settings.alpaca_api_key and settings.alpaca_api_secret else "yfinance_research"
+        provider = get_market_data_provider(provider_name)
+        for timeframe in payload.timeframes:
+            try:
+                candles = await provider.sync_candles(conn, symbol=symbol, timeframe=timeframe, limit=5000)
+                features = sync_features(conn, symbol=symbol, timeframe=timeframe)
+                prepared.append({
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "provider": provider_name,
+                    "candles": candles.candle_count,
+                    "features": features["usable"],
+                })
+            except Exception as error:
+                conn.rollback()
+                errors.append({"symbol": symbol, "timeframe": timeframe, "reason": str(error)})
+    readiness = research_campaign_preflight(conn, assets=payload.assets, timeframes=payload.timeframes)
+    return {
+        "ready": readiness["ready"],
+        "prepared": prepared,
+        "errors": errors,
+        "readiness": readiness,
+        "simulation_only": True,
+    }
 
 
 @router.post("/research/campaigns/{campaign_id}/quality-follow-up")
@@ -442,6 +508,19 @@ def run_large_scale_research_campaign_batch(
     return run_research_campaign_batch(conn, campaign_id=campaign_id, batch_size=batch_size)
 
 
+@router.post("/research/campaigns/{campaign_id}/run-parallel")
+def run_large_scale_research_campaign_parallel_batch(
+    campaign_id: int,
+    workers: int = Query(2, ge=1, le=8),
+    jobs_per_worker: int = Query(10, ge=1, le=100),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    try:
+        return run_parallel_campaign_batch(conn, campaign_id=campaign_id, workers=workers, jobs_per_worker=jobs_per_worker)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+
 @router.get("/research/campaigns/{campaign_id}")
 def get_large_scale_research_campaign(
     campaign_id: int,
@@ -456,6 +535,14 @@ def get_large_scale_research_campaign_analytics(
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     return get_campaign_analytics(conn, campaign_id)
+
+
+@router.get("/research/campaigns/{campaign_id}/profile")
+def get_large_scale_research_campaign_profile(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return get_campaign_performance_profile(conn, campaign_id)
 
 
 @router.get("/research/campaigns/{campaign_id}/reports")
@@ -523,6 +610,18 @@ def control_large_scale_research_campaign(
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     return campaign_control(conn, campaign_id=campaign_id, action=action)
+
+
+@router.delete("/research/campaigns/{campaign_id}")
+def remove_research_campaign(
+    campaign_id: int,
+    force: bool = Query(False),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    try:
+        return delete_research_campaign(conn, campaign_id, force=force)
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 @router.put("/research/campaigns/{campaign_id}/scheduling")

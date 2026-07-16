@@ -1,8 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { ArrowUpDown, RefreshCw } from "lucide-react";
+import { motion, useReducedMotion } from "framer-motion";
+import { ArrowRight, ArrowUpDown, Layers3, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { CampaignActivity } from "@/components/CampaignActivity";
 import { Card, DataTable, EmptyState, MetricCard, PageTitle } from "@/components/ResearchUI";
 import { getResearchIntelligence, type ResearchIntelligence } from "@/lib/api";
 import { number } from "@/lib/format";
@@ -10,6 +12,7 @@ import { number } from "@/lib/format";
 type SortKey = "global_rank" | "research_score" | "review_priority_score" | "trade_count" | "profit_factor";
 
 export function ResearchIntelligenceDashboard() {
+  const reduceMotion = useReducedMotion();
   const [data, setData] = useState<ResearchIntelligence | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -51,25 +54,19 @@ export function ResearchIntelligenceDashboard() {
     );
   }
 
-  return (
-    <div className="pageStack">
-      <PageTitle
-        title="Research Intelligence"
-        description="Deterministic research quality and review-priority rankings from stored evidence only."
-        actions={<Link className="button" href="/mission-control">Mission Control</Link>}
-      />
+  if (!rankings.length) {
+    return <CandidateStartingWorkspace reduceMotion={Boolean(reduceMotion)} />;
+  }
 
-      <section className="paperHero">
+  return (
+    <div className="pageStack intelligenceWorkspace">
+      <section className="intelligenceEvidenceHero">
         <div>
-          <span className="eyebrow">RESEARCH ONLY</span>
-          <h2>{String(data.summary.top_ranked_asset ?? "No ranked asset")}</h2>
-          <p>Research rankings are based on historical and stored evidence. They are not trading recommendations.</p>
+          <span className="eyebrow">Ranked research evidence</span>
+          <h1>{String(data.summary.top_ranked_asset ?? "Research candidates")}</h1>
+          <p>Compare deterministic research quality, validation depth, and review priority from stored evidence.</p>
         </div>
-        <div className="safetyStack">
-          <span>Simulation only</span>
-          <span>No broker routing</span>
-          <span>No live execution</span>
-        </div>
+        <Link className="button secondary" href="/research">Open research archive <ArrowRight size={16} /></Link>
       </section>
 
       <Card title="Research Intelligence Summary" eyebrow="Composite evidence">
@@ -115,7 +112,7 @@ export function ResearchIntelligenceDashboard() {
               formatMetric(row.stability),
               row.latest_setup_state,
               Array.isArray(row.blocking_issues) && row.blocking_issues.length ? row.blocking_issues.join("; ") : "none",
-              <span key="links" className="inlineLinks"><Link href={String(row.links?.candidate_detail ?? "/promising")}>Candidate</Link><Link href={String(row.links?.validation_detail ?? "/validation")}>Validation</Link><Link href="/paper#signal-review">Signal</Link><Link href="/mission-control">Deploy</Link><Link href="/paper">Paper</Link></span>
+              <span key="links" className="inlineLinks"><Link href={String(row.links?.candidate_detail ?? "/research-intelligence")}>Candidate</Link><Link href={String(row.links?.validation_detail ?? "/validation")}>Validation</Link><Link href="/paper">Forward evidence</Link><Link href="/mission-control">System</Link></span>
             ])}
           />
         ) : <EmptyState title="No ranked candidates match the filters." body="Adjust filters or add stored experiment and validation evidence." />}
@@ -167,6 +164,47 @@ export function ResearchIntelligenceDashboard() {
     </div>
   );
 }
+
+function CandidateStartingWorkspace({ reduceMotion }: { reduceMotion: boolean }) {
+  const qualification = [
+    { number: "01", icon: <Search size={18} />, title: "Discover", detail: "Campaigns search strategy variations across the selected market universe." },
+    { number: "02", icon: <ShieldCheck size={18} />, title: "Validate", detail: "Candidates must survive evidence, consistency, and robustness requirements." },
+    { number: "03", icon: <Layers3 size={18} />, title: "Rank", detail: "Only stored, comparable evidence enters the candidate ranking workspace." },
+  ];
+  return (
+    <motion.div className="candidateStartingWorkspace" initial={reduceMotion ? false : "hidden"} animate="visible" variants={{ visible: { transition: { staggerChildren: 0.08 } } }}>
+      <motion.header className="candidateArchiveHero" variants={candidateReveal}>
+        <div>
+          <span className="eyebrow">Candidate intelligence</span>
+          <h1>Strong evidence will surface here.</h1>
+          <p>KefTrade ranks candidates only after strategy ideas have been tested and preserved with enough evidence to compare responsibly.</p>
+          <div className="candidateHeroActions">
+            <Link className="button" href="/#research-builder">Start Research Campaign <ArrowRight size={17} /></Link>
+            <Link className="candidateResearchLink" href="/research">View research archive <ArrowRight size={15} /></Link>
+          </div>
+        </div>
+        <div className="candidateEvidenceSignal" aria-label="Candidate evidence pipeline waiting for results">
+          <span>Ranking pipeline</span>
+          <div><i className="ready" /><strong>Market data</strong><small>Ready</small></div>
+          <div><i /><strong>Validated evidence</strong><small>Waiting</small></div>
+          <div><i /><strong>Ranked candidates</strong><small>Waiting</small></div>
+          <p>Simulation only · No broker routing</p>
+        </div>
+      </motion.header>
+
+      <motion.section className="candidateQualificationPath" variants={candidateReveal} aria-label="How candidates qualify">
+        {qualification.map((step) => <article key={step.number}><span>{step.number}</span><i>{step.icon}</i><div><strong>{step.title}</strong><p>{step.detail}</p></div></article>)}
+      </motion.section>
+
+      <CampaignActivity />
+    </motion.div>
+  );
+}
+
+const candidateReveal = {
+  hidden: { opacity: 0, y: 18 },
+  visible: { opacity: 1, y: 0 },
+};
 
 function FilterBar({ rankings, filters, onFilters, sortKey, onSortKey }: { rankings: Array<Record<string, any>>; filters: Record<string, string>; onFilters: (filters: any) => void; sortKey: SortKey; onSortKey: (key: SortKey) => void }) {
   return (

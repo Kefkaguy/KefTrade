@@ -10,7 +10,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.services.backtester import run_backtest
+from app.services.backtester import count_setup_opportunities, run_backtest
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.strategy import BASE_PARAMETERS, StrategyDecision, StrategyDefinition
@@ -67,6 +67,7 @@ RULE_LIBRARY: dict[str, list[RuleBlock]] = {
         RuleBlock("roc_positive", "momentum", "ROC positive", {"momentum": "roc", "returns_5_min": 0.01}),
         RuleBlock("adx_proxy", "momentum", "ADX trend proxy", {"momentum": "adx_proxy", "returns_5_min": 0.015}, 2),
         RuleBlock("stochastic_proxy", "momentum", "Stochastic pullback proxy", {"momentum": "stochastic_proxy", "rsi_min": 45, "rsi_max": 72}, 2),
+        RuleBlock("rsi_oversold", "momentum", "RSI oversold", {"momentum": "rsi_oversold", "rsi_oversold": 42}),
     ],
     "volatility": [
         RuleBlock("atr_stop_ready", "volatility", "ATR stop ready", {"volatility": "atr", "atr_multiplier": 1.5}),
@@ -147,12 +148,109 @@ def generate_discovery_candidates(
     return generated
 
 
+def generate_balanced_discovery_candidates(max_candidates: int = 1000) -> list[DiscoveryCandidate]:
+    if max_candidates <= 0:
+        return []
+    minimum_balanced_pool = 7000 if max_candidates >= 6 else 1200
+    pool_size = min(16000, max(minimum_balanced_pool, max_candidates * 10))
+    pool = generate_discovery_candidates(max_candidates=pool_size)
+    entry_order = ("trend_continuation", "pullback", "breakout", "mean_reversion", "opening_range_proxy", "gap_proxy")
+    grouped = {entry: [] for entry in entry_order}
+    for candidate in pool:
+        entry = str(candidate.parameters.get("entry") or "")
+        if entry in grouped:
+            grouped[entry].append(candidate)
+    for entry in entry_order:
+        grouped[entry] = interleave_candidate_groups(grouped[entry], "momentum")
+
+    selected: list[DiscoveryCandidate] = []
+    offsets = {entry: 0 for entry in entry_order}
+    while len(selected) < max_candidates:
+        added = False
+        for entry in entry_order:
+            offset = offsets[entry]
+            candidates = grouped[entry]
+            if offset >= len(candidates):
+                continue
+            base = candidates[offset]
+            selected.append(frequency_aware_variant(base, offset % 5))
+            offsets[entry] += 1
+            added = True
+            if len(selected) >= max_candidates:
+                break
+        if not added:
+            break
+    return selected
+
+
+def interleave_candidate_groups(candidates: list[DiscoveryCandidate], block_name: str) -> list[DiscoveryCandidate]:
+    keys = list(dict.fromkeys(candidate.blocks.get(block_name, "unknown") for candidate in candidates))
+    grouped = {key: [candidate for candidate in candidates if candidate.blocks.get(block_name, "unknown") == key] for key in keys}
+    offsets = {key: 0 for key in keys}
+    result: list[DiscoveryCandidate] = []
+    while len(result) < len(candidates):
+        for key in keys:
+            offset = offsets[key]
+            if offset < len(grouped[key]):
+                result.append(grouped[key][offset])
+                offsets[key] += 1
+    return result
+
+
+def frequency_aware_variant(candidate: DiscoveryCandidate, profile_index: int) -> DiscoveryCandidate:
+    profiles = ("baseline", "entry_frequency", "momentum_frequency", "volume_frequency", "holding_frequency")
+    profile = profiles[profile_index % len(profiles)]
+    params = dict(candidate.parameters)
+    params["frequency_hypothesis"] = profile
+    params["frequency_screen_min_opportunities"] = 30
+
+    if profile == "entry_frequency":
+        entry = str(params.get("entry") or "")
+        if entry in {"breakout", "opening_range_proxy"}:
+            params["breakout_lookback"] = max(4, int(params.get("breakout_lookback", 20)) // 2)
+        elif entry == "pullback":
+            params["entry_distance_to_ema20_max"] = round(float(params.get("entry_distance_to_ema20_max", 0.035)) * 1.75, 4)
+        elif entry == "mean_reversion":
+            params["rsi_oversold"] = min(50, float(params.get("rsi_oversold", 38)) + 7)
+        elif entry in {"trend_continuation", "gap_proxy"}:
+            params["returns_5_min"] = round(float(params.get("returns_5_min", 0.01)) * 0.5, 5)
+    elif profile == "momentum_frequency":
+        momentum = str(params.get("momentum") or "")
+        if momentum == "rsi":
+            params["rsi_min"] = max(45, float(params.get("rsi_min", 55)) - 7)
+        elif momentum in {"roc", "adx_proxy"}:
+            params["returns_5_min"] = round(float(params.get("returns_5_min", 0.01)) * 0.5, 5)
+        elif momentum == "stochastic_proxy":
+            params["rsi_min"] = max(35, float(params.get("rsi_min", 45)) - 7)
+            params["rsi_max"] = min(80, float(params.get("rsi_max", 72)) + 5)
+        elif momentum == "rsi_oversold":
+            params["rsi_oversold"] = min(50, float(params.get("rsi_oversold", 42)) + 5)
+        elif momentum == "macd":
+            params["macd_signal_tolerance"] = 0.08
+    elif profile == "volume_frequency":
+        params["volume_change_min"] = min(float(params.get("volume_change_min", 0)), -0.25)
+    elif profile == "holding_frequency":
+        params["max_holding_bars"] = 8
+
+    canonical_key = canonical_candidate_key(candidate.blocks, params, candidate.parent_candidate_id)
+    return DiscoveryCandidate(
+        candidate_id=f"sd_{sha256(canonical_key.encode()).hexdigest()[:14]}",
+        family_id=candidate.family_id,
+        parent_candidate_id=candidate.parent_candidate_id,
+        generation=candidate.generation,
+        blocks=dict(candidate.blocks),
+        parameters=params,
+        complexity=candidate.complexity,
+        canonical_key=canonical_key,
+    )
+
+
 def is_redundant_or_impossible(params: dict[str, Any], complexity: int) -> bool:
     if complexity > 10:
         return True
     if int(params.get("trend_fast", 0)) >= int(params.get("trend_slow", 1)):
         return True
-    if params.get("entry") == "mean_reversion" and params.get("momentum") in {"rsi", "adx_proxy"} and float(params.get("rsi_min", 0)) >= 55:
+    if params.get("entry") == "mean_reversion" and params.get("momentum") != "rsi_oversold":
         return True
     if params.get("entry") == "breakout" and params.get("volatility") == "bollinger":
         return True
@@ -330,12 +428,18 @@ def momentum_passes(feature: dict[str, Any], params: dict[str, Any]) -> bool:
     if block == "rsi":
         return feature.get("rsi_14") is not None and Decimal(feature["rsi_14"]) >= Decimal(str(params.get("rsi_min", 50)))
     if block == "macd":
-        return feature.get("macd") is not None and feature.get("macd_signal") is not None and Decimal(feature["macd"]) > Decimal(feature["macd_signal"])
+        if feature.get("macd") is None or feature.get("macd_signal") is None:
+            return False
+        signal = Decimal(feature["macd_signal"])
+        tolerance = abs(signal) * Decimal(str(params.get("macd_signal_tolerance", 0)))
+        return Decimal(feature["macd"]) >= signal - tolerance
     if block in {"roc", "adx_proxy"}:
         return feature.get("returns_5") is not None and Decimal(feature["returns_5"]) >= Decimal(str(params.get("returns_5_min", 0)))
     if block == "stochastic_proxy":
         rsi = feature.get("rsi_14")
         return rsi is not None and Decimal(str(params.get("rsi_min", 45))) <= Decimal(rsi) <= Decimal(str(params.get("rsi_max", 72)))
+    if block == "rsi_oversold":
+        return feature.get("rsi_14") is not None and Decimal(feature["rsi_14"]) <= Decimal(str(params.get("rsi_oversold", 42)))
     return False
 
 
@@ -450,6 +554,7 @@ def run_strategy_discovery(
     timeframe: str,
     max_candidates: int = 100,
 ) -> dict[str, Any]:
+    ensure_strategy_discovery_tables(conn)
     sync_market_regimes(conn, symbol=symbol, timeframe=timeframe)
     candles = load_candles(conn, symbol, timeframe)
     features = list(
@@ -487,9 +592,36 @@ def run_strategy_discovery(
     }
 
 
-def evaluate_candidate(candidate: DiscoveryCandidate, candles: list[dict[str, Any]], features: list[dict[str, Any]], context_by_time: dict[Any, dict[str, Any]]) -> dict[str, Any]:
+def evaluate_candidate(
+    candidate: DiscoveryCandidate,
+    candles: list[dict[str, Any]],
+    features: list[dict[str, Any]],
+    context_by_time: dict[Any, dict[str, Any]],
+    market_arrays: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     strategy = make_strategy_definition(candidate)
-    result = run_backtest(candles, features, strategy.parameters, strategy.decide)
+    frequency_screen = None
+    minimum_opportunities = int(strategy.parameters.get("frequency_screen_min_opportunities") or 0)
+    if minimum_opportunities > 0:
+        frequency_screen = count_setup_opportunities(candles, features, strategy.parameters, strategy.decide)
+    if frequency_screen and int(frequency_screen["opportunities"]) < minimum_opportunities:
+        result = {
+            "metrics": {
+                "profit_factor": None,
+                "expectancy_per_trade": 0,
+                "max_drawdown": 0,
+                "number_of_trades": 0,
+                "setup_opportunities": int(frequency_screen["opportunities"]),
+                "frequency_screen_rejected": True,
+                "walk_forward": {
+                    "enabled": bool(frequency_screen["walk_forward_enabled"]),
+                    "reason": "Candidate cannot reach the unchanged trade-count gate in the available validation window.",
+                },
+            },
+            "trades": [],
+        }
+    else:
+        result = run_backtest(candles, features, strategy.parameters, strategy.decide, market_arrays=market_arrays)
     metrics = dict(result["metrics"])
     trades = result.get("trades", [])
     by_year = compare_by_year(trades)
@@ -508,7 +640,7 @@ def evaluate_candidate(candidate: DiscoveryCandidate, candles: list[dict[str, An
         "parameters": candidate.parameters,
         "complexity": candidate.complexity,
         "metrics": metrics,
-        "validation_metrics": {"score_metrics": research_score, "paper_ready": readiness["paper_ready"]},
+        "validation_metrics": {"score_metrics": research_score, "paper_ready": readiness["paper_ready"], "frequency_screen": frequency_screen},
         "walk_forward_metrics": metrics.get("walk_forward", {}),
         "out_of_sample_metrics": metrics.get("walk_forward", {}),
         "regime_analysis": {"by_year": by_year, "by_market_regime": by_market, "by_volatility_regime": by_volatility},
@@ -534,6 +666,8 @@ def failure_reasons_for(metrics: dict[str, Any], readiness: dict[str, Any], by_m
     reasons: list[str] = []
     if finite_metric(metrics.get("number_of_trades")) < 20:
         reasons.append("insufficient_trades")
+    if metrics.get("frequency_screen_rejected"):
+        reasons.append("projected_trade_count_below_gate")
     if finite_metric(metrics.get("profit_factor")) < 1.05:
         reasons.append("weak_profit_factor")
     if finite_metric(metrics.get("expectancy_per_trade")) <= 0:
@@ -568,6 +702,80 @@ def insert_discovery_run(conn: psycopg.Connection, symbol: str, timeframe: str, 
         (symbol, timeframe, max_candidates, DISCOVERY_VERSION, SAFETY_STATEMENT),
     ).fetchone()
     return int(row["id"])
+
+
+def ensure_strategy_discovery_tables(conn: psycopg.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_discovery_runs (
+            id BIGSERIAL PRIMARY KEY,
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            requested_candidates INTEGER NOT NULL,
+            discovery_version TEXT NOT NULL,
+            safety_statement TEXT NOT NULL,
+            simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_discovery_strategies (
+            id BIGSERIAL PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            family_id TEXT NOT NULL,
+            parent_candidate_id TEXT,
+            discovery_run_id BIGINT REFERENCES strategy_discovery_runs(id),
+            symbol TEXT NOT NULL,
+            timeframe TEXT NOT NULL,
+            generation INTEGER NOT NULL,
+            blocks JSONB NOT NULL,
+            parameters JSONB NOT NULL,
+            complexity INTEGER NOT NULL,
+            metrics JSONB NOT NULL,
+            validation_metrics JSONB NOT NULL,
+            walk_forward_metrics JSONB NOT NULL,
+            out_of_sample_metrics JSONB NOT NULL,
+            regime_analysis JSONB NOT NULL,
+            feature_correlations JSONB NOT NULL,
+            paper_readiness JSONB NOT NULL,
+            research_score NUMERIC NOT NULL,
+            status TEXT NOT NULL,
+            failure_reasons JSONB NOT NULL,
+            explanation TEXT NOT NULL,
+            discovery_version TEXT NOT NULL,
+            simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            UNIQUE(candidate_id, symbol, timeframe)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategy_discovery_events (
+            id BIGSERIAL PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            parent_candidate_id TEXT,
+            event_type TEXT NOT NULL,
+            details JSONB NOT NULL,
+            simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS strategy_discovery_strategies_status_score_idx
+        ON strategy_discovery_strategies(status, research_score DESC, created_at DESC)
+        """
+    )
+    conn.execute(
+        """
+        CREATE INDEX IF NOT EXISTS strategy_discovery_events_created_idx
+        ON strategy_discovery_events(created_at DESC)
+        """
+    )
 
 
 def persist_discovered_strategy(conn: psycopg.Connection, run_id: int, symbol: str, timeframe: str, candidate: DiscoveryCandidate, row: dict[str, Any]) -> None:
@@ -610,6 +818,7 @@ def persist_discovered_strategy(conn: psycopg.Connection, run_id: int, symbol: s
 
 
 def evolve_discovered_strategies(conn: psycopg.Connection, limit: int = 20) -> dict[str, Any]:
+    ensure_strategy_discovery_tables(conn)
     parents = conn.execute(
         """
         SELECT candidate_id, family_id, generation, blocks, parameters
@@ -763,6 +972,7 @@ def generate_child_variants(parent: DiscoveryCandidate, pattern_context: dict[st
 
 
 def discovery_dashboard(conn: psycopg.Connection, limit: int = 20) -> dict[str, Any]:
+    ensure_strategy_discovery_tables(conn)
     summary_rows = conn.execute(
         """
         SELECT status, COUNT(*) AS count

@@ -16,9 +16,16 @@ CADENCE_DELTAS = {
     "60m": timedelta(minutes=60),
     "daily": timedelta(days=1),
 }
+_DEPLOYMENT_MANAGEMENT_SCHEMA_READY = False
 
 
 def ensure_deployment_management_schema(conn: psycopg.Connection) -> None:
+    global _DEPLOYMENT_MANAGEMENT_SCHEMA_READY
+    if _DEPLOYMENT_MANAGEMENT_SCHEMA_READY:
+        return
+    if deployment_management_schema_ready(conn):
+        _DEPLOYMENT_MANAGEMENT_SCHEMA_READY = True
+        return
     conn.execute(
         """
         ALTER TABLE strategy_deployments
@@ -59,6 +66,42 @@ def ensure_deployment_management_schema(conn: psycopg.Connection) -> None:
         ON strategy_deployments(status, simulation_only, symbol, timeframe, strategy_name)
         """
     )
+    conn.commit()
+    _DEPLOYMENT_MANAGEMENT_SCHEMA_READY = True
+
+
+def deployment_management_schema_ready(conn: psycopg.Connection) -> bool:
+    try:
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM information_schema.columns
+            WHERE table_name = 'strategy_deployments'
+              AND column_name IN (
+                'scan_cadence',
+                'max_simulated_exposure_pct',
+                'health_status',
+                'health_checked_at',
+                'resumed_at'
+              )
+            """
+        ).fetchone()
+        if int((row or {}).get("count") or 0) < 5:
+            return False
+        constraints = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM pg_constraint
+            WHERE conrelid = 'strategy_deployments'::regclass
+              AND conname IN (
+                'strategy_deployments_scan_cadence_check',
+                'strategy_deployments_exposure_limit_check'
+              )
+            """
+        ).fetchone()
+        return int((constraints or {}).get("count") or 0) >= 2
+    except Exception:
+        return False
 
 
 def deployment_due_for_scheduler(deployment: dict[str, Any], now: datetime | None = None) -> bool:

@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.providers import alpaca
-from app.providers.alpaca import exclude_incomplete_latest, fetch_stock_bars, normalize_stock_bar, normalize_stock_bars, start_for_limit
+from app.providers.alpaca import exclude_incomplete_latest, fetch_stock_assets, fetch_stock_bars, normalize_alpaca_asset, normalize_stock_bar, normalize_stock_bars, start_for_limit
 
 
 def test_normalize_stock_bar_maps_alpaca_payload_to_candle() -> None:
@@ -60,11 +60,11 @@ def test_exclude_incomplete_latest_intraday_bar() -> None:
     assert excluded is True
 
 
-def test_start_for_limit_caps_hourly_stock_research_to_recent_monitoring_window() -> None:
+def test_start_for_limit_requests_multi_year_hourly_research_window() -> None:
     start = start_for_limit("1h", 5000)
     age = datetime.now(tz=UTC) - start
 
-    assert timedelta(days=400) < age < timedelta(days=430)
+    assert timedelta(days=1370) < age < timedelta(days=1390)
 
 
 def test_fetch_stock_bars_returns_latest_paginated_tail(monkeypatch) -> None:
@@ -121,3 +121,71 @@ def test_fetch_stock_bars_returns_latest_paginated_tail(monkeypatch) -> None:
 
     assert [bar["t"] for bar in bars] == ["2026-07-10T18:00:00Z", "2026-07-10T19:00:00Z"]
     assert len(request_log) == 2
+
+
+def test_normalize_alpaca_asset_keeps_active_tradable_us_equities() -> None:
+    asset = normalize_alpaca_asset(
+        {
+            "id": "asset-id",
+            "class": "us_equity",
+            "exchange": "NASDAQ",
+            "symbol": "AAPL",
+            "name": "Apple Inc.",
+            "status": "active",
+            "tradable": True,
+            "marginable": True,
+            "shortable": True,
+            "fractionable": True,
+        }
+    )
+
+    assert asset == {
+        "id": "asset-id",
+        "symbol": "AAPL",
+        "name": "Apple Inc.",
+        "exchange": "NASDAQ",
+        "asset_class": "us_equity",
+        "status": "active",
+        "tradable": True,
+        "marginable": True,
+        "shortable": True,
+        "fractionable": True,
+    }
+    assert normalize_alpaca_asset({"class": "us_equity", "symbol": "OLD", "status": "inactive", "tradable": True}) is None
+    assert normalize_alpaca_asset({"class": "us_equity", "symbol": "VIEW", "status": "active", "tradable": False}) is None
+
+
+def test_fetch_stock_assets_filters_and_sorts_catalog(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self):
+            return [
+                {"id": "2", "class": "us_equity", "exchange": "NYSE", "symbol": "ZZZ", "name": "Zed", "status": "active", "tradable": True},
+                {"id": "1", "class": "us_equity", "exchange": "NASDAQ", "symbol": "AAA", "name": "Alpha", "status": "active", "tradable": True},
+                {"id": "3", "class": "us_equity", "exchange": "NYSE", "symbol": "OLD", "name": "Old", "status": "inactive", "tradable": True},
+            ]
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, endpoint, params):
+            assert endpoint == "/v2/assets"
+            assert params == {"status": "active", "asset_class": "us_equity"}
+            return FakeResponse()
+
+    monkeypatch.setattr(alpaca.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(alpaca.settings, "alpaca_api_key", "key")
+    monkeypatch.setattr(alpaca.settings, "alpaca_api_secret", "secret")
+
+    assets = asyncio.run(fetch_stock_assets())
+
+    assert [asset["symbol"] for asset in assets] == ["AAA", "ZZZ"]
