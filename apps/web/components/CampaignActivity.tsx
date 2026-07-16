@@ -166,6 +166,8 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
             const isPaused = campaign.status === "paused";
             const canControl = ["running", "queued", "paused", "failed"].includes(campaign.status);
             const canDelete = !["running", "completed"].includes(campaign.status);
+            const isActive = ["running", "queued"].includes(campaign.status);
+            const eta = isActive ? formatEta(estimatedSecondsRemaining(campaign)) : null;
             return (
               <motion.article key={campaign.id} className="campaignRow" layout initial={reduceMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, height: 0 }}>
                 <div className="campaignState">
@@ -181,7 +183,10 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                   <span className="campaignProgressTrack"><motion.i initial={false} animate={{ width: `${progress}%` }} transition={{ duration: reduceMotion ? 0 : 0.45 }} /></span>
                   <small>{campaign.queued_jobs.toLocaleString()} queued · {campaign.blocked_jobs.toLocaleString()} blocked</small>
                 </div>
-                <time dateTime={campaign.updated_at}>{relativeTime(campaign.updated_at)}</time>
+                <div className="campaignTiming">
+                  {eta ? <strong title={eta.title}>{eta.label}</strong> : null}
+                  <time dateTime={campaign.updated_at}>{relativeTime(campaign.updated_at)}</time>
+                </div>
                 <div className="campaignRowActions">
                   <button className="campaignIconButton" type="button" onClick={() => void openExecution(campaign.id)} disabled={!['queued', 'running'].includes(campaign.status) || busyId === campaign.id} title={['queued', 'running'].includes(campaign.status) ? "Parallel execution and profiling" : "Resume before running simulations"} aria-label={`Configure parallel execution for ${campaign.name}`}>
                     <Gauge size={16} />
@@ -261,6 +266,42 @@ function relativeTime(value: string) {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `Updated ${hours}h ago`;
   return `Updated ${Math.floor(hours / 24)}d ago`;
+}
+
+function formatEta(value: number | null | undefined) {
+  if (!value || value <= 0) {
+    return { label: "ETA calculating", title: "Not enough recent completed jobs to estimate time remaining yet." };
+  }
+  const minutes = Math.ceil(value / 60);
+  if (minutes < 60) {
+    return { label: `ETA ${minutes}m`, title: `Estimated time left: ${minutes} minute${minutes === 1 ? "" : "s"}.` };
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  if (hours < 24) {
+    return {
+      label: remainingMinutes ? `ETA ${hours}h ${remainingMinutes}m` : `ETA ${hours}h`,
+      title: `Estimated time left: ${hours} hour${hours === 1 ? "" : "s"}${remainingMinutes ? ` ${remainingMinutes} minute${remainingMinutes === 1 ? "" : "s"}` : ""}.`
+    };
+  }
+  const days = Math.floor(hours / 24);
+  const remainingHours = hours % 24;
+  return {
+    label: remainingHours ? `ETA ${days}d ${remainingHours}h` : `ETA ${days}d`,
+    title: `Estimated time left: ${days} day${days === 1 ? "" : "s"}${remainingHours ? ` ${remainingHours} hour${remainingHours === 1 ? "" : "s"}` : ""}.`
+  };
+}
+
+function estimatedSecondsRemaining(campaign: ResearchCampaignListRow) {
+  if (campaign.estimated_seconds_remaining && campaign.estimated_seconds_remaining > 0) {
+    return campaign.estimated_seconds_remaining;
+  }
+  const remainingJobs = Math.max(campaign.total_jobs - campaign.terminal_jobs - campaign.blocked_jobs, 0);
+  const startedAt = campaign.started_at ? new Date(campaign.started_at).getTime() : NaN;
+  if (remainingJobs <= 0 || campaign.terminal_jobs <= 0 || !Number.isFinite(startedAt)) return null;
+  const elapsedSeconds = Math.max((Date.now() - startedAt) / 1000, 1);
+  const jobsPerSecond = campaign.terminal_jobs / elapsedSeconds;
+  return jobsPerSecond > 0 ? Math.round(remainingJobs / jobsPerSecond) : null;
 }
 
 function readCampaignError(error: unknown) {

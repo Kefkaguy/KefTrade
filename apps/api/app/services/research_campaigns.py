@@ -4737,6 +4737,10 @@ def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dic
             COUNT(j.id) FILTER (WHERE j.status = 'blocked_data') AS blocked_jobs,
             COUNT(j.id) FILTER (WHERE j.status = 'deferred_rate_limit') AS deferred_jobs,
             COUNT(j.id) FILTER (WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')) AS terminal_jobs,
+            COUNT(j.id) FILTER (
+                WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')
+                  AND j.updated_at >= NOW() - INTERVAL '15 minutes'
+            ) AS recent_terminal_jobs,
             COUNT(j.id) FILTER (WHERE j.status = 'promoted') AS promoted_jobs,
             COUNT(j.id) FILTER (WHERE j.status = 'rejected') AS rejected_jobs
         FROM research_campaigns c
@@ -4748,7 +4752,7 @@ def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dic
         """,
         (limit,),
     ).fetchall()
-    campaigns = [jsonable(dict(row)) for row in rows]
+    campaigns = [campaign_list_row_with_eta(dict(row)) for row in rows]
     return {
         "campaigns": campaigns,
         "summary": {
@@ -4758,6 +4762,29 @@ def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dic
         },
         "simulation_only": True,
     }
+
+
+def campaign_list_row_with_eta(row: dict[str, Any]) -> dict[str, Any]:
+    total_jobs = int(row.get("total_jobs") or 0)
+    terminal_jobs = int(row.get("terminal_jobs") or 0)
+    blocked_jobs = int(row.get("blocked_jobs") or 0)
+    remaining_jobs = max(total_jobs - terminal_jobs - blocked_jobs, 0)
+    recent_terminal_jobs = int(row.pop("recent_terminal_jobs", 0) or 0)
+    jobs_per_minute = recent_terminal_jobs / 15 if recent_terminal_jobs > 0 else 0.0
+
+    started_at = row.get("started_at")
+    if jobs_per_minute <= 0 and terminal_jobs > 0 and isinstance(started_at, datetime):
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=UTC)
+        elapsed_minutes = max((datetime.now(UTC) - started_at).total_seconds() / 60, 1)
+        jobs_per_minute = terminal_jobs / elapsed_minutes
+
+    if row.get("status") in {"queued", "running"} and remaining_jobs > 0 and jobs_per_minute > 0:
+        row["estimated_seconds_remaining"] = round((remaining_jobs / jobs_per_minute) * 60)
+    else:
+        row["estimated_seconds_remaining"] = None
+    row["jobs_per_minute"] = round(jobs_per_minute, 2)
+    return jsonable(row)
 
 
 def get_campaign_performance_profile(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:

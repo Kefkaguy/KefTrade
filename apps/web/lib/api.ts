@@ -1,4 +1,4 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8002";
+const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
 
 export type Candle = {
   timestamp: string;
@@ -1126,6 +1126,8 @@ export type ResearchCampaignListRow = {
   terminal_jobs: number;
   promoted_jobs: number;
   rejected_jobs: number;
+  estimated_seconds_remaining?: number | null;
+  jobs_per_minute?: number;
   created_at: string;
   started_at?: string | null;
   completed_at?: string | null;
@@ -1199,6 +1201,9 @@ async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
     return response.json() as Promise<T>;
   } catch (error) {
     if (!responseLogged) logApiTiming(path, method, startedAt, "error", error);
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
+    }
     throw error;
   } finally {
     clearTimeout(timeout);
@@ -1377,7 +1382,7 @@ export function getResearchArchive() {
 }
 
 export function getResearchIntelligence() {
-  return request<ResearchIntelligence>("/research/intelligence");
+  return request<ResearchIntelligence>("/research/intelligence", { timeoutMs: 60000 });
 }
 
 export function saveResearchUniverse(payload: ResearchUniverseInput) {

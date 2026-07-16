@@ -380,7 +380,9 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .campaignProgressTrack { display: block; height: 4px; margin-top: 8px; overflow: hidden; border-radius: 2px; background: var(--panel-soft); }
 .campaignProgressTrack i { display: block; height: 100%; border-radius: inherit; background: var(--accent); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 45%, transparent); }
 .campaignProgress small { display: block; margin-top: 6px; color: var(--muted); font-size: 7px; }
-.campaignRow > time { color: var(--muted); font: 8px var(--font-mono); text-align: right; }
+.campaignTiming { display: grid; justify-items: end; gap: 5px; color: var(--muted); font: 8px var(--font-mono); text-align: right; }
+.campaignTiming strong { color: var(--ink); font: 650 9px var(--font-mono); white-space: nowrap; }
+.campaignTiming time { white-space: nowrap; }
 .campaignRowActions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
 .campaignIconButton { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); color: var(--muted-accent); cursor: pointer; transition: border-color .2s ease, background .2s ease, color .2s ease, transform .2s ease; }
 .campaignIconButton:hover:not(:disabled) { transform: translateY(-1px); border-color: var(--accent-2); background: var(--panel); color: var(--accent); }
@@ -751,7 +753,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   .researchJourney article:first-child { padding-left: 0; }
   .researchJourney article:last-child { padding-right: 0; }
   .campaignRow { grid-template-columns: 92px minmax(180px, 1fr) minmax(190px, .9fr) auto; }
-  .campaignRow > time { display: none; }
+  .campaignTiming { display: none; }
   .researchBuilderSection { padding-top: 92px; }
   .researchBuilderShell { grid-template-columns: 1fr; }
   .campaignPreview { border-top: 1px solid var(--line-strong); border-left: 0; }
@@ -803,6 +805,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   .campaignFilters { padding-right: 0; padding-left: 0; }
   .campaignRow { grid-template-columns: 88px minmax(0, 1fr) auto; gap: 14px; padding: 18px 0; }
   .campaignProgress { grid-column: 2 / -1; }
+  .campaignTiming { display: grid; grid-column: 2 / -1; justify-items: start; text-align: left; }
   .campaignRowActions { grid-row: 1; grid-column: 3; }
   .campaignExecutionPanel { grid-template-columns: 1fr auto; }
   .campaignProfile, .campaignProfileEmpty { grid-column: 1 / -1; }
@@ -870,6 +873,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   .campaignState { grid-column: 1; }
   .campaignIdentity { grid-column: 1 / -1; }
   .campaignProgress { grid-column: 1 / -1; }
+  .campaignTiming { grid-column: 1 / -1; }
   .campaignRowActions { grid-row: 1; grid-column: 2; }
   .campaignDeleteConfirm { align-items: stretch; flex-direction: column; }
   .campaignExecutionPanel { grid-template-columns: 1fr; }

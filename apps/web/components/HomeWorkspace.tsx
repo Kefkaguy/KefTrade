@@ -279,7 +279,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         ))}
       </motion.section>
 
-      <CampaignActivity enabled={Boolean(snapshot) || !serviceError} />
+      <CampaignActivity enabled />
 
       {serviceError ? (
         <motion.div className="researchServiceNote" variants={reveal}>
