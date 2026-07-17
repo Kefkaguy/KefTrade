@@ -45,6 +45,9 @@ CREATE INDEX IF NOT EXISTS research_campaign_batches_campaign_idx
     ON research_campaign_batches(campaign_id, batch_number);
 
 ALTER TABLE research_campaign_jobs
+    DROP CONSTRAINT IF EXISTS research_campaign_jobs_batch_fk;
+
+ALTER TABLE research_campaign_jobs
     ADD CONSTRAINT research_campaign_jobs_batch_fk
     FOREIGN KEY (batch_id) REFERENCES research_campaign_batches(id) ON DELETE SET NULL;
 

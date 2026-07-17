@@ -8,6 +8,10 @@ ALTER TABLE paper_orders DROP CONSTRAINT IF EXISTS paper_orders_type_check;
 ALTER TABLE paper_orders ADD CONSTRAINT paper_orders_type_check
     CHECK (order_type IN ('market', 'limit', 'stop_loss', 'take_profit'));
 
+ALTER TABLE paper_orders DROP CONSTRAINT IF EXISTS paper_orders_trigger_price_check;
+ALTER TABLE paper_orders DROP CONSTRAINT IF EXISTS paper_orders_stop_loss_price_check;
+ALTER TABLE paper_orders DROP CONSTRAINT IF EXISTS paper_orders_take_profit_price_check;
+
 ALTER TABLE paper_orders ADD CONSTRAINT paper_orders_trigger_price_check
     CHECK (trigger_price IS NULL OR trigger_price > 0);
 ALTER TABLE paper_orders ADD CONSTRAINT paper_orders_stop_loss_price_check

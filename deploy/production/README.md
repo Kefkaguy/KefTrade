@@ -71,6 +71,13 @@ docker compose -f docker-compose.prod.yml up -d api worker nginx
 docker compose -f docker-compose.prod.yml ps
 ```
 
+The `api` and `worker` services are configured to wait for the migration job to complete before starting. If a worker was started before migrations completed, recreate it after a successful migration:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --force-recreate worker
+docker compose -f docker-compose.prod.yml logs --tail=100 --since=5m worker
+```
+
 ## Validation commands
 
 ```bash
@@ -78,8 +85,9 @@ curl -fsS http://127.0.0.1/health
 curl -fsS http://127.0.0.1/docs | head
 docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml ps
 docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml logs --tail=100 api
-docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml logs --tail=100 worker
+docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml logs --tail=100 --since=5m worker
 docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml exec postgres pg_isready -U keftrade -d keftrade
+docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml exec postgres psql -U keftrade -d keftrade -c "select to_regclass('public.research_campaign_jobs');"
 ```
 
 ## Vercel frontend
