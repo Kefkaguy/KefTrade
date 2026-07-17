@@ -10,6 +10,11 @@ from app.domain.market_data import MarketDataSyncResult
 from app.providers.yfinance_provider import STATIC_STOCK_METADATA, valid_ohlc
 from app.settings import settings
 
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+
 ALPACA_SOURCE = "alpaca_iex"
 ALPACA_STOCK_BARS_ENDPOINT = "/v2/stocks/{symbol}/bars"
 ALPACA_ASSETS_ENDPOINT = "/v2/assets"
@@ -31,6 +36,33 @@ TIMEFRAME_SECONDS = {
     "1d": 24 * 60 * 60,
 }
 
+async def sync_alpaca_stock_assets(conn: psycopg.Connection) -> dict[str, Any]:
+    t = time.perf_counter()
+
+    logger.info("STEP 1: Starting fetch_stock_assets()")
+    assets = await fetch_stock_assets()
+    logger.info(
+        "STEP 2: fetch_stock_assets() finished in %.2f seconds (%d assets)",
+        time.perf_counter() - t,
+        len(assets),
+    )
+
+    t = time.perf_counter()
+
+    logger.info("STEP 3: Starting import_alpaca_stock_assets()")
+    imported = import_alpaca_stock_assets(conn, assets)
+    logger.info(
+        "STEP 4: import_alpaca_stock_assets() finished in %.2f seconds (%d imported)",
+        time.perf_counter() - t,
+        imported,
+    )
+
+    return {
+        "assets": assets,
+        "total": len(assets),
+        "imported": imported,
+        "source": "alpaca",
+    }
 
 class AlpacaMarketDataProvider:
     name = "alpaca_iex"
