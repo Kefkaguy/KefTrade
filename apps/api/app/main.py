@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.routers import alpha, backtests, data, features, paper, regimes, research, research_copilot, research_intelligence, research_lab, risk, signals, symbols, validation
+from app.settings import cors_origin_list
 from app.services.paper_scheduler import start_scheduler, stop_scheduler
 
 
@@ -20,7 +21,7 @@ app = FastAPI(title="KefTrade API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:3000", "http://localhost:3000", "http://127.0.0.1:3001", "http://localhost:3001"],
+    allow_origins=cors_origin_list(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

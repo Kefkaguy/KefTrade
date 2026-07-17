@@ -7,6 +7,7 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 
 class Settings(BaseSettings):
     database_url: str = "postgresql://keftrade:keftrade@127.0.0.1:5432/keftrade"
+    cors_origins: str = "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001"
     binance_base_url: str = "https://api.binance.us"
     llm_provider: str = "openai"
     openai_api_key: str | None = None
@@ -25,3 +26,7 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def cors_origin_list() -> list[str]:
+    return [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
