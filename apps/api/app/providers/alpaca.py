@@ -132,34 +132,36 @@ def normalize_alpaca_asset(row: dict[str, Any]) -> dict[str, Any] | None:
 def import_alpaca_stock_assets(conn: psycopg.Connection, assets: list[dict[str, Any]]) -> int:
     if not assets:
         return 0
-    conn.executemany(
-        """
-        INSERT INTO symbols(symbol, asset_class, exchange, currency, name, provider_symbol, primary_provider, index_membership, is_active)
-        VALUES (%s, 'us_equity', %s, 'USD', %s, %s, 'alpaca_iex', %s, TRUE)
-        ON CONFLICT (symbol)
-        DO UPDATE SET
-            asset_class = CASE WHEN symbols.asset_class = 'etf' THEN symbols.asset_class ELSE EXCLUDED.asset_class END,
-            exchange = EXCLUDED.exchange,
-            currency = EXCLUDED.currency,
-            name = EXCLUDED.name,
-            provider_symbol = EXCLUDED.provider_symbol,
-            primary_provider = EXCLUDED.primary_provider,
-            is_active = TRUE
-        """,
-        [
-            (
-                asset["symbol"],
-                asset["exchange"],
-                asset["name"],
-                asset["symbol"],
-                Jsonb([]),
-            )
-            for asset in assets
-        ],
-    )
+
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO symbols(symbol, asset_class, exchange, currency, name, provider_symbol, primary_provider, index_membership, is_active)
+            VALUES (%s, 'us_equity', %s, 'USD', %s, %s, 'alpaca_iex', %s, TRUE)
+            ON CONFLICT (symbol)
+            DO UPDATE SET
+                asset_class = CASE WHEN symbols.asset_class = 'etf' THEN symbols.asset_class ELSE EXCLUDED.asset_class END,
+                exchange = EXCLUDED.exchange,
+                currency = EXCLUDED.currency,
+                name = EXCLUDED.name,
+                provider_symbol = EXCLUDED.provider_symbol,
+                primary_provider = EXCLUDED.primary_provider,
+                is_active = TRUE
+            """,
+            [
+                (
+                    asset["symbol"],
+                    asset["exchange"],
+                    asset["name"],
+                    asset["symbol"],
+                    Jsonb([]),
+                )
+                for asset in assets
+            ],
+        )
+
     conn.commit()
     return len(assets)
-
 
 async def fetch_stock_bars(symbol: str, timeframe: str, limit: int) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], str | None]:
     requested_limit = max(1, limit)
