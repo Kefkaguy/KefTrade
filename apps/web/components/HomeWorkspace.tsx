@@ -51,9 +51,12 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
   }, []);
 
   const processCampaign = useCallback(async (campaignId: number, generation: number) => {
+    const startedAt = now();
+    logLaunchDiagnostic("Parallel launch started", { campaignId });
     try {
       await runParallelResearchCampaign(campaignId, 1, 10);
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
+      logLaunchDiagnostic("Parallel launch finished", { campaignId, elapsedMs: elapsedSince(startedAt) });
       const nextStatus = await getResearchCampaign(campaignId);
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
       setStatus(nextStatus);
@@ -61,6 +64,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
       else setPhase("running");
     } catch (error) {
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
+      logLaunchException("Parallel launch exception", error, { campaignId, elapsedMs: elapsedSince(startedAt) });
       setLaunchError(readError(error));
       setPhase("error");
     }
@@ -73,11 +77,14 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
     const timer = window.setInterval(async () => {
       if (pollingRef.current || !aliveRef.current) return;
       pollingRef.current = true;
+      const pollStartedAt = now();
+      logLaunchDiagnostic("Polling started", { campaignId });
       try {
         const nextStatus = await getResearchCampaign(campaignId);
         if (!aliveRef.current) return;
         setStatus(nextStatus);
         if (nextStatus.campaign.status === "completed") setPhase("complete");
+        logLaunchDiagnostic("Polling finished", { campaignId, status: nextStatus.campaign.status, elapsedMs: elapsedSince(pollStartedAt) });
         const blockedJobs = Number(nextStatus.analytics.jobs_by_status?.blocked_data ?? 0);
         if (blockedJobs > 0) {
           setLaunchError(`${blockedJobs.toLocaleString()} jobs were blocked because required market data or features are unavailable. The remaining queue has been stopped.`);
@@ -87,7 +94,8 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
           setLaunchError(`Campaign ${campaignId} is ${nextStatus.campaign.status.toLowerCase()}. No additional jobs will be started.`);
           setPhase("error");
         }
-      } catch {
+      } catch (error) {
+        logLaunchException("Polling timeout or failure", error, { campaignId, elapsedMs: elapsedSince(pollStartedAt) });
         // The active execution request can briefly hold the local API; the next poll retries.
       } finally {
         pollingRef.current = false;
@@ -98,6 +106,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
   }, [createdCampaign?.campaign.id, phase]);
 
   async function launchCampaign(nextSelection: ResearchSelection) {
+    const launchStartedAt = now();
     const generation = runGenerationRef.current + 1;
     runGenerationRef.current = generation;
     setSelection(nextSelection);
@@ -105,13 +114,17 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
     setStatus(null);
     setLaunchError(null);
     setPhase("creating");
+    logLaunchDiagnostic("Launch button clicked", { assets: nextSelection.assets.map((asset) => asset.apiSymbol), candidateCount: nextSelection.candidateCount, estimatedJobs: nextSelection.estimatedJobs });
 
     try {
+      const preflightStartedAt = now();
+      logLaunchDiagnostic("Preflight started", { assets: nextSelection.assets.length, timeframes: RESEARCH_TIMEFRAMES });
       const preflight = await preflightResearchCampaign(
         nextSelection.assets.map((asset) => asset.apiSymbol),
         [...RESEARCH_TIMEFRAMES]
       );
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
+      logLaunchDiagnostic("Preflight complete", { ready: preflight.ready, blockedDatasets: preflight.blocked_datasets, elapsedMs: elapsedSince(preflightStartedAt) });
       if (!preflight.ready) {
         const firstIssue = preflight.issues[0];
         const issueDetail = firstIssue
@@ -123,6 +136,8 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
       }
 
       const universeKey = researchUniverseKey(nextSelection);
+      const universeStartedAt = now();
+      logLaunchDiagnostic("Universe save started", { universeKey, assets: nextSelection.assets.length });
       await saveResearchUniverse({
         universe_key: universeKey,
         name: `${nextSelection.scopeLabel} research universe`,
@@ -135,7 +150,10 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
           display_assets: nextSelection.assets.map((asset) => asset.id)
         }
       });
+      logLaunchDiagnostic("Universe save complete", { universeKey, elapsedMs: elapsedSince(universeStartedAt) });
 
+      const createStartedAt = now();
+      logLaunchDiagnostic("Campaign create request sent", { universeKey, maxCandidates: nextSelection.candidateCount, assetLimit: nextSelection.assets.length });
       const created = await createResearchCampaign({
         universeKey,
         name: `${nextSelection.scopeLabel} hypothesis research`,
@@ -144,6 +162,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         timeframes: [...RESEARCH_TIMEFRAMES]
       });
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
+      logLaunchDiagnostic("Campaign create response received", { campaignId: created.campaign.id, jobsCreated: created.jobs_created, elapsedMs: elapsedSince(createStartedAt) });
 
       setCreatedCampaign(created);
       const initialStatus = await getResearchCampaign(created.campaign.id);
@@ -157,8 +176,10 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
 
       setPhase("running");
       void processCampaign(created.campaign.id, generation);
+      logLaunchDiagnostic("Campaign launch workflow dispatched", { campaignId: created.campaign.id, elapsedMs: elapsedSince(launchStartedAt) });
     } catch (error) {
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
+      logLaunchException("Launch unexpected exception", error, { campaignId: createdCampaign?.campaign.id, elapsedMs: elapsedSince(launchStartedAt) });
       setLaunchError(readError(error));
       setPhase("error");
     }
@@ -292,4 +313,27 @@ function readError(error: unknown) {
     return `The research service returned ${error.message}.`;
   }
   return "KefTrade could not continue the campaign. Completed evidence remains preserved.";
+}
+
+function now() {
+  return typeof performance === "undefined" ? Date.now() : performance.now();
+}
+
+function elapsedSince(startedAt: number) {
+  return Math.round(now() - startedAt);
+}
+
+function logLaunchDiagnostic(message: string, fields: Record<string, unknown>) {
+  if (process.env.NODE_ENV === "production" && process.env.NEXT_PUBLIC_DIAGNOSTIC_LOGGING !== "true") return;
+  console.info(`[research-launch] ${message}`, fields);
+}
+
+function logLaunchException(message: string, error: unknown, fields: Record<string, unknown>) {
+  if (process.env.NODE_ENV === "production" && process.env.NEXT_PUBLIC_DIAGNOSTIC_LOGGING !== "true") return;
+  console.error(`[research-launch] ${message}`, {
+    ...fields,
+    exceptionClass: error instanceof Error ? error.name : typeof error,
+    exceptionMessage: error instanceof Error ? error.message : String(error),
+    traceback: error instanceof Error ? error.stack : undefined
+  });
 }

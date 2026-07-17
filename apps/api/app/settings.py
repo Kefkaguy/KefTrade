@@ -6,6 +6,9 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 
 
 class Settings(BaseSettings):
+    environment: str = "development"
+    log_level: str = "INFO"
+    diagnostic_logging: bool = True
     database_url: str = "postgresql://keftrade:keftrade@127.0.0.1:5432/keftrade"
     cors_origins: str = "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001"
     binance_base_url: str = "https://api.binance.us"

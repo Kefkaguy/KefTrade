@@ -1,4 +1,5 @@
 from typing import Any
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -27,6 +28,7 @@ from app.services.production_validation import (
 )
 from app.services.features import load_candles
 from app.services.features import sync_features
+from app.observability import elapsed_ms, log_event, log_exception
 from app.providers.registry import get_market_data_provider
 from app.settings import settings
 from app.services.regimes import load_regimes, sync_market_regimes
@@ -435,15 +437,23 @@ def save_research_universe(
     payload: ResearchUniversePayload,
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
-    return upsert_research_universe(
-        conn,
-        universe_key=payload.universe_key,
-        name=payload.name,
-        description=payload.description,
-        assets=payload.assets,
-        default_timeframes=payload.default_timeframes,
-        metadata=payload.metadata,
-    )
+    started = time.perf_counter()
+    log_event("Universe save started", universe_key=payload.universe_key, assets=len(payload.assets), timeframes=len(payload.default_timeframes))
+    try:
+        result = upsert_research_universe(
+            conn,
+            universe_key=payload.universe_key,
+            name=payload.name,
+            description=payload.description,
+            assets=payload.assets,
+            default_timeframes=payload.default_timeframes,
+            metadata=payload.metadata,
+        )
+        log_event("Universe save completed", universe_key=payload.universe_key, elapsed_ms=elapsed_ms(started))
+        return result
+    except Exception as error:
+        log_exception("Universe save exception", error, universe_key=payload.universe_key, elapsed_ms=elapsed_ms(started))
+        raise
 
 
 @router.post("/research/campaigns")
@@ -459,9 +469,11 @@ def create_large_scale_research_campaign(
     hypothesis_id: int | None = Query(None, ge=1),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
+    started = time.perf_counter()
+    log_event("Campaign creation started", universe_key=universe_key, name=name, max_candidates=max_candidates, asset_limit=asset_limit, timeframes=timeframes, architecture_mode=architecture_mode, dataset_mode=dataset_mode, dataset_id=dataset_id, hypothesis_id=hypothesis_id)
     if architecture_mode == "intelligent":
         try:
-            return create_intelligent_research_campaign(
+            result = create_intelligent_research_campaign(
                 conn,
                 universe_key=universe_key,
                 name=name,
@@ -472,16 +484,25 @@ def create_large_scale_research_campaign(
                 dataset_id=dataset_id,
                 hypothesis_id=hypothesis_id,
             )
+            log_event("Campaign launch complete", campaign_id=result.get("campaign", {}).get("id"), elapsed_ms=elapsed_ms(started))
+            return result
         except ValueError as error:
+            log_exception("Campaign creation rejected", error, elapsed_ms=elapsed_ms(started))
             raise HTTPException(status_code=400, detail=str(error)) from error
-    return create_research_campaign(
-        conn,
-        universe_key=universe_key,
-        name=name,
-        max_candidates=max_candidates,
-        asset_limit=asset_limit,
-        timeframes=timeframes,
-    )
+    try:
+        result = create_research_campaign(
+            conn,
+            universe_key=universe_key,
+            name=name,
+            max_candidates=max_candidates,
+            asset_limit=asset_limit,
+            timeframes=timeframes,
+        )
+        log_event("Campaign launch complete", campaign_id=result.get("campaign", {}).get("id"), elapsed_ms=elapsed_ms(started))
+        return result
+    except Exception as error:
+        log_exception("Campaign creation exception", error, elapsed_ms=elapsed_ms(started))
+        raise
 
 
 @router.get("/research/campaigns")
@@ -500,6 +521,7 @@ def preflight_large_scale_research_campaign(
     try:
         return research_campaign_preflight(conn, assets=payload.assets, timeframes=payload.timeframes)
     except ValueError as error:
+        log_exception("Campaign preflight exception", error, assets=len(payload.assets), timeframes=len(payload.timeframes))
         raise HTTPException(status_code=400, detail=str(error)) from error
 
 
@@ -508,15 +530,23 @@ async def prepare_large_scale_research_campaign(
     payload: ResearchCampaignPreflightPayload,
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
+    request_started = time.perf_counter()
     prepared: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
     for symbol in payload.assets:
         provider_name = "binance_dev" if symbol.upper().endswith("USDT") else "alpaca_iex" if settings.alpaca_api_key and settings.alpaca_api_secret else "yfinance_research"
         provider = get_market_data_provider(provider_name)
         for timeframe in payload.timeframes:
+            asset_started = time.perf_counter()
+            log_event("Starting asset sync", asset=symbol, provider=provider_name, timeframe=timeframe, retry_count=0)
             try:
+                download_started = time.perf_counter()
+                log_event("Download start", asset=symbol, provider=provider_name, timeframe=timeframe)
                 candles = await provider.sync_candles(conn, symbol=symbol, timeframe=timeframe, limit=5000)
+                log_event("Download finished", asset=symbol, provider=provider_name, timeframe=timeframe, candles_received=candles.candle_count, elapsed_ms=elapsed_ms(download_started))
+                feature_started = time.perf_counter()
                 features = sync_features(conn, symbol=symbol, timeframe=timeframe)
+                log_event("Features calculated", asset=symbol, provider=provider_name, timeframe=timeframe, features=features["usable"], elapsed_ms=elapsed_ms(feature_started))
                 prepared.append({
                     "symbol": symbol,
                     "timeframe": timeframe,
@@ -524,10 +554,13 @@ async def prepare_large_scale_research_campaign(
                     "candles": candles.candle_count,
                     "features": features["usable"],
                 })
+                log_event("Features committed", asset=symbol, provider=provider_name, timeframe=timeframe, elapsed_ms=elapsed_ms(asset_started))
             except Exception as error:
+                log_exception("Asset sync failure", error, asset=symbol, provider=provider_name, timeframe=timeframe, retry_count=0, elapsed_ms=elapsed_ms(asset_started))
                 conn.rollback()
                 errors.append({"symbol": symbol, "timeframe": timeframe, "reason": str(error)})
     readiness = research_campaign_preflight(conn, assets=payload.assets, timeframes=payload.timeframes)
+    log_event("Campaign prepare finished", ready=readiness["ready"], prepared=len(prepared), errors=len(errors), elapsed_ms=elapsed_ms(request_started))
     return {
         "ready": readiness["ready"],
         "prepared": prepared,
@@ -639,9 +672,14 @@ def run_large_scale_research_campaign_parallel_batch(
     jobs_per_worker: int = Query(10, ge=1, le=100),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
+    started = time.perf_counter()
+    log_event("Parallel campaign launch started", campaign_id=campaign_id, workers=workers, jobs_per_worker=jobs_per_worker)
     try:
-        return run_parallel_campaign_batch(conn, campaign_id=campaign_id, workers=workers, jobs_per_worker=jobs_per_worker)
+        result = run_parallel_campaign_batch(conn, campaign_id=campaign_id, workers=workers, jobs_per_worker=jobs_per_worker)
+        log_event("Worker dispatch started", campaign_id=campaign_id, started=result.get("started"), already_active=result.get("already_active"), elapsed_ms=elapsed_ms(started))
+        return result
     except ValueError as error:
+        log_exception("Parallel campaign launch rejected", error, campaign_id=campaign_id, elapsed_ms=elapsed_ms(started))
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 

@@ -15,6 +15,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.observability import elapsed_ms, log_event, log_exception
 from app.services.evidence_alerts import create_evidence_alert
 from app.services.backtester import build_market_arrays, combine_candles_features
 from app.services.features import load_candles
@@ -557,13 +558,18 @@ def create_research_campaign(
     asset_limit: int = 100,
     timeframes: list[str] | None = None,
 ) -> dict[str, Any]:
+    started = time.perf_counter()
+    log_event("Research campaign launch requested", universe_key=universe_key, max_candidates=max_candidates, asset_limit=asset_limit, timeframes=timeframes)
     seed_default_universes(conn)
     universe = get_universe(conn, universe_key)
     assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
     selected_timeframes = list(timeframes or universe.get("default_timeframes") or DEFAULT_CAMPAIGN_TIMEFRAMES)
+    log_event("Job generation started", assets=len(assets), timeframes=len(selected_timeframes), strategies=max_candidates, expected_jobs=len(assets) * len(selected_timeframes) * max_candidates)
     candidates = generate_balanced_discovery_candidates(max_candidates=max_candidates)
     campaign_key = research_campaign_key(universe_key, assets, selected_timeframes, max_candidates)
     campaign_name = name or f"{universe['name']} strategy discovery campaign"
+    insert_started = time.perf_counter()
+    log_event("Before INSERT research_campaigns", campaign_key=campaign_key, name=campaign_name)
     row = conn.execute(
         """
         INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
@@ -588,10 +594,14 @@ def create_research_campaign(
             SAFETY_STATEMENT,
         ),
     ).fetchone()
+    log_event("After INSERT research_campaigns", elapsed_ms=elapsed_ms(insert_started), rows_affected=1 if row else 0, campaign_id=row["id"] if row else None)
     campaign_id = int(row["id"])
     created = queue_campaign_jobs(conn, campaign_id, candidates, assets, selected_timeframes)
     update_campaign_counts(conn, campaign_id)
+    log_event("Before COMMIT research_campaigns", campaign_id=campaign_id)
     conn.commit()
+    log_event("After COMMIT research_campaigns", campaign_id=campaign_id, jobs_inserted=created)
+    log_event("Campaign returned", campaign_id=campaign_id, elapsed_ms=elapsed_ms(started))
     return {
         "campaign": jsonable(dict(row)),
         "assets": assets,
@@ -2166,6 +2176,9 @@ def queue_campaign_jobs(
     assets: list[str],
     timeframes: list[str],
 ) -> int:
+    started = time.perf_counter()
+    expected_jobs = len(candidates) * len(assets) * len(timeframes)
+    log_event("Generating jobs", campaign_id=campaign_id, assets=len(assets), strategies=len(candidates), timeframes=len(timeframes), expected_jobs=expected_jobs)
     created = 0
     batch_number = 1
     batch_job_count = 0
@@ -2192,6 +2205,7 @@ def queue_campaign_jobs(
                     created += 1
                     batch_job_count += 1
                     conn.execute("UPDATE research_campaign_batches SET job_count = job_count + 1, updated_at = NOW() WHERE id = %s", (batch_id,))
+    log_event("Jobs inserted", campaign_id=campaign_id, expected_jobs=expected_jobs, actual_jobs_inserted=created, elapsed_ms=elapsed_ms(started))
     return created
 
 
@@ -2842,6 +2856,8 @@ def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dic
 
 
 def research_campaign_preflight(conn: psycopg.Connection, *, assets: list[str], timeframes: list[str]) -> dict[str, Any]:
+    started = time.perf_counter()
+    log_event("Campaign preflight started", assets=len(assets), timeframes=len(timeframes))
     normalized_assets = sorted({str(asset).strip().upper() for asset in assets if str(asset).strip()})
     normalized_timeframes = sorted({str(timeframe).strip() for timeframe in timeframes if str(timeframe).strip()})
     if not normalized_assets:
@@ -2928,7 +2944,7 @@ def research_campaign_preflight(conn: psycopg.Connection, *, assets: list[str], 
 
     dataset_count = len(normalized_assets) * len(normalized_timeframes)
     blocked_datasets = dataset_count - eligible_datasets
-    return {
+    result = {
         "ready": blocked_datasets == 0,
         "assets_total": len(normalized_assets),
         "timeframes": normalized_timeframes,
@@ -2940,6 +2956,8 @@ def research_campaign_preflight(conn: psycopg.Connection, *, assets: list[str], 
         "issues_truncated": blocked_datasets > len(issues),
         "simulation_only": True,
     }
+    log_event("Campaign preflight finished", ready=result["ready"], datasets_total=dataset_count, blocked_datasets=blocked_datasets, elapsed_ms=elapsed_ms(started))
+    return result
 
 
 def readiness_block(
@@ -3330,26 +3348,36 @@ def run_background_campaign_worker(
     max_cycles: int | None = None,
     stop_file: str | None = None,
 ) -> dict[str, Any]:
+    started = time.perf_counter()
     worker = worker_id or f"{WORKER_VERSION}_{socket.gethostname()}_{os.getpid()}"
+    log_event("Worker started", worker_id=worker, poll_seconds=poll_seconds, max_cycles=max_cycles, stop_file=stop_file)
     cycles = 0
     processed = 0
-    with conn_factory() as conn:
-        register_campaign_worker(conn, worker_id=worker, status="running")
-        conn.commit()
-    while max_cycles is None or cycles < max_cycles:
-        if stop_file and os.path.exists(stop_file):
-            break
+    try:
         with conn_factory() as conn:
-            heartbeat_campaign_worker(conn, worker)
-            result = run_campaign_scheduler_cycle(conn, force=False, worker_id=worker)
-            processed += int(result.get("processed") or 0)
+            register_campaign_worker(conn, worker_id=worker, status="running")
             conn.commit()
-        cycles += 1
-        if max_cycles is None or cycles < max_cycles:
-            time.sleep(poll_seconds)
-    with conn_factory() as conn:
-        stop_campaign_worker(conn, worker)
-    return {"worker_id": worker, "cycles": cycles, "processed": processed, "simulation_only": True}
+        while max_cycles is None or cycles < max_cycles:
+            if stop_file and os.path.exists(stop_file):
+                log_event("Worker cancelled", worker_id=worker, reason="stop_file")
+                break
+            cycle_started = time.perf_counter()
+            with conn_factory() as conn:
+                heartbeat_campaign_worker(conn, worker)
+                result = run_campaign_scheduler_cycle(conn, force=False, worker_id=worker)
+                processed += int(result.get("processed") or 0)
+                conn.commit()
+            log_event("Task completed", task="worker_cycle", worker_id=worker, cycle=cycles + 1, processed=result.get("processed"), elapsed_ms=elapsed_ms(cycle_started))
+            cycles += 1
+            if max_cycles is None or cycles < max_cycles:
+                time.sleep(poll_seconds)
+        with conn_factory() as conn:
+            stop_campaign_worker(conn, worker)
+        log_event("Worker stopped", worker_id=worker, cycles=cycles, processed=processed, elapsed_ms=elapsed_ms(started))
+        return {"worker_id": worker, "cycles": cycles, "processed": processed, "simulation_only": True}
+    except Exception as error:
+        log_exception("Worker exception", error, worker_id=worker, cycles=cycles, processed=processed, elapsed_ms=elapsed_ms(started))
+        raise
 
 
 def eligible_campaigns(conn: psycopg.Connection) -> list[dict[str, Any]]:
@@ -5058,6 +5086,7 @@ def run_parallel_campaign_batch(
         }
 
     try:
+        log_event("Task created", task="parallel_pool_coordinator", campaign_id=campaign_id, pool_id=pool_id, workers=worker_count, jobs_per_worker=batch_size)
         Thread(
             target=_run_persistent_parallel_pool,
             name=f"campaign-{campaign_id}-coordinator",
@@ -5069,7 +5098,8 @@ def run_parallel_campaign_batch(
             },
             daemon=True,
         ).start()
-    except Exception:
+    except Exception as error:
+        log_exception("Task creation failed", error, task="parallel_pool_coordinator", campaign_id=campaign_id, pool_id=pool_id)
         with _PARALLEL_POOLS_LOCK:
             _PARALLEL_POOLS.pop(campaign_id, None)
         raise
@@ -5101,8 +5131,10 @@ def _execute_parallel_campaign_worker(
 
     from app.db import connect
 
+    started = time.perf_counter()
     totals = {"processed": 0, "completed": 0, "failed": 0}
     worker_id = f"parallel_{campaign_id}_{worker_index}_{pool_id.rsplit('_', 1)[-1]}"
+    log_event("Worker started", worker_id=worker_id, campaign_id=campaign_id, worker_index=worker_index, assigned_datasets=len(assigned_datasets))
     allowed_dataset_keys = [f"{row['symbol']}|{row['timeframe']}" for row in assigned_datasets]
     worker_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
     with connect() as worker_conn:
@@ -5134,12 +5166,15 @@ def _execute_parallel_campaign_worker(
                 totals[key] += int(result.get(key) or 0)
             if result.get("status") in {"paused", "canceled", "completed"} or int(result.get("processed") or 0) == 0:
                 break
+    log_event("Worker stopped", worker_id=worker_id, campaign_id=campaign_id, processed=totals["processed"], completed=totals["completed"], failed=totals["failed"], elapsed_ms=elapsed_ms(started))
     return {**totals, "preloaded_datasets": len(worker_cache)}
 
 
 def _run_persistent_parallel_pool(*, pool_id: str, campaign_id: int, worker_count: int, batch_size: int) -> None:
     from app.db import connect
 
+    started = time.perf_counter()
+    log_event("Task created", task="persistent_parallel_pool", campaign_id=campaign_id, pool_id=pool_id, workers=worker_count, jobs_per_worker=batch_size)
     with connect() as assignment_conn:
         dataset_rows = assignment_conn.execute(
             """
@@ -5188,6 +5223,7 @@ def _run_persistent_parallel_pool(*, pool_id: str, campaign_id: int, worker_coun
             for future in as_completed(futures):
                 try:
                     totals = future.result()
+                    log_event("Task completed", task="parallel_worker", campaign_id=campaign_id, pool_id=pool_id, processed=totals.get("processed"), completed=totals.get("completed"), failed=totals.get("failed"))
                     with _PARALLEL_POOLS_LOCK:
                         state = _PARALLEL_POOLS.get(campaign_id)
                         if state and state.get("pool_id") == pool_id:
@@ -5195,6 +5231,7 @@ def _run_persistent_parallel_pool(*, pool_id: str, campaign_id: int, worker_coun
                             state["preloaded_datasets"] = int(state.get("preloaded_datasets") or 0) + int(totals.get("preloaded_datasets") or 0)
                             state["live_workers"] = max(0, int(state.get("live_workers") or 0) - 1)
                 except Exception as error:
+                    log_exception("Worker exception", error, campaign_id=campaign_id, pool_id=pool_id)
                     worker_errors.append(str(error))
                     with _PARALLEL_POOLS_LOCK:
                         state = _PARALLEL_POOLS.get(campaign_id)
@@ -5210,6 +5247,7 @@ def _run_persistent_parallel_pool(*, pool_id: str, campaign_id: int, worker_coun
             refresh_campaign_analytics(coordinator_conn, campaign_id)
             coordinator_conn.commit()
     finally:
+        log_event("Task completed", task="persistent_parallel_pool", campaign_id=campaign_id, pool_id=pool_id, worker_errors=len(worker_errors), elapsed_ms=elapsed_ms(started))
         with _PARALLEL_POOLS_LOCK:
             state = _PARALLEL_POOLS.get(campaign_id)
             if state and state.get("pool_id") == pool_id:

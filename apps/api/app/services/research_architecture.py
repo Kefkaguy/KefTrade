@@ -16,6 +16,7 @@ from typing import Any, Iterable
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.observability import elapsed_ms, log_event
 from app.services.features import calculate_features
 from app.services.regimes import calculate_regimes
 from app.services.strategy_discovery import (
@@ -1425,6 +1426,8 @@ def create_intelligent_research_campaign(
     allocation: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """Create the default hypothesis-driven campaign instead of a broad random sweep."""
+    started = time.perf_counter()
+    log_event("Research campaign launch requested", mode="intelligent", universe_key=universe_key, max_candidates=max_candidates, asset_limit=asset_limit, timeframes=timeframes, dataset_mode=dataset_mode, dataset_id=dataset_id, hypothesis_id=hypothesis_id)
 
     from app.services.research_campaigns import (
         DEFAULT_CAMPAIGN_TIMEFRAMES,
@@ -1445,21 +1448,32 @@ def create_intelligent_research_campaign(
     universe_assets = [str(asset).upper() for asset in list(universe.get("assets") or [])[:asset_limit]]
     selected_timeframes = sorted(set(timeframes or universe.get("default_timeframes") or DEFAULT_CAMPAIGN_TIMEFRAMES))
     if dataset_id is None:
+        snapshot_started = time.perf_counter()
+        log_event("Dataset snapshot started", assets=len(universe_assets), timeframes=len(selected_timeframes), dataset_mode=dataset_mode)
         dataset = record_dataset_snapshot(conn, assets=universe_assets, timeframes=selected_timeframes, mode=dataset_mode)
         dataset_id = int(dataset["id"])
+        log_event("Dataset snapshot completed", dataset_id=dataset_id, elapsed_ms=elapsed_ms(snapshot_started))
     else:
         dataset_row = conn.execute("SELECT * FROM research_dataset_manifests WHERE id = %s", (dataset_id,)).fetchone()
         if not dataset_row:
             raise ValueError(f"research dataset {dataset_id} was not found")
         dataset = jsonable(dict(dataset_row))
         dataset_mode = str(dataset["mode"])
+    verify_started = time.perf_counter()
     integrity = verify_dataset_snapshot(conn, dataset_id)
+    log_event("Dataset verification finished", dataset_id=dataset_id, passed=integrity["passed"], elapsed_ms=elapsed_ms(verify_started))
     if not integrity["passed"]:
         raise ValueError(f"research dataset {dataset_id} failed integrity verification")
 
+    profile_started = time.perf_counter()
     profiles = build_asset_profiles(conn, dataset_id)["profiles"]
+    log_event("Asset profiles built", dataset_id=dataset_id, count=len(profiles), elapsed_ms=elapsed_ms(profile_started))
+    cluster_started = time.perf_counter()
     clusters = build_asset_clusters(conn, dataset_id)["clusters"]
+    log_event("Asset clusters built", dataset_id=dataset_id, count=len(clusters), elapsed_ms=elapsed_ms(cluster_started))
+    hypothesis_started = time.perf_counter()
     hypotheses = build_research_hypotheses(conn, dataset_id)["hypotheses"]
+    log_event("Research hypotheses built", dataset_id=dataset_id, count=len(hypotheses), elapsed_ms=elapsed_ms(hypothesis_started))
     hypothesis = select_campaign_hypothesis(hypotheses, hypothesis_id)
     testing_hypothesis = append_hypothesis_version(conn, hypothesis, status="testing", test_summary={**dict(hypothesis.get("test_summary") or {}), "campaign_status": "queued"})
 
@@ -1489,8 +1503,10 @@ def create_intelligent_research_campaign(
         timeframes=target_timeframes,
         limit=max(5, min(100, max_candidates // 2)),
     )
+    generation_started = time.perf_counter()
     generation = generate_targeted_candidates(testing_hypothesis, max_candidates=max_candidates, parents=parents, allocation=allocation)
     candidates = generation["candidates"]
+    log_event("Job generation started", assets=len(target_assets), timeframes=len(target_timeframes), strategies=len(candidates), expected_jobs=len(target_assets) * len(target_timeframes) * len(candidates), elapsed_ms=elapsed_ms(generation_started))
     policy = conn.execute(
         "SELECT * FROM research_validation_policy_versions WHERE policy_key = %s AND version = %s",
         (VALIDATION_POLICY_KEY, VALIDATION_POLICY_VERSION),
@@ -1515,6 +1531,8 @@ def create_intelligent_research_campaign(
         "code_commit": code_commit(),
     }
     campaign_key = f"intelligent_{stable_hash({**immutable_config, 'max_candidates': max_candidates})[:24]}"
+    insert_started = time.perf_counter()
+    log_event("Before INSERT research_campaigns", campaign_key=campaign_key, name=name or f"{testing_hypothesis['strategy_family']} hypothesis campaign: {testing_hypothesis['scope_ref']}")
     row = conn.execute(
         """
         INSERT INTO research_campaigns(
@@ -1556,7 +1574,9 @@ def create_intelligent_research_campaign(
             Jsonb(immutable_config),
         ),
     ).fetchone()
+    log_event("After INSERT research_campaigns", elapsed_ms=elapsed_ms(insert_started), rows_affected=1 if row else 0, campaign_id=row["id"] if row else None)
     campaign_id = int(row["id"])
+    log_event("Campaign inserted into database", campaign_id=campaign_id)
     created = queue_campaign_jobs(conn, campaign_id, candidates, target_assets, target_timeframes)
     for candidate in candidates:
         conn.execute(
@@ -1578,7 +1598,11 @@ def create_intelligent_research_campaign(
             ),
         )
     update_campaign_counts(conn, campaign_id)
+    log_event("Before COMMIT research_campaigns", campaign_id=campaign_id)
     conn.commit()
+    log_event("After COMMIT research_campaigns", campaign_id=campaign_id, jobs_inserted=created)
+    log_event("Campaign committed", campaign_id=campaign_id)
+    log_event("Campaign returned", campaign_id=campaign_id, elapsed_ms=elapsed_ms(started))
     return {
         "campaign": jsonable(dict(row)),
         "dataset": dataset,

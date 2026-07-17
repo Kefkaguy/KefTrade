@@ -1191,7 +1191,7 @@ export type ResearchCampaignProfile = {
   simulation_only: boolean;
 };
 
-const API_TIMING_ENABLED = process.env.NODE_ENV !== "production";
+const API_TIMING_ENABLED = process.env.NODE_ENV !== "production" || process.env.NEXT_PUBLIC_DIAGNOSTIC_LOGGING === "true";
 
 async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
   const controller = new AbortController();
@@ -1201,6 +1201,7 @@ async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let responseLogged = false;
   try {
+    logFrontendDiagnostic("Fetch request sent", { method, path, timeoutMs });
     const response = await fetch(`${API_URL}${path}`, {
       ...fetchOptions,
       cache: "no-store",
@@ -1210,7 +1211,9 @@ async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
         ...(fetchOptions.headers ?? {})
       }
     });
+    const requestId = response.headers.get("X-Request-ID");
     logApiTiming(path, method, startedAt, response.status);
+    logFrontendDiagnostic("Fetch response received", { method, path, status: response.status, requestId, elapsedMs: Math.round(now() - startedAt) });
     responseLogged = true;
     if (!response.ok) {
       let detail = "";
@@ -1220,14 +1223,18 @@ async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
       } catch {
         // Some upstream failures do not return JSON.
       }
-      throw new Error(`${response.status} ${response.statusText}${detail}`);
+      const error = new Error(`${response.status} ${response.statusText}${detail}`);
+      logFrontendDiagnostic("Fetch failure", { method, path, status: response.status, requestId, errorClass: error.name, errorMessage: error.message, elapsedMs: Math.round(now() - startedAt) });
+      throw error;
     }
     return response.json() as Promise<T>;
   } catch (error) {
     if (!responseLogged) logApiTiming(path, method, startedAt, "error", error);
     if (error instanceof Error && error.name === "AbortError") {
+      logFrontendDiagnostic("Fetch abort", { method, path, timeoutMs, errorClass: error.name, errorMessage: error.message, elapsedMs: Math.round(now() - startedAt) });
       throw new Error(`Request timed out after ${Math.round(timeoutMs / 1000)}s.`);
     }
+    logFrontendDiagnostic("Fetch unexpected exception", { method, path, errorClass: error instanceof Error ? error.name : typeof error, errorMessage: error instanceof Error ? error.message : String(error), elapsedMs: Math.round(now() - startedAt) });
     throw error;
   } finally {
     clearTimeout(timeout);
@@ -1247,6 +1254,11 @@ function logApiTiming(path: string, method: string, startedAt: number, status: n
     return;
   }
   console.info(prefix);
+}
+
+function logFrontendDiagnostic(message: string, fields: Record<string, unknown>) {
+  if (!API_TIMING_ENABLED) return;
+  console.info(`[frontend-diagnostic] ${message}`, fields);
 }
 
 export function getCandles(limit = 220, input: ResearchAssetInput = { symbol: "BTCUSDT", timeframe: "4h" }) {
