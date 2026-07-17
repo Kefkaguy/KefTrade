@@ -1056,8 +1056,12 @@ export type ResearchCampaignAnalytics = {
 
 export type ResearchCampaignCreateResult = {
   campaign: ResearchCampaignRecord;
-  assets: string[];
-  timeframes: string[];
+  assets?: string[];
+  timeframes?: string[];
+  dataset?: Record<string, unknown>;
+  hypothesis?: Record<string, unknown>;
+  targeting?: Record<string, unknown>;
+  candidate_generation?: Record<string, unknown>;
   candidates_generated: number;
   jobs_created: number;
   campaign_version: string;
@@ -1112,11 +1116,27 @@ export type ResearchCampaignPreparation = {
   simulation_only: boolean;
 };
 
+export type ResearchArchitectureState = {
+  architecture_version: string;
+  active_dataset_id?: number | null;
+  datasets: Array<Record<string, unknown>>;
+  asset_profiles: Array<Record<string, unknown>>;
+  clusters: Array<Record<string, unknown>>;
+  hypotheses: Array<Record<string, unknown>>;
+  cycles: Array<Record<string, unknown>>;
+  archives: Array<Record<string, unknown>>;
+  validation_policy: Record<string, unknown>;
+  safety: Record<string, unknown>;
+};
+
 export type ResearchCampaignListRow = {
   id: number;
   name: string;
   universe_key: string;
   status: string;
+  dataset_id?: number | null;
+  dataset_mode?: "rolling" | "reproducibility" | null;
+  generator_version?: string | null;
   requested_candidates: number;
   total_jobs: number;
   queued_jobs: number;
@@ -1160,6 +1180,10 @@ export type ResearchCampaignProfile = {
     active_parallel_workers: number;
     active_parallel_jobs: number;
     configured_parallel_workers: number;
+    starting_parallel_workers: number;
+    parallel_pool_active: boolean;
+    parallel_pool_status: "idle" | "starting" | "running";
+    processed_parallel_jobs: number;
     preloaded_datasets: number;
     resident_memory_mb: number;
     worker_limit: number;
@@ -1406,12 +1430,15 @@ export function createResearchCampaign(options: {
   maxCandidates: number;
   assetLimit: number;
   timeframes: string[];
+  datasetMode?: "rolling" | "reproducibility";
 }) {
   const params = new URLSearchParams({
     universe_key: options.universeKey,
     name: options.name,
     max_candidates: String(options.maxCandidates),
-    asset_limit: String(options.assetLimit)
+    asset_limit: String(options.assetLimit),
+    architecture_mode: "intelligent",
+    dataset_mode: options.datasetMode ?? "rolling"
   });
   for (const timeframe of options.timeframes) params.append("timeframes", timeframe);
   return request<ResearchCampaignCreateResult>(`/research/campaigns?${params.toString()}`, {
@@ -1434,6 +1461,43 @@ export function prepareResearchCampaign(assets: string[], timeframes: string[]) 
     body: JSON.stringify({ assets, timeframes }),
     timeoutMs: 600000
   });
+}
+
+export function getResearchArchitecture(datasetId?: number) {
+  const params = new URLSearchParams();
+  if (datasetId) params.set("dataset_id", String(datasetId));
+  const query = params.toString();
+  return request<ResearchArchitectureState>(`/research/architecture${query ? `?${query}` : ""}`, { timeoutMs: 60000 });
+}
+
+export function runAutonomousResearchCycle(options: {
+  universeKey?: string;
+  timeframes?: string[];
+  maxCandidates?: number;
+  assetLimit?: number;
+  datasetMode?: "rolling" | "reproducibility";
+  approvalMode?: "manual" | "auto_queue";
+}) {
+  return request<Record<string, unknown>>("/research/architecture/cycles", {
+    method: "POST",
+    body: JSON.stringify({
+      universe_key: options.universeKey ?? "research_core_ten",
+      timeframes: options.timeframes,
+      max_candidates: options.maxCandidates ?? 250,
+      asset_limit: options.assetLimit ?? 10,
+      dataset_mode: options.datasetMode ?? "rolling",
+      approval_mode: options.approvalMode ?? "manual"
+    }),
+    timeoutMs: 300000
+  });
+}
+
+export function verifyResearchDataset(datasetId: number) {
+  return request<Record<string, unknown>>(`/research/datasets/${datasetId}/verify`, { method: "POST", timeoutMs: 60000 });
+}
+
+export function exportResearchDataset(datasetId: number) {
+  return request<Record<string, unknown>>(`/research/datasets/${datasetId}/export`, { method: "POST", timeoutMs: 300000 });
 }
 
 export function runResearchCampaignBatch(campaignId: number, batchSize = 50) {
@@ -1470,9 +1534,9 @@ export function getResearchCampaignProfile(campaignId: number) {
   return request<ResearchCampaignProfile>(`/research/campaigns/${campaignId}/profile`, { timeoutMs: 60000 });
 }
 
-export function runParallelResearchCampaign(campaignId: number, workers: number, jobsPerWorker = 10) {
+export function runParallelResearchCampaign(campaignId: number, workers = 1, jobsPerWorker = 10) {
   const params = new URLSearchParams({ workers: String(workers), jobs_per_worker: String(jobsPerWorker) });
-  return request<{ campaign_id: number; started: boolean; workers: number; jobs_per_worker: number; remaining: number }>(`/research/campaigns/${campaignId}/run-parallel?${params.toString()}`, {
+  return request<{ campaign_id: number; started: boolean; already_active: boolean; workers: number; jobs_per_worker: number; remaining: number }>(`/research/campaigns/${campaignId}/run-parallel?${params.toString()}`, {
     method: "POST",
     timeoutMs: 600000
   });

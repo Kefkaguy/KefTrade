@@ -1,6 +1,7 @@
 from app.domain.assets import ALPACA_IEX_PROVIDER, DEFAULT_DEV_PROVIDER, US_EQUITY_RESEARCH_UNIVERSE, US_EQUITY_VALIDATION_UNIVERSE, YFINANCE_RESEARCH_PROVIDER
 from app.domain.market_data import MarketDataSyncResult
 from app.providers.registry import get_market_data_provider
+from app.providers.yfinance_provider import STATIC_STOCK_METADATA
 from datetime import UTC, datetime
 import asyncio
 
@@ -25,6 +26,10 @@ def test_stock_research_universe_is_explicit() -> None:
         "SPY",
         "QQQ",
     )
+
+
+def test_fallback_provider_covers_every_stock_research_asset() -> None:
+    assert set(US_EQUITY_RESEARCH_UNIVERSE).issubset(STATIC_STOCK_METADATA)
 
 
 def test_stock_validation_universe_is_explicit() -> None:

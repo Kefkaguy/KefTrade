@@ -20,11 +20,11 @@ type ResearchLaunchExperienceProps = {
 };
 
 const researchStages = [
-  { title: "Finding market opportunities", detail: "Scanning selected assets across connected market data." },
-  { title: "Testing strategy ideas", detail: "Running deterministic strategy variations through the research engine." },
-  { title: "Rejecting weak strategies", detail: "Removing ideas that fail evidence and consistency requirements." },
-  { title: "Promoting strong evidence", detail: "Advancing candidates that remain stable through validation." },
-  { title: "Searching for elite strategies", detail: "Ranking the strongest surviving research candidates." }
+  { title: "Freezing and observing markets", detail: "Hashing the exact candle dataset and building versioned asset behavior profiles." },
+  { title: "Grouping measured behavior", detail: "Clustering similar assets and selecting an evidence-backed hypothesis." },
+  { title: "Testing focused variations", detail: "Running controlled exploitation, nearby, and exploration candidates." },
+  { title: "Classifying the evidence", detail: "Recording every validation gate, specialist, cluster candidate, and elite." },
+  { title: "Learning and archiving", detail: "Updating durable knowledge and exporting a checksum-verified experiment record." }
 ] as const;
 
 export function ResearchLaunchExperience({
@@ -169,8 +169,8 @@ function phaseTitle(phase: ResearchLaunchPhase, scope: string, campaignCreated: 
 }
 
 function phaseDescription(phase: ResearchLaunchPhase, assetCount: number, campaignCreated: boolean) {
-  if (phase === "creating") return "Backfilling market history, calculating research features, and preparing deterministic validation jobs.";
-  if (phase === "complete") return "Every candidate has been tested, classified, and preserved with its supporting evidence.";
+  if (phase === "creating") return "Preparing market history, an immutable dataset snapshot, asset profiles, clusters, and a testable hypothesis.";
+  if (phase === "complete") return "Every candidate and rejection has been classified, learned from, and preserved in a checksum-verified archive.";
   if (phase === "error") return campaignCreated
     ? "Completed evidence remains preserved. Retry the current batch or return to the builder."
     : "No campaign was created. KefTrade attempted to prepare the required market history and preserved the exact dataset issue for review.";

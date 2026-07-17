@@ -13,7 +13,7 @@ import {
   getResearchCampaign,
   prepareResearchCampaign,
   preflightResearchCampaign,
-  runResearchCampaignBatch,
+  runParallelResearchCampaign,
   saveResearchUniverse,
   type MissionControlSnapshot,
   type ResearchCampaignCreateResult,
@@ -27,9 +27,9 @@ type HomeWorkspaceProps = {
 };
 
 const journey = [
-  { number: "01", title: "Choose the market", detail: "Research one asset, a focused sector, or every connected market." },
-  { number: "02", title: "Search systematically", detail: "Generate and test deterministic strategy variations across market conditions." },
-  { number: "03", title: "Promote the evidence", detail: "Reject weak ideas and advance only repeatable, evidence-backed candidates." }
+  { number: "01", title: "Observe the market", detail: "Freeze the dataset, measure each asset, and group similar behavior." },
+  { number: "02", title: "Test a hypothesis", detail: "Generate focused 70/20/10 strategy variations around measured evidence." },
+  { number: "03", title: "Learn and preserve", detail: "Classify specialists and elites, record failures, and archive the experiment." }
 ] as const;
 
 export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspaceProps) {
@@ -53,40 +53,13 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
 
   const processCampaign = useCallback(async (campaignId: number, generation: number) => {
     try {
-      while (aliveRef.current && generation === runGenerationRef.current) {
-        const batch = await runResearchCampaignBatch(campaignId, 50);
-        if (!aliveRef.current || generation !== runGenerationRef.current) return;
-
-        const nextStatus = await getResearchCampaign(campaignId);
-        if (!aliveRef.current || generation !== runGenerationRef.current) return;
-        setStatus(nextStatus);
-
-        const campaignState = nextStatus.campaign.status.toLowerCase();
-        const blockedJobs = Number(nextStatus.analytics.jobs_by_status?.blocked_data ?? 0);
-        if (["paused", "failed", "canceled"].includes(campaignState)) {
-          setLaunchError(`Campaign ${campaignId} is ${campaignState}. Completed and blocked job records remain preserved.`);
-          setPhase("error");
-          return;
-        }
-        if (blockedJobs > 0) {
-          setLaunchError(`${blockedJobs.toLocaleString()} jobs were blocked because required market data or features are unavailable. The remaining queue has been stopped.`);
-          setPhase("error");
-          return;
-        }
-
-        const campaignComplete = nextStatus.campaign.status === "completed" || batch.remaining === 0;
-        if (campaignComplete) {
-          setPhase("complete");
-          return;
-        }
-
-        if (batch.processed === 0) {
-          setLaunchError("No campaign jobs were eligible to run. Check market-data coverage before retrying.");
-          setPhase("error");
-          return;
-        }
-        await delay(700);
-      }
+      await runParallelResearchCampaign(campaignId, 1, 10);
+      if (!aliveRef.current || generation !== runGenerationRef.current) return;
+      const nextStatus = await getResearchCampaign(campaignId);
+      if (!aliveRef.current || generation !== runGenerationRef.current) return;
+      setStatus(nextStatus);
+      if (nextStatus.campaign.status === "completed") setPhase("complete");
+      else setPhase("running");
     } catch (error) {
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
       setLaunchError(readError(error));
@@ -106,6 +79,11 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         if (!aliveRef.current) return;
         setStatus(nextStatus);
         if (nextStatus.campaign.status === "completed") setPhase("complete");
+        const blockedJobs = Number(nextStatus.analytics.jobs_by_status?.blocked_data ?? 0);
+        if (blockedJobs > 0) {
+          setLaunchError(`${blockedJobs.toLocaleString()} jobs were blocked because required market data or features are unavailable. The remaining queue has been stopped.`);
+          setPhase("error");
+        }
         if (["paused", "failed", "canceled"].includes(nextStatus.campaign.status.toLowerCase())) {
           setLaunchError(`Campaign ${campaignId} is ${nextStatus.campaign.status.toLowerCase()}. No additional jobs will be started.`);
           setPhase("error");
@@ -169,7 +147,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
 
       const created = await createResearchCampaign({
         universeKey,
-        name: `${nextSelection.scopeLabel} deterministic discovery`,
+        name: `${nextSelection.scopeLabel} hypothesis research`,
         maxCandidates: nextSelection.candidateCount,
         assetLimit: nextSelection.assets.length,
         timeframes: [...RESEARCH_TIMEFRAMES]
@@ -234,7 +212,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         <div className="researchHeroCopy">
           <motion.span className="eyebrow" variants={reveal}>KefTrade research engine</motion.span>
           <motion.h1 variants={reveal}>Research the Market</motion.h1>
-          <motion.p variants={reveal}>Discover evidence-based quantitative strategies across thousands of market conditions. Build deterministic research campaigns powered by KefTrade.</motion.p>
+          <motion.p variants={reveal}>Turn measured market behavior into versioned hypotheses, focused strategy campaigns, and reproducible research evidence.</motion.p>
           <motion.div className="researchHeroActions" variants={reveal}>
             <motion.button
               type="button"
@@ -305,7 +283,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
       </AnimatePresence>
 
       <motion.footer className="researchHomeFooter" variants={reveal}>
-        <span><Search size={15} /> Deterministic strategy discovery</span>
+        <span><Search size={15} /> Versioned hypothesis research</span>
         <span><ShieldCheck size={15} /> Simulation only</span>
         <Link href="/research">Research archive <ArrowRight size={14} /></Link>
       </motion.footer>
@@ -323,8 +301,4 @@ function readError(error: unknown) {
     return `The research service returned ${error.message}.`;
   }
   return "KefTrade could not continue the campaign. Completed evidence remains preserved.";
-}
-
-function delay(milliseconds: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }

@@ -5,6 +5,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from hashlib import sha256
 from itertools import product
+import math
 from typing import Any
 
 import psycopg
@@ -14,6 +15,13 @@ from app.services.backtester import count_setup_opportunities, run_backtest
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.strategy import BASE_PARAMETERS, StrategyDecision, StrategyDefinition
+from app.services.strategy_families import (
+    PHASE_2_FAMILY_NAMES,
+    PHASE_2_FAMILY_VERSION,
+    family_parameter_combinations,
+    strategy_family_decision,
+    strategy_family_spec,
+)
 from app.services.strategy_research import (
     build_context_by_time,
     calculate_feature_correlations,
@@ -21,6 +29,7 @@ from app.services.strategy_research import (
     compare_by_year,
     finite_metric,
     paper_readiness_report,
+    profit_factor_passes,
     score_metrics,
 )
 from app.services.research_learning import mutation_options
@@ -183,6 +192,71 @@ def generate_balanced_discovery_candidates(max_candidates: int = 1000) -> list[D
     return selected
 
 
+def generate_family_discovery_candidates(
+    strategy_family: str,
+    *,
+    max_candidates: int,
+    role: str = "core",
+    seed: int = 0,
+) -> list[DiscoveryCandidate]:
+    """Build deterministic candidates whose family label changes executable behavior.
+
+    Phase 2 candidates still use the existing DiscoveryCandidate, campaign job,
+    backtester, validation, learning, and archive path. The family-specific
+    architecture marker only dispatches the decision function inside that path.
+    """
+
+    if strategy_family not in PHASE_2_FAMILY_NAMES:
+        raise ValueError(f"unsupported Phase 2 strategy family: {strategy_family}")
+    if role not in {"core", "exploration"}:
+        raise ValueError("family candidate role must be core or exploration")
+    if max_candidates <= 0:
+        return []
+    spec = strategy_family_spec(strategy_family)
+    combinations = family_parameter_combinations(strategy_family, role=role, seed=seed)
+    blocks = {
+        "trend": f"{spec.slug}_trend_context",
+        "momentum": f"{spec.slug}_confirmation",
+        "volatility": f"{spec.slug}_volatility_context",
+        "volume": f"{spec.slug}_participation",
+        "entry": spec.slug,
+        "exit": f"{spec.slug}_atr_risk_reward",
+    }
+    candidates: list[DiscoveryCandidate] = []
+    seen: set[str] = set()
+    for combination in combinations:
+        params = {
+            **BASE_PARAMETERS,
+            **combination,
+            "strategy_architecture": PHASE_2_FAMILY_VERSION,
+            "phase2_strategy_family": strategy_family,
+            "phase2_generation_role": role,
+            "phase2_generation_seed": int(seed),
+            "frequency_screen_min_opportunities": 30,
+            "recent_candle_window_bars": 220,
+            "swing_lookback": int(combination.get("pause_bars") or combination.get("range_lookback") or 5),
+        }
+        canonical_key = canonical_candidate_key(blocks, params)
+        if canonical_key in seen:
+            continue
+        seen.add(canonical_key)
+        candidates.append(
+            DiscoveryCandidate(
+                candidate_id=f"sd_{sha256(canonical_key.encode()).hexdigest()[:14]}",
+                family_id=f"phase2_family_{spec.slug}",
+                parent_candidate_id=None,
+                generation=1,
+                blocks=dict(blocks),
+                parameters=params,
+                complexity=6,
+                canonical_key=canonical_key,
+            )
+        )
+        if len(candidates) >= max_candidates:
+            break
+    return candidates
+
+
 def interleave_candidate_groups(candidates: list[DiscoveryCandidate], block_name: str) -> list[DiscoveryCandidate]:
     keys = list(dict.fromkeys(candidate.blocks.get(block_name, "unknown") for candidate in candidates))
     grouped = {key: [candidate for candidate in candidates if candidate.blocks.get(block_name, "unknown") == key] for key in keys}
@@ -266,7 +340,53 @@ def canonical_candidate_key(blocks: dict[str, str], params: dict[str, Any], pare
     return repr(material)
 
 
+def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
+    """Identify identical executable strategies independently of research lineage.
+
+    Candidate ids intentionally include lineage and rule labels. Campaign-level
+    deduplication needs a narrower key so two labels that resolve to the same
+    decision parameters do not consume separate validation jobs.
+    """
+
+    non_execution_keys = {
+        "controlled_mutation",
+        "expected_behavior",
+        "exit",  # exit behavior is represented by RR, stop, and holding parameters
+        "frequency_hypothesis",
+        "generation_channel",
+        "generator_version",
+        "hypothesis_key",
+        "hypothesis_scope_ref",
+        "hypothesis_scope_type",
+        "hypothesis_strategy_family",
+        "hypothesis_version_id",
+        "phase2_generation_role",
+        "phase2_generation_seed",
+        "relevant_regimes",
+        "research_architecture_version",
+        "volume",  # the executable volume rule is volume_change_min
+    }
+    parameters = {
+        key: candidate.parameters[key]
+        for key in sorted(candidate.parameters)
+        if key not in non_execution_keys
+    }
+    return repr(parameters)
+
+
 def make_strategy_definition(candidate: DiscoveryCandidate) -> StrategyDefinition:
+    if candidate.parameters.get("strategy_architecture") == PHASE_2_FAMILY_VERSION:
+        spec = strategy_family_spec(str(candidate.parameters.get("phase2_strategy_family")))
+        return StrategyDefinition(
+            name=f"research_{spec.slug}",
+            version=candidate.candidate_id,
+            description=spec.observation,
+            parameters=candidate.parameters,
+            entry_rules=[spec.entry_logic, spec.confirmation_logic],
+            exit_rules=[spec.exit_logic, "Long-only simulation; no order is routed."],
+            supported_market_regimes=list(spec.relevant_conditions),
+            decide=strategy_family_decision,
+        )
     return StrategyDefinition(
         name="autonomous_strategy_discovery",
         version=candidate.candidate_id,
@@ -286,6 +406,8 @@ def make_strategy_definition(candidate: DiscoveryCandidate) -> StrategyDefinitio
 
 
 def discovered_strategy_decision(candle: dict[str, Any], feature: dict[str, Any], recent_candles: list[dict[str, Any]], params: dict[str, Any]) -> StrategyDecision:
+    if params.get("strategy_architecture") == PHASE_2_FAMILY_VERSION:
+        return strategy_family_decision(candle, feature, recent_candles, params)
     if params.get("strategy_architecture") == "relative_strength_continuation_v2":
         return relative_strength_continuation_v2_decision(candle, feature, recent_candles, params)
     close = Decimal(candle["close"])
@@ -657,7 +779,7 @@ def evaluate_candidate(
 def status_for_candidate(metrics: dict[str, Any], readiness: dict[str, Any], research_score: float) -> str:
     if readiness.get("paper_ready") and research_score > 0:
         return "promoted"
-    if finite_metric(metrics.get("profit_factor")) >= 1.05 and finite_metric(metrics.get("expectancy_per_trade")) > 0 and finite_metric(metrics.get("number_of_trades")) >= 20:
+    if profit_factor_passes(metrics, 1.05) and finite_metric(metrics.get("expectancy_per_trade")) > 0 and finite_metric(metrics.get("number_of_trades")) >= 20:
         return "promoted"
     return "rejected"
 
@@ -668,7 +790,7 @@ def failure_reasons_for(metrics: dict[str, Any], readiness: dict[str, Any], by_m
         reasons.append("insufficient_trades")
     if metrics.get("frequency_screen_rejected"):
         reasons.append("projected_trade_count_below_gate")
-    if finite_metric(metrics.get("profit_factor")) < 1.05:
+    if not profit_factor_passes(metrics, 1.05):
         reasons.append("weak_profit_factor")
     if finite_metric(metrics.get("expectancy_per_trade")) <= 0:
         reasons.append("poor_expectancy")
@@ -1063,7 +1185,9 @@ def jsonable(value: Any) -> Any:
     if isinstance(value, Jsonb):
         return value.obj
     if isinstance(value, Decimal):
-        return float(value)
+        return float(value) if value.is_finite() else None
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, dict):

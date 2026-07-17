@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from datetime import UTC, date, datetime, time as dt_time, timedelta
 from decimal import Decimal
@@ -29,7 +29,13 @@ from app.services.strategy_discovery import (
     generate_discovery_candidates,
     jsonable,
 )
-from app.services.strategy_research import build_context_by_time, finite_metric
+from app.services.strategy_research import (
+    aggregate_profit_factor,
+    build_context_by_time,
+    finite_metric,
+    profit_factor_passes,
+    validation_profit_factor,
+)
 
 
 CAMPAIGN_VERSION = "large_scale_research_campaign_v1"
@@ -86,6 +92,14 @@ DRIFT_THRESHOLDS: dict[str, dict[str, float]] = {
 }
 
 DEFAULT_UNIVERSES: tuple[dict[str, Any], ...] = (
+    {
+        "universe_key": "research_core_ten",
+        "name": "Research Core Ten",
+        "description": "Ten liquid technology leaders and broad-market ETFs for measured profiling and cluster-specific research.",
+        "assets": ["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "AMZN", "SPY", "QQQ"],
+        "default_timeframes": ["1h", "4h"],
+        "metadata": {"asset_class": "equity_and_etf", "source": "reproducible_research_architecture_v1", "purpose": "asset_intelligence"},
+    },
     {
         "universe_key": "sp500_leaders",
         "name": "S&P 500 Leaders",
@@ -728,7 +742,7 @@ def infer_job_failure_reasons(job: dict[str, Any]) -> list[str]:
     reasons = []
     if finite_metric(metrics.get("number_of_trades")) < 30:
         reasons.append("insufficient_trades")
-    if finite_metric(metrics.get("profit_factor")) < 1.2:
+    if not profit_factor_passes(metrics, 1.2):
         reasons.append("weak_profit_factor")
     if finite_metric(metrics.get("expectancy_per_trade")) <= 0:
         reasons.append("poor_expectancy")
@@ -767,6 +781,7 @@ def grouped_quality_rank(jobs: list[dict[str, Any]], field: str) -> list[dict[st
     rows = []
     for name, items in grouped.items():
         metrics = [((row.get("result") or {}).get("metrics") or {}) for row in items]
+        aggregate_pf, aggregate_pf_infinite = aggregate_profit_factor(metrics)
         promoted = sum(1 for row in items if row.get("status") == "promoted")
         rows.append(
             {
@@ -774,7 +789,8 @@ def grouped_quality_rank(jobs: list[dict[str, Any]], field: str) -> list[dict[st
                 "tested": len(items),
                 "single_market_passes": promoted,
                 "pass_rate": round(promoted / len(items), 4) if items else 0,
-                "average_profit_factor": average(metric.get("profit_factor") for metric in metrics),
+                "average_profit_factor": aggregate_pf,
+                "profit_factor_is_infinite": aggregate_pf_infinite,
                 "average_expectancy": average(metric.get("expectancy_per_trade") for metric in metrics),
                 "average_drawdown": average(metric.get("max_drawdown") for metric in metrics),
                 "average_trades": average(metric.get("number_of_trades") for metric in metrics),
@@ -803,7 +819,7 @@ def strongest_market_regimes(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]
         for bucket in ("by_market_regime", "by_volatility_regime"):
             for item in analysis.get(bucket) or []:
                 metrics = item.get("metrics") or {}
-                if finite_metric(metrics.get("expectancy_per_trade")) > 0 and finite_metric(metrics.get("profit_factor")) >= 1:
+                if finite_metric(metrics.get("expectancy_per_trade")) > 0 and profit_factor_passes(metrics, 1):
                     regimes[str(item.get("regime") or item.get("condition") or "unknown")] += 1
     return [{"regime": regime, "supporting_passes": count} for regime, count in regimes.most_common(8)]
 
@@ -816,7 +832,7 @@ def source_parent_rows(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in jobs:
         metrics = ((row.get("result") or {}).get("metrics") or {})
         if (
-            finite_metric(metrics.get("profit_factor")) >= 1.1
+            profit_factor_passes(metrics, 1.1)
             and finite_metric(metrics.get("expectancy_per_trade")) > 0
             and finite_metric(metrics.get("max_drawdown")) <= 0.12
             and finite_metric(metrics.get("number_of_trades")) >= 20
@@ -2200,10 +2216,14 @@ def campaign_batch_key(campaign_id: int, batch_number: int) -> str:
 def strategy_family_for_candidate(candidate: DiscoveryCandidate | dict[str, Any]) -> str:
     blocks = candidate.blocks if isinstance(candidate, DiscoveryCandidate) else dict(candidate.get("blocks") or {})
     params = candidate.parameters if isinstance(candidate, DiscoveryCandidate) else dict(candidate.get("parameters") or {})
+    if params.get("phase2_strategy_family"):
+        return str(params["phase2_strategy_family"])
     if params.get("phase_9_12_strategy_family"):
         return str(params["phase_9_12_strategy_family"])
     if params.get("phase_9_11_strategy_family"):
         return str(params["phase_9_11_strategy_family"])
+    if params.get("hypothesis_strategy_family"):
+        return str(params["hypothesis_strategy_family"])
     entry = str(blocks.get("entry", ""))
     trend = str(blocks.get("trend", ""))
     momentum = str(blocks.get("momentum", ""))
@@ -2228,7 +2248,7 @@ def run_research_campaign_batch(
     worker_id: str | None = None,
     ensure_tables: bool = True,
     coordinate_campaign: bool = True,
-    dataset_cache: dict[tuple[str, str, bool], dict[str, Any]] | None = None,
+    dataset_cache: dict[tuple[Any, ...], dict[str, Any]] | None = None,
     allowed_dataset_keys: list[str] | None = None,
 ) -> dict[str, Any]:
     if ensure_tables:
@@ -2258,6 +2278,9 @@ def run_research_campaign_batch(
         retry_limit=int(config["retry_limit"]),
         allowed_dataset_keys=allowed_dataset_keys,
     )
+    # Make claims and leases visible before simulations begin. This prevents other
+    # workers from reporting an empty pool and makes crash recovery durable.
+    conn.commit()
     queue_claim_ms = round((time.perf_counter() - claim_started) * 1000, 3)
     completed: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
@@ -2269,10 +2292,12 @@ def run_research_campaign_batch(
             if not readiness["ready"]:
                 mark_claimed_job_deferred(conn, dict(job), readiness)
                 best_effort_worker_heartbeat(conn, worker_id, status="running")
+                conn.commit()
                 failed.append({"job_id": job["id"], "candidate_id": job["candidate_id"], "symbol": job["symbol"], "timeframe": job["timeframe"], "deferred": readiness["status"], "reason": readiness["reason"]})
                 continue
             refresh_job_heartbeat(conn, int(job["id"]), worker_id, int(config["worker_lease_seconds"]))
             best_effort_worker_heartbeat(conn, worker_id, status="running")
+            conn.commit()
             job_payload = {**dict(job), "_dataset_cache": worker_dataset_cache}
             result = run_campaign_job(conn, job_payload)
             runtime_ms = int((time.perf_counter() - started) * 1000)
@@ -2304,11 +2329,13 @@ def run_research_campaign_batch(
             )
             profile["writing_results_ms"] = round((time.perf_counter() - write_started) * 1000, 3)
             record_job_runtime(conn, int(job["id"]), runtime_ms, profile)
+            conn.commit()
             best_effort_worker_heartbeat(conn, worker_id, status="running")
             completed.append({"job_id": job["id"], "candidate_id": job["candidate_id"], "symbol": job["symbol"], "timeframe": job["timeframe"], "status": status})
         except Exception as error:  # noqa: BLE001 - one failed asset/timeframe must not stop the campaign
             safe_rollback(conn)
             fail_or_retry_claimed_job(conn, dict(job), error, config)
+            conn.commit()
             best_effort_worker_heartbeat(conn, worker_id, status="running")
             failed.append({"job_id": job["id"], "candidate_id": job["candidate_id"], "symbol": job["symbol"], "timeframe": job["timeframe"], "error": str(error)})
     remaining = open_job_count(conn, campaign_id)
@@ -2562,11 +2589,12 @@ def run_campaign_job(
     )
     provided_cache = job.get("_dataset_cache")
     cache = provided_cache if isinstance(provided_cache, dict) else {}
-    cache_key = (str(symbol), str(timeframe), needs_enriched_context)
+    dataset_id = int(job["dataset_id"]) if job.get("dataset_id") is not None else None
+    cache_key = (str(symbol), str(timeframe), needs_enriched_context, dataset_id)
     dataset = cache.get(cache_key)
     cache_hit = dataset is not None
     if dataset is None:
-        dataset = load_campaign_dataset(conn, symbol, timeframe, needs_enriched_context)
+        dataset = load_campaign_dataset(conn, symbol, timeframe, needs_enriched_context, dataset_id=dataset_id)
         cache[cache_key] = dataset
     simulation_started = time.perf_counter()
     row = evaluate_candidate(
@@ -2582,28 +2610,47 @@ def run_campaign_job(
         "simulation_ms": round((time.perf_counter() - simulation_started) * 1000, 3),
         "dataset_cache_hit": cache_hit,
     }
-    return {**row, "symbol": symbol, "timeframe": timeframe, "campaign_version": CAMPAIGN_VERSION}
+    from app.services.research_architecture import validation_gate_diagnostics
+
+    result = {**row, "symbol": symbol, "timeframe": timeframe, "campaign_version": CAMPAIGN_VERSION, "dataset_id": dataset_id}
+    result["gate_diagnostics"] = validation_gate_diagnostics(result)
+    return result
 
 
-def load_campaign_dataset(conn: psycopg.Connection, symbol: str, timeframe: str, enriched_context: bool) -> dict[str, Any]:
+def load_campaign_dataset(
+    conn: psycopg.Connection,
+    symbol: str,
+    timeframe: str,
+    enriched_context: bool,
+    *,
+    dataset_id: int | None = None,
+) -> dict[str, Any]:
     load_started = time.perf_counter()
-    sync_market_regimes(conn, symbol=symbol, timeframe=timeframe)
-    candles = load_candles(conn, symbol, timeframe)
-    features = list(
-        conn.execute(
-            """
-            SELECT *
-            FROM features
-            WHERE symbol = %s AND timeframe = %s
-            ORDER BY timestamp ASC
-            """,
-            (symbol, timeframe),
-        ).fetchall()
-    )
-    regimes = load_regimes(conn, symbol=symbol, timeframe=timeframe)
+    if dataset_id is not None:
+        from app.services.research_architecture import load_frozen_campaign_dataset
+
+        frozen = load_frozen_campaign_dataset(conn, dataset_id=dataset_id, symbol=symbol, timeframe=timeframe)
+        candles = frozen["candles"]
+        features = frozen["features"]
+        regimes = frozen["regimes"]
+    else:
+        sync_market_regimes(conn, symbol=symbol, timeframe=timeframe)
+        candles = load_candles(conn, symbol, timeframe)
+        features = list(
+            conn.execute(
+                """
+                SELECT *
+                FROM features
+                WHERE symbol = %s AND timeframe = %s
+                ORDER BY timestamp ASC
+                """,
+                (symbol, timeframe),
+            ).fetchall()
+        )
+        regimes = load_regimes(conn, symbol=symbol, timeframe=timeframe)
     data_loading_ms = round((time.perf_counter() - load_started) * 1000, 3)
     indicator_started = time.perf_counter()
-    if enriched_context:
+    if enriched_context and dataset_id is None:
         features = enrich_phase_9_11_context(conn, symbol, timeframe, features)
     context_by_time = build_context_by_time(candles, features, regimes)
     rows = combine_candles_features(candles, features)
@@ -2701,6 +2748,46 @@ def latest_context_at_or_before(rows: list[dict[str, Any]], timestamp: Any) -> d
 def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dict[str, Any]:
     symbol = str(job["symbol"]).upper()
     timeframe = str(job["timeframe"])
+    if job.get("dataset_id") is not None:
+        dataset_id = int(job["dataset_id"])
+        row = conn.execute(
+            """
+            SELECT COUNT(*) AS candle_count, MAX(timestamp) AS latest_candle_timestamp
+            FROM research_dataset_candles
+            WHERE dataset_id = %s AND symbol = %s AND timeframe = %s
+            """,
+            (dataset_id, symbol, timeframe),
+        ).fetchone()
+        candle_count = int((row or {}).get("candle_count") or 0)
+        if candle_count < MIN_CAMPAIGN_CANDLES:
+            classification = "missing_dataset" if candle_count == 0 else "insufficient_historical_depth"
+            return readiness_block(
+                "blocked_data",
+                classification,
+                f"Immutable dataset {dataset_id} contains {candle_count} candles; {MIN_CAMPAIGN_CANDLES} are required.",
+                retry_after_seconds=86400,
+                job=job,
+                symbol_row={"symbol": symbol, "asset_class": "snapshot", "is_active": True},
+                candle_count=candle_count,
+                latest_candle_timestamp=(row or {}).get("latest_candle_timestamp"),
+            )
+        return {
+            "ready": True,
+            "status": "eligible",
+            "reason": "immutable campaign dataset passed the stored candle-depth check",
+            "failure_classification": None,
+            "preflight": {
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "dataset_id": dataset_id,
+                "dataset_mode": "immutable_snapshot",
+                "candle_count": candle_count,
+                "feature_count": candle_count,
+                "latest_candle_timestamp": jsonable((row or {}).get("latest_candle_timestamp")),
+                "classification": "eligible",
+                "explanation": "Snapshot campaigns intentionally do not fail freshness checks after creation.",
+            },
+        }
     try:
         symbol_row = conn.execute(
             "SELECT symbol, asset_class, provider_symbol, primary_provider, is_active FROM symbols WHERE symbol = %s LIMIT 1",
@@ -2993,18 +3080,18 @@ def parse_timestamp(value: Any) -> datetime | None:
 
 def classify_worker_error(error: Exception) -> str:
     message = str(error).lower()
+    if any(token in message for token in ("invalid input syntax", "jsonb", "postgres", "database", "sql", "connection refused", "connection reset")):
+        return "database_error"
     if "stale" in message:
         return "stale_data"
-    if "candle" in message or "feature" in message or "data" in message:
-        return "data_unavailable"
     if "provider" in message or "rate" in message:
         return "provider_error"
+    if any(token in message for token in ("no candle", "missing candle", "candle history", "no feature", "missing feature", "market data unavailable")):
+        return "data_unavailable"
     if "validation" in message:
         return "validation_error"
     if "strategy" in message:
         return "strategy_error"
-    if "database" in message or "sql" in message:
-        return "database_error"
     return "unknown_error"
 
 
@@ -3499,7 +3586,7 @@ def passes_single_market_validation(result: dict[str, Any]) -> bool:
     metrics = result.get("metrics") or {}
     readiness = result.get("paper_readiness") or {}
     return (
-        finite_metric(metrics.get("profit_factor")) >= 1.2
+        profit_factor_passes(metrics, 1.2)
         and finite_metric(metrics.get("expectancy_per_trade")) > 0
         and finite_metric(metrics.get("max_drawdown")) <= 0.12
         and finite_metric(metrics.get("number_of_trades")) >= 30
@@ -3545,7 +3632,6 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
         (promoted, rejected, Jsonb(jsonable(analytics)), campaign_id),
     )
     update_job_consistency_scores(conn, campaign_id, summaries)
-    generate_campaign_report(conn, campaign_id, analytics)
     try:
         learning = learn_from_completed_campaign(conn, campaign_id)
         analytics["research_learning"] = {
@@ -3557,6 +3643,31 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
         }
     except Exception as error:  # noqa: BLE001 - learning must not invalidate completed simulation evidence
         analytics["research_learning"] = {"error": str(error)}
+    campaign_metadata = get_campaign(conn, campaign_id)
+    if campaign_metadata.get("dataset_id") is not None:
+        from app.services.research_architecture import finalize_architecture_campaign
+
+        analytics = finalize_architecture_campaign(conn, campaign_id, summaries=summaries, analytics=analytics)
+    from app.services.automated_scientific_reporting import generate_automated_scientific_report
+
+    scientific_report = generate_automated_scientific_report(conn, campaign_id, analytics=analytics)
+    analytics["automated_scientific_reporting"] = {
+        "report_id": scientific_report["id"],
+        "report_key": scientific_report["report_key"],
+        "calculation_version": "automated_scientific_reporting_v1",
+    }
+    if campaign_metadata.get("dataset_id") is not None:
+        from app.services.research_architecture import persist_campaign_archive
+
+        archive = persist_campaign_archive(conn, campaign_id)
+        analytics.setdefault("research_architecture", {})["archive"] = {
+            key: archive.get(key)
+            for key in ("archive_key", "content_hash", "storage_locations")
+        }
+    conn.execute(
+        "UPDATE research_campaigns SET analytics = %s, updated_at = NOW() WHERE id = %s",
+        (Jsonb(jsonable(analytics)), campaign_id),
+    )
     return analytics
 
 
@@ -3675,6 +3786,7 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
         passed = [row for row in rows if row["status"] == "promoted"]
         results = [row.get("result") or {} for row in rows if row.get("result")]
         metrics = [result.get("metrics") or {} for result in results]
+        aggregate_pf, aggregate_pf_infinite = aggregate_profit_factor(metrics)
         consistency_score = round(len(passed) / len(rows), 4) if rows else 0.0
         regime_counter: Counter[str] = Counter()
         for result in results:
@@ -3691,7 +3803,8 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
                 "strategy_name": "autonomous_strategy_discovery",
                 "strategy_version": candidate_id,
                 "research_score": average(row.get("validation_score") for row in rows),
-                "profit_factor": average(metric.get("profit_factor") for metric in metrics),
+                "profit_factor": aggregate_pf,
+                "profit_factor_is_infinite": aggregate_pf_infinite,
                 "expectancy": average(metric.get("expectancy_per_trade") for metric in metrics),
                 "max_drawdown": average(metric.get("max_drawdown") for metric in metrics),
                 "trade_count": int(sum(finite_metric(metric.get("number_of_trades")) for metric in metrics)),
@@ -3705,13 +3818,13 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
                 "passed_markets": [{"symbol": row["symbol"], "timeframe": row["timeframe"]} for row in passed],
             }
         )
-    return sorted(summaries, key=lambda row: (row["stability"], row["research_score"], row["profit_factor"]), reverse=True)
+    return sorted(summaries, key=lambda row: (row["stability"], row["research_score"], validation_profit_factor(row)), reverse=True)
 
 
 def passes_cross_validation(summary: dict[str, Any]) -> bool:
     return (
         summary["research_score"] > 0
-        and summary["profit_factor"] >= 1.2
+        and profit_factor_passes(summary, 1.2)
         and summary["expectancy"] > 0
         and summary["max_drawdown"] <= 0.12
         and summary["trade_count"] >= 60
@@ -4418,6 +4531,7 @@ def grouped_research_intelligence(conn: psycopg.Connection, campaign_id: int, jo
         promoted = [row for row in rows if row.get("status") == "promoted"]
         rejected = [row for row in rows if row.get("status") == "rejected"]
         metrics = [(row.get("result") or {}).get("metrics") or {} for row in completed]
+        aggregate_pf, aggregate_pf_infinite = aggregate_profit_factor(metrics)
         paper = [elite_by_candidate[row["candidate_id"]].get("paper_performance") or {} for row in promoted if row["candidate_id"] in elite_by_candidate]
         result.append(
             {
@@ -4426,7 +4540,8 @@ def grouped_research_intelligence(conn: psycopg.Connection, campaign_id: int, jo
                 "promoted": len(promoted),
                 "rejected": len(rejected),
                 "average_research_score": average(row.get("validation_score") for row in completed),
-                "average_profit_factor": average(metric.get("profit_factor") for metric in metrics),
+                "average_profit_factor": aggregate_pf,
+                "profit_factor_is_infinite": aggregate_pf_infinite,
                 "average_expectancy": average(metric.get("expectancy_per_trade") for metric in metrics),
                 "average_drawdown": average(metric.get("max_drawdown") for metric in metrics),
                 "promotion_rate": round(len(promoted) / len(completed), 4) if completed else 0,
@@ -4547,6 +4662,7 @@ def campaign_analytics(jobs: list[dict[str, Any]], summaries: list[dict[str, Any
     tested = len(completed)
     promoted = statuses.get("promoted", 0)
     rejected = statuses.get("rejected", 0)
+    aggregate_pf, aggregate_pf_infinite = aggregate_profit_factor(metrics)
     return {
         "strategies_generated": len({row["candidate_id"] for row in jobs}),
         "strategies_tested": tested,
@@ -4559,7 +4675,8 @@ def campaign_analytics(jobs: list[dict[str, Any]], summaries: list[dict[str, Any
         "rejected": rejected,
         "promoted": promoted,
         "average_research_score": average(row.get("validation_score") for row in completed),
-        "average_profit_factor": average(metric.get("profit_factor") for metric in metrics),
+        "average_profit_factor": aggregate_pf,
+        "profit_factor_is_infinite": aggregate_pf_infinite,
         "average_runtime_ms": average(row.get("execution_runtime_ms") for row in completed),
         "runtime_by_strategy_family": grouped_runtime(jobs, "strategy_family"),
         "runtime_by_asset": grouped_runtime(jobs, "symbol"),
@@ -4726,6 +4843,9 @@ def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dic
             c.name,
             c.universe_key,
             c.status,
+            c.dataset_id,
+            c.dataset_mode,
+            c.generator_version,
             c.requested_candidates,
             c.created_at,
             c.started_at,
@@ -4834,6 +4954,10 @@ def get_campaign_performance_profile(conn: psycopg.Connection, campaign_id: int)
             "active_parallel_workers": active_parallel_workers,
             "active_parallel_jobs": int(row.get("active_parallel_jobs") or 0),
             "configured_parallel_workers": int(pool.get("workers") or active_parallel_workers),
+            "starting_parallel_workers": int(pool.get("starting_workers") or 0),
+            "parallel_pool_active": bool(pool.get("active")),
+            "parallel_pool_status": str(pool.get("status") or "idle"),
+            "processed_parallel_jobs": int(pool.get("processed_jobs") or 0),
             "preloaded_datasets": int(pool.get("preloaded_datasets") or 0),
             "resident_memory_mb": round(process_resident_memory_bytes() / (1024 * 1024), 1),
             "worker_limit": 8,
@@ -4897,8 +5021,16 @@ def run_parallel_campaign_batch(
 
     with _PARALLEL_POOLS_LOCK:
         existing = _PARALLEL_POOLS.get(campaign_id)
-        if existing and int(existing.get("live_workers") or 0) > 0:
-            raise ValueError("A parallel worker pool is already active for this campaign.")
+        if existing and bool(existing.get("active", True)):
+            return {
+                "campaign_id": campaign_id,
+                "started": False,
+                "already_active": True,
+                "workers": int(existing.get("workers") or 1),
+                "jobs_per_worker": int(existing.get("jobs_per_worker") or batch_size),
+                "remaining": open_job_count(conn, campaign_id),
+                "simulation_only": True,
+            }
 
         config = scheduling_config(campaign)
         recover_expired_campaign_jobs(conn, campaign_id=campaign_id, retry_limit=int(config["retry_limit"]), recovery_worker_id=f"parallel_coordinator_{campaign_id}")
@@ -4914,10 +5046,14 @@ def run_parallel_campaign_batch(
         pool_id = f"parallel_pool_{campaign_id}_{int(time.time() * 1000)}"
         _PARALLEL_POOLS[campaign_id] = {
             "pool_id": pool_id,
+            "active": True,
+            "status": "starting",
             "workers": worker_count,
-            "live_workers": worker_count,
+            "live_workers": 0,
+            "starting_workers": worker_count,
             "jobs_per_worker": batch_size,
             "preloaded_datasets": 0,
+            "processed_jobs": 0,
             "started_at": datetime.now(UTC).isoformat(),
         }
 
@@ -4941,6 +5077,7 @@ def run_parallel_campaign_batch(
     return {
         "campaign_id": campaign_id,
         "started": True,
+        "already_active": False,
         "workers": worker_count,
         "jobs_per_worker": batch_size,
         "remaining": open_job_count(conn, campaign_id),
@@ -4953,6 +5090,53 @@ def parallel_pool_snapshot(campaign_id: int) -> dict[str, Any]:
         return dict(_PARALLEL_POOLS.get(campaign_id) or {})
 
 
+def _execute_parallel_campaign_worker(
+    campaign_id: int,
+    worker_index: int,
+    pool_id: str,
+    batch_size: int,
+    assigned_datasets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Execute one real OS process worth of CPU-bound campaign simulations."""
+
+    from app.db import connect
+
+    totals = {"processed": 0, "completed": 0, "failed": 0}
+    worker_id = f"parallel_{campaign_id}_{worker_index}_{pool_id.rsplit('_', 1)[-1]}"
+    allowed_dataset_keys = [f"{row['symbol']}|{row['timeframe']}" for row in assigned_datasets]
+    worker_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
+    with connect() as worker_conn:
+        for dataset in assigned_datasets:
+            symbol = str(dataset["symbol"])
+            timeframe = str(dataset["timeframe"])
+            enriched_context = bool(dataset.get("enriched_context"))
+            dataset_id = int(dataset["dataset_id"]) if dataset.get("dataset_id") is not None else None
+            worker_cache[(symbol, timeframe, enriched_context, dataset_id)] = load_campaign_dataset(
+                worker_conn,
+                symbol,
+                timeframe,
+                enriched_context,
+                dataset_id=dataset_id,
+            )
+        worker_conn.commit()
+        while True:
+            result = run_research_campaign_batch(
+                worker_conn,
+                campaign_id=campaign_id,
+                batch_size=batch_size,
+                worker_id=worker_id,
+                ensure_tables=False,
+                coordinate_campaign=False,
+                dataset_cache=worker_cache,
+                allowed_dataset_keys=allowed_dataset_keys,
+            )
+            for key in totals:
+                totals[key] += int(result.get(key) or 0)
+            if result.get("status") in {"paused", "canceled", "completed"} or int(result.get("processed") or 0) == 0:
+                break
+    return {**totals, "preloaded_datasets": len(worker_cache)}
+
+
 def _run_persistent_parallel_pool(*, pool_id: str, campaign_id: int, worker_count: int, batch_size: int) -> None:
     from app.db import connect
 
@@ -4962,14 +5146,15 @@ def _run_persistent_parallel_pool(*, pool_id: str, campaign_id: int, worker_coun
             SELECT
                 symbol,
                 timeframe,
+                dataset_id,
                 BOOL_OR(
                     COALESCE(candidate->'parameters'->>'phase_9_11_campaign_version', '') = %s
                     OR COALESCE(candidate->'parameters'->>'phase_9_12_campaign_version', '') = %s
                 ) AS enriched_context
             FROM research_campaign_jobs
             WHERE campaign_id = %s
-            GROUP BY symbol, timeframe
-            ORDER BY symbol, timeframe
+            GROUP BY symbol, timeframe, dataset_id
+            ORDER BY symbol, timeframe, dataset_id
             """,
             (STRATEGY_REDESIGN_CAMPAIGN_VERSION, VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION, campaign_id),
         ).fetchall()
@@ -4980,55 +5165,41 @@ def _run_persistent_parallel_pool(*, pool_id: str, campaign_id: int, worker_coun
             if not assigned:
                 worker_datasets[index] = [datasets[index % len(datasets)]]
 
-    def execute(worker_index: int) -> dict[str, Any]:
-        totals = {"processed": 0, "completed": 0, "failed": 0}
-        worker_id = f"parallel_{campaign_id}_{worker_index}_{pool_id.rsplit('_', 1)[-1]}"
-        assigned_datasets = worker_datasets[worker_index]
-        allowed_dataset_keys = [f"{row['symbol']}|{row['timeframe']}" for row in assigned_datasets]
-        worker_cache: dict[tuple[str, str, bool], dict[str, Any]] = {}
-        try:
-            with connect() as worker_conn:
-                for dataset in assigned_datasets:
-                    symbol = str(dataset["symbol"])
-                    timeframe = str(dataset["timeframe"])
-                    enriched_context = bool(dataset.get("enriched_context"))
-                    worker_cache[(symbol, timeframe, enriched_context)] = load_campaign_dataset(worker_conn, symbol, timeframe, enriched_context)
-                worker_conn.commit()
-                with _PARALLEL_POOLS_LOCK:
-                    state = _PARALLEL_POOLS.get(campaign_id)
-                    if state and state.get("pool_id") == pool_id:
-                        state["preloaded_datasets"] = int(state.get("preloaded_datasets") or 0) + len(worker_cache)
-                while True:
-                    result = run_research_campaign_batch(
-                        worker_conn,
-                        campaign_id=campaign_id,
-                        batch_size=batch_size,
-                        worker_id=worker_id,
-                        ensure_tables=False,
-                        coordinate_campaign=False,
-                        dataset_cache=worker_cache,
-                        allowed_dataset_keys=allowed_dataset_keys,
-                    )
-                    for key in totals:
-                        totals[key] += int(result.get(key) or 0)
-                    if result.get("status") in {"paused", "canceled", "completed"} or int(result.get("processed") or 0) == 0:
-                        break
-        finally:
-            with _PARALLEL_POOLS_LOCK:
-                state = _PARALLEL_POOLS.get(campaign_id)
-                if state and state.get("pool_id") == pool_id:
-                    state["live_workers"] = max(0, int(state.get("live_workers") or 0) - 1)
-        return totals
-
     worker_errors: list[str] = []
     try:
-        with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix=f"campaign-{campaign_id}") as executor:
-            futures = [executor.submit(execute, index) for index in range(worker_count)]
+        with _PARALLEL_POOLS_LOCK:
+            state = _PARALLEL_POOLS.get(campaign_id)
+            if state and state.get("pool_id") == pool_id:
+                state["live_workers"] = worker_count
+                state["starting_workers"] = 0
+                state["status"] = "running"
+        with ProcessPoolExecutor(max_workers=worker_count) as executor:
+            futures = [
+                executor.submit(
+                    _execute_parallel_campaign_worker,
+                    campaign_id,
+                    index,
+                    pool_id,
+                    batch_size,
+                    worker_datasets[index],
+                )
+                for index in range(worker_count)
+            ]
             for future in as_completed(futures):
                 try:
-                    future.result()
+                    totals = future.result()
+                    with _PARALLEL_POOLS_LOCK:
+                        state = _PARALLEL_POOLS.get(campaign_id)
+                        if state and state.get("pool_id") == pool_id:
+                            state["processed_jobs"] = int(state.get("processed_jobs") or 0) + int(totals.get("processed") or 0)
+                            state["preloaded_datasets"] = int(state.get("preloaded_datasets") or 0) + int(totals.get("preloaded_datasets") or 0)
+                            state["live_workers"] = max(0, int(state.get("live_workers") or 0) - 1)
                 except Exception as error:
                     worker_errors.append(str(error))
+                    with _PARALLEL_POOLS_LOCK:
+                        state = _PARALLEL_POOLS.get(campaign_id)
+                        if state and state.get("pool_id") == pool_id:
+                            state["live_workers"] = max(0, int(state.get("live_workers") or 0) - 1)
 
         with connect() as coordinator_conn:
             remaining = open_job_count(coordinator_conn, campaign_id)
@@ -5042,6 +5213,7 @@ def _run_persistent_parallel_pool(*, pool_id: str, campaign_id: int, worker_coun
         with _PARALLEL_POOLS_LOCK:
             state = _PARALLEL_POOLS.get(campaign_id)
             if state and state.get("pool_id") == pool_id:
+                state["live_workers"] = 0
                 if worker_errors:
                     state["worker_errors"] = worker_errors
                 _PARALLEL_POOLS.pop(campaign_id, None)
@@ -5462,7 +5634,7 @@ def candidate_lifecycle_summary(summary: dict[str, Any]) -> dict[str, Any]:
         lifecycle = "elite_candidate"
     elif summary.get("passed_markets"):
         lifecycle = "research_candidate"
-    elif finite_metric(summary.get("profit_factor")) >= 1.0 and finite_metric(summary.get("trade_count")) > 0:
+    elif profit_factor_passes(summary, 1.0) and finite_metric(summary.get("trade_count")) > 0:
         lifecycle = "needs_more_evidence"
     else:
         lifecycle = "rejected"
@@ -5471,6 +5643,7 @@ def candidate_lifecycle_summary(summary: dict[str, Any]) -> dict[str, Any]:
         "lifecycle": lifecycle,
         "research_score": summary.get("research_score"),
         "profit_factor": summary.get("profit_factor"),
+        "profit_factor_is_infinite": bool(summary.get("profit_factor_is_infinite")),
         "expectancy": summary.get("expectancy"),
         "max_drawdown": summary.get("max_drawdown"),
         "trade_count": summary.get("trade_count"),
@@ -5493,7 +5666,7 @@ def best_simple_candidate(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
             row["lifecycle"] == "research_candidate",
             finite_metric(row.get("stability")),
             finite_metric(row.get("research_score")),
-            finite_metric(row.get("profit_factor")),
+            validation_profit_factor(row),
         ),
         reverse=True,
     )

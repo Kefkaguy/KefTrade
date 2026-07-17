@@ -210,6 +210,7 @@ def verify_migrations(migration_dir: str | Path | None = None) -> dict[str, Any]
         "024_large_scale_research_operations.sql",
         "025_research_learning_engine.sql",
         "026_production_validation_readiness.sql",
+        "028_reproducible_research_architecture.sql",
     }
     present_required = sorted(name for name in files if name in required)
     idempotent = all("CREATE TABLE IF NOT EXISTS" in (root / name).read_text(encoding="utf-8") for name in present_required)
@@ -1048,7 +1049,7 @@ def readiness_gates(migration: dict[str, Any], worker: dict[str, Any], integrity
     paper_summary = paper["summary"]
     no_eligible_reason = "No eligible candidate-linked closed forward trades exist yet."
     return [
-        gate("migrations_verified", migration["passed"], True, "engineering_reliability", "migration verification", bool(migration["passed"]), True, "All migrations through 026 are ordered, idempotent, and simulation constrained.", "Apply missing migrations and rerun migration verification."),
+        gate("migrations_verified", migration["passed"], True, "engineering_reliability", "migration verification", bool(migration["passed"]), True, "All required migrations through 028 are ordered, idempotent, and simulation constrained.", "Apply missing migrations and rerun migration verification."),
         gate("backend_and_frontend_verified", bool(thresholds.get("backend_tests_passed") and thresholds.get("frontend_build_passed")), True, "engineering_reliability", "verification run", bool(thresholds.get("backend_tests_passed") and thresholds.get("frontend_build_passed")), True, "Backend tests and frontend build evidence must be supplied by the current verification run.", "Run backend tests and frontend build, then pass those results into the readiness assessment."),
         gate("worker_supervision_configured", worker["passed"], True, "worker_reliability", "deploy/campaign-worker.compose.yml", bool(worker["passed"]), True, "Campaign worker has restart, healthcheck, shutdown, logs, identity.", "Fix campaign-worker.compose.yml supervision settings."),
         gate("no_critical_integrity_failures", integrity["summary"]["critical_failures"] == 0, True, "data_integrity", "integrity audit", integrity["summary"]["critical_failures"], 0, "Data integrity audit has no critical failures.", "Resolve critical audit failures before Phase 10 readiness."),

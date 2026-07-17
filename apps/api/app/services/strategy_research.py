@@ -29,6 +29,11 @@ PAPER_READY_THRESHOLDS = {
     "number_of_trades": 30,
 }
 
+# A no-loss sample has an infinite profit factor. Keep that fact explicit in the
+# metrics while using a conservative finite cap only where a numeric score is
+# required (JSON, sorting, and persisted aggregate summaries).
+PROFIT_FACTOR_SCORE_CAP = 10.0
+
 
 @dataclass(frozen=True)
 class StrategyCandidate:
@@ -449,7 +454,7 @@ def empty_scorecard() -> dict[str, Any]:
 
 
 def score_metrics(metrics: dict[str, Any]) -> float:
-    profit_factor = finite_metric(metrics.get("profit_factor"))
+    profit_factor = validation_profit_factor(metrics, infinite_value=PROFIT_FACTOR_SCORE_CAP)
     expectancy = finite_metric(metrics.get("expectancy_per_trade"))
     max_drawdown = finite_metric(metrics.get("max_drawdown"))
     sharpe = finite_metric(metrics.get("sharpe_ratio"))
@@ -482,10 +487,49 @@ def finite_metric(value: Any) -> float:
     return parsed
 
 
+def profit_factor_is_infinite(metrics: dict[str, Any]) -> bool:
+    return bool(metrics.get("profit_factor_is_infinite"))
+
+
+def validation_profit_factor(metrics: dict[str, Any], *, infinite_value: float = PROFIT_FACTOR_SCORE_CAP) -> float:
+    """Return a validation-safe PF without erasing an explicit no-loss result."""
+
+    if profit_factor_is_infinite(metrics):
+        return float(infinite_value)
+    return finite_metric(metrics.get("profit_factor"))
+
+
+def profit_factor_passes(metrics: dict[str, Any], threshold: float) -> bool:
+    return profit_factor_is_infinite(metrics) or finite_metric(metrics.get("profit_factor")) >= threshold
+
+
+def profit_factor_detail(metrics: dict[str, Any]) -> str:
+    if profit_factor_is_infinite(metrics):
+        return "infinite (no losing trades)"
+    return format_metric(metrics.get("profit_factor"))
+
+
+def aggregate_profit_factor(metrics: Iterable[dict[str, Any]]) -> tuple[float, bool]:
+    """Pool gross P/L when available; otherwise aggregate validated PF values."""
+
+    rows = list(metrics)
+    has_gross_totals = bool(rows) and all("gross_profit" in row and "gross_loss" in row for row in rows)
+    if has_gross_totals:
+        gross_profit = sum(finite_metric(row.get("gross_profit")) for row in rows)
+        gross_loss = sum(finite_metric(row.get("gross_loss")) for row in rows)
+        if gross_loss > 0:
+            return round(gross_profit / gross_loss, 8), False
+        if gross_profit > 0:
+            return PROFIT_FACTOR_SCORE_CAP, True
+        return 0.0, False
+    values = [validation_profit_factor(row) for row in rows if row.get("profit_factor") is not None or profit_factor_is_infinite(row)]
+    return (round(sum(values) / len(values), 8), bool(values) and all(profit_factor_is_infinite(row) for row in rows)) if values else (0.0, False)
+
+
 def recommend_strategy(metrics: dict[str, Any], paper_readiness: dict[str, Any] | None = None) -> str:
     if paper_readiness is None:
         paper_readiness = paper_readiness_report(metrics)
-    profit_factor = finite_metric(metrics.get("profit_factor"))
+    profit_factor = validation_profit_factor(metrics)
     expectancy = finite_metric(metrics.get("expectancy_per_trade"))
     trade_count = int(finite_metric(metrics.get("number_of_trades")))
     if paper_readiness["paper_ready"]:
@@ -505,8 +549,8 @@ def paper_readiness_report(
     checks = [
         readiness_check(
             "profit_factor",
-            finite_metric(metrics.get("profit_factor")) >= PAPER_READY_THRESHOLDS["profit_factor"],
-            f"Profit factor {format_metric(metrics.get('profit_factor'))} must be >= {PAPER_READY_THRESHOLDS['profit_factor']}.",
+            profit_factor_passes(metrics, PAPER_READY_THRESHOLDS["profit_factor"]),
+            f"Profit factor {profit_factor_detail(metrics)} must be >= {PAPER_READY_THRESHOLDS['profit_factor']}.",
         ),
         readiness_check(
             "positive_expectancy",
@@ -557,7 +601,7 @@ def regime_stability_passes(by_market_regime: list[dict[str, Any]], by_volatilit
         return True
     return all(
         finite_metric(row.get("metrics", {}).get("expectancy_per_trade")) > 0
-        and finite_metric(row.get("metrics", {}).get("profit_factor")) >= 1
+        and profit_factor_passes(row.get("metrics", {}), 1)
         for row in material_rows
     )
 
@@ -569,7 +613,7 @@ def regime_stability_detail(by_market_regime: list[dict[str, Any]], by_volatilit
         if finite_metric(row.get("metrics", {}).get("number_of_trades")) >= 5
         and (
             finite_metric(row.get("metrics", {}).get("expectancy_per_trade")) <= 0
-            or finite_metric(row.get("metrics", {}).get("profit_factor")) < 1
+            or not profit_factor_passes(row.get("metrics", {}), 1)
         )
     ]
     if weak_rows:
@@ -695,7 +739,7 @@ def build_library_markdown_report(ranked: list[dict[str, Any]]) -> str:
 
 def infer_strengths(metrics: dict[str, Any]) -> list[str]:
     strengths = []
-    if finite_metric(metrics.get("profit_factor")) >= 1:
+    if profit_factor_passes(metrics, 1):
         strengths.append("Gross profits exceed gross losses.")
     if finite_metric(metrics.get("max_drawdown")) <= 0.1:
         strengths.append("Drawdown stayed below 10%.")
@@ -706,7 +750,7 @@ def infer_strengths(metrics: dict[str, Any]) -> list[str]:
 
 def infer_weaknesses(metrics: dict[str, Any]) -> list[str]:
     weaknesses = []
-    if finite_metric(metrics.get("profit_factor")) < 1:
+    if not profit_factor_passes(metrics, 1):
         weaknesses.append("Profit factor is below 1.0.")
     if finite_metric(metrics.get("expectancy_per_trade")) <= 0:
         weaknesses.append("Expectancy per trade is not positive.")

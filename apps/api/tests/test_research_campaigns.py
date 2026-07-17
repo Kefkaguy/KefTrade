@@ -1,9 +1,13 @@
 from datetime import UTC, datetime
 from dataclasses import asdict
+from decimal import Decimal
+import math
 
 from app.services import research_campaigns
+from app.services.strategy_discovery import jsonable
 from app.services.research_campaigns import (
     candidate_consistency_summaries,
+    classify_worker_error,
     claim_campaign_jobs,
     closed_trade_attribution,
     create_research_campaign,
@@ -12,6 +16,7 @@ from app.services.research_campaigns import (
     forward_validation_state,
     generate_discovery_candidates,
     passes_cross_validation,
+    passes_single_market_validation,
     overfit_regime_robustness_blueprint,
     quality_first_campaign_blueprint,
     research_heatmaps,
@@ -253,6 +258,20 @@ def jsonb(value):
     return getattr(value, "obj", value)
 
 
+def test_jsonable_normalizes_non_finite_values_for_postgres_jsonb() -> None:
+    assert jsonable({"nan": math.nan, "infinite": math.inf, "decimal_nan": Decimal("NaN")}) == {
+        "nan": None,
+        "infinite": None,
+        "decimal_nan": None,
+    }
+
+
+def test_worker_error_classifier_does_not_mistake_invalid_json_for_missing_data() -> None:
+    error = ValueError('invalid input syntax for type json: Token "NaN" is invalid')
+
+    assert classify_worker_error(error) == "database_error"
+
+
 def test_large_strategy_generation_supports_thousands_without_duplicates() -> None:
     candidates = generate_discovery_candidates(max_candidates=1000)
 
@@ -286,6 +305,7 @@ def test_campaign_lifecycle_promotes_only_cross_validated_candidates(monkeypatch
     monkeypatch.setattr(research_campaigns, "run_campaign_job", fake_campaign_job)
 
     created = create_research_campaign(conn, universe_key="sp500_leaders", max_candidates=1, asset_limit=2, timeframes=["1h"])
+    commits_before_run = conn.commits
     result = run_research_campaign_batch(conn, campaign_id=created["campaign"]["id"], batch_size=10)
 
     assert created["jobs_created"] == 2
@@ -294,6 +314,7 @@ def test_campaign_lifecycle_promotes_only_cross_validated_candidates(monkeypatch
     assert conn.campaigns[0]["promoted_candidates"] == 1
     assert conn.elite[0]["simulation_only"] is True
     assert conn.jobs[0]["consistency_score"] == 1.0
+    assert conn.commits - commits_before_run >= 4
 
 
 def test_worker_dataset_cache_survives_multiple_claim_batches(monkeypatch) -> None:
@@ -322,6 +343,31 @@ def test_worker_dataset_cache_survives_multiple_claim_batches(monkeypatch) -> No
     assert observed_caches == [shared_cache, shared_cache]
 
 
+def test_parallel_pool_start_is_idempotent_when_pool_is_active() -> None:
+    conn = CampaignConn()
+    created = create_research_campaign(conn, universe_key="sp500_leaders", max_candidates=1, asset_limit=2, timeframes=["1h"])
+    campaign_id = created["campaign"]["id"]
+    research_campaigns._PARALLEL_POOLS[campaign_id] = {
+        "pool_id": "existing_pool",
+        "active": True,
+        "workers": 1,
+        "jobs_per_worker": 10,
+    }
+    try:
+        result = research_campaigns.run_parallel_campaign_batch(
+            conn,
+            campaign_id=campaign_id,
+            workers=8,
+            jobs_per_worker=20,
+        )
+    finally:
+        research_campaigns._PARALLEL_POOLS.pop(campaign_id, None)
+
+    assert result["started"] is False
+    assert result["already_active"] is True
+    assert result["workers"] == 1
+
+
 def test_consistency_summary_records_failure_causes() -> None:
     rows = [
         {"candidate_id": "sd_1", "family_id": "family_1", "symbol": "AAPL", "timeframe": "1h", "status": "rejected", "validation_score": 0, "failure_reasons": ["poor_expectancy"], "result": {}},
@@ -333,6 +379,33 @@ def test_consistency_summary_records_failure_causes() -> None:
     assert summary["stability"] == 0.5
     assert summary["assets_passed"] == 1
     assert summary["failure_reasons"] == ["poor_expectancy"]
+
+
+def test_no_loss_metrics_pass_and_pool_without_becoming_zero_profit_factor() -> None:
+    result = {
+        "metrics": {
+            "gross_profit": 120,
+            "gross_loss": 0,
+            "profit_factor": None,
+            "profit_factor_is_infinite": True,
+            "expectancy_per_trade": 3,
+            "max_drawdown": 0.02,
+            "number_of_trades": 35,
+            "walk_forward": {"enabled": True},
+        },
+        "paper_readiness": {"paper_ready": True},
+    }
+    rows = [
+        {"candidate_id": "sd_inf", "family_id": "family_inf", "symbol": "AAPL", "timeframe": "1h", "status": "promoted", "validation_score": 5, "failure_reasons": [], "result": result},
+        {"candidate_id": "sd_inf", "family_id": "family_inf", "symbol": "MSFT", "timeframe": "1h", "status": "promoted", "validation_score": 5, "failure_reasons": [], "result": result},
+    ]
+
+    summary = candidate_consistency_summaries(rows)[0]
+
+    assert passes_single_market_validation(result) is True
+    assert summary["profit_factor_is_infinite"] is True
+    assert summary["profit_factor"] > 1.2
+    assert passes_cross_validation(summary) is True
 
 
 def test_worker_claims_are_idempotent_across_workers() -> None:

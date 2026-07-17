@@ -121,7 +121,7 @@ class ValidationConn:
 def test_migration_verification_finds_milestone_5_migration() -> None:
     result = verify_migrations()
 
-    assert result["latest_migration"] >= 26
+    assert result["latest_migration"] >= 28
     assert result["required_present"] is True
     assert result["simulation_only_constraints_present"] is True
 

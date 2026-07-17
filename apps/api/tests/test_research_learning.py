@@ -93,7 +93,7 @@ def test_failure_and_success_detection_are_explainable_and_ranked() -> None:
 
     assert failures[0]["frequency"] >= failures[-1]["frequency"]
     assert any(row["value"] == "drawdown_excessive" for row in failures)
-    assert any("evidence_refs" in row and row["calculation"]["version"] == "research_learning_v1" for row in failures)
+    assert any("evidence_refs" in row and row["calculation"]["version"] == "research_learning_v2" for row in failures)
     assert any(row["pattern_type"] == "atr_multiplier_range" and row["value"] == "atr_multiplier:3.0" for row in successes)
 
 
@@ -144,7 +144,7 @@ def test_full_campaign_learning_builds_versioned_knowledge_timeline_and_rankings
 
     assert learning["summary"]["jobs_analyzed"] == 3
     assert learning["knowledge"]
-    assert all(row["calculation_version"] == "research_learning_v1" for row in learning["knowledge"])
+    assert all(row["calculation_version"] == "research_learning_v2" for row in learning["knowledge"])
     assert any(event["event_type"] == "promotion" for event in learning["timeline"])
     assert any(event["event_type"] == "rejection" for event in learning["timeline"])
     assert learning["elite_rankings"][0]["candidate_id"] == "elite_a"

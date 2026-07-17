@@ -1,0 +1,490 @@
+{
+  "backfill": {
+    "campaigns": 25,
+    "errors": [],
+    "reports": 25
+  },
+  "calculation_version": "automated_scientific_reporting_v1",
+  "completed_campaigns": [
+    {
+      "completed_at": "2026-07-16 07:30:36.957359+00:00",
+      "created_at": "2026-07-16 05:16:53.933709+00:00",
+      "dataset_id": null,
+      "id": 10,
+      "name": "4 selected assets deterministic discovery",
+      "promoted_candidates": 0,
+      "rejected_candidates": 1250,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-16 23:13:40.046731+00:00",
+      "created_at": "2026-07-16 23:04:03.264333+00:00",
+      "dataset_id": 1,
+      "id": 50,
+      "name": "Research Core hypothesis research",
+      "promoted_candidates": 0,
+      "rejected_candidates": 250,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 00:18:54.178887+00:00",
+      "created_at": "2026-07-16 23:34:21.802760+00:00",
+      "dataset_id": 1,
+      "id": 51,
+      "name": "Frequency-aware 1h cluster validation",
+      "promoted_candidates": 0,
+      "rejected_candidates": 100,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 00:24:28.643858+00:00",
+      "created_at": "2026-07-17 00:19:38.737541+00:00",
+      "dataset_id": 1,
+      "id": 52,
+      "name": "QQQ-SPY 1h cluster elite search",
+      "promoted_candidates": 0,
+      "rejected_candidates": 100,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 00:35:49.302257+00:00",
+      "created_at": "2026-07-17 00:24:57.345367+00:00",
+      "dataset_id": 1,
+      "id": 53,
+      "name": "AMD-NVDA-TSLA 1h cluster elite search",
+      "promoted_candidates": 0,
+      "rejected_candidates": 100,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 00:50:47.939207+00:00",
+      "created_at": "2026-07-17 00:36:44.285967+00:00",
+      "dataset_id": 1,
+      "id": 54,
+      "name": "GOOGL specialist transfer refinement",
+      "promoted_candidates": 0,
+      "rejected_candidates": 60,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:30:27.077410+00:00",
+      "created_at": "2026-07-17 03:13:22.721574+00:00",
+      "dataset_id": 1,
+      "id": 55,
+      "name": "Research Core hypothesis research",
+      "promoted_candidates": 0,
+      "rejected_candidates": 250,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:31:13.261307+00:00",
+      "created_at": "2026-07-17 03:30:54.114364+00:00",
+      "dataset_id": 1,
+      "id": 56,
+      "name": "Phase 2 frozen regression \u2014 Breakout",
+      "promoted_candidates": 0,
+      "rejected_candidates": 8,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:31:26.464980+00:00",
+      "created_at": "2026-07-17 03:31:18.934922+00:00",
+      "dataset_id": 1,
+      "id": 57,
+      "name": "Phase 2 frozen regression \u2014 Momentum",
+      "promoted_candidates": 0,
+      "rejected_candidates": 8,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:31:44.144303+00:00",
+      "created_at": "2026-07-17 03:31:32.033775+00:00",
+      "dataset_id": 1,
+      "id": 58,
+      "name": "Phase 2 frozen regression \u2014 Pullback",
+      "promoted_candidates": 0,
+      "rejected_candidates": 8,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:31:55.168232+00:00",
+      "created_at": "2026-07-17 03:31:49.648376+00:00",
+      "dataset_id": 1,
+      "id": 59,
+      "name": "Phase 2 frozen regression \u2014 Mean Reversion",
+      "promoted_candidates": 0,
+      "rejected_candidates": 8,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:32:17.997947+00:00",
+      "created_at": "2026-07-17 03:32:01.049466+00:00",
+      "dataset_id": 1,
+      "id": 60,
+      "name": "Phase 2 frozen regression \u2014 Volatility Expansion",
+      "promoted_candidates": 0,
+      "rejected_candidates": 8,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:32:32.768162+00:00",
+      "created_at": "2026-07-17 03:32:23.440216+00:00",
+      "dataset_id": 1,
+      "id": 61,
+      "name": "Phase 2 frozen regression \u2014 Range Breakout",
+      "promoted_candidates": 0,
+      "rejected_candidates": 8,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:32:52.674867+00:00",
+      "created_at": "2026-07-17 03:32:38.504489+00:00",
+      "dataset_id": 1,
+      "id": 62,
+      "name": "Phase 2 frozen regression \u2014 Continuation",
+      "promoted_candidates": 0,
+      "rejected_candidates": 8,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:33:04.680036+00:00",
+      "created_at": "2026-07-17 03:32:58.329835+00:00",
+      "dataset_id": 1,
+      "id": 63,
+      "name": "Phase 2 frozen regression \u2014 Gap",
+      "promoted_candidates": 0,
+      "rejected_candidates": 8,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:37:24.807604+00:00",
+      "created_at": "2026-07-17 03:37:01.110552+00:00",
+      "dataset_id": 1,
+      "id": 64,
+      "name": "Phase 2 frozen regression \u2014 Breakout",
+      "promoted_candidates": 0,
+      "rejected_candidates": 10,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:37:40.044840+00:00",
+      "created_at": "2026-07-17 03:37:30.732228+00:00",
+      "dataset_id": 1,
+      "id": 65,
+      "name": "Phase 2 frozen regression \u2014 Momentum",
+      "promoted_candidates": 0,
+      "rejected_candidates": 10,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:38:01.597650+00:00",
+      "created_at": "2026-07-17 03:37:45.866160+00:00",
+      "dataset_id": 1,
+      "id": 66,
+      "name": "Phase 2 frozen regression \u2014 Pullback",
+      "promoted_candidates": 0,
+      "rejected_candidates": 10,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:38:15.301677+00:00",
+      "created_at": "2026-07-17 03:38:07.381616+00:00",
+      "dataset_id": 1,
+      "id": 67,
+      "name": "Phase 2 frozen regression \u2014 Mean Reversion",
+      "promoted_candidates": 0,
+      "rejected_candidates": 10,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:38:42.112248+00:00",
+      "created_at": "2026-07-17 03:38:21.075659+00:00",
+      "dataset_id": 1,
+      "id": 68,
+      "name": "Phase 2 frozen regression \u2014 Volatility Expansion",
+      "promoted_candidates": 0,
+      "rejected_candidates": 10,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:39:00.261907+00:00",
+      "created_at": "2026-07-17 03:38:48.047129+00:00",
+      "dataset_id": 1,
+      "id": 69,
+      "name": "Phase 2 frozen regression \u2014 Range Breakout",
+      "promoted_candidates": 0,
+      "rejected_candidates": 10,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:39:24.232304+00:00",
+      "created_at": "2026-07-17 03:39:06.447818+00:00",
+      "dataset_id": 1,
+      "id": 70,
+      "name": "Phase 2 frozen regression \u2014 Continuation",
+      "promoted_candidates": 0,
+      "rejected_candidates": 10,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 03:39:38.534707+00:00",
+      "created_at": "2026-07-17 03:39:30.102297+00:00",
+      "dataset_id": 1,
+      "id": 71,
+      "name": "Phase 2 frozen regression \u2014 Gap",
+      "promoted_candidates": 0,
+      "rejected_candidates": 10,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 04:42:53.714782+00:00",
+      "created_at": "2026-07-17 04:33:13.286353+00:00",
+      "dataset_id": 1,
+      "id": 72,
+      "name": "Phase 4 Multi-Generation Evolution development campaign",
+      "promoted_candidates": 0,
+      "rejected_candidates": 6,
+      "status": "completed"
+    },
+    {
+      "completed_at": "2026-07-17 04:37:13.198258+00:00",
+      "created_at": "2026-07-17 04:33:48.298957+00:00",
+      "dataset_id": 1,
+      "id": 73,
+      "name": "Phase 4 Multi-Generation Evolution development campaign",
+      "promoted_candidates": 0,
+      "rejected_candidates": 12,
+      "status": "completed"
+    }
+  ],
+  "phase": 6,
+  "phase7_started": false,
+  "reports": [
+    {
+      "campaign_id": 10,
+      "recommendations": 2,
+      "report_id": 63,
+      "report_key": "a9564fdd0fba3920597947da872dfaf4ae779f785914cb6ad01982376526d777",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: 4 selected assets deterministic discovery",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 50,
+      "recommendations": 3,
+      "report_id": 64,
+      "report_key": "df438d019c7ccc0584f5eb1f80dbbd5ed81ecbb2de526b39f7f5339413940eef",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Research Core hypothesis research",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 51,
+      "recommendations": 3,
+      "report_id": 65,
+      "report_key": "10d36d72a6ebb35099b8d9645a8f938b37b1d24a6521bce65165fb87326d2bb0",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Frequency-aware 1h cluster validation",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 52,
+      "recommendations": 3,
+      "report_id": 66,
+      "report_key": "140699f09348cf1a83aebd1539d951367393896bd64f3f5e93a5c7cbd83f3187",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: QQQ-SPY 1h cluster elite search",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 53,
+      "recommendations": 3,
+      "report_id": 67,
+      "report_key": "34371e04015583b5d06b581020b434195f05fe9809c240966b359a77b82ef4b2",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: AMD-NVDA-TSLA 1h cluster elite search",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 54,
+      "recommendations": 3,
+      "report_id": 68,
+      "report_key": "277a040559bd574af179a2523dd08a534f04e7c285f56d769db2c5563a4bf222",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: GOOGL specialist transfer refinement",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 55,
+      "recommendations": 3,
+      "report_id": 69,
+      "report_key": "9585ac66d55236acd56600901375f1b4ce3abeaae34bfff8030329163d47ce42",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Research Core hypothesis research",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 56,
+      "recommendations": 3,
+      "report_id": 70,
+      "report_key": "86366d49bddbb274ac8758576c8b2be608f2e4a675201e6029bd1135d4ead89c",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Breakout",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 57,
+      "recommendations": 3,
+      "report_id": 71,
+      "report_key": "9099d8008df49d597e813c65c06c55929a964de13e52e25bf2523203a1697619",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Momentum",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 58,
+      "recommendations": 3,
+      "report_id": 72,
+      "report_key": "020e82d777ab2f6176e0bb4beeca7c5229bf2ea8c7e5e9daee9da2be20b10810",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Pullback",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 59,
+      "recommendations": 3,
+      "report_id": 73,
+      "report_key": "eb5d6b8fc8f8733df95d2d1f596af4f66f3d9efa2e4cdfe93cf68c5254c33135",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Mean Reversion",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 60,
+      "recommendations": 3,
+      "report_id": 74,
+      "report_key": "51f00e61239f648312505f1c06cf53a7f9c8d1cccfe312b77d783d7e67f1d0dc",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Volatility Expansion",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 61,
+      "recommendations": 3,
+      "report_id": 75,
+      "report_key": "6f80515c0e9d058629af14424fc822cb567faf45ac98f325de693a0812a7c92d",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Range Breakout",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 62,
+      "recommendations": 3,
+      "report_id": 76,
+      "report_key": "83b07936d2166d452eeadd1c5a2c2f4b9acf4aaba79415486ec484c2b90a0153",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Continuation",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 63,
+      "recommendations": 3,
+      "report_id": 77,
+      "report_key": "16b0e3577a3456434dfb30c121f1fa5d36687f821f3af85139296c908711f806",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Gap",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 64,
+      "recommendations": 3,
+      "report_id": 78,
+      "report_key": "72bc46613b700c0f5a4364b4268360ebd5e36ea2f9f86c578026577fdb60b357",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Breakout",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 65,
+      "recommendations": 3,
+      "report_id": 79,
+      "report_key": "0d9d0485379c9fd10daf9ef344f168def8bd2067faaab3f190065e5d9deb8845",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Momentum",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 66,
+      "recommendations": 3,
+      "report_id": 80,
+      "report_key": "4e29c7e8b1b118cc8faed4ca77076d3b71c4caaf71c6f9612a517d9266213879",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Pullback",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 67,
+      "recommendations": 3,
+      "report_id": 81,
+      "report_key": "93462d050b35c3004d0b6d0745cfadd4a996e424bd7c5eb76fe73f21536cdda4",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Mean Reversion",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 68,
+      "recommendations": 3,
+      "report_id": 82,
+      "report_key": "82477ca75ed852583f9c3cbe60604f4874e7e8e2f8c47029ec2af93bd6b05a6a",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Volatility Expansion",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 69,
+      "recommendations": 3,
+      "report_id": 83,
+      "report_key": "cfca8803221e9e68bf0dc2383a838cd0d4344ee49c6b610bf0a008cc8f1e0675",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Range Breakout",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 70,
+      "recommendations": 3,
+      "report_id": 84,
+      "report_key": "7d022f053123ac361ac27a0cf0413a5638115e133d37c0e413061a6c5367919a",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Continuation",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 71,
+      "recommendations": 3,
+      "report_id": 85,
+      "report_key": "de3332a79155efdb9014a0299d40f58025cc02bf8838d4ac0a074a403d2aaaed",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 2 frozen regression \u2014 Gap",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 72,
+      "recommendations": 3,
+      "report_id": 86,
+      "report_key": "5566feac93fb0762ca76ba98264bbdb0b7a35ff18f38baa95b93c52e728924e0",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 4 Multi-Generation Evolution development campaign",
+      "uses_inconclusive_language": true
+    },
+    {
+      "campaign_id": 73,
+      "recommendations": 3,
+      "report_id": 60,
+      "report_key": "61bdfb64687f0c49ea7611e320eacd0889344f7ecc9b4ac158574579b5d81512",
+      "report_version": "automated_scientific_reporting_v1",
+      "title": "Scientific Campaign Report: Phase 4 Multi-Generation Evolution development campaign",
+      "uses_inconclusive_language": true
+    }
+  ],
+  "simulation_only": true
+}

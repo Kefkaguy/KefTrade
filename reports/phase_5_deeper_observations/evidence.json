@@ -1,0 +1,3086 @@
+{
+  "calculation_version": "deeper_market_observations_v1",
+  "dataset_id": 1,
+  "hypotheses": [
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.7496,
+      "contradictory_evidence": [],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "momentum_persistence",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "Directional persistence survives a bounded pause and resumes.",
+      "hypothesis": "Persistent momentum after a short pause has measurable continuation value.",
+      "hypothesis_key": "phase5_obs_0491b66aacde1006128e",
+      "id": 110,
+      "observation": "Momentum persistence is measured deterministically on frozen dataset 1: score=0.566028, event_rate=0.548706, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "bull_trend",
+        "normal_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Continuation",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [],
+        "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if persistence-filtered candidates fail unchanged gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+          "event_rate": 0.548706,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.566028,
+          "strategy_family": "Continuation"
+        },
+        "observation_key": "momentum_persistence",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Momentum persistence market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.6056,
+      "contradictory_evidence": [],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "trend_acceleration",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "Acceleration persists after entry rather than immediately reverting.",
+      "hypothesis": "Positive trend acceleration identifies momentum entries with better continuation odds.",
+      "hypothesis_key": "phase5_obs_74521525b8a3a72b1de1",
+      "id": 111,
+      "observation": "Trend acceleration is measured deterministically on frozen dataset 1: score=0.290507, event_rate=0.241987, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "bull_trend",
+        "normal_volatility",
+        "high_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Momentum",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [],
+        "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if acceleration-filtered candidates fail unchanged economic or stability gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+          "event_rate": 0.241987,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.290507,
+          "strategy_family": "Momentum"
+        },
+        "observation_key": "trend_acceleration",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Trend acceleration market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.6573,
+      "contradictory_evidence": [],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "structural_shift",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "A new volatility/trend state produces distinct strategy performance.",
+      "hypothesis": "Structural shifts identify when old local behavior should not be extrapolated blindly.",
+      "hypothesis_key": "phase5_obs_4eaaa3cb73f35dc3052e",
+      "id": 112,
+      "observation": "Structural market shift is measured deterministically on frozen dataset 1: score=0.472835, event_rate=0.227093, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "high_volatility",
+        "normal_volatility",
+        "bull_trend",
+        "sideways"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Volatility Expansion",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [],
+        "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if shift-aware candidates do not improve robustness under unchanged validation gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+          "event_rate": 0.227093,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.472835,
+          "strategy_family": "Volatility Expansion"
+        },
+        "observation_key": "structural_shift",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Structural market shift market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.5554,
+      "contradictory_evidence": [
+        "research_dataset:1"
+      ],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "false_breakout",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "A failed boundary break reverts toward the prior range.",
+      "hypothesis": "Failed breaks create measurable reversal opportunities.",
+      "hypothesis_key": "phase5_obs_ff73d54f09aba3321da3",
+      "id": 113,
+      "observation": "False breakout is measured deterministically on frozen dataset 1: score=0.168519, event_rate=0.174202, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "sideways",
+        "high_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Mean Reversion",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [
+          "The observation is measurable but sparse or weak on this preserved dataset."
+        ],
+        "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if false-breakout reversals fail unchanged gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+          "event_rate": 0.174202,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.168519,
+          "strategy_family": "Mean Reversion"
+        },
+        "observation_key": "false_breakout",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "False breakout market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.5717,
+      "contradictory_evidence": [],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "volatility_expansion",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "Expansion follows through without breaching existing drawdown and regime-stability gates.",
+      "hypothesis": "Directional volatility expansion with participation produces continuation opportunities.",
+      "hypothesis_key": "phase5_obs_ecdf5c32ea074293088f",
+      "id": 114,
+      "observation": "Volatility expansion is measured deterministically on frozen dataset 1: score=0.229371, event_rate=0.164445, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "high_volatility",
+        "bull_trend",
+        "normal_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Volatility Expansion",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [],
+        "definition": "Current true range expansion versus the prior rolling median range.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if expansion entries reverse or collapse under unchanged validation gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Current true range expansion versus the prior rolling median range.",
+          "event_rate": 0.164445,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.229371,
+          "strategy_family": "Volatility Expansion"
+        },
+        "observation_key": "volatility_expansion",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Volatility expansion market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.5557,
+      "contradictory_evidence": [],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "liquidity_expansion",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "Signals with liquidity expansion show better follow-through than thin moves.",
+      "hypothesis": "Participation expansion improves reliability of directional signals.",
+      "hypothesis_key": "phase5_obs_7949958ba48698491921",
+      "id": 115,
+      "observation": "Liquidity expansion is measured deterministically on frozen dataset 1: score=0.204843, event_rate=0.121120, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "bull_trend",
+        "high_volatility",
+        "normal_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Volatility Expansion",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [],
+        "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if liquidity-filtered signals fail unchanged validation gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+          "event_rate": 0.12112,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.204843,
+          "strategy_family": "Volatility Expansion"
+        },
+        "observation_key": "liquidity_expansion",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Liquidity expansion market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.5189,
+      "contradictory_evidence": [
+        "research_dataset:1"
+      ],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "pullback_quality",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "The trend resumes after a measurable retracement.",
+      "hypothesis": "Bounded pullbacks inside aligned trends create better continuation entries.",
+      "hypothesis_key": "phase5_obs_cc8fff26ac41a124a49c",
+      "id": 116,
+      "observation": "Pullback quality is measured deterministically on frozen dataset 1: score=0.119243, event_rate=0.065499, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "bull_trend",
+        "normal_volatility",
+        "low_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Pullback",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [
+          "The observation is measurable but sparse or weak on this preserved dataset."
+        ],
+        "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if bounded pullbacks fail unchanged validation gates or only work on source evidence.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+          "event_rate": 0.065499,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.119243,
+          "strategy_family": "Pullback"
+        },
+        "observation_key": "pullback_quality",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Pullback quality market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.5297,
+      "contradictory_evidence": [
+        "research_dataset:1"
+      ],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "exhaustion",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "An overextended move reverts toward its local mean.",
+      "hypothesis": "Exhausted extensions are more likely to mean-revert than continue.",
+      "hypothesis_key": "phase5_obs_5ec0655b1d42cdd1e57f",
+      "id": 117,
+      "observation": "Exhaustion is measured deterministically on frozen dataset 1: score=0.178960, event_rate=0.029723, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "sideways",
+        "high_volatility",
+        "normal_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Mean Reversion",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [
+          "The observation is measurable but sparse or weak on this preserved dataset."
+        ],
+        "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if exhaustion entries fail unchanged economic or drawdown gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+          "event_rate": 0.029723,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.17896,
+          "strategy_family": "Mean Reversion"
+        },
+        "observation_key": "exhaustion",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Exhaustion market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.5212,
+      "contradictory_evidence": [
+        "research_dataset:1"
+      ],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "breakout_quality",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "Price follows through after a clean, participated range break.",
+      "hypothesis": "High-quality breakouts are more likely to continue than boundary touches.",
+      "hypothesis_key": "phase5_obs_85ec4f4fbc1505398e7f",
+      "id": 118,
+      "observation": "Breakout quality is measured deterministically on frozen dataset 1: score=0.153896, event_rate=0.024815, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "bull_trend",
+        "high_volatility",
+        "normal_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Breakout",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [
+          "The observation is measurable but sparse or weak on this preserved dataset."
+        ],
+        "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if quality-filtered breakouts fail unchanged expectancy or stability gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+          "event_rate": 0.024815,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.153896,
+          "strategy_family": "Breakout"
+        },
+        "observation_key": "breakout_quality",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Breakout quality market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.5001,
+      "contradictory_evidence": [
+        "research_dataset:1"
+      ],
+      "created_at": "2026-07-17T04:47:09.444502+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "trend_maturity",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "A controlled retracement resumes in the direction of the established trend.",
+      "hypothesis": "Mature but non-exhausted trends create higher-quality pullback continuation opportunities.",
+      "hypothesis_key": "phase5_obs_a49a0789ab27cad10b1b",
+      "id": 119,
+      "observation": "Trend maturity is measured deterministically on frozen dataset 1: score=0.085345, event_rate=0.022042, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "bull_trend",
+        "normal_volatility",
+        "low_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Pullback",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [
+          "The observation is measurable but sparse or weak on this preserved dataset."
+        ],
+        "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if mature-trend pullbacks fail unchanged trade-count, expectancy, drawdown, or walk-forward gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+          "event_rate": 0.022042,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.085345,
+          "strategy_family": "Pullback"
+        },
+        "observation_key": "trend_maturity",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Trend maturity market-structure hypothesis",
+      "version": 1
+    },
+    {
+      "calculation_version": "evidence_hypothesis_v1",
+      "confidence_score": 0.5063,
+      "contradictory_evidence": [
+        "research_dataset:1"
+      ],
+      "created_at": "2026-07-17T04:47:34.693584+00:00",
+      "creation_source": "phase5_deeper_observations",
+      "evidence_window": {
+        "assets": [
+          "AAPL",
+          "AMD",
+          "AMZN",
+          "GOOGL",
+          "META",
+          "MSFT",
+          "NVDA",
+          "QQQ",
+          "SPY",
+          "TSLA"
+        ],
+        "dataset_id": 1,
+        "dataset_key": "dataset_0fcc46465c65d213af34b46a",
+        "independent_confirmation_required": true,
+        "observation_key": "volatility_contraction",
+        "sample_size": 63340,
+        "timeframes": [
+          "1h",
+          "4h"
+        ]
+      },
+      "expected_behavior": "A narrow range resolves directionally after sufficient compression.",
+      "hypothesis": "Contractions define cleaner range-breakout staging areas.",
+      "hypothesis_key": "phase5_obs_1ba564b0bdcddbac6e6b",
+      "id": 120,
+      "observation": "Volatility contraction is measured deterministically on frozen dataset 1: score=0.117351, event_rate=0.005350, sample_size=63340. Post-hoc and unconfirmed.",
+      "parent_hypothesis_id": null,
+      "relevant_regimes": [
+        "sideways",
+        "low_volatility",
+        "normal_volatility"
+      ],
+      "scope_ref": "dataset_0fcc46465c65d213af34b46a",
+      "scope_type": "universal",
+      "simulation_only": true,
+      "status": "proposed",
+      "strategy_family": "Range Breakout",
+      "supporting_evidence": [
+        "research_dataset:1"
+      ],
+      "test_summary": {
+        "candidate_generation_contract": "standard generate_targeted_candidates using existing strategy_family",
+        "confirmation_status": "unconfirmed",
+        "contradictory_observations": [
+          "The observation is measurable but sparse or weak on this preserved dataset."
+        ],
+        "definition": "Recent median true range below the prior baseline true range without using future bars.",
+        "expected_range": "0.0 to 1.0",
+        "falsification_criteria": "Falsified if contraction breakouts do not survive unchanged validation gates.",
+        "generation_seed": 0,
+        "leakage_control": "causal rolling windows only; no future bars used",
+        "measured": {
+          "definition": "Recent median true range below the prior baseline true range without using future bars.",
+          "event_rate": 0.00535,
+          "expected_range": "0.0 to 1.0",
+          "sample_size": 63340,
+          "score": 0.117351,
+          "strategy_family": "Range Breakout"
+        },
+        "observation_key": "volatility_contraction",
+        "observation_version": "deeper_market_observations_v1",
+        "phase": 5,
+        "post_hoc": true,
+        "source_dataset_id": 1,
+        "validation_policy": "unchanged strong_research_gates:v1"
+      },
+      "title": "Volatility contraction market-structure hypothesis",
+      "version": 1
+    }
+  ],
+  "observations": {
+    "calculation_version": "deeper_market_observations_v1",
+    "market_count": 20,
+    "markets": [
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.019227,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.320462,
+            "sample_size": 4941,
+            "score": 0.149658,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.006274,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.325086,
+            "sample_size": 4941,
+            "score": 0.147542,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.172232,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.172232,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.153613,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.878437,
+            "sample_size": 4941,
+            "score": 0.208173,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.544019,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 4941,
+            "score": 0.56357,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.023882,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.405084,
+            "sample_size": 4941,
+            "score": 0.10039,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.193078,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.686424,
+            "sample_size": 4941,
+            "score": 0.457844,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.236794,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.288018,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.018013,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.275,
+            "sample_size": 4941,
+            "score": 0.080753,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.00081,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.340047,
+            "sample_size": 4941,
+            "score": 0.109723,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.160696,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.922983,
+            "sample_size": 4941,
+            "score": 0.222763,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "AAPL",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.022238,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.314306,
+            "sample_size": 1394,
+            "score": 0.142023,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.022956,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.411819,
+            "sample_size": 1394,
+            "score": 0.200066,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.180775,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1394,
+            "score": 0.180775,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.07604,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.512355,
+            "sample_size": 1394,
+            "score": 0.157791,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.579627,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.8,
+            "sample_size": 1394,
+            "score": 0.579125,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.077475,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.517672,
+            "sample_size": 1394,
+            "score": 0.134792,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.247489,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.708739,
+            "sample_size": 1394,
+            "score": 0.489932,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.235294,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1394,
+            "score": 0.278398,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.006456,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.2625,
+            "sample_size": 1394,
+            "score": 0.077143,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.004304,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.385013,
+            "sample_size": 1394,
+            "score": 0.119391,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.135581,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.762744,
+            "sample_size": 1394,
+            "score": 0.215972,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1394,
+        "symbol": "AAPL",
+        "timeframe": "4h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.030156,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.355728,
+            "sample_size": 4941,
+            "score": 0.163477,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.034811,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.464507,
+            "sample_size": 4941,
+            "score": 0.2139,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.157458,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.157458,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.183768,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.236132,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.531674,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 4941,
+            "score": 0.560312,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.102813,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.608199,
+            "sample_size": 4941,
+            "score": 0.137647,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.227484,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.682557,
+            "sample_size": 4941,
+            "score": 0.488393,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.261486,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.307579,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.024894,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.2875,
+            "sample_size": 4941,
+            "score": 0.08394,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.003036,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.350738,
+            "sample_size": 4941,
+            "score": 0.112403,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.178102,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.240308,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "AMD",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.051006,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.349363,
+            "sample_size": 1392,
+            "score": 0.160324,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.10273,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.604216,
+            "sample_size": 1392,
+            "score": 0.307564,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.172414,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.172414,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.103448,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.606492,
+            "sample_size": 1392,
+            "score": 0.184323,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.542385,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 1392,
+            "score": 0.564368,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.114943,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.651329,
+            "sample_size": 1392,
+            "score": 0.137591,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.265805,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.74304,
+            "sample_size": 1392,
+            "score": 0.511329,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.262213,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.298795,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.012931,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.275,
+            "sample_size": 1392,
+            "score": 0.076787,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.014368,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.402958,
+            "sample_size": 1392,
+            "score": 0.13102,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.179598,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.925406,
+            "sample_size": 1392,
+            "score": 0.241047,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1392,
+        "symbol": "AMD",
+        "timeframe": "4h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.019024,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.326926,
+            "sample_size": 4941,
+            "score": 0.15082,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.007286,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.337299,
+            "sample_size": 4941,
+            "score": 0.161057,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.161506,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.161506,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.161303,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.900702,
+            "sample_size": 4941,
+            "score": 0.212724,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.528031,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 4941,
+            "score": 0.561789,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.036227,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.450355,
+            "sample_size": 4941,
+            "score": 0.11072,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.197733,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.665827,
+            "sample_size": 4941,
+            "score": 0.461327,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.257843,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.300929,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.008298,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.2375,
+            "sample_size": 4941,
+            "score": 0.067752,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.002429,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.343127,
+            "sample_size": 4941,
+            "score": 0.110973,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.169601,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.996064,
+            "sample_size": 4941,
+            "score": 0.227851,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "AMZN",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.027299,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.316495,
+            "sample_size": 1392,
+            "score": 0.145762,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.03592,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.423299,
+            "sample_size": 1392,
+            "score": 0.206303,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.189655,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.189655,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.081897,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.541162,
+            "sample_size": 1392,
+            "score": 0.165031,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.523707,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 1392,
+            "score": 0.56171,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.090517,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.564668,
+            "sample_size": 1392,
+            "score": 0.13899,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.238506,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.737886,
+            "sample_size": 1392,
+            "score": 0.504563,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.235632,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.280072,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.002155,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.225,
+            "sample_size": 1392,
+            "score": 0.068068,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.002155,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.395451,
+            "sample_size": 1392,
+            "score": 0.124662,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.180316,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.889284,
+            "sample_size": 1392,
+            "score": 0.236066,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1392,
+        "symbol": "AMZN",
+        "timeframe": "4h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.020846,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.331512,
+            "sample_size": 4941,
+            "score": 0.15637,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.0085,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.344565,
+            "sample_size": 4941,
+            "score": 0.159477,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.156446,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.156446,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.167375,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.955829,
+            "sample_size": 4941,
+            "score": 0.224008,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.537543,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 4941,
+            "score": 0.56268,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.059705,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.488246,
+            "sample_size": 4941,
+            "score": 0.127409,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.228496,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.690513,
+            "sample_size": 4941,
+            "score": 0.481427,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.246104,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.292641,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.02287,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.3125,
+            "sample_size": 4941,
+            "score": 0.092276,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.002631,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.341615,
+            "sample_size": 4941,
+            "score": 0.111085,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.181137,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.237839,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "GOOGL",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.025144,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.315163,
+            "sample_size": 1392,
+            "score": 0.148153,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.038793,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.46918,
+            "sample_size": 1392,
+            "score": 0.222256,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.173851,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.173851,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.102011,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.604355,
+            "sample_size": 1392,
+            "score": 0.169157,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.531609,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 1392,
+            "score": 0.562213,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.135057,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.67076,
+            "sample_size": 1392,
+            "score": 0.178153,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.219109,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.681999,
+            "sample_size": 1392,
+            "score": 0.479885,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.252874,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.294173,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.006466,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.2875,
+            "sample_size": 1392,
+            "score": 0.086602,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.005747,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.382587,
+            "sample_size": 1392,
+            "score": 0.123123,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.162356,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.854485,
+            "sample_size": 1392,
+            "score": 0.226422,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1392,
+        "symbol": "GOOGL",
+        "timeframe": "4h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.02287,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.341569,
+            "sample_size": 4941,
+            "score": 0.152979,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.014977,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.354205,
+            "sample_size": 4941,
+            "score": 0.164212,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.150374,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.150374,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.173447,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.225194,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.524388,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 4941,
+            "score": 0.56104,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.052216,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.476084,
+            "sample_size": 4941,
+            "score": 0.11513,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.2034,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.687231,
+            "sample_size": 4941,
+            "score": 0.47045,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.249545,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.291992,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.027525,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.3,
+            "sample_size": 4941,
+            "score": 0.086255,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.001012,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.344904,
+            "sample_size": 4941,
+            "score": 0.110805,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.171625,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.232415,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "META",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.032328,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.326303,
+            "sample_size": 1392,
+            "score": 0.149977,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.048851,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.484785,
+            "sample_size": 1392,
+            "score": 0.235136,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.176724,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.176724,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.10704,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.614128,
+            "sample_size": 1392,
+            "score": 0.18122,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.561063,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.8,
+            "sample_size": 1392,
+            "score": 0.56796,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.115661,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.64856,
+            "sample_size": 1392,
+            "score": 0.155587,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.25,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.701747,
+            "sample_size": 1392,
+            "score": 0.504061,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.246408,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.296101,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.030172,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.2875,
+            "sample_size": 1392,
+            "score": 0.091864,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.005029,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.385366,
+            "sample_size": 1392,
+            "score": 0.123001,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.155172,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.829261,
+            "sample_size": 1392,
+            "score": 0.22875,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1392,
+        "symbol": "META",
+        "timeframe": "4h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.014167,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.330714,
+            "sample_size": 4941,
+            "score": 0.150904,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.004857,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.309472,
+            "sample_size": 4941,
+            "score": 0.141946,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.157053,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.157053,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.155232,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.864087,
+            "sample_size": 4941,
+            "score": 0.214818,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.530257,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 4941,
+            "score": 0.563105,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.021858,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.387747,
+            "sample_size": 4941,
+            "score": 0.096663,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.175268,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.668404,
+            "sample_size": 4941,
+            "score": 0.438877,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.245497,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.29201,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.012548,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.2625,
+            "sample_size": 4941,
+            "score": 0.073702,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.001012,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.334778,
+            "sample_size": 4941,
+            "score": 0.107691,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.163732,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.927758,
+            "sample_size": 4941,
+            "score": 0.224669,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "MSFT",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.022956,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.3,
+            "sample_size": 1394,
+            "score": 0.139629,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.020086,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.393022,
+            "sample_size": 1394,
+            "score": 0.186578,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.201578,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1394,
+            "score": 0.201578,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.073888,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.489081,
+            "sample_size": 1394,
+            "score": 0.149348,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.572453,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.8,
+            "sample_size": 1394,
+            "score": 0.573601,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.058106,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.447935,
+            "sample_size": 1394,
+            "score": 0.11551,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.227403,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.710269,
+            "sample_size": 1394,
+            "score": 0.491249,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.231707,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1394,
+            "score": 0.282668,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.048063,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.325,
+            "sample_size": 1394,
+            "score": 0.099032,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.005022,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.385091,
+            "sample_size": 1394,
+            "score": 0.116768,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.144907,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.770593,
+            "sample_size": 1394,
+            "score": 0.215166,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1394,
+        "symbol": "MSFT",
+        "timeframe": "4h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.031168,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.364677,
+            "sample_size": 4941,
+            "score": 0.163968,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.019024,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.412318,
+            "sample_size": 4941,
+            "score": 0.193415,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.162113,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.162113,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.179923,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.229615,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.53815,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 4941,
+            "score": 0.5627,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.068002,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.523299,
+            "sample_size": 4941,
+            "score": 0.130724,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.263509,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.718614,
+            "sample_size": 4941,
+            "score": 0.492266,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.257033,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.301705,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.025096,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.3,
+            "sample_size": 4941,
+            "score": 0.089521,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.003845,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.366982,
+            "sample_size": 4941,
+            "score": 0.117984,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.179114,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.240362,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "NVDA",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.049498,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.34447,
+            "sample_size": 1394,
+            "score": 0.165884,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.063128,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.540012,
+            "sample_size": 1394,
+            "score": 0.270589,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.183644,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1394,
+            "score": 0.183644,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.076758,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.539117,
+            "sample_size": 1394,
+            "score": 0.17217,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.564562,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.8,
+            "sample_size": 1394,
+            "score": 0.574892,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.102582,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.6076,
+            "sample_size": 1394,
+            "score": 0.151095,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.265423,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.716389,
+            "sample_size": 1394,
+            "score": 0.51426,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.225968,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1394,
+            "score": 0.282417,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.065997,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.45,
+            "sample_size": 1394,
+            "score": 0.127331,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.009326,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.399821,
+            "sample_size": 1394,
+            "score": 0.132217,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.175036,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.842126,
+            "sample_size": 1394,
+            "score": 0.228425,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1394,
+        "symbol": "NVDA",
+        "timeframe": "4h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.01275,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.330712,
+            "sample_size": 4941,
+            "score": 0.154927,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.002833,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.314732,
+            "sample_size": 4941,
+            "score": 0.141332,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.182757,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.182757,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.137219,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.763292,
+            "sample_size": 4941,
+            "score": 0.201472,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.563449,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.8,
+            "sample_size": 4941,
+            "score": 0.574661,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.003036,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.348946,
+            "sample_size": 4941,
+            "score": 0.098485,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.195912,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.698053,
+            "sample_size": 4941,
+            "score": 0.453264,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.236794,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.283541,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.028334,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.3375,
+            "sample_size": 4941,
+            "score": 0.099398,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.011334,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.39631,
+            "sample_size": 4941,
+            "score": 0.127699,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.159482,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.916164,
+            "sample_size": 4941,
+            "score": 0.22588,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "QQQ",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.017241,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.33822,
+            "sample_size": 1392,
+            "score": 0.153416,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.007902,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.381474,
+            "sample_size": 1392,
+            "score": 0.18175,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.197557,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.197557,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.066092,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.504501,
+            "sample_size": 1392,
+            "score": 0.150864,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.594828,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.8,
+            "sample_size": 1392,
+            "score": 0.585489,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.052443,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.493539,
+            "sample_size": 1392,
+            "score": 0.155786,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.260057,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.726061,
+            "sample_size": 1392,
+            "score": 0.490261,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.224856,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1392,
+            "score": 0.267445,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.011494,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.275,
+            "sample_size": 1392,
+            "score": 0.091155,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.009339,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.410161,
+            "sample_size": 1392,
+            "score": 0.137482,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.156609,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.822286,
+            "sample_size": 1392,
+            "score": 0.224794,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1392,
+        "symbol": "QQQ",
+        "timeframe": "4h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.005869,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.314856,
+            "sample_size": 4941,
+            "score": 0.148614,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.001012,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.286559,
+            "sample_size": 4941,
+            "score": 0.125031,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.192471,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.192471,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.111516,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.631833,
+            "sample_size": 4941,
+            "score": 0.186398,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.562032,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.8,
+            "sample_size": 4941,
+            "score": 0.574155,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.000405,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.321153,
+            "sample_size": 4941,
+            "score": 0.095641,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.17122,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.686487,
+            "sample_size": 4941,
+            "score": 0.427336,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.221615,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.271728,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.036025,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.375,
+            "sample_size": 4941,
+            "score": 0.110236,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.0085,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.396135,
+            "sample_size": 4941,
+            "score": 0.128789,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.150982,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.865252,
+            "sample_size": 4941,
+            "score": 0.216188,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "SPY",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.005022,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.304781,
+            "sample_size": 1394,
+            "score": 0.136479,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.005022,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.323167,
+            "sample_size": 1394,
+            "score": 0.154918,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.211621,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1394,
+            "score": 0.211621,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.044476,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.386594,
+            "sample_size": 1394,
+            "score": 0.116247,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.585366,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.8,
+            "sample_size": 1394,
+            "score": 0.582496,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.009326,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.400544,
+            "sample_size": 1394,
+            "score": 0.135044,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.230273,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.721854,
+            "sample_size": 1394,
+            "score": 0.476448,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.212339,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.997318,
+            "sample_size": 1394,
+            "score": 0.256944,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.035868,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.35,
+            "sample_size": 1394,
+            "score": 0.119136,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.010043,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.452233,
+            "sample_size": 1394,
+            "score": 0.145685,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.15495,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.80504,
+            "sample_size": 1394,
+            "score": 0.221674,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1394,
+        "symbol": "SPY",
+        "timeframe": "4h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.027322,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.343676,
+            "sample_size": 4941,
+            "score": 0.160143,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.041894,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.444571,
+            "sample_size": 4941,
+            "score": 0.210782,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.148148,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.148148,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.179114,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.22918,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.52884,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.7,
+            "sample_size": 4941,
+            "score": 0.560797,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.086015,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.546211,
+            "sample_size": 4941,
+            "score": 0.114674,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.22202,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.690759,
+            "sample_size": 4941,
+            "score": 0.489071,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.254402,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 4941,
+            "score": 0.298858,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.016191,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.2,
+            "sample_size": 4941,
+            "score": 0.058548,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.000607,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.339538,
+            "sample_size": 4941,
+            "score": 0.106523,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.16778,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.987825,
+            "sample_size": 4941,
+            "score": 0.230716,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 4941,
+        "symbol": "TSLA",
+        "timeframe": "1h"
+      },
+      {
+        "observations": {
+          "breakout_quality": {
+            "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+            "event_rate": 0.040172,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.322248,
+            "sample_size": 1394,
+            "score": 0.151562,
+            "version": "deeper_market_observations_v1"
+          },
+          "exhaustion": {
+            "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+            "event_rate": 0.107604,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.609173,
+            "sample_size": 1394,
+            "score": 0.288822,
+            "version": "deeper_market_observations_v1"
+          },
+          "false_breakout": {
+            "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+            "event_rate": 0.155667,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1394,
+            "score": 0.155667,
+            "version": "deeper_market_observations_v1"
+          },
+          "liquidity_expansion": {
+            "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+            "event_rate": 0.088235,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.570674,
+            "sample_size": 1394,
+            "score": 0.179224,
+            "version": "deeper_market_observations_v1"
+          },
+          "momentum_persistence": {
+            "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+            "event_rate": 0.530129,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.8,
+            "sample_size": 1394,
+            "score": 0.563271,
+            "version": "deeper_market_observations_v1"
+          },
+          "pullback_quality": {
+            "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+            "event_rate": 0.099713,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.591747,
+            "sample_size": 1394,
+            "score": 0.120329,
+            "version": "deeper_market_observations_v1"
+          },
+          "structural_shift": {
+            "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+            "event_rate": 0.259684,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.706654,
+            "sample_size": 1394,
+            "score": 0.507911,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_acceleration": {
+            "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+            "event_rate": 0.245337,
+            "expected_range": "0.0 to 1.0",
+            "p90": 1.0,
+            "sample_size": 1394,
+            "score": 0.283202,
+            "version": "deeper_market_observations_v1"
+          },
+          "trend_maturity": {
+            "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+            "event_rate": 0.001435,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.225,
+            "sample_size": 1394,
+            "score": 0.055551,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_contraction": {
+            "definition": "Recent median true range below the prior baseline true range without using future bars.",
+            "event_rate": 0.006456,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.37647,
+            "sample_size": 1394,
+            "score": 0.126004,
+            "version": "deeper_market_observations_v1"
+          },
+          "volatility_expansion": {
+            "definition": "Current true range expansion versus the prior rolling median range.",
+            "event_rate": 0.162123,
+            "expected_range": "0.0 to 1.0",
+            "p90": 0.891529,
+            "sample_size": 1394,
+            "score": 0.236695,
+            "version": "deeper_market_observations_v1"
+          }
+        },
+        "series_sample_size": 1394,
+        "symbol": "TSLA",
+        "timeframe": "4h"
+      }
+    ],
+    "observations": {
+      "breakout_quality": {
+        "definition": "Break distance beyond the prior high, close location, and volume participation measured at the bar.",
+        "event_rate": 0.024815,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.153896,
+        "strategy_family": "Breakout"
+      },
+      "exhaustion": {
+        "definition": "Overextension from EMA20 combined with RSI extremes and decelerating momentum.",
+        "event_rate": 0.029723,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.17896,
+        "strategy_family": "Mean Reversion"
+      },
+      "false_breakout": {
+        "definition": "A prior boundary break that closes back inside the range using only current and previous bars.",
+        "event_rate": 0.174202,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.168519,
+        "strategy_family": "Mean Reversion"
+      },
+      "liquidity_expansion": {
+        "definition": "Current volume and dollar volume expansion versus prior rolling medians.",
+        "event_rate": 0.12112,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.204843,
+        "strategy_family": "Volatility Expansion"
+      },
+      "momentum_persistence": {
+        "definition": "Share of same-direction closes inside the recent lookback, weighted by 5-bar return direction.",
+        "event_rate": 0.548706,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.566028,
+        "strategy_family": "Continuation"
+      },
+      "pullback_quality": {
+        "definition": "Retracement depth inside an EMA-aligned trend plus reclaim confirmation.",
+        "event_rate": 0.065499,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.119243,
+        "strategy_family": "Pullback"
+      },
+      "structural_shift": {
+        "definition": "Recent trend and volatility state diverges materially from the preceding baseline.",
+        "event_rate": 0.227093,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.472835,
+        "strategy_family": "Volatility Expansion"
+      },
+      "trend_acceleration": {
+        "definition": "Recent 5-bar return improvement versus the prior 5-bar return, scaled by recent volatility.",
+        "event_rate": 0.241987,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.290507,
+        "strategy_family": "Momentum"
+      },
+      "trend_maturity": {
+        "definition": "Bars in an aligned EMA20/EMA50 trend, normalized by a capped trend-age window.",
+        "event_rate": 0.022042,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.085345,
+        "strategy_family": "Pullback"
+      },
+      "volatility_contraction": {
+        "definition": "Recent median true range below the prior baseline true range without using future bars.",
+        "event_rate": 0.00535,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.117351,
+        "strategy_family": "Range Breakout"
+      },
+      "volatility_expansion": {
+        "definition": "Current true range expansion versus the prior rolling median range.",
+        "event_rate": 0.164445,
+        "expected_range": "0.0 to 1.0",
+        "sample_size": 63340,
+        "score": 0.229371,
+        "strategy_family": "Volatility Expansion"
+      }
+    }
+  },
+  "phase": 5,
+  "phase6_started": false,
+  "simulation_only": true,
+  "stored_hypothesis_ids": [
+    110,
+    111,
+    112,
+    113,
+    114,
+    115,
+    116,
+    117,
+    118,
+    119,
+    120
+  ]
+}

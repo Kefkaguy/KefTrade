@@ -47,6 +47,7 @@ STATIC_STOCK_METADATA = {
     "SPY": {"name": "SPDR S&P 500 ETF Trust", "asset_class": "etf", "exchange": "NYSEARCA", "currency": "USD", "sector": None, "index_membership": ["S&P 500"]},
     "QQQ": {"name": "Invesco QQQ Trust", "asset_class": "etf", "exchange": "NASDAQ", "currency": "USD", "sector": None, "index_membership": ["NASDAQ 100"]},
     "AAPL": {"name": "Apple Inc.", "asset_class": "us_equity", "exchange": "NASDAQ", "currency": "USD", "sector": "Technology", "index_membership": ["S&P 500", "NASDAQ 100"]},
+    "AMD": {"name": "Advanced Micro Devices, Inc.", "asset_class": "us_equity", "exchange": "NASDAQ", "currency": "USD", "sector": "Technology", "index_membership": ["S&P 500", "NASDAQ 100"]},
     "AMZN": {"name": "Amazon.com, Inc.", "asset_class": "us_equity", "exchange": "NASDAQ", "currency": "USD", "sector": "Consumer Cyclical", "index_membership": ["S&P 500", "NASDAQ 100"]},
     "AVGO": {"name": "Broadcom Inc.", "asset_class": "us_equity", "exchange": "NASDAQ", "currency": "USD", "sector": "Technology", "index_membership": ["S&P 500", "NASDAQ 100"]},
     "GOOGL": {"name": "Alphabet Inc. Class A", "asset_class": "us_equity", "exchange": "NASDAQ", "currency": "USD", "sector": "Communication Services", "index_membership": ["S&P 500", "NASDAQ 100"]},

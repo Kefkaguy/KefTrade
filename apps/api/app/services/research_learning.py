@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
+from statistics import median
 from typing import Any
 
 import psycopg
@@ -11,7 +12,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.strategy_research import finite_metric
 
-LEARNING_VERSION = "research_learning_v1"
+LEARNING_VERSION = "research_learning_v2"
 SAFETY_STATEMENT = "Deterministic simulation-only research learning. No live trading, broker routing, or opaque ML decisioning."
 
 
@@ -380,7 +381,52 @@ def family_statistics(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for family, items in grouped.items():
         promoted = sum(1 for row in items if row["promoted"])
         rejected = sum(1 for row in items if row["rejected"])
-        rows.append({"family": family, "tested": len(items), "promoted": promoted, "rejected": rejected, "promotion_rate": round(promoted / len(items), 4)})
+        candidate_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        asset_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in items:
+            candidate_groups[row["candidate_id"]].append(row)
+            asset_groups[row["symbol"]].append(row)
+        promoted_candidates = sum(1 for rows in candidate_groups.values() if any(row["promoted"] for row in rows))
+        transferable_candidates = sum(
+            1
+            for rows in candidate_groups.values()
+            if len({row["symbol"] for row in rows if row["promoted"]}) >= 2
+        )
+        transfer_eligible = sum(1 for rows in candidate_groups.values() if len({row["symbol"] for row in rows}) >= 2)
+        profit_factors = [finite_metric(row["metrics"].get("profit_factor")) for row in items if row["metrics"].get("profit_factor") is not None]
+        expectancies = [finite_metric(row["metrics"].get("expectancy_per_trade")) for row in items if row["metrics"].get("expectancy_per_trade") is not None]
+        walk_forward_survivors = sum(1 for row in items if bool((row["metrics"].get("walk_forward") or {}).get("enabled")))
+        regime_stability_survivors = sum(1 for row in items if bool((row["result"].get("paper_readiness") or {}).get("paper_ready")))
+        operational_failures = sum(1 for row in items if row["status"] in {"failed", "blocked_data"})
+        rows.append(
+            {
+                "family": family,
+                "tested": len(items),
+                "unique_candidates": len(candidate_groups),
+                "promoted": promoted,
+                "rejected": rejected,
+                "promoted_candidates": promoted_candidates,
+                "promotion_rate": round(promoted / len(items), 4),
+                "jobs_per_promoted_candidate": round(len(items) / promoted_candidates, 4) if promoted_candidates else None,
+                "transfer_eligible_candidates": transfer_eligible,
+                "transferable_candidates": transferable_candidates,
+                "family_transfer_rate": round(transferable_candidates / transfer_eligible, 4) if transfer_eligible else None,
+                "median_profit_factor": round(median(profit_factors), 6) if profit_factors else None,
+                "median_expectancy": round(median(expectancies), 6) if expectancies else None,
+                "walk_forward_survival_rate": round(walk_forward_survivors / len(items), 4),
+                "regime_stability_survival_rate": round(regime_stability_survivors / len(items), 4),
+                "operational_failure_rate": round(operational_failures / len(items), 4),
+                "asset_outcomes": [
+                    {
+                        "asset": asset,
+                        "tested": len(rows),
+                        "promoted": sum(1 for row in rows if row["promoted"]),
+                        "promotion_rate": round(sum(1 for row in rows if row["promoted"]) / len(rows), 4),
+                    }
+                    for asset, rows in sorted(asset_groups.items())
+                ],
+            }
+        )
     return sorted(rows, key=lambda row: (row["promotion_rate"], row["tested"], row["family"]), reverse=True)
 
 
@@ -781,7 +827,17 @@ def get_strategy_timeline(conn: psycopg.Connection, strategy_id: str, limit: int
 
 def parameter_buckets(parameters: dict[str, Any]) -> dict[str, str]:
     buckets = {}
-    for key in ("trend_fast", "trend_slow", "rsi_min", "rsi_max", "risk_reward", "atr_multiplier", "max_holding_bars", "volume_change_min"):
+    for key in (
+        "trend_fast", "trend_slow", "rsi_min", "rsi_max", "risk_reward", "atr_multiplier", "max_holding_bars", "volume_change_min",
+        "breakout_lookback", "breakout_buffer", "compression_ratio_max", "volume_ratio_min",
+        "momentum_short_bars", "momentum_long_bars", "momentum_short_min", "momentum_long_min", "momentum_acceleration_min",
+        "pullback_lookback", "pullback_depth_min", "pullback_depth_max", "reclaim_buffer", "pullback_rsi_min",
+        "mean_reversion_distance_min", "mean_reversion_rsi_max", "mean_reversion_trend_distance_max", "reversal_body_min",
+        "range_baseline_lookback", "true_range_expansion_min", "directional_close_min", "volatility_20_min",
+        "range_lookback", "range_width_max", "range_break_buffer", "range_stop_fraction",
+        "impulse_bars", "impulse_return_min", "pause_bars", "pause_depth_max", "continuation_buffer",
+        "gap_size_min", "gap_continuation_min", "gap_close_location_min", "gap_stop_fraction",
+    ):
         if key in parameters and parameters[key] is not None:
             buckets[key] = bucket_value(key, parameters[key])
     return buckets

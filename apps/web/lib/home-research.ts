@@ -8,7 +8,7 @@ export type ResearchAsset = {
   exchange?: string;
 };
 
-export type ResearchScopeId = "single" | "technology" | "crypto" | "index" | "universe" | "custom";
+export type ResearchScopeId = "single" | "core" | "technology" | "crypto" | "index" | "universe" | "custom";
 
 export type ResearchScope = {
   id: Exclude<ResearchScopeId, "custom">;
@@ -25,15 +25,21 @@ export type ResearchSelection = {
   estimatedJobs: number;
 };
 
-export const MIN_RESEARCH_JOBS = 10000;
-export const MAX_RESEARCH_CANDIDATES = 5000;
+export const MIN_TARGETED_CANDIDATES = 60;
+export const MAX_TARGETED_CANDIDATES = 250;
+export const MAX_PROFILE_ASSETS = 10;
 
 export const FALLBACK_RESEARCH_ASSETS: ResearchAsset[] = [
   { id: "TSLA", apiSymbol: "TSLA", name: "Tesla", market: "Equity", exchange: "NASDAQ" },
   { id: "NVDA", apiSymbol: "NVDA", name: "NVIDIA", market: "Equity", exchange: "NASDAQ" },
   { id: "AAPL", apiSymbol: "AAPL", name: "Apple", market: "Equity", exchange: "NASDAQ" },
   { id: "MSFT", apiSymbol: "MSFT", name: "Microsoft", market: "Equity", exchange: "NASDAQ" },
+  { id: "AMD", apiSymbol: "AMD", name: "AMD", market: "Equity", exchange: "NASDAQ" },
+  { id: "META", apiSymbol: "META", name: "Meta", market: "Equity", exchange: "NASDAQ" },
+  { id: "GOOGL", apiSymbol: "GOOGL", name: "Alphabet", market: "Equity", exchange: "NASDAQ" },
+  { id: "AMZN", apiSymbol: "AMZN", name: "Amazon", market: "Equity", exchange: "NASDAQ" },
   { id: "SPY", apiSymbol: "SPY", name: "S&P 500 ETF", market: "ETF", exchange: "NYSEARCA" },
+  { id: "QQQ", apiSymbol: "QQQ", name: "Nasdaq 100 ETF", market: "ETF", exchange: "NASDAQ" },
   { id: "BTC", apiSymbol: "BTCUSDT", name: "Bitcoin", market: "Crypto", exchange: "BINANCE" },
   { id: "ETH", apiSymbol: "ETHUSDT", name: "Ethereum", market: "Crypto", exchange: "BINANCE" }
 ];
@@ -44,13 +50,19 @@ export const RESEARCH_SCOPES: ResearchScope[] = [
   {
     id: "single",
     label: "Single Asset",
-    description: "Focus 10,000 jobs on one market.",
+    description: "Build one versioned asset profile and specialist hypothesis.",
     assets: ["TSLA"]
+  },
+  {
+    id: "core",
+    label: "Research Core",
+    description: "Profile and cluster ten liquid technology leaders and market ETFs.",
+    assets: ["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "AMZN", "SPY", "QQQ"]
   },
   {
     id: "technology",
     label: "Technology Stocks",
-    description: "Compare signals across four liquid leaders.",
+    description: "Measure and compare behavior across four liquid leaders.",
     assets: ["TSLA", "NVDA", "AAPL", "MSFT"]
   },
   {
@@ -67,8 +79,8 @@ export const RESEARCH_SCOPES: ResearchScope[] = [
   },
   {
     id: "universe",
-    label: "Entire Alpaca Universe",
-    description: "Use every active tradable US equity returned by Alpaca.",
+    label: "Measured Universe",
+    description: "Use ten prioritized active equities from the connected catalog.",
     assets: []
   }
 ];
@@ -94,8 +106,8 @@ export function buildResearchSelection(scopeId: ResearchScopeId, assets: Researc
 
 export function candidateCountForAssets(assetCount: number) {
   if (assetCount <= 0) return 0;
-  const required = Math.ceil(MIN_RESEARCH_JOBS / (assetCount * RESEARCH_TIMEFRAMES.length));
-  return Math.max(1, Math.min(MAX_RESEARCH_CANDIDATES, required));
+  const focusedBudget = assetCount * 30;
+  return Math.max(MIN_TARGETED_CANDIDATES, Math.min(MAX_TARGETED_CANDIDATES, focusedBudget));
 }
 
 export function researchUniverseKey(selection: ResearchSelection) {

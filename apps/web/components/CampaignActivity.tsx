@@ -23,7 +23,7 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [executionId, setExecutionId] = useState<number | null>(null);
-  const [workerCount, setWorkerCount] = useState(2);
+  const [workerCount, setWorkerCount] = useState(1);
   const [profile, setProfile] = useState<ResearchCampaignProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -88,6 +88,10 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
     try {
       await deleteResearchCampaign(campaignId, true);
       setDeleteId(null);
+      if (executionId === campaignId) {
+        setExecutionId(null);
+        setProfile(null);
+      }
       await refresh();
     } catch (requestError) {
       setError(readCampaignError(requestError));
@@ -101,8 +105,13 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
     setExecutionId(nextId);
     setProfile(null);
     if (!nextId) return;
+    setWorkerCount(1);
     try {
-      setProfile(await getResearchCampaignProfile(campaignId));
+      const nextProfile = await getResearchCampaignProfile(campaignId);
+      setProfile(nextProfile);
+      if (nextProfile.runtime.parallel_pool_active) {
+        setWorkerCount(nextProfile.runtime.configured_parallel_workers || 1);
+      }
     } catch (requestError) {
       setError(readCampaignError(requestError));
     }
@@ -168,6 +177,8 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
             const canDelete = !["running", "completed"].includes(campaign.status);
             const isActive = ["running", "queued"].includes(campaign.status);
             const eta = isActive ? formatEta(estimatedSecondsRemaining(campaign)) : null;
+            const poolActive = Boolean(profile?.runtime.parallel_pool_active) && executionId === campaign.id;
+            const poolStarting = poolActive && profile?.runtime.parallel_pool_status === "starting";
             return (
               <motion.article key={campaign.id} className="campaignRow" layout initial={reduceMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, height: 0 }}>
                 <div className="campaignState">
@@ -176,7 +187,7 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                 </div>
                 <div className="campaignIdentity">
                   <strong>{campaign.name}</strong>
-                  <small>Campaign {campaign.id} · {campaign.universe_key}</small>
+                  <small>Campaign {campaign.id} · {campaign.dataset_id ? "versioned research" : "legacy research"} · {campaign.universe_key}</small>
                 </div>
                 <div className="campaignProgress">
                   <div><span>{campaign.terminal_jobs.toLocaleString()} of {campaign.total_jobs.toLocaleString()} jobs</span><strong>{progress}%</strong></div>
@@ -205,14 +216,14 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                     <motion.div className="campaignExecutionPanel" initial={reduceMotion ? false : { opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
                       <div className="campaignExecutionHeading"><div><strong>Parallel simulations</strong><span>Keep the selected worker pool active until the campaign is paused or finished.</span></div><small>Optional</small></div>
                       <div className="workerSelector" role="group" aria-label="Concurrent simulation workers">
-                        {[1, 2, 4, 8].map((count) => <button key={count} type="button" className={workerCount === count ? "active" : undefined} onClick={() => setWorkerCount(count)} disabled={busyId === campaign.id || Boolean(profile?.runtime.active_parallel_workers)}>{count} worker{count === 1 ? "" : "s"}</button>)}
+                        {[1, 2, 4, 8].map((count) => <button key={count} type="button" className={workerCount === count ? "active" : undefined} onClick={() => setWorkerCount(count)} disabled={busyId === campaign.id || poolActive}>{count} worker{count === 1 ? "" : "s"}</button>)}
                       </div>
                       {profile ? (
                         <div className="campaignRuntime" aria-label="Live parallel worker resource usage">
                           <span><Cpu size={15} /><small>Workers alive</small><strong>{profile.runtime.active_parallel_workers} / {profile.runtime.configured_parallel_workers || workerCount}</strong></span>
                           <span><Gauge size={15} /><small>Jobs claimed</small><strong>{profile.runtime.active_parallel_jobs}</strong></span>
                           <span title="Resident memory used by the KefTrade API process, including parallel worker threads"><MemoryStick size={15} /><small>API RAM</small><strong>{formatMemory(profile.runtime.resident_memory_mb)}</strong></span>
-                          <i className={profile.runtime.active_parallel_workers > 0 ? "active" : undefined}>{profile.runtime.active_parallel_workers > 0 ? `Worker pool active / ${profile.runtime.preloaded_datasets} datasets cached` : "Workers idle"}</i>
+                          <i className={poolActive ? "active" : undefined}>{poolStarting ? `Starting ${profile.runtime.starting_parallel_workers} worker${profile.runtime.starting_parallel_workers === 1 ? "" : "s"}` : poolActive ? `Worker pool active / ${profile.runtime.preloaded_datasets} dataset caches ready` : "Workers idle"}</i>
                         </div>
                       ) : null}
                       {profile?.profiled_jobs ? (
@@ -224,7 +235,7 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                           <ProfileMetric label="Total" value={profile.average_ms.total} />
                         </div>
                       ) : <p className="campaignProfileEmpty">Timing data appears after the first completed batch.</p>}
-                      <button type="button" className="button" onClick={() => void runParallel(campaign.id)} disabled={busyId === campaign.id || Boolean(profile?.runtime.active_parallel_workers)}>{busyId === campaign.id ? "Starting workers..." : profile?.runtime.active_parallel_workers ? `${profile.runtime.active_parallel_workers} workers running` : `Start ${workerCount} worker${workerCount === 1 ? "" : "s"}`}</button>
+                      <button type="button" className="button" onClick={() => void runParallel(campaign.id)} disabled={busyId === campaign.id || poolActive}>{busyId === campaign.id || poolStarting ? "Starting workers..." : poolActive ? `${profile?.runtime.active_parallel_workers ?? 0} worker${profile?.runtime.active_parallel_workers === 1 ? "" : "s"} running` : `Start ${workerCount} worker${workerCount === 1 ? "" : "s"}`}</button>
                     </motion.div>
                   ) : null}
                   {deleteId === campaign.id ? (

@@ -250,3 +250,30 @@ def test_paper_readiness_blocks_material_weak_regimes() -> None:
 
     assert report["paper_ready"] is False
     assert any("sideways" in reason for reason in report["failed_reasons"])
+
+
+def test_paper_readiness_accepts_explicit_no_loss_profit_factor() -> None:
+    report = paper_readiness_report(
+        {
+            "profit_factor": None,
+            "profit_factor_is_infinite": True,
+            "expectancy_per_trade": 5,
+            "max_drawdown": 0.02,
+            "number_of_trades": 40,
+            "walk_forward": {"enabled": True},
+        },
+        by_market_regime=[
+            {
+                "regime": "bull_trend",
+                "metrics": {
+                    "number_of_trades": 10,
+                    "profit_factor": None,
+                    "profit_factor_is_infinite": True,
+                    "expectancy_per_trade": 4,
+                },
+            }
+        ],
+    )
+
+    assert report["paper_ready"] is True
+    assert next(check for check in report["checks"] if check["name"] == "profit_factor")["passed"] is True

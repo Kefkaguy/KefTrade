@@ -7,7 +7,11 @@ import psycopg
 from app.db import get_connection
 from app.domain.assets import DEFAULT_DEV_SYMBOL, DEFAULT_DEV_TIMEFRAME
 from app.services.candidate_lifecycle import METRIC_DEFINITIONS, build_research_portfolio
+from app.services.deeper_observations import create_deeper_observation_hypotheses
+from app.services.automated_scientific_reporting import generate_automated_scientific_report
 from app.services.evidence_alerts import detect_research_report_alert
+from app.services.edge_discovery import run_edge_discovery
+from app.services.multi_generation_evolution import create_multi_generation_evolution_campaign
 from app.services.promising_research import build_promising_research_candidates
 from app.services.production_validation import (
     create_soak_snapshot,
@@ -27,6 +31,14 @@ from app.providers.registry import get_market_data_provider
 from app.settings import settings
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.research_automation import analyze_research_automation, queue_research_automation, research_automation_status, run_research_automation_batch
+from app.services.research_architecture import (
+    create_intelligent_research_campaign,
+    export_dataset_bundle,
+    persist_campaign_archive,
+    research_architecture_state,
+    run_autonomous_research_cycle,
+    verify_dataset_snapshot,
+)
 from app.services.research_campaigns import (
     blocked_campaign_jobs,
     campaign_control,
@@ -39,7 +51,6 @@ from app.services.research_campaigns import (
     create_volatility_adaptive_relative_strength_campaign,
     create_transferability_sample_size_campaign,
     elite_candidate_forward_details,
-    generate_campaign_report,
     get_campaign_analytics,
     get_campaign_intelligence,
     get_campaign_report,
@@ -111,6 +122,15 @@ class ResearchUniversePayload(BaseModel):
 class ResearchCampaignPreflightPayload(BaseModel):
     assets: list[str]
     timeframes: list[str]
+
+
+class AutonomousResearchCyclePayload(BaseModel):
+    universe_key: str = "research_core_ten"
+    timeframes: list[str] | None = None
+    max_candidates: int = Field(default=250, ge=1, le=5000)
+    asset_limit: int = Field(default=10, ge=1, le=100)
+    dataset_mode: str = Field(default="rolling", pattern="^(rolling|reproducibility)$")
+    approval_mode: str = Field(default="manual", pattern="^(manual|auto_queue)$")
 
 
 class CampaignSchedulingPayload(BaseModel):
@@ -325,6 +345,91 @@ def get_research_universes(conn: psycopg.Connection = Depends(get_connection)) -
     return list_research_universes(conn)
 
 
+@router.get("/research/architecture")
+def get_research_architecture(
+    dataset_id: int | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return research_architecture_state(conn, dataset_id=dataset_id, limit=limit)
+
+
+@router.post("/research/architecture/cycles")
+def create_autonomous_research_cycle(
+    payload: AutonomousResearchCyclePayload,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    try:
+        return run_autonomous_research_cycle(
+            conn,
+            universe_key=payload.universe_key,
+            timeframes=payload.timeframes,
+            max_candidates=payload.max_candidates,
+            asset_limit=payload.asset_limit,
+            dataset_mode=payload.dataset_mode,
+            approval_mode=payload.approval_mode,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/research/datasets/{dataset_id}/verify")
+def verify_research_dataset(dataset_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return verify_dataset_snapshot(conn, dataset_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.post("/research/datasets/{dataset_id}/export")
+def export_research_dataset(dataset_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    try:
+        return export_dataset_bundle(conn, dataset_id)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/research/architecture/edge-discovery")
+def create_edge_discovery_hypotheses(
+    dataset_id: int | None = Query(None, ge=1),
+    max_hypotheses: int = Query(12, ge=1, le=50),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return run_edge_discovery(conn, dataset_id=dataset_id, max_hypotheses=max_hypotheses)
+
+
+@router.post("/research/architecture/multi-generation-evolution")
+def create_multi_generation_evolution(
+    dataset_id: int = Query(1, ge=1),
+    validation_dataset_id: int | None = Query(None, ge=1),
+    max_parents: int = Query(3, ge=1, le=10),
+    children_per_parent: int = Query(4, ge=1, le=12),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    try:
+        return create_multi_generation_evolution_campaign(
+            conn,
+            dataset_id=dataset_id,
+            validation_dataset_id=validation_dataset_id,
+            max_parents=max_parents,
+            children_per_parent=children_per_parent,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.post("/research/architecture/deeper-observations")
+def create_phase5_deeper_observations(
+    dataset_id: int = Query(1, ge=1),
+    max_hypotheses: int = Query(11, ge=1, le=20),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    try:
+        return create_deeper_observation_hypotheses(conn, dataset_id=dataset_id, max_hypotheses=max_hypotheses)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
 @router.post("/research/universes")
 def save_research_universe(
     payload: ResearchUniversePayload,
@@ -343,13 +448,32 @@ def save_research_universe(
 
 @router.post("/research/campaigns")
 def create_large_scale_research_campaign(
-    universe_key: str = Query("sp500_leaders"),
+    universe_key: str = Query("research_core_ten"),
     name: str | None = Query(None),
-    max_candidates: int = Query(1000, ge=1, le=5000),
+    max_candidates: int = Query(250, ge=1, le=5000),
     asset_limit: int = Query(100, ge=1, le=50000),
     timeframes: list[str] | None = Query(None),
+    architecture_mode: str = Query("intelligent", pattern="^(intelligent|legacy)$"),
+    dataset_mode: str = Query("rolling", pattern="^(rolling|reproducibility)$"),
+    dataset_id: int | None = Query(None, ge=1),
+    hypothesis_id: int | None = Query(None, ge=1),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
+    if architecture_mode == "intelligent":
+        try:
+            return create_intelligent_research_campaign(
+                conn,
+                universe_key=universe_key,
+                name=name,
+                max_candidates=max_candidates,
+                asset_limit=min(asset_limit, 10),
+                timeframes=timeframes,
+                dataset_mode=dataset_mode,
+                dataset_id=dataset_id,
+                hypothesis_id=hypothesis_id,
+            )
+        except ValueError as error:
+            raise HTTPException(status_code=400, detail=str(error)) from error
     return create_research_campaign(
         conn,
         universe_key=universe_key,
@@ -511,7 +635,7 @@ def run_large_scale_research_campaign_batch(
 @router.post("/research/campaigns/{campaign_id}/run-parallel")
 def run_large_scale_research_campaign_parallel_batch(
     campaign_id: int,
-    workers: int = Query(2, ge=1, le=8),
+    workers: int = Query(1, ge=1, le=8),
     jobs_per_worker: int = Query(10, ge=1, le=100),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
@@ -542,7 +666,10 @@ def get_large_scale_research_campaign_profile(
     campaign_id: int,
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
-    return get_campaign_performance_profile(conn, campaign_id)
+    try:
+        return get_campaign_performance_profile(conn, campaign_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @router.get("/research/campaigns/{campaign_id}/reports")
@@ -558,9 +685,20 @@ def generate_large_scale_research_campaign_report(
     campaign_id: int,
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
-    report = generate_campaign_report(conn, campaign_id)
+    report = generate_automated_scientific_report(conn, campaign_id)
     conn.commit()
     return report
+
+
+@router.post("/research/campaigns/{campaign_id}/archive")
+def archive_large_scale_research_campaign(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    try:
+        return persist_campaign_archive(conn, campaign_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @router.get("/research/campaigns/{campaign_id}/strategy-family-analytics")

@@ -13,7 +13,16 @@ BEGIN
           'strategy_versions',
           'risk_settings',
           'paper_scan_scheduler',
-          'research_campaign_scheduler'
+          'research_campaign_scheduler',
+          -- Immutable scientific evidence must survive an operational reset.
+          'research_dataset_manifests',
+          'research_dataset_candles',
+          'asset_profile_versions',
+          'asset_cluster_versions',
+          'asset_cluster_members',
+          'research_hypothesis_versions',
+          'research_validation_policy_versions',
+          'research_campaign_archives'
       );
 
     IF runtime_tables IS NOT NULL THEN

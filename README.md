@@ -7,6 +7,8 @@ KefTrade is a research-first quantitative strategy platform for deterministic st
 
 The platform is designed around one rule: strategies advance only when stored evidence supports the promotion. Research thresholds, validation gates, elite promotion requirements, and forward-validation requirements are not weakened to force progress.
 
+New campaigns use the reproducible research architecture: exact dataset snapshots, versioned asset profiles, measured clusters, evidence-scored hypotheses, focused 70/20/10 candidate generation, explicit specialist/elite levels, complete rejection funnels, and checksum-verified campaign archives. See [Reproducible Research Architecture](docs/reproducible-research-architecture.md).
+
 KefTrade is still research and simulation only. It does not route broker orders, does not connect to an external broker paper account, does not trade live capital, and does not support leverage, margin, shorting, or automatic live execution.
 
 ## Current State

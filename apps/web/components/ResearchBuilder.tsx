@@ -21,7 +21,8 @@ import {
   buildResearchSelection,
   CRYPTO_RESEARCH_ASSETS,
   FALLBACK_RESEARCH_ASSETS,
-  MIN_RESEARCH_JOBS,
+  MAX_TARGETED_CANDIDATES,
+  MAX_PROFILE_ASSETS,
   RESEARCH_SCOPES,
   STRATEGY_FAMILIES,
   VALIDATION_METHODS,
@@ -40,6 +41,7 @@ type ResearchBuilderProps = {
 
 const scopeIcons = {
   single: Crosshair,
+  core: Layers3,
   technology: CircuitBoard,
   crypto: Bitcoin,
   index: ChartNoAxesCombined,
@@ -51,9 +53,9 @@ const fallbackStocks = FALLBACK_RESEARCH_ASSETS.filter((asset) => asset.market !
 
 export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   const reduceMotion = useReducedMotion();
-  const [scopeId, setScopeId] = useState<ResearchScopeId>("technology");
+  const [scopeId, setScopeId] = useState<ResearchScopeId>("core");
   const [stockCatalog, setStockCatalog] = useState<ResearchAsset[]>(fallbackStocks);
-  const [assetIds, setAssetIds] = useState<ResearchAssetId[]>(["TSLA", "NVDA", "AAPL", "MSFT"]);
+  const [assetIds, setAssetIds] = useState<ResearchAssetId[]>(["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "AMZN", "SPY", "QQQ"]);
   const [catalogState, setCatalogState] = useState<"loading" | "ready" | "fallback">("loading");
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
@@ -100,7 +102,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
     const scope = RESEARCH_SCOPES.find((item) => item.id === nextScopeId);
     if (!scope) return;
     const nextIds = nextScopeId === "universe"
-      ? stockCatalog.map((asset) => asset.id)
+      ? prioritizeAssets(stockCatalog).slice(0, MAX_PROFILE_ASSETS).map((asset) => asset.id)
       : scope.assets.filter((id) => allAssets.some((asset) => asset.id === id));
     if (!nextIds.length) return;
     setScopeId(nextScopeId);
@@ -114,12 +116,13 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
     }
     const exists = assetIds.includes(assetId);
     if (exists && assetIds.length === 1) return;
+    if (!exists && assetIds.length >= MAX_PROFILE_ASSETS) return;
     setAssetIds(exists ? assetIds.filter((id) => id !== assetId) : [...assetIds, assetId]);
     setScopeId("custom");
   }
 
   function chooseAssetCount(rawCount: number) {
-    const count = Math.max(1, Math.min(stockCatalog.length, Math.floor(rawCount || 1)));
+    const count = Math.max(1, Math.min(stockCatalog.length, MAX_PROFILE_ASSETS, Math.floor(rawCount || 1)));
     setAssetIds(prioritizeAssets(stockCatalog).slice(0, count).map((asset) => asset.id));
     setScopeId("custom");
   }
@@ -137,7 +140,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
       <header className="builderIntro">
         <span className="eyebrow">Research builder</span>
         <h2 id="research-builder-title">Define the market. KefTrade handles the search.</h2>
-        <p>Search Alpaca&apos;s active stock universe, choose an exact asset count, or build a custom selection. Every campaign queues at least {MIN_RESEARCH_JOBS.toLocaleString()} deterministic research jobs.</p>
+        <p>Choose a measured market scope. KefTrade freezes the experiment dataset, profiles behavior, forms one testable hypothesis, and creates at most {MAX_TARGETED_CANDIDATES.toLocaleString()} focused strategy variations.</p>
       </header>
 
       <div className="researchBuilderShell">
@@ -199,7 +202,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                   id="asset-count"
                   type="range"
                   min="1"
-                  max={Math.max(1, stockCatalog.length)}
+                  max={Math.max(1, Math.min(stockCatalog.length, MAX_PROFILE_ASSETS))}
                   value={Math.max(1, selectedStockCount)}
                   onChange={(event) => chooseAssetCount(Number(event.target.value))}
                 />
@@ -207,12 +210,12 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                   <input
                     type="number"
                     min="1"
-                    max={Math.max(1, stockCatalog.length)}
+                    max={Math.max(1, Math.min(stockCatalog.length, MAX_PROFILE_ASSETS))}
                     value={Math.max(1, selectedStockCount)}
                     onChange={(event) => chooseAssetCount(Number(event.target.value))}
                     aria-label="Number of stock assets"
                   />
-                  <span>of {stockCatalog.length.toLocaleString()}</span>
+                  <span>up to {Math.min(stockCatalog.length, MAX_PROFILE_ASSETS).toLocaleString()}</span>
                 </div>
               </div>
             )}
@@ -226,6 +229,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
             <div className="assetSelector" role="group" aria-label="Assets">
               {visibleAssets.map((asset) => {
                 const selected = assetIds.includes(asset.id);
+                const unavailable = !selected && assetIds.length >= MAX_PROFILE_ASSETS;
                 const AssetIcon = asset.market === "Crypto" ? Bitcoin : asset.market === "ETF" ? Layers3 : TrendingUp;
                 return (
                   <motion.button
@@ -233,6 +237,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                     type="button"
                     className={`assetOption ${selected ? "selected" : ""}`}
                     aria-pressed={selected}
+                    disabled={unavailable}
                     onClick={() => toggleAsset(asset.id)}
                     whileHover={reduceMotion ? undefined : { y: -3 }}
                     whileTap={reduceMotion ? undefined : { scale: 0.98 }}
@@ -251,7 +256,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
             <Sparkles size={19} />
             <div>
               <strong>What happens next</strong>
-              <p>KefTrade generates, tests, rejects, and ranks at least 10,000 strategy jobs. Weak ideas are removed early; only candidates supported by repeatable evidence move forward.</p>
+              <p>KefTrade observes the selected markets first, groups similar assets, and tests a 70/20/10 mix of strong-region, nearby, and exploratory variations. Weak ideas remain preserved as evidence.</p>
             </div>
           </div>
         </div>
@@ -264,13 +269,13 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
 
           <div className="previewSummary">
             <PreviewValue label="Research scope" value={selection.scopeLabel} />
-            <PreviewValue label="Estimated jobs" value={selection.estimatedJobs.toLocaleString()} mono />
+            <PreviewValue label="Maximum evaluations" value={selection.estimatedJobs.toLocaleString()} mono />
             <PreviewValue label="Selected assets" value={selection.assets.length.toLocaleString()} mono />
             <PreviewValue label="Strategy variations" value={selection.candidateCount.toLocaleString()} mono />
           </div>
 
           <div className="previewGroup">
-            <span>Strategy search</span>
+            <span>Hypothesis families</span>
             <div className="strategyList">
               {STRATEGY_FAMILIES.map((strategy) => <span key={strategy}>{strategy}</span>)}
             </div>
