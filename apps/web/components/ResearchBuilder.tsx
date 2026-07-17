@@ -31,7 +31,7 @@ import {
   type ResearchScopeId,
   type ResearchSelection
 } from "@/lib/home-research";
-import { syncAlpacaAssetCatalog } from "@/lib/api";
+import { getSymbols } from "@/lib/api";
 import { useEffect, useMemo, useState } from "react";
 
 type ResearchBuilderProps = {
@@ -77,23 +77,25 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
 
   useEffect(() => {
     let active = true;
-    void syncAlpacaAssetCatalog()
-      .then((catalog) => {
+    void getSymbols()
+      .then((symbols) => {
         if (!active) return;
-        const imported = catalog.assets.map<ResearchAsset>((asset) => ({
-          id: asset.symbol,
-          apiSymbol: asset.symbol,
-          name: asset.name,
-          market: asset.symbol === "SPY" || asset.symbol === "QQQ" ? "ETF" : "Equity",
-          exchange: asset.exchange
-        }));
+        const imported = symbols
+          .filter((symbol) => symbol.is_active && ["us_equity", "etf"].includes(String(symbol.asset_class).toLowerCase()))
+          .map<ResearchAsset>((symbol) => ({
+            id: symbol.symbol,
+            apiSymbol: symbol.symbol,
+            name: symbol.name,
+            market: String(symbol.asset_class).toLowerCase() === "etf" ? "ETF" : "Equity",
+            exchange: symbol.exchange
+          }));
         setStockCatalog(imported.length ? imported : fallbackStocks);
         setCatalogState(imported.length ? "ready" : "fallback");
       })
       .catch((error: unknown) => {
         if (!active) return;
         setCatalogState("fallback");
-        setCatalogError(error instanceof Error ? error.message : "Alpaca asset import is unavailable.");
+        setCatalogError(error instanceof Error ? error.message : "The saved symbol catalog is unavailable.");
       });
     return () => { active = false; };
   }, []);
@@ -184,8 +186,8 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
             <div className="assetCatalogStatus">
               <Database size={16} />
               <div>
-                <strong>{catalogState === "loading" ? "Importing Alpaca assets" : `${stockCatalog.length.toLocaleString()} stock assets available`}</strong>
-                <small>{catalogState === "ready" ? "Active tradable US equities synced from Alpaca" : catalogError ? "Using the local fallback until Alpaca credentials are available" : "Connecting to the Alpaca asset directory"}</small>
+                <strong>{catalogState === "loading" ? "Loading saved assets" : `${stockCatalog.length.toLocaleString()} stock assets available`}</strong>
+                <small>{catalogState === "ready" ? "Active tradable US equities from the saved symbol catalog" : catalogError ? "Using the local fallback while the saved catalog is unavailable" : "Reading the saved symbol catalog"}</small>
               </div>
               {catalogState === "loading" ? <LoaderCircle className="catalogSpinner" size={16} /> : <Check size={16} />}
             </div>

@@ -11,7 +11,6 @@ import { ResearchLaunchExperience, type ResearchLaunchPhase } from "@/components
 import {
   createResearchCampaign,
   getResearchCampaign,
-  prepareResearchCampaign,
   preflightResearchCampaign,
   runParallelResearchCampaign,
   saveResearchUniverse,
@@ -108,25 +107,17 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
     setPhase("creating");
 
     try {
-      let preflight = await preflightResearchCampaign(
+      const preflight = await preflightResearchCampaign(
         nextSelection.assets.map((asset) => asset.apiSymbol),
         [...RESEARCH_TIMEFRAMES]
       );
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
       if (!preflight.ready) {
-        const preparation = await prepareResearchCampaign(
-          nextSelection.assets.map((asset) => asset.apiSymbol),
-          [...RESEARCH_TIMEFRAMES]
-        );
-        if (!aliveRef.current || generation !== runGenerationRef.current) return;
-        preflight = preparation.readiness;
-      }
-      if (!preflight.ready) {
         const firstIssue = preflight.issues[0];
         const issueDetail = firstIssue
           ? `${firstIssue.symbol} ${firstIssue.timeframe}: ${firstIssue.reason}`
           : "Required candle or feature data is unavailable.";
-        setLaunchError(`Market data preparation could not complete. ${preflight.blocked_datasets.toLocaleString()} of ${preflight.datasets_total.toLocaleString()} datasets are still unavailable. ${issueDetail}`);
+        setLaunchError(`Market data is not ready for this campaign. ${preflight.blocked_datasets.toLocaleString()} of ${preflight.datasets_total.toLocaleString()} datasets are unavailable. ${issueDetail}`);
         setPhase("error");
         return;
       }
