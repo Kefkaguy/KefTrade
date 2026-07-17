@@ -12,7 +12,7 @@ from pathlib import Path
 from statistics import mean, median, pstdev
 from threading import Lock
 from typing import Any, Iterable
-
+import time
 import psycopg
 from psycopg.types.json import Jsonb
 
