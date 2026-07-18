@@ -17,6 +17,7 @@ import {
   saveResearchUniverse,
   type MissionControlSnapshot,
   type ResearchCampaignCreateResult,
+  type ResearchCampaignPreflight,
   type ResearchCampaignStatus
 } from "@/lib/api";
 import { RESEARCH_TIMEFRAMES, buildResearchSelection, researchUniverseKey, type ResearchSelection } from "@/lib/home-research";
@@ -144,7 +145,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         : nextSelection.assets.filter((asset) => executableSymbols.has(asset.apiSymbol.toUpperCase()));
       if (!preflight.ready && executableSymbols.size && campaignAssets.length < nextSelection.assets.length) {
         const missing = nextSelection.assets.length - campaignAssets.length;
-        setLaunchError(`Only ${campaignAssets.length.toLocaleString()} of ${nextSelection.assets.length.toLocaleString()} selected assets are executable after data preparation. ${missing.toLocaleString()} selected assets still need candles or features, so no smaller campaign was launched.`);
+        setLaunchError(`Only ${campaignAssets.length.toLocaleString()} of ${nextSelection.assets.length.toLocaleString()} selected assets are executable after data preparation. ${missing.toLocaleString()} selected assets still need candles or features, so no smaller campaign was launched. ${formatPreflightBlockers(preflight)}`);
         setPhase("error");
         return;
       }
@@ -357,6 +358,32 @@ function now() {
 
 function elapsedSince(startedAt: number) {
   return Math.round(now() - startedAt);
+}
+
+function formatPreflightBlockers(preflight: ResearchCampaignPreflight) {
+  const classSummary = Object.entries(preflight.classifications ?? {})
+    .map(([key, value]) => `${key.replaceAll("_", " ")}: ${value}`)
+    .join("; ");
+  const issuesBySymbol = new Map<string, string[]>();
+  for (const issue of preflight.issues ?? []) {
+    const parts = [`${issue.timeframe} ${issue.classification.replaceAll("_", " ")}`];
+    if (issue.reason) parts.push(issue.reason);
+    const existing = issuesBySymbol.get(issue.symbol) ?? [];
+    existing.push(parts.join(": "));
+    issuesBySymbol.set(issue.symbol, existing);
+  }
+  const excludedDetails = (preflight.excluded_assets ?? [])
+    .slice(0, 20)
+    .map((symbol) => {
+      const details = issuesBySymbol.get(symbol);
+      return details?.length ? `${symbol} (${details.join("; ")})` : symbol;
+    })
+    .join(", ");
+  const remaining = Math.max(0, (preflight.excluded_assets_total ?? 0) - 20);
+  const excludedSummary = excludedDetails
+    ? `Excluded: ${excludedDetails}${remaining ? `, +${remaining.toLocaleString()} more` : ""}.`
+    : "Excluded symbols were not reported.";
+  return `${excludedSummary} ${classSummary ? `Issue totals: ${classSummary}.` : ""}`;
 }
 
 function logLaunchDiagnostic(message: string, fields: Record<string, unknown>) {

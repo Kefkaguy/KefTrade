@@ -76,8 +76,8 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
     const matches = query
       ? allAssets.filter((asset) => asset.id.toLowerCase().includes(query) || asset.name.toLowerCase().includes(query))
       : prioritizeAssets(allAssets);
-    return matches.slice(0, 40);
-  }, [allAssets, searchQuery]);
+    return selectedFirst(matches, assetIds).slice(0, 40);
+  }, [allAssets, assetIds, searchQuery]);
 
   useEffect(() => {
     let active = true;
@@ -258,6 +258,13 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
               <span>{visibleAssets.length} shown</span>
             </label>
 
+            <div className="selectedAssetStrip" aria-label="Selected stocks">
+              <div>
+                <strong>{selectedAssets.length.toLocaleString()} chosen</strong>
+                <small>{selectedAssets.map((asset) => asset.id).join(", ")}</small>
+              </div>
+            </div>
+
             <div className="assetSelector" role="group" aria-label="Assets">
               {visibleAssets.map((asset) => {
                 const selected = assetIds.includes(asset.id);
@@ -360,6 +367,19 @@ function randomStocks(assets: ResearchAsset[], count: number) {
     [pool[index], pool[swapIndex]] = [pool[swapIndex], pool[index]];
   }
   return pool.slice(0, count);
+}
+
+function selectedFirst(assets: ResearchAsset[], selectedIds: ResearchAssetId[]) {
+  const selected = new Set(selectedIds);
+  return [...assets].sort((left, right) => {
+    const leftSelected = selected.has(left.id) ? 1 : 0;
+    const rightSelected = selected.has(right.id) ? 1 : 0;
+    if (leftSelected !== rightSelected) return rightSelected - leftSelected;
+    const leftOrder = selectedIds.indexOf(left.id);
+    const rightOrder = selectedIds.indexOf(right.id);
+    if (leftOrder !== -1 || rightOrder !== -1) return (leftOrder === -1 ? Number.MAX_SAFE_INTEGER : leftOrder) - (rightOrder === -1 ? Number.MAX_SAFE_INTEGER : rightOrder);
+    return 0;
+  });
 }
 
 function readinessScore(asset: ResearchAsset) {
