@@ -525,8 +525,15 @@ def trend_passes(close: Decimal, feature: dict[str, Any], recent_candles: list[d
     if params.get("trend_method") == "vwap":
         vwap = feature.get("vwap") or feature.get("ema_20")
         return vwap is not None and close > Decimal(vwap)
-    fast = moving_average(recent_candles, int(params["trend_fast"]), str(params.get("trend_method", "ema")))
-    slow = moving_average(recent_candles, int(params["trend_slow"]), str(params.get("trend_method", "ema")))
+    fast_period = int(params["trend_fast"])
+    slow_period = int(params["trend_slow"])
+    method = str(params.get("trend_method", "ema"))
+    if method == "ema" and fast_period == 20 and slow_period == 50 and feature.get("ema_20") is not None and feature.get("ema_50") is not None:
+        fast = Decimal(str(feature["ema_20"]))
+        slow = Decimal(str(feature["ema_50"]))
+    else:
+        fast = moving_average(recent_candles, fast_period, method)
+        slow = moving_average(recent_candles, slow_period, method)
     if fast is None or slow is None:
         return False
     if params.get("trend_requires_positive_returns") and finite_metric(feature.get("returns_5")) <= 0:
@@ -656,7 +663,7 @@ def entry_passes(close: Decimal, candle: dict[str, Any], feature: dict[str, Any]
         prior_high = max(Decimal(row["high"]) for row in recent_candles[-lookback - 1 : -1])
         return close > prior_high
     if entry == "pullback":
-        ema20 = moving_average(recent_candles, 20, "ema")
+        ema20 = Decimal(str(feature["ema_20"])) if feature.get("ema_20") is not None else moving_average(recent_candles, 20, "ema")
         return ema20 is not None and abs((close - ema20) / ema20) <= Decimal(str(params.get("entry_distance_to_ema20_max", 0.035)))
     if entry == "mean_reversion":
         return feature.get("rsi_14") is not None and Decimal(feature["rsi_14"]) <= Decimal(str(params.get("rsi_oversold", 38)))

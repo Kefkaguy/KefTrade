@@ -267,3 +267,12 @@ def test_readiness_score_is_blocked_by_mandatory_gates_despite_score_components(
     assert result["readiness_state"] in {"not_ready", "blocked"}
     assert "backend_and_frontend_verified" in result["blocking_reasons"]
     assert result["calculation"]["mandatory_gates_override_score"] is True
+
+
+def test_nginx_owns_cors_for_preflight_and_upstream_failures() -> None:
+    config = (Path(__file__).resolve().parents[3] / "deploy" / "production" / "nginx" / "keftrade.conf").read_text(encoding="utf-8")
+
+    assert '"https://keftrade.vercel.app" $http_origin;' in config
+    assert "if ($request_method = OPTIONS)" in config
+    assert "proxy_hide_header Access-Control-Allow-Origin;" in config
+    assert "add_header Access-Control-Allow-Origin $cors_allow_origin always;" in config

@@ -398,6 +398,35 @@ def test_worker_dataset_cache_survives_multiple_claim_batches(monkeypatch) -> No
     assert observed_caches == [shared_cache, shared_cache]
 
 
+def test_campaign_dataset_cache_is_lru_bounded(monkeypatch) -> None:
+    cache = {
+        ("OLD", "1h", False, None): {"candles": [], "features": [], "context_by_time": {}, "market_arrays": {}, "data_loading_ms": 1, "indicator_calculation_ms": 1}
+    }
+    monkeypatch.setattr(research_campaigns.settings, "campaign_dataset_cache_entries", 1)
+    monkeypatch.setattr(
+        research_campaigns,
+        "load_campaign_dataset",
+        lambda *_args, **_kwargs: {"candles": [], "features": [], "context_by_time": {}, "market_arrays": {}, "data_loading_ms": 1, "indicator_calculation_ms": 1},
+    )
+    monkeypatch.setattr(
+        research_campaigns,
+        "evaluate_candidate",
+        lambda *_args, **_kwargs: {"metrics": {}, "paper_readiness": {}, "regime_analysis": {}, "failure_reasons": []},
+    )
+    monkeypatch.setattr(
+        research_campaigns,
+        "candidate_from_payload",
+        lambda _payload: type("Candidate", (), {"parameters": {}})(),
+    )
+
+    research_campaigns.run_campaign_job(
+        CampaignConn(),
+        {"symbol": "NEW", "timeframe": "1h", "candidate": {}, "dataset_id": None, "_dataset_cache": cache},
+    )
+
+    assert list(cache) == [("NEW", "1h", False, None)]
+
+
 def test_parallel_scale_request_persists_new_target_without_api_pool() -> None:
     conn = CampaignConn()
     created = create_research_campaign(conn, universe_key="sp500_leaders", max_candidates=1, asset_limit=2, timeframes=["1h"])

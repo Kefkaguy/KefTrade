@@ -35,6 +35,7 @@ def run_backtest(
     market_arrays: dict[str, np.ndarray] | None = None,
 ) -> dict[str, Any]:
     rows = combine_candles_features(candles, features)
+    candle_rows = [row["candle"] for row in rows]
     arrays = market_arrays if market_arrays is not None and len(market_arrays["low"]) == len(rows) else build_market_arrays(rows)
     train_rows, validation_rows = walk_forward_split(rows, float(params["walk_forward_train_ratio"]))
     execution_rows = validation_rows or rows
@@ -50,7 +51,7 @@ def run_backtest(
     entry_offset = 1 + entry_delay_bars
     entry_cooldown_bars = max(0, int(params.get("entry_cooldown_bars") or 0))
 
-    start_index = rows.index(execution_rows[0]) if execution_rows else 0
+    start_index = len(train_rows) if validation_rows else 0
     realized_equity_points = [{"timestamp": rows[start_index]["candle"]["timestamp"], "equity": equity}] if rows else []
     i = max(start_index, 50)
     while i < len(rows) - entry_offset:
@@ -59,7 +60,7 @@ def run_backtest(
         feature = current["feature"]
         recent_window_bars = max(0, int(params.get("recent_candle_window_bars") or 0))
         recent_start = max(0, i + 1 - recent_window_bars) if recent_window_bars else 0
-        recent_candles = [row["candle"] for row in rows[recent_start : i + 1]]
+        recent_candles = candle_rows[recent_start : i + 1]
         decision = strategy_decide(candle, feature, recent_candles, params)
 
         if decision.signal != "setup" or decision.stop_loss is None or decision.take_profit is None:
@@ -158,15 +159,16 @@ def count_setup_opportunities(
     strategy_decide: StrategyFn,
 ) -> dict[str, Any]:
     rows = combine_candles_features(candles, features)
-    _train_rows, validation_rows = walk_forward_split(rows, float(params["walk_forward_train_ratio"]))
+    candle_rows = [row["candle"] for row in rows]
+    train_rows, validation_rows = walk_forward_split(rows, float(params["walk_forward_train_ratio"]))
     execution_rows = validation_rows or rows
-    start_index = rows.index(execution_rows[0]) if execution_rows else 0
+    start_index = len(train_rows) if validation_rows else 0
     count = 0
     for index in range(max(start_index, 50), max(0, len(rows) - 1)):
         current = rows[index]
         recent_window_bars = max(0, int(params.get("recent_candle_window_bars") or 0))
         recent_start = max(0, index + 1 - recent_window_bars) if recent_window_bars else 0
-        recent_candles = [row["candle"] for row in rows[recent_start : index + 1]]
+        recent_candles = candle_rows[recent_start : index + 1]
         decision = strategy_decide(current["candle"], current["feature"], recent_candles, params)
         if decision.signal == "setup" and decision.stop_loss is not None and decision.take_profit is not None:
             count += 1

@@ -2746,7 +2746,7 @@ def claim_campaign_jobs(
                   OR (status IN ('retrying', 'blocked_data', 'deferred_rate_limit') AND (deferred_until IS NULL OR deferred_until <= NOW()))
                   OR (status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at <= NOW())
               )
-            ORDER BY id ASC
+            ORDER BY symbol ASC, timeframe ASC, id ASC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
@@ -2946,8 +2946,14 @@ def run_campaign_job(
     cache_key = (str(symbol), str(timeframe), needs_enriched_context, dataset_id)
     dataset = cache.get(cache_key)
     cache_hit = dataset is not None
+    if cache_hit and provided_cache is cache:
+        cache.pop(cache_key)
+        cache[cache_key] = dataset
     if dataset is None:
         dataset = load_campaign_dataset(conn, symbol, timeframe, needs_enriched_context, dataset_id=dataset_id)
+        cache_limit = max(1, int(settings.campaign_dataset_cache_entries or 8))
+        while len(cache) >= cache_limit:
+            cache.pop(next(iter(cache)))
         cache[cache_key] = dataset
     simulation_started = time.perf_counter()
     row = evaluate_candidate(
@@ -2987,20 +2993,27 @@ def load_campaign_dataset(
         features = frozen["features"]
         regimes = frozen["regimes"]
     else:
-        sync_market_regimes(conn, symbol=symbol, timeframe=timeframe)
-        candles = load_candles(conn, symbol, timeframe)
+        candle_limit = max(500, int(settings.campaign_backtest_candle_limit or 4000))
+        candles = load_candles(conn, symbol, timeframe, limit=candle_limit)
+        first_timestamp = candles[0]["timestamp"] if candles else None
         features = list(
             conn.execute(
                 """
                 SELECT *
                 FROM features
                 WHERE symbol = %s AND timeframe = %s
+                  AND (%s::timestamptz IS NULL OR timestamp >= %s::timestamptz)
                 ORDER BY timestamp ASC
                 """,
-                (symbol, timeframe),
+                (symbol, timeframe, first_timestamp, first_timestamp),
             ).fetchall()
         )
         regimes = load_regimes(conn, symbol=symbol, timeframe=timeframe)
+        if not regimes:
+            sync_market_regimes(conn, symbol=symbol, timeframe=timeframe)
+            regimes = load_regimes(conn, symbol=symbol, timeframe=timeframe)
+        if first_timestamp is not None:
+            regimes = [row for row in regimes if row.get("timestamp") is None or row["timestamp"] >= first_timestamp]
     data_loading_ms = round((time.perf_counter() - load_started) * 1000, 3)
     indicator_started = time.perf_counter()
     if enriched_context and dataset_id is None:
@@ -3746,7 +3759,12 @@ def stop_campaign_worker(conn: psycopg.Connection, worker_id: str) -> dict[str, 
     return {"worker": jsonable(dict(row)) if row else None, "simulation_only": True}
 
 
-def run_durable_campaign_worker_cycle(conn: psycopg.Connection, *, worker_id: str) -> dict[str, Any]:
+def run_durable_campaign_worker_cycle(
+    conn: psycopg.Connection,
+    *,
+    worker_id: str,
+    dataset_cache: dict[tuple[Any, ...], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     ensure_campaign_tables(conn)
     register_campaign_worker(conn, worker_id=worker_id, status="idle")
     campaigns = executable_target_campaigns(conn)
@@ -3764,7 +3782,13 @@ def run_durable_campaign_worker_cycle(conn: psycopg.Connection, *, worker_id: st
         # slots will observe this heartbeat after commit and cannot exceed target.
         set_campaign_worker_assignment(conn, worker_id, campaign_id=campaign_id, current_job_id=None, status="starting")
         conn.commit()
-        result = run_research_campaign_batch(conn, campaign_id=campaign_id, batch_size=1, worker_id=worker_id)
+        result = run_research_campaign_batch(
+            conn,
+            campaign_id=campaign_id,
+            batch_size=1,
+            worker_id=worker_id,
+            dataset_cache=dataset_cache,
+        )
         processed = int(result.get("processed") or 0)
         if processed:
             return result
@@ -3798,9 +3822,15 @@ def run_background_campaign_worker(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     worker = worker_id or f"{WORKER_VERSION}_{socket.gethostname()}_{os.getpid()}"
+    if max_cycles is None and os.name == "posix" and int(settings.campaign_worker_nice or 0) > 0:
+        try:
+            os.nice(int(settings.campaign_worker_nice))
+        except OSError as error:
+            log_event("Worker priority unchanged", worker_id=worker, error=str(error))
     log_event("Worker started", worker_id=worker, poll_seconds=poll_seconds, max_cycles=max_cycles, stop_file=stop_file)
     cycles = 0
     processed = 0
+    dataset_cache: dict[tuple[Any, ...], dict[str, Any]] = {}
     try:
         with conn_factory() as conn:
             register_campaign_worker(conn, worker_id=worker, status="running")
@@ -3812,7 +3842,7 @@ def run_background_campaign_worker(
             cycle_started = time.perf_counter()
             with conn_factory() as conn:
                 heartbeat_campaign_worker(conn, worker)
-                result = run_durable_campaign_worker_cycle(conn, worker_id=worker)
+                result = run_durable_campaign_worker_cycle(conn, worker_id=worker, dataset_cache=dataset_cache)
                 processed += int(result.get("processed") or 0)
                 conn.commit()
             log_event("Task completed", task="worker_cycle", worker_id=worker, cycle=cycles + 1, processed=result.get("processed"), elapsed_ms=elapsed_ms(cycle_started))

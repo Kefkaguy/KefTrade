@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     max_campaign_workers: int | None = Field(default=None, validation_alias="KEFTRADE_MAX_CAMPAIGN_WORKERS")
     campaign_worker_heartbeat_seconds: int = Field(default=10, validation_alias="KEFTRADE_CAMPAIGN_WORKER_HEARTBEAT_SECONDS")
     campaign_worker_stale_seconds: int = Field(default=45, validation_alias="KEFTRADE_CAMPAIGN_WORKER_STALE_SECONDS")
+    campaign_worker_nice: int = Field(default=5, validation_alias="KEFTRADE_CAMPAIGN_WORKER_NICE")
+    campaign_backtest_candle_limit: int = Field(default=4000, validation_alias="KEFTRADE_CAMPAIGN_BACKTEST_CANDLE_LIMIT")
+    campaign_dataset_cache_entries: int = Field(default=8, validation_alias="KEFTRADE_CAMPAIGN_DATASET_CACHE_ENTRIES")
 
     model_config = SettingsConfigDict(env_file=ROOT_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 

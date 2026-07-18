@@ -140,6 +140,21 @@ def test_discovered_strategy_decision_uses_rule_blocks() -> None:
     assert "deterministic rule blocks" in decision.explanation[0]
 
 
+def test_trend_filter_reuses_precomputed_standard_emas(monkeypatch) -> None:
+    monkeypatch.setattr(
+        strategy_discovery,
+        "moving_average",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("EMA should come from stored features")),
+    )
+
+    assert strategy_discovery.trend_passes(
+        Decimal("105"),
+        {"ema_20": Decimal("104"), "ema_50": Decimal("100"), "returns_5": Decimal("0.02")},
+        [],
+        {"trend_fast": 20, "trend_slow": 50, "trend_method": "ema", "trend_requires_positive_returns": True},
+    ) is True
+
+
 def test_run_strategy_discovery_persists_research_only_rows(monkeypatch) -> None:
     conn = DiscoveryConn()
     monkeypatch.setattr(strategy_discovery, "sync_market_regimes", lambda *args, **kwargs: None)
