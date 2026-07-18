@@ -1465,6 +1465,7 @@ export function createResearchCampaign(options: {
   maxCandidates: number;
   assetLimit: number;
   timeframes: string[];
+  architectureMode?: "intelligent" | "legacy";
   datasetMode?: "rolling" | "reproducibility";
 }) {
   const params = new URLSearchParams({
@@ -1472,7 +1473,7 @@ export function createResearchCampaign(options: {
     name: options.name,
     max_candidates: String(options.maxCandidates),
     asset_limit: String(options.assetLimit),
-    architecture_mode: "intelligent",
+    architecture_mode: options.architectureMode ?? "intelligent",
     dataset_mode: options.datasetMode ?? "rolling"
   });
   for (const timeframe of options.timeframes) params.append("timeframes", timeframe);
