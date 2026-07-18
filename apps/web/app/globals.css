@@ -474,10 +474,22 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .assetCatalogStatus small { margin-top: 2px; color: var(--muted); font-size: 8px; }
 .catalogSpinner { animation: catalogSpin 1s linear infinite; }
 .assetCountControl { display: grid; grid-template-columns: minmax(0, 1fr) 104px; align-items: center; gap: 12px 18px; margin-bottom: 12px; padding: 15px; border: 1px solid var(--line); border-radius: var(--radius-small); }
-.assetCountControl > div:first-child { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 14px; }
+.assetCountHeader { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 14px; }
 .assetCountControl label, .assetCountControl strong { color: var(--ink); font-size: 10px; font-weight: 700; }
-.assetCountControl > div:first-child span { color: var(--accent); font: 650 9px var(--font-mono); }
+.assetCountHeader span { color: var(--accent); font: 650 9px var(--font-mono); }
 .assetCountControl > input[type="range"] { width: 100%; height: 4px; accent-color: var(--accent); cursor: pointer; }
+.universeModeControl { display: grid; grid-column: 1 / -1; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.universeModeControl button { display: flex; min-height: 38px; align-items: center; justify-content: center; gap: 7px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--bg); color: var(--muted); font-size: 9px; font-weight: 700; cursor: pointer; transition: background .2s ease, border-color .2s ease, color .2s ease; }
+.universeModeControl button:hover { border-color: var(--accent-2); color: var(--ink); }
+.universeModeControl button.selected { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); color: var(--accent); }
+.universeModeControl button:disabled { cursor: not-allowed; opacity: .48; }
+.evidenceGuidancePanel { display: grid; grid-column: 1 / -1; gap: 11px; padding: 12px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); border-radius: var(--radius-small); background: color-mix(in srgb, var(--accent-soft) 48%, var(--panel-soft)); }
+.evidenceGuidancePanel > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.evidenceGuidancePanel > div span { color: var(--accent); font: 650 9px var(--font-mono); }
+.evidenceGuidancePanel label { display: grid; gap: 7px; }
+.evidenceGuidancePanel label strong { color: var(--muted-accent); font: 650 9px var(--font-mono); }
+.evidenceGuidancePanel input { width: 100%; height: 4px; accent-color: var(--accent); }
+.evidenceGuidancePanel small { color: var(--muted); font-size: 8px; line-height: 1.55; }
 .assetCountInput { display: grid; grid-template-columns: 54px minmax(0, 1fr); align-items: center; gap: 7px; }
 .assetCountInput input { width: 54px; height: 34px; padding: 0 6px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); background: var(--bg); font: 650 10px var(--font-mono); text-align: center; }
 .assetCountInput span { color: var(--muted); font-size: 8px; white-space: nowrap; }
@@ -489,10 +501,12 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .assetSearch:focus-within { border-color: var(--accent-2); color: var(--accent); }
 .assetSearch input { width: 100%; border: 0; outline: 0; background: transparent; font-size: 10px; }
 .assetSearch span { font-size: 8px; }
-.selectedAssetStrip { margin-bottom: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-small); background: color-mix(in srgb, var(--panel-soft) 68%, var(--bg)); }
+.selectedAssetStrip { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 12px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-small); background: color-mix(in srgb, var(--panel-soft) 68%, var(--bg)); }
+.selectedAssetStrip > div { min-width: 0; }
 .selectedAssetStrip strong, .selectedAssetStrip small { display: block; }
 .selectedAssetStrip strong { color: var(--accent); font: 700 10px var(--font-mono); }
 .selectedAssetStrip small { max-height: 88px; margin-top: 5px; overflow: auto; color: var(--muted); font-size: 9px; line-height: 1.6; word-break: break-word; }
+.evidenceBadge { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius: var(--radius-small); background: var(--accent-soft); color: var(--accent); font-size: 8px; font-weight: 800; text-transform: uppercase; }
 .scopeSelector { display: grid; border-top: 1px solid var(--line); }
 .scopeOption { display: grid; min-height: 66px; grid-template-columns: 25px minmax(0, 1fr) 24px; align-items: center; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; text-align: left; transition: color .2s ease, background .2s ease; }
 .scopeOption:hover { background: color-mix(in srgb, var(--panel-soft) 48%, transparent); color: var(--ink); }

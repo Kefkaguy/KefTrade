@@ -119,21 +119,22 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
     logLaunchDiagnostic("Launch button clicked", { assets: nextSelection.assets.map((asset) => asset.apiSymbol), candidateCount: nextSelection.candidateCount, estimatedJobs: nextSelection.estimatedJobs });
 
     try {
+      const selectedTimeframes = nextSelection.timeframes?.length ? nextSelection.timeframes : [...RESEARCH_TIMEFRAMES];
       const preflightStartedAt = now();
-      logLaunchDiagnostic("Preflight started", { assets: nextSelection.assets.length, timeframes: RESEARCH_TIMEFRAMES });
+      logLaunchDiagnostic("Preflight started", { assets: nextSelection.assets.length, timeframes: selectedTimeframes });
       let preflight = await preflightResearchCampaign(
         nextSelection.assets.map((asset) => asset.apiSymbol),
-        [...RESEARCH_TIMEFRAMES]
+        selectedTimeframes
       );
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
       logLaunchDiagnostic("Preflight complete", { ready: preflight.ready, blockedDatasets: preflight.blocked_datasets, elapsedMs: elapsedSince(preflightStartedAt) });
       if (!preflight.ready && preflight.issues.some((issue) => ["missing_dataset", "insufficient_historical_depth", "feature_generation_failure", "stale_data"].includes(issue.classification))) {
         setPhase("preparing");
         const prepareStartedAt = now();
-        logLaunchDiagnostic("Prepare started", { assets: nextSelection.assets.length, timeframes: RESEARCH_TIMEFRAMES });
+        logLaunchDiagnostic("Prepare started", { assets: nextSelection.assets.length, timeframes: selectedTimeframes });
         const prepared = await prepareResearchCampaign(
           nextSelection.assets.map((asset) => asset.apiSymbol),
-          [...RESEARCH_TIMEFRAMES]
+          selectedTimeframes
         );
         if (!aliveRef.current || generation !== runGenerationRef.current) return;
         preflight = prepared.readiness;
@@ -151,7 +152,13 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
       }
       const campaignSelection = campaignAssets.length === nextSelection.assets.length
         ? nextSelection
-        : buildResearchSelection("custom", campaignAssets);
+        : buildResearchSelection("custom", campaignAssets, {
+            universeMode: nextSelection.universeMode,
+            evidenceAllocationPct: nextSelection.evidenceAllocationPct,
+            guidanceSnapshotKey: nextSelection.guidanceSnapshotKey,
+            establishedStrategyFamilies: nextSelection.establishedStrategyFamilies,
+            timeframes: selectedTimeframes
+          });
 
       if (!preflight.ready && !campaignAssets.length) {
         const firstIssue = preflight.issues[0];
@@ -175,10 +182,15 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         name: `${campaignSelection.scopeLabel} research universe`,
         description: "User-defined research universe created from the KefTrade Home research builder.",
         assets: campaignSelection.assets.map((asset) => asset.apiSymbol),
-        default_timeframes: [...RESEARCH_TIMEFRAMES],
+        default_timeframes: selectedTimeframes,
         metadata: {
           source: "home_research_builder",
           scope: nextSelection.scopeId,
+          universe_mode: nextSelection.universeMode ?? "random",
+          evidence_allocation_pct: nextSelection.evidenceAllocationPct ?? null,
+          guidance_snapshot_key: nextSelection.guidanceSnapshotKey ?? null,
+          established_strategy_families: nextSelection.establishedStrategyFamilies ?? [],
+          established_timeframes: nextSelection.timeframes ?? [],
           executable_scope: campaignSelection.scopeId,
           display_assets: campaignSelection.assets.map((asset) => asset.id),
           requested_assets: nextSelection.assets.map((asset) => asset.apiSymbol),
@@ -194,7 +206,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         name: `${campaignSelection.scopeLabel} hypothesis research`,
         maxCandidates: campaignSelection.candidateCount,
         assetLimit: campaignSelection.assets.length,
-        timeframes: [...RESEARCH_TIMEFRAMES],
+        timeframes: selectedTimeframes,
         architectureMode: "legacy",
         searchMode: "scout_expand"
       });

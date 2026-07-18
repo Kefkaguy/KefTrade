@@ -28,6 +28,11 @@ export type ResearchSelection = {
   scopeId: ResearchScopeId;
   scopeLabel: string;
   assets: ResearchAsset[];
+  universeMode?: "random" | "established";
+  evidenceAllocationPct?: number;
+  guidanceSnapshotKey?: string | null;
+  establishedStrategyFamilies?: string[];
+  timeframes?: string[];
   candidateCount: number;
   estimatedJobs: number;
   scoutCandidateCount: number;
@@ -100,19 +105,35 @@ export const STRATEGY_FAMILIES = ["Momentum", "Pullback", "Breakout", "Mean Reve
 
 export const VALIDATION_METHODS = ["Walk Forward", "Cross Asset", "Robustness", "Forward Validation"] as const;
 
-export function buildResearchSelection(scopeId: ResearchScopeId, assets: ResearchAsset[]): ResearchSelection {
+export function buildResearchSelection(
+  scopeId: ResearchScopeId,
+  assets: ResearchAsset[],
+  options: {
+    universeMode?: "random" | "established";
+    evidenceAllocationPct?: number;
+    guidanceSnapshotKey?: string | null;
+    establishedStrategyFamilies?: string[];
+    timeframes?: string[];
+  } = {}
+): ResearchSelection {
   const scope = RESEARCH_SCOPES.find((item) => item.id === scopeId);
   const candidateCount = candidateCountForAssets(assets.length);
   const scoutCandidateCount = scoutCandidateBudget(candidateCount);
+  const timeframes = options.timeframes?.length ? options.timeframes : [...RESEARCH_TIMEFRAMES];
 
   return {
     scopeId,
-    scopeLabel: scope?.label ?? `${assets.length.toLocaleString()} selected assets`,
+    scopeLabel: options.universeMode === "established" ? "Established Evidence" : scope?.label ?? `${assets.length.toLocaleString()} selected assets`,
     assets,
+    universeMode: options.universeMode,
+    evidenceAllocationPct: options.evidenceAllocationPct,
+    guidanceSnapshotKey: options.guidanceSnapshotKey,
+    establishedStrategyFamilies: options.establishedStrategyFamilies,
+    timeframes,
     candidateCount,
-    estimatedJobs: assets.length * RESEARCH_TIMEFRAMES.length * candidateCount,
+    estimatedJobs: assets.length * timeframes.length * candidateCount,
     scoutCandidateCount,
-    scoutEstimatedJobs: assets.length * RESEARCH_TIMEFRAMES.length * scoutCandidateCount
+    scoutEstimatedJobs: assets.length * timeframes.length * scoutCandidateCount
   };
 }
 
@@ -129,7 +150,9 @@ export function candidateCountForAssets(assetCount: number) {
 
 export function researchUniverseKey(selection: ResearchSelection) {
   const symbols = selection.assets.map((asset) => asset.apiSymbol).sort().join("|");
-  return `home_${selection.scopeId}_${selection.assets.length}_${stableHash(symbols)}`;
+  const mode = selection.universeMode === "established" ? "evidence" : selection.scopeId;
+  const timeframes = (selection.timeframes ?? RESEARCH_TIMEFRAMES).join("|");
+  return `home_${mode}_${selection.assets.length}_${stableHash(`${symbols}|${timeframes}`)}`;
 }
 
 function stableHash(value: string) {

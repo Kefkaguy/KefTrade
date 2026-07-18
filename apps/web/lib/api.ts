@@ -1057,6 +1057,30 @@ export type ResearchUniverseInput = {
   metadata: Record<string, unknown>;
 };
 
+export type ResearchLearningSummary = {
+  global_learning?: {
+    available?: boolean;
+    snapshot_key?: string;
+    reason?: string;
+    decision_intelligence?: {
+      assets?: Array<Record<string, unknown>>;
+      strategy_families?: Array<Record<string, unknown>>;
+      timeframes?: Array<Record<string, unknown>>;
+    };
+    campaign_guidance?: {
+      search_prioritization?: {
+        assets?: string[];
+        strategy_families?: string[];
+        timeframes?: string[];
+      };
+      campaign_budgeting?: Record<string, unknown>;
+    };
+    calculation_version?: string;
+    created_at?: string;
+  };
+  safety?: Record<string, unknown>;
+};
+
 export type AlpacaStockAsset = {
   id: string;
   symbol: string;
@@ -1496,6 +1520,10 @@ export function getResearchArchive() {
 
 export function getResearchIntelligence() {
   return request<ResearchIntelligence>("/research/intelligence", { timeoutMs: 60000 });
+}
+
+export function getResearchLearning() {
+  return request<ResearchLearningSummary>("/research/learning", { timeoutMs: 60000 });
 }
 
 export function saveResearchUniverse(payload: ResearchUniverseInput) {
