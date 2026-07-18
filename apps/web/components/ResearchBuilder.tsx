@@ -68,7 +68,9 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   );
   const selection = useMemo(() => buildResearchSelection(scopeId, selectedAssets), [scopeId, selectedAssets]);
   const selectedStockCount = selectedAssets.filter((asset) => asset.market !== "Crypto").length;
+  const readyStockCatalog = useMemo(() => stockCatalog.filter(isResearchReadyStock), [stockCatalog]);
   const maxStockSelection = Math.max(1, Math.min(stockCatalog.length, MAX_PROFILE_ASSETS, MAX_RANDOM_STOCKS));
+  const maxReadyStockSelection = Math.max(1, Math.min(readyStockCatalog.length || stockCatalog.length, MAX_PROFILE_ASSETS, MAX_RANDOM_STOCKS));
   const visibleAssets = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const matches = query
@@ -136,9 +138,14 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   }
 
   function chooseRandomAssetCount(rawCount: number) {
-    const count = boundedStockCount(rawCount, stockCatalog.length);
-    setAssetIds(randomStocks(stockCatalog, count).map((asset) => asset.id));
+    const pool = readyStockCatalog.length >= rawCount ? readyStockCatalog : stockCatalog;
+    const count = boundedStockCount(rawCount, pool.length);
+    setAssetIds(randomStocks(pool, count).map((asset) => asset.id));
     setScopeId("custom");
+  }
+
+  function chooseRandomDefault() {
+    chooseRandomAssetCount(maxReadyStockSelection);
   }
 
   return (
@@ -234,13 +241,13 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                 <button
                   className="button secondary compact randomAssetButton"
                   type="button"
-                  onClick={() => chooseRandomAssetCount(selectedStockCount || maxStockSelection)}
+                  onClick={chooseRandomDefault}
                   disabled={!stockCatalog.length}
                 >
-                  <Sparkles size={14} /> Random {Math.max(1, Math.min(selectedStockCount || maxStockSelection, maxStockSelection))}
+                  <Sparkles size={14} /> Random {maxReadyStockSelection}
                 </button>
                 <small className="assetCountHelp">
-                  Count and random selection use the full {stockCatalog.length.toLocaleString()} stock catalog, not the {visibleAssets.length.toLocaleString()} visible search rows.
+                  Random uses ready 1h/4h stocks first: {readyStockCatalog.length.toLocaleString()} ready of {stockCatalog.length.toLocaleString()} catalog stocks. It never uses only the {visibleAssets.length.toLocaleString()} visible rows.
                 </small>
               </div>
             )}
@@ -359,6 +366,15 @@ function readinessScore(asset: ResearchAsset) {
   const candleReady = Math.min(asset.ready1hCandles ?? 0, 120) + Math.min(asset.ready4hCandles ?? 0, 120);
   const featureReady = Math.min(asset.ready1hFeatures ?? 0, 80) + Math.min(asset.ready4hFeatures ?? 0, 80);
   return candleReady + featureReady;
+}
+
+function isResearchReadyStock(asset: ResearchAsset) {
+  return (
+    (asset.ready1hCandles ?? 0) >= 120 &&
+    (asset.ready4hCandles ?? 0) >= 120 &&
+    (asset.ready1hFeatures ?? 0) >= 80 &&
+    (asset.ready4hFeatures ?? 0) >= 80
+  );
 }
 
 function PreviewValue({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
