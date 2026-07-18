@@ -478,7 +478,7 @@ def create_large_scale_research_campaign(
                 universe_key=universe_key,
                 name=name,
                 max_candidates=max_candidates,
-                asset_limit=min(asset_limit, 10),
+                asset_limit=min(asset_limit, 100),
                 timeframes=timeframes,
                 dataset_mode=dataset_mode,
                 dataset_id=dataset_id,

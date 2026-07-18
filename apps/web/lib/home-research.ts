@@ -27,7 +27,7 @@ export type ResearchSelection = {
 
 export const MIN_TARGETED_CANDIDATES = 60;
 export const MAX_TARGETED_CANDIDATES = 250;
-export const MAX_PROFILE_ASSETS = 10;
+export const MAX_PROFILE_ASSETS = 100;
 
 export const FALLBACK_RESEARCH_ASSETS: ResearchAsset[] = [
   { id: "TSLA", apiSymbol: "TSLA", name: "Tesla", market: "Equity", exchange: "NASDAQ" },
@@ -56,7 +56,7 @@ export const RESEARCH_SCOPES: ResearchScope[] = [
   {
     id: "core",
     label: "Research Core",
-    description: "Profile and cluster ten liquid technology leaders and market ETFs.",
+    description: "Profile liquid technology leaders and market ETFs.",
     assets: ["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "AMZN", "SPY", "QQQ"]
   },
   {
@@ -80,7 +80,7 @@ export const RESEARCH_SCOPES: ResearchScope[] = [
   {
     id: "universe",
     label: "Measured Universe",
-    description: "Use ten prioritized active equities from the connected catalog.",
+    description: "Use up to 100 prioritized active equities from the connected catalog.",
     assets: []
   }
 ];
