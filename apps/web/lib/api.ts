@@ -268,6 +268,10 @@ export type SymbolRow = {
   market_cap?: string | number | null;
   index_membership?: string[] | null;
   is_active: boolean;
+  ready_1h_candles?: number;
+  ready_4h_candles?: number;
+  ready_1h_features?: number;
+  ready_4h_features?: number;
 };
 
 export type ResearchHypothesis = {

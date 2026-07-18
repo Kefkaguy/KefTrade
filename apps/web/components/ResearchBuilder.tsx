@@ -87,7 +87,11 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
             apiSymbol: symbol.symbol,
             name: symbol.name,
             market: String(symbol.asset_class).toLowerCase() === "etf" ? "ETF" : "Equity",
-            exchange: symbol.exchange
+            exchange: symbol.exchange,
+            ready1hCandles: Number(symbol.ready_1h_candles ?? 0),
+            ready4hCandles: Number(symbol.ready_4h_candles ?? 0),
+            ready1hFeatures: Number(symbol.ready_1h_features ?? 0),
+            ready4hFeatures: Number(symbol.ready_4h_features ?? 0)
           }));
         setStockCatalog(imported.length ? imported : fallbackStocks);
         setCatalogState(imported.length ? "ready" : "fallback");
@@ -309,10 +313,19 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
 function prioritizeAssets(assets: ResearchAsset[]) {
   const priority = new Map(preferredSymbols.map((symbol, index) => [symbol, index]));
   return [...assets].sort((left, right) => {
+    const rightReady = readinessScore(right);
+    const leftReady = readinessScore(left);
+    if (rightReady !== leftReady) return rightReady - leftReady;
     const leftPriority = priority.get(left.id) ?? Number.MAX_SAFE_INTEGER;
     const rightPriority = priority.get(right.id) ?? Number.MAX_SAFE_INTEGER;
     return leftPriority - rightPriority || left.id.localeCompare(right.id);
   });
+}
+
+function readinessScore(asset: ResearchAsset) {
+  const candleReady = Math.min(asset.ready1hCandles ?? 0, 120) + Math.min(asset.ready4hCandles ?? 0, 120);
+  const featureReady = Math.min(asset.ready1hFeatures ?? 0, 80) + Math.min(asset.ready4hFeatures ?? 0, 80);
+  return candleReady + featureReady;
 }
 
 function PreviewValue({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {

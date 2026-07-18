@@ -11,6 +11,7 @@ import { ResearchLaunchExperience, type ResearchLaunchPhase } from "@/components
 import {
   createResearchCampaign,
   getResearchCampaign,
+  prepareResearchCampaign,
   preflightResearchCampaign,
   runParallelResearchCampaign,
   saveResearchUniverse,
@@ -119,12 +120,24 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
     try {
       const preflightStartedAt = now();
       logLaunchDiagnostic("Preflight started", { assets: nextSelection.assets.length, timeframes: RESEARCH_TIMEFRAMES });
-      const preflight = await preflightResearchCampaign(
+      let preflight = await preflightResearchCampaign(
         nextSelection.assets.map((asset) => asset.apiSymbol),
         [...RESEARCH_TIMEFRAMES]
       );
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
       logLaunchDiagnostic("Preflight complete", { ready: preflight.ready, blockedDatasets: preflight.blocked_datasets, elapsedMs: elapsedSince(preflightStartedAt) });
+      if (!preflight.ready && preflight.issues.some((issue) => ["missing_dataset", "insufficient_historical_depth", "feature_generation_failure", "stale_data"].includes(issue.classification))) {
+        setPhase("preparing");
+        const prepareStartedAt = now();
+        logLaunchDiagnostic("Prepare started", { assets: nextSelection.assets.length, timeframes: RESEARCH_TIMEFRAMES });
+        const prepared = await prepareResearchCampaign(
+          nextSelection.assets.map((asset) => asset.apiSymbol),
+          [...RESEARCH_TIMEFRAMES]
+        );
+        if (!aliveRef.current || generation !== runGenerationRef.current) return;
+        preflight = prepared.readiness;
+        logLaunchDiagnostic("Prepare complete", { ready: preflight.ready, prepared: prepared.prepared.length, errors: prepared.errors.length, elapsedMs: elapsedSince(prepareStartedAt) });
+      }
       if (!preflight.ready) {
         const firstIssue = preflight.issues[0];
         const issueDetail = firstIssue

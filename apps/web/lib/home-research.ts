@@ -6,6 +6,10 @@ export type ResearchAsset = {
   name: string;
   market: "Equity" | "ETF" | "Crypto";
   exchange?: string;
+  ready1hCandles?: number;
+  ready4hCandles?: number;
+  ready1hFeatures?: number;
+  ready4hFeatures?: number;
 };
 
 export type ResearchScopeId = "single" | "core" | "technology" | "crypto" | "index" | "universe" | "custom";

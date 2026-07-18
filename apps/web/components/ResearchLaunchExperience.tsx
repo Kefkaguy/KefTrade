@@ -7,7 +7,7 @@ import { ArrowRight, Check, ExternalLink, FlaskConical, RotateCcw, Sparkles, Tro
 import type { ResearchCampaignCreateResult, ResearchCampaignStatus } from "@/lib/api";
 import type { ResearchSelection } from "@/lib/home-research";
 
-export type ResearchLaunchPhase = "creating" | "running" | "complete" | "error";
+export type ResearchLaunchPhase = "creating" | "preparing" | "running" | "complete" | "error";
 
 type ResearchLaunchExperienceProps = {
   phase: ResearchLaunchPhase;
@@ -136,6 +136,7 @@ export function ResearchLaunchExperience({
 function campaignProgress(phase: ResearchLaunchPhase, status: ResearchCampaignStatus | null) {
   if (phase === "complete") return 100;
   if (phase === "creating") return 0;
+  if (phase === "preparing") return 8;
   const progress = Number(status?.analytics.completion_percentage ?? 0);
   return Number.isFinite(progress) ? Math.max(0, Math.min(100, progress)) : 0;
 }
@@ -143,6 +144,7 @@ function campaignProgress(phase: ResearchLaunchPhase, status: ResearchCampaignSt
 function stageProgress(index: number, overall: number, phase: ResearchLaunchPhase) {
   if (phase === "complete") return 100;
   if (phase === "creating") return index === 0 ? 18 : 0;
+  if (phase === "preparing") return index === 0 ? 55 : 0;
   const starts = [0, 0, 16, 38, 72];
   const spans = [1, 42, 38, 34, 28];
   if (index === 0) return 100;
@@ -156,6 +158,7 @@ function terminalJobs(statuses: Record<string, number>) {
 
 function phaseLabel(phase: ResearchLaunchPhase, campaignCreated: boolean) {
   if (phase === "creating") return "Preparing deterministic campaign";
+  if (phase === "preparing") return "Preparing market data";
   if (phase === "running") return "Research in progress";
   if (phase === "complete") return "Research complete";
   return campaignCreated ? "Research interrupted" : "Research preflight blocked";
@@ -163,6 +166,7 @@ function phaseLabel(phase: ResearchLaunchPhase, campaignCreated: boolean) {
 
 function phaseTitle(phase: ResearchLaunchPhase, scope: string, campaignCreated: boolean) {
   if (phase === "creating") return "Building your research environment";
+  if (phase === "preparing") return "Backfilling missing market history";
   if (phase === "complete") return `${scope} search complete`;
   if (phase === "error") return campaignCreated ? "Research paused safely" : "Market data is not ready";
   return `Searching ${scope}`;
@@ -170,6 +174,7 @@ function phaseTitle(phase: ResearchLaunchPhase, scope: string, campaignCreated: 
 
 function phaseDescription(phase: ResearchLaunchPhase, assetCount: number, campaignCreated: boolean) {
   if (phase === "creating") return "Preparing market history, an immutable dataset snapshot, asset profiles, clusters, and a testable hypothesis.";
+  if (phase === "preparing") return "KefTrade is syncing candles and recalculating features for the selected assets before creating the campaign.";
   if (phase === "complete") return "Every candidate and rejection has been classified, learned from, and preserved in a checksum-verified archive.";
   if (phase === "error") return campaignCreated
     ? "Completed evidence remains preserved. Retry the current batch or return to the builder."
