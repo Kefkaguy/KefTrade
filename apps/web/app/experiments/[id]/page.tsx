@@ -1,4 +1,8 @@
 import Link from "next/link";
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import { notFound } from "next/navigation";
 import { Card, DataTable, EmptyState, Heatmap, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
 import { getResearchPortfolio, getStrategyExperiment } from "@/lib/api";

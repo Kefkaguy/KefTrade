@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import { AssetLink, Card, DataTable, EmptyState, MetricCard, PageTitle } from "@/components/ResearchUI";
 import { countBy, displayAssetClass, getLiveResearchSnapshot } from "@/lib/live-research";
 

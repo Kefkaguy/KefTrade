@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import Link from "next/link";
 import { Card, DataTable, EmptyState, MetricCard, PageTitle } from "@/components/ResearchUI";
 import { getStrategyExperiments } from "@/lib/api";

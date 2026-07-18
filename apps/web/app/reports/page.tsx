@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import { AlertTriangle, Archive, CalendarDays, CheckCircle2, ChevronRight, FileText, ShieldCheck } from "lucide-react";
 import { SavedReports } from "@/components/SavedReports";
 import { GenerateDailyReportButton } from "@/components/DailyReportActions";

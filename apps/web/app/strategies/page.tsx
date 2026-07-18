@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import Link from "next/link";
 import { Card, DataTable, EmptyState, LineChart, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
 import { countBy, displayRecommendation, getLiveResearchSnapshot, metricValue, statusClass, timelineItems, validationSeries } from "@/lib/live-research";

@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import Link from "next/link";
 import { Activity, ArrowRight, Check, CheckCircle2, Clock3, LockKeyhole, Radar, ShieldCheck } from "lucide-react";
 import { AcknowledgeAlertButton, CandidateDeploymentScanButton, PaperSchedulerControls } from "@/components/PaperActions";

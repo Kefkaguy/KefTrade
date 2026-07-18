@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import { Card, EmptyState, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
 import { countBy, getLiveResearchSnapshot, timelineItems } from "@/lib/live-research";
 

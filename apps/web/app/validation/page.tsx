@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import { AlphaValidationRunner } from "@/components/AlphaValidationRunner";
 import { Card, DataTable, EmptyState } from "@/components/ResearchUI";
 import { getValidationRuns } from "@/lib/api";

@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import { Card, DataTable, EmptyState, EvidenceBadges, PageTitle } from "@/components/ResearchUI";
 import { getCopilotInteractions } from "@/lib/api";
 import { displayProviderFromModel } from "@/lib/live-research";

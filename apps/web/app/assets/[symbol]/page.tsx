@@ -1,3 +1,7 @@
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 import { notFound } from "next/navigation";
 import { CandleChart } from "@/components/CandleChart";
 import { BarList, Card, DataTable, EmptyState, MetricCard, PageTitle, Timeline } from "@/components/ResearchUI";
