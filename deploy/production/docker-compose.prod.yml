@@ -92,7 +92,7 @@ services:
       - --stop-file
       - /tmp/keftrade-campaign-worker.stop
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import os; assert os.environ.get('DATABASE_URL')\" && pgrep -f app.workers.campaign_runner >/dev/null"]
+      test: ["CMD", "python", "-c", "import os, pathlib; assert os.environ.get('DATABASE_URL'); assert not pathlib.Path('/tmp/keftrade-campaign-worker.stop').exists()"]
       interval: 30s
       timeout: 10s
       retries: 5
