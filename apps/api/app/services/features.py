@@ -6,7 +6,29 @@ import psycopg
 
 from app.domain.assets import DEFAULT_DEV_SYMBOL, DEFAULT_DEV_TIMEFRAME
 
-def load_candles(conn: psycopg.Connection, symbol: str = DEFAULT_DEV_SYMBOL, timeframe: str = DEFAULT_DEV_TIMEFRAME) -> list[dict[str, Any]]:
+def load_candles(
+    conn: psycopg.Connection,
+    symbol: str = DEFAULT_DEV_SYMBOL,
+    timeframe: str = DEFAULT_DEV_TIMEFRAME,
+    *,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
+    if limit is not None:
+        rows = conn.execute(
+            """
+            SELECT symbol, timeframe, timestamp, open, high, low, close, volume
+            FROM (
+                SELECT symbol, timeframe, timestamp, open, high, low, close, volume
+                FROM candles
+                WHERE symbol = %s AND timeframe = %s
+                ORDER BY timestamp DESC
+                LIMIT %s
+            ) recent
+            ORDER BY timestamp ASC
+            """,
+            (symbol, timeframe, limit),
+        ).fetchall()
+        return list(rows)
     rows = conn.execute(
         """
         SELECT symbol, timeframe, timestamp, open, high, low, close, volume
@@ -113,10 +135,16 @@ def upsert_features(conn: psycopg.Connection, feature_rows: list[dict[str, Any]]
     return affected
 
 
-def sync_features(conn: psycopg.Connection, symbol: str = DEFAULT_DEV_SYMBOL, timeframe: str = DEFAULT_DEV_TIMEFRAME) -> dict[str, Any]:
-    candles = load_candles(conn, symbol, timeframe)
+def sync_features(
+    conn: psycopg.Connection,
+    symbol: str = DEFAULT_DEV_SYMBOL,
+    timeframe: str = DEFAULT_DEV_TIMEFRAME,
+    *,
+    candle_limit: int | None = None,
+) -> dict[str, Any]:
+    candles = load_candles(conn, symbol, timeframe, limit=candle_limit)
     feature_rows = calculate_features(candles)
     upserted = upsert_features(conn, feature_rows)
     conn.commit()
     complete_rows = sum(1 for row in feature_rows if row["ema_50"] is not None and row["rsi_14"] is not None)
-    return {"symbol": symbol, "timeframe": timeframe, "calculated": len(feature_rows), "usable": complete_rows, "upserted": upserted}
+    return {"symbol": symbol, "timeframe": timeframe, "calculated": len(feature_rows), "usable": complete_rows, "upserted": upserted, "candle_limit": candle_limit}

@@ -555,7 +555,7 @@ async def prepare_large_scale_research_campaign(
             candles = await provider.sync_candles(conn, symbol=symbol, timeframe=timeframe, limit=sync_limit)
             log_event("Download finished", asset=symbol, provider=provider_name, timeframe=timeframe, candles_received=candles.candle_count, elapsed_ms=elapsed_ms(download_started))
             feature_started = time.perf_counter()
-            features = sync_features(conn, symbol=symbol, timeframe=timeframe)
+            features = sync_features(conn, symbol=symbol, timeframe=timeframe, candle_limit=sync_limit)
             log_event("Features calculated", asset=symbol, provider=provider_name, timeframe=timeframe, features=features["usable"], elapsed_ms=elapsed_ms(feature_started))
             prepared.append({
                 "symbol": symbol,

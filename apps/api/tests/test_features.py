@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from app.services.features import calculate_features
+from app.services.features import calculate_features, load_candles
 
 
 def make_candles(count: int = 70) -> list[dict]:
@@ -36,4 +36,29 @@ def test_feature_timestamp_matches_source_candle_timestamp() -> None:
 
     assert rows[-1]["timestamp"] == candles[-1]["timestamp"]
     assert rows[-1]["symbol"] == "BTCUSDT"
+
+
+def test_load_candles_can_request_recent_bounded_window() -> None:
+    class Result:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchall(self):
+            return self.rows
+
+    class Conn:
+        def __init__(self):
+            self.params = None
+
+        def execute(self, query, params):
+            self.params = params
+            assert "ORDER BY timestamp DESC" in query
+            assert "LIMIT %s" in query
+            return Result(make_candles(3)[-2:])
+
+    conn = Conn()
+    rows = load_candles(conn, "META", "1h", limit=2)
+
+    assert conn.params == ("META", "1h", 2)
+    assert len(rows) == 2
 
