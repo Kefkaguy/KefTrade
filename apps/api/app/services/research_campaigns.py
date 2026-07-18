@@ -5652,7 +5652,7 @@ def campaign_list_row_with_eta(row: dict[str, Any]) -> dict[str, Any]:
 
 def get_campaign_performance_profile(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
     ensure_campaign_tables(conn)
-    get_campaign(conn, campaign_id)
+    campaign = get_campaign(conn, campaign_id)
     row = conn.execute(
         """
         SELECT
@@ -5680,8 +5680,8 @@ def get_campaign_performance_profile(conn: psycopg.Connection, campaign_id: int)
         (campaign_id,),
     ).fetchone() or {}
     pool = parallel_pool_snapshot(campaign_id)
-    durable_runtime = campaign_runtime_snapshot(conn, campaign_id)
-    efficiency = campaign_efficiency_metrics(conn, campaign_id, durable_runtime)
+    durable_runtime = campaign_runtime_snapshot(conn, campaign_id, campaign=campaign)
+    efficiency = campaign_efficiency_metrics(conn, campaign_id, durable_runtime, campaign=campaign)
     active_parallel_workers = max(int(row.get("active_parallel_workers") or 0), int(pool.get("live_workers") or 0))
     return {
         "campaign_id": campaign_id,
@@ -5712,8 +5712,14 @@ def get_campaign_performance_profile(conn: psycopg.Connection, campaign_id: int)
     }
 
 
-def campaign_efficiency_metrics(conn: psycopg.Connection, campaign_id: int, runtime: dict[str, Any] | None = None) -> dict[str, Any]:
-    campaign = get_campaign(conn, campaign_id)
+def campaign_efficiency_metrics(
+    conn: psycopg.Connection,
+    campaign_id: int,
+    runtime: dict[str, Any] | None = None,
+    *,
+    campaign: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    campaign = campaign or get_campaign(conn, campaign_id)
     controls = dict(campaign.get("controls") or {})
     generation = dict(controls.get("candidate_generation_mix") or {})
     dedupe = dict(controls.get("execution_key_deduplication") or {})
@@ -5723,13 +5729,14 @@ def campaign_efficiency_metrics(conn: psycopg.Connection, campaign_id: int, runt
             COUNT(DISTINCT candidate_id) FILTER (WHERE status IN ('completed', 'promoted', 'rejected', 'failed')) AS evaluated_unique_candidates,
             COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'promoted') AS near_pass_candidates,
             AVG(execution_runtime_ms) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS average_simulation_time_ms,
-            AVG(EXTRACT(EPOCH FROM (claimed_at - created_at)) * 1000) FILTER (WHERE claimed_at IS NOT NULL) AS average_queue_delay_ms
+            AVG(EXTRACT(EPOCH FROM (claimed_at - created_at)) * 1000) FILTER (WHERE claimed_at IS NOT NULL) AS average_queue_delay_ms,
+            (SELECT COUNT(*) FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE AND forward_validation_state = 'forward_validation_passed') AS elite_count
         FROM research_campaign_jobs
         WHERE campaign_id = %s
         """,
-        (campaign_id,),
+        (campaign_id, campaign_id),
     ).fetchone() or {}
-    elite_count = int((conn.execute("SELECT COUNT(*) AS count FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE AND forward_validation_state = 'forward_validation_passed'", (campaign_id,)).fetchone() or {}).get("count") or 0)
+    elite_count = int(row.get("elite_count") or 0)
     evaluated = int(row.get("evaluated_unique_candidates") or 0)
     duplicates_prevented = int(generation.get("duplicates_prevented") or 0) + int(dedupe.get("duplicates_prevented") or 0)
     attempted = int(generation.get("attempted_candidate_generations") or evaluated or 0)
@@ -5858,8 +5865,13 @@ def parallel_pool_snapshot(campaign_id: int) -> dict[str, Any]:
         return dict(_PARALLEL_POOLS.get(campaign_id) or {})
 
 
-def campaign_runtime_snapshot(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
-    campaign = get_campaign(conn, campaign_id)
+def campaign_runtime_snapshot(
+    conn: psycopg.Connection,
+    campaign_id: int,
+    *,
+    campaign: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    campaign = campaign or get_campaign(conn, campaign_id)
     stale_cutoff = datetime.now(UTC) - timedelta(seconds=worker_stale_seconds())
     workers = conn.execute(
         """

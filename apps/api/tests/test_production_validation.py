@@ -276,3 +276,4 @@ def test_nginx_owns_cors_for_preflight_and_upstream_failures() -> None:
     assert "if ($request_method = OPTIONS)" in config
     assert "proxy_hide_header Access-Control-Allow-Origin;" in config
     assert "add_header Access-Control-Allow-Origin $cors_allow_origin always;" in config
+    assert 'add_header Access-Control-Expose-Headers "X-Request-ID" always;' in config

@@ -2,7 +2,7 @@
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Cpu, Gauge, MemoryStick, Pause, Play, RefreshCw, Trash2 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   controlResearchCampaign,
   deleteResearchCampaign,
@@ -27,9 +27,13 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
   const [profile, setProfile] = useState<ResearchCampaignProfile | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const listRequestActive = useRef(false);
+  const profileRequestActive = useRef(false);
+  const profileRequestSucceeded = useRef(false);
 
   const refresh = useCallback(async (showActivity = false) => {
-    if (!enabled) return;
+    if (!enabled || listRequestActive.current) return;
+    listRequestActive.current = true;
     if (showActivity) setRefreshing(true);
     try {
       const next = await getResearchCampaigns();
@@ -38,6 +42,7 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
     } catch (requestError) {
       setError(readCampaignError(requestError));
     } finally {
+      listRequestActive.current = false;
       if (showActivity) setRefreshing(false);
     }
   }, [enabled]);
@@ -51,14 +56,24 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
   useEffect(() => {
     if (!executionId) return;
     const refreshProfile = async () => {
+      if (profileRequestActive.current) return;
+      profileRequestActive.current = true;
       try {
-        setProfile(await getResearchCampaignProfile(executionId));
+        const nextProfile = await getResearchCampaignProfile(executionId);
+        profileRequestSucceeded.current = true;
+        setProfile(nextProfile);
+        setError(null);
+        if (nextProfile.runtime.parallel_pool_active) {
+          setWorkerCount(nextProfile.runtime.configured_parallel_workers || 1);
+        }
       } catch (requestError) {
-        setError(readCampaignError(requestError));
+        if (!profileRequestSucceeded.current) setError(readCampaignError(requestError));
+      } finally {
+        profileRequestActive.current = false;
       }
     };
     void refreshProfile();
-    const timer = window.setInterval(() => void refreshProfile(), 2000);
+    const timer = window.setInterval(() => void refreshProfile(), 5000);
     return () => window.clearInterval(timer);
   }, [executionId]);
 
@@ -105,16 +120,8 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
     setExecutionId(nextId);
     setProfile(null);
     if (!nextId) return;
+    profileRequestSucceeded.current = false;
     setWorkerCount(1);
-    try {
-      const nextProfile = await getResearchCampaignProfile(campaignId);
-      setProfile(nextProfile);
-      if (nextProfile.runtime.parallel_pool_active) {
-        setWorkerCount(nextProfile.runtime.configured_parallel_workers || 1);
-      }
-    } catch (requestError) {
-      setError(readCampaignError(requestError));
-    }
   }
 
   async function runParallel(campaignId: number) {
