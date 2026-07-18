@@ -261,18 +261,29 @@ def aggregate_command_center(
 
     overview = dict(conn.execute(
         f"""
+        WITH candidate_status AS (
+            SELECT
+                campaign_id,
+                candidate_id,
+                BOOL_OR(status IN ('completed', 'rejected', 'promoted')) AS tested,
+                BOOL_OR(status = 'promoted') AS promoted,
+                BOOL_OR(status IN ('queued', 'running', 'retrying', 'deferred_rate_limit', 'blocked_data')) AS active,
+                BOOL_AND(status IN ('completed', 'rejected', 'promoted', 'failed', 'canceled')) AS terminal
+            FROM research_campaign_jobs
+            WHERE {where_sql}
+            GROUP BY campaign_id, candidate_id
+        )
         SELECT
-            COUNT(*) AS campaign_jobs,
-            COUNT(DISTINCT candidate_id) AS candidates_generated,
-            COUNT(DISTINCT candidate_id) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS candidates_tested,
-            COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'rejected') AS candidates_rejected,
-            COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'completed') AS candidates_completed,
-            COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'promoted') AS research_candidates,
-            COUNT(*) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS terminal_jobs
-        FROM research_campaign_jobs
-        WHERE {where_sql}
+            (SELECT COUNT(*) FROM research_campaign_jobs WHERE {where_sql}) AS campaign_jobs,
+            COUNT(*) AS candidates_generated,
+            COUNT(*) FILTER (WHERE tested) AS candidates_tested,
+            COUNT(*) FILTER (WHERE terminal AND NOT promoted) AS candidates_rejected,
+            COUNT(*) FILTER (WHERE terminal AND NOT promoted) AS candidates_completed,
+            COUNT(*) FILTER (WHERE tested AND active AND NOT promoted) AS needs_more_evidence,
+            COUNT(*) FILTER (WHERE promoted) AS research_candidates
+        FROM candidate_status
         """,
-        tuple(params),
+        tuple(params + params),
     ).fetchone() or {})
     dimensions = dict(conn.execute(
         f"""
@@ -288,7 +299,7 @@ def aggregate_command_center(
     ).fetchone() or {})
     top_assets = [dict(row) for row in conn.execute(
         f"""
-        SELECT symbol AS name, COUNT(*) AS total_runs,
+        SELECT symbol AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(*) AS total_runs,
                COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
                COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs
         FROM research_campaign_jobs
@@ -301,7 +312,7 @@ def aggregate_command_center(
     ).fetchall()]
     top_timeframes = [dict(row) for row in conn.execute(
         f"""
-        SELECT timeframe AS name, COUNT(*) AS total_runs,
+        SELECT timeframe AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(*) AS total_runs,
                COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
                COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs
         FROM research_campaign_jobs
@@ -314,7 +325,7 @@ def aggregate_command_center(
     ).fetchall()]
     top_families = [dict(row) for row in conn.execute(
         f"""
-        SELECT COALESCE(strategy_family, family_id) AS name, COUNT(*) AS total_runs,
+        SELECT COALESCE(strategy_family, family_id) AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(*) AS total_runs,
                COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
                COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs
         FROM research_campaign_jobs
@@ -339,7 +350,7 @@ def aggregate_command_center(
     rejected = int(overview.get("candidates_rejected") or 0)
     completed = int(overview.get("candidates_completed") or 0)
     promoted = int(overview.get("research_candidates") or 0)
-    needs_more = max(0, tested - rejected - promoted)
+    needs_more = int(overview.get("needs_more_evidence") or 0)
     overview_payload = {
         "campaign_jobs": int(overview.get("campaign_jobs") or 0),
         "candidates_generated": generated,
@@ -422,13 +433,14 @@ def aggregate_funnel(generated: int, tested: int, rejected: int, needs_more: int
 def aggregate_dimension_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for row in rows:
+        candidate_count = int(row.get("candidate_count") or 0)
         total = int(row.get("total_runs") or 0)
         passed = int(row.get("passed_runs") or 0)
         rejected = int(row.get("rejected_runs") or 0)
         result.append(
             {
                 "name": row.get("name") or "unknown",
-                "candidates_tested": total,
+                "candidates_tested": candidate_count,
                 "validation_runs": total,
                 "rejection_rate": ratio(rejected, total),
                 "pass_rate": ratio(passed, total),
