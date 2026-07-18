@@ -275,9 +275,10 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
 
           <div className="previewSummary">
             <PreviewValue label="Research scope" value={selection.scopeLabel} />
-            <PreviewValue label="Maximum evaluations" value={selection.estimatedJobs.toLocaleString()} mono />
+            <PreviewValue label="Scout evaluations" value={selection.scoutEstimatedJobs.toLocaleString()} mono />
             <PreviewValue label="Selected assets" value={selection.assets.length.toLocaleString()} mono />
-            <PreviewValue label="Strategy variations" value={selection.candidateCount.toLocaleString()} mono />
+            <PreviewValue label="Scout variations" value={selection.scoutCandidateCount.toLocaleString()} mono />
+            <PreviewValue label="Expansion ceiling" value={selection.estimatedJobs.toLocaleString()} mono />
           </div>
 
           <div className="previewGroup">

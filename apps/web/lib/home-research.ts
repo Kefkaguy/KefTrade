@@ -27,6 +27,8 @@ export type ResearchSelection = {
   assets: ResearchAsset[];
   candidateCount: number;
   estimatedJobs: number;
+  scoutCandidateCount: number;
+  scoutEstimatedJobs: number;
 };
 
 export const MIN_TARGETED_CANDIDATES = 60;
@@ -98,14 +100,22 @@ export const VALIDATION_METHODS = ["Walk Forward", "Cross Asset", "Robustness", 
 export function buildResearchSelection(scopeId: ResearchScopeId, assets: ResearchAsset[]): ResearchSelection {
   const scope = RESEARCH_SCOPES.find((item) => item.id === scopeId);
   const candidateCount = candidateCountForAssets(assets.length);
+  const scoutCandidateCount = scoutCandidateBudget(candidateCount);
 
   return {
     scopeId,
     scopeLabel: scope?.label ?? `${assets.length.toLocaleString()} selected assets`,
     assets,
     candidateCount,
-    estimatedJobs: assets.length * RESEARCH_TIMEFRAMES.length * candidateCount
+    estimatedJobs: assets.length * RESEARCH_TIMEFRAMES.length * candidateCount,
+    scoutCandidateCount,
+    scoutEstimatedJobs: assets.length * RESEARCH_TIMEFRAMES.length * scoutCandidateCount
   };
+}
+
+export function scoutCandidateBudget(candidateCount: number) {
+  if (candidateCount <= 0) return 0;
+  return Math.min(candidateCount, Math.max(12, Math.min(36, Math.round(candidateCount * 0.12))));
 }
 
 export function candidateCountForAssets(assetCount: number) {

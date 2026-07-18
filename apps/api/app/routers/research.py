@@ -468,10 +468,11 @@ def create_large_scale_research_campaign(
     dataset_mode: str = Query("rolling", pattern="^(rolling|reproducibility)$"),
     dataset_id: int | None = Query(None, ge=1),
     hypothesis_id: int | None = Query(None, ge=1),
+    search_mode: str = Query("scout_expand", pattern="^(scout_expand|full)$"),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     started = time.perf_counter()
-    log_event("Campaign creation started", universe_key=universe_key, name=name, max_candidates=max_candidates, asset_limit=asset_limit, timeframes=timeframes, architecture_mode=architecture_mode, dataset_mode=dataset_mode, dataset_id=dataset_id, hypothesis_id=hypothesis_id)
+    log_event("Campaign creation started", universe_key=universe_key, name=name, max_candidates=max_candidates, asset_limit=asset_limit, timeframes=timeframes, architecture_mode=architecture_mode, dataset_mode=dataset_mode, dataset_id=dataset_id, hypothesis_id=hypothesis_id, search_mode=search_mode)
     if architecture_mode == "intelligent":
         try:
             result = create_intelligent_research_campaign(
@@ -498,6 +499,7 @@ def create_large_scale_research_campaign(
             max_candidates=max_candidates,
             asset_limit=asset_limit,
             timeframes=timeframes,
+            search_mode=search_mode,
         )
         log_event("Campaign launch complete", campaign_id=result.get("campaign", {}).get("id"), elapsed_ms=elapsed_ms(started))
         return result

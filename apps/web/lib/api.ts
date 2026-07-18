@@ -1078,6 +1078,7 @@ export type ResearchCampaignStatus = {
   analytics: ResearchCampaignAnalytics;
   recent_jobs: Array<Record<string, unknown>>;
   elite_candidates: Array<Record<string, unknown>>;
+  forward_validation_candidates?: Array<Record<string, unknown>>;
   simulation_only: boolean;
 };
 
@@ -1166,6 +1167,11 @@ export type ResearchCampaignListRow = {
   jobs_per_minute_15m?: number;
   executable_remaining_jobs?: number;
   target_workers?: number;
+  search_mode?: "scout_expand" | "full";
+  research_stage?: "scout" | "expanded" | "stopped_no_signal" | "stopped_no_inventory" | "full";
+  scout_candidate_count?: number;
+  expanded_routes?: number;
+  expansion_jobs_created?: number;
   average_queue_delay_ms?: number;
   created_at: string;
   started_at?: string | null;
@@ -1467,6 +1473,7 @@ export function createResearchCampaign(options: {
   timeframes: string[];
   architectureMode?: "intelligent" | "legacy";
   datasetMode?: "rolling" | "reproducibility";
+  searchMode?: "scout_expand" | "full";
 }) {
   const params = new URLSearchParams({
     universe_key: options.universeKey,
@@ -1474,7 +1481,8 @@ export function createResearchCampaign(options: {
     max_candidates: String(options.maxCandidates),
     asset_limit: String(options.assetLimit),
     architecture_mode: options.architectureMode ?? "intelligent",
-    dataset_mode: options.datasetMode ?? "rolling"
+    dataset_mode: options.datasetMode ?? "rolling",
+    search_mode: options.searchMode ?? (options.architectureMode === "legacy" ? "scout_expand" : "full")
   });
   for (const timeframe of options.timeframes) params.append("timeframes", timeframe);
   return request<ResearchCampaignCreateResult>(`/research/campaigns?${params.toString()}`, {

@@ -16,6 +16,10 @@ from app.services.research_campaigns import (
     forward_validation_state,
     generate_discovery_candidates,
     campaign_list_row_with_eta,
+    candidate_parameter_distance,
+    diverse_candidate_selection,
+    expansion_candidate_mix,
+    multi_objective_candidate_score,
     near_pass_repair_candidates,
     passes_cross_validation,
     passes_single_market_validation,
@@ -25,6 +29,8 @@ from app.services.research_campaigns import (
     research_heatmaps,
     run_parallel_campaign_batch,
     run_research_campaign_batch,
+    scout_candidate_budget,
+    select_scout_expansion_routes,
     single_asset_generalization_blueprint,
     strategy_redesign_blueprint,
     transferability_sample_size_blueprint,
@@ -175,6 +181,8 @@ class CampaignConn:
             campaign["status"] = "running"
             campaign["target_workers"] = params[0]
             campaign["scheduling_config"] = jsonb(params[2])
+            return Result([])
+        if "WITH ranked AS" in query and "research_campaign_workers" in query:
             return Result([])
         if "UPDATE research_campaigns" in query and "status = 'running'" in query:
             campaign = self.campaign(params[0])
@@ -403,6 +411,108 @@ def test_parallel_scale_request_persists_new_target_without_api_pool() -> None:
     assert second["scaled"] is True
     assert second["workers"] == min(8, research_campaigns.campaign_worker_limit())
     assert conn.campaign(campaign_id)["target_workers"] == second["workers"]
+
+
+def test_parallel_scale_down_persists_reduced_target_for_graceful_drain() -> None:
+    conn = CampaignConn()
+    created = create_research_campaign(conn, universe_key="sp500_leaders", max_candidates=1, asset_limit=2, timeframes=["1h"])
+    campaign_id = created["campaign"]["id"]
+    run_parallel_campaign_batch(conn, campaign_id=campaign_id, workers=4, jobs_per_worker=20)
+
+    reduced = run_parallel_campaign_batch(conn, campaign_id=campaign_id, workers=1, jobs_per_worker=20)
+
+    assert reduced["scaled"] is True
+    assert reduced["workers"] == 1
+    assert conn.campaign(campaign_id)["target_workers"] == 1
+
+
+def test_worker_container_pool_creates_distinct_logical_slots(monkeypatch) -> None:
+    observed = []
+
+    def fake_worker(_factory, **kwargs):
+        observed.append(kwargs["worker_id"])
+        return {"worker_id": kwargs["worker_id"], "processed": 1}
+
+    monkeypatch.setattr(research_campaigns, "run_background_campaign_worker", fake_worker)
+    result = research_campaigns.run_background_campaign_worker_pool(lambda: None, worker_id_prefix="vps-worker", slots=4, max_cycles=1, use_processes=False)
+
+    assert result["slots"] == min(4, research_campaigns.campaign_worker_limit())
+    assert len(set(observed)) == result["slots"]
+    assert all(worker_id.startswith("vps-worker-slot-") for worker_id in observed)
+
+
+def test_scout_mode_queues_a_small_diverse_pass_before_full_budget() -> None:
+    conn = CampaignConn()
+
+    created = create_research_campaign(
+        conn,
+        universe_key="sp500_leaders",
+        max_candidates=100,
+        asset_limit=2,
+        timeframes=["1h"],
+        search_mode="scout_expand",
+    )
+
+    assert created["search_mode"] == "scout_expand"
+    assert created["candidate_budget"] == 100
+    assert created["candidates_generated"] == scout_candidate_budget(100)
+    assert created["jobs_created"] == scout_candidate_budget(100) * 2
+    execution = conn.campaigns[0]["controls"]["research_execution"]
+    assert execution["stage"] == "scout"
+    assert len(execution["scout_candidate_ids"]) == scout_candidate_budget(100)
+
+
+def test_diversity_filter_avoids_near_identical_candidate_inventory() -> None:
+    candidates = generate_discovery_candidates(max_candidates=80)
+    selected = diverse_candidate_selection(candidates, 12)
+
+    assert len(selected) == 12
+    for index, candidate in enumerate(selected):
+        same_family = [prior for prior in selected[:index] if research_campaigns.strategy_family_for_candidate(prior) == research_campaigns.strategy_family_for_candidate(candidate)]
+        assert all(candidate_parameter_distance(candidate, prior) >= 0.08 for prior in same_family)
+
+
+def test_scout_routing_requires_positive_walk_forward_evidence() -> None:
+    candidate = generate_discovery_candidates(max_candidates=1)[0]
+    payload = asdict(candidate)
+    strong = {
+        "candidate_id": candidate.candidate_id,
+        "candidate": payload,
+        "symbol": "AAPL",
+        "timeframe": "1h",
+        "strategy_family": research_campaigns.strategy_family_for_candidate(candidate),
+        "status": "promoted",
+        "validation_score": 5,
+        "result": {"metrics": {"profit_factor": 1.35, "expectancy_per_trade": 3, "max_drawdown": 0.04, "number_of_trades": 40, "walk_forward": {"enabled": True}}},
+    }
+    no_walk_forward = {**strong, "symbol": "MSFT", "result": {"metrics": {**strong["result"]["metrics"], "walk_forward": {"enabled": False}}}}
+
+    routes = select_scout_expansion_routes([strong, no_walk_forward])
+
+    assert [row["symbol"] for row in routes] == ["AAPL"]
+
+
+def test_expansion_mix_prefers_near_pass_repairs_and_keeps_unique_execution_keys() -> None:
+    base = generate_discovery_candidates(max_candidates=80)
+    parent = base[0]
+    evidence = [{
+        "candidate": parent,
+        "result": {"metrics": {"profit_factor": 1.1, "expectancy_per_trade": 2, "max_drawdown": 0.08, "number_of_trades": 24}},
+        "failure_reasons": ["weak_profit_factor", "insufficient_trades"],
+    }]
+
+    mixed = expansion_candidate_mix(base, evidence, 20)
+
+    assert len({research_campaigns.candidate_execution_key(row) for row in mixed}) == len(mixed)
+    assert any("repair" in str(row.parameters.get("generation_channel")) for row in mixed)
+    assert any(row.parameters.get("adaptive_volatility_profiles") for row in mixed)
+
+
+def test_multi_objective_ranking_rewards_stable_trade_supported_candidates() -> None:
+    fragile = {"profit_factor": 2.0, "expectancy": 8, "max_drawdown": 0.04, "trade_count": 4, "stability": 0.1, "assets_passed": 1}
+    robust = {"profit_factor": 1.45, "expectancy": 4, "max_drawdown": 0.05, "trade_count": 100, "stability": 0.8, "assets_passed": 3}
+
+    assert multi_objective_candidate_score(robust) > multi_objective_candidate_score(fragile)
 
 
 def test_campaign_eta_uses_rolling_or_profiled_backend_method() -> None:

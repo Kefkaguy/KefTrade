@@ -354,7 +354,9 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
         "exit",  # exit behavior is represented by RR, stop, and holding parameters
         "frequency_hypothesis",
         "generation_channel",
+        "generation_stage",
         "generator_version",
+        "elite_repair_version",
         "hypothesis_key",
         "hypothesis_scope_ref",
         "hypothesis_scope_type",
@@ -362,6 +364,8 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
         "hypothesis_version_id",
         "phase2_generation_role",
         "phase2_generation_seed",
+        "phase_9_11_campaign_version",
+        "phase_9_12_campaign_version",
         "relevant_regimes",
         "research_architecture_version",
         "volume",  # the executable volume rule is volume_change_min

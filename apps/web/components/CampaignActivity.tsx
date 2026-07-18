@@ -178,7 +178,8 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
             const isActive = ["running", "queued"].includes(campaign.status);
             const eta = isActive ? formatEta(campaign.eta_seconds ?? campaign.estimated_seconds_remaining, campaign.eta_method) : null;
             const poolActive = Boolean(profile?.runtime.parallel_pool_active) && executionId === campaign.id;
-            const poolStarting = poolActive && profile?.runtime.parallel_pool_status === "starting";
+            const poolStarting = poolActive && ((profile?.runtime.starting_parallel_workers ?? 0) > 0 || (profile?.runtime.live_workers ?? 0) < (profile?.runtime.target_workers ?? 0));
+            const startingWorkers = Math.max(profile?.runtime.starting_parallel_workers ?? 0, (profile?.runtime.target_workers ?? 0) - (profile?.runtime.live_workers ?? 0));
             const workerLimit = profile?.runtime.worker_limit ?? 8;
             const workerOptions = [1, 2, 4, 8].filter((count) => count <= workerLimit);
             return (
@@ -190,6 +191,7 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                 <div className="campaignIdentity">
                   <strong>{campaign.name}</strong>
                   <small>Campaign {campaign.id} · {campaign.dataset_id ? "versioned research" : "legacy research"} · {campaign.universe_key}</small>
+                  {campaign.search_mode === "scout_expand" ? <small>{researchStageLabel(campaign)}</small> : null}
                 </div>
                 <div className="campaignProgress">
                   <div><span>{campaign.terminal_jobs.toLocaleString()} of {campaign.total_jobs.toLocaleString()} jobs</span><strong>{progress}%</strong></div>
@@ -225,7 +227,7 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                           <span><Cpu size={15} /><small>Workers alive</small><strong>{profile.runtime.live_workers ?? profile.runtime.active_parallel_workers} / {profile.runtime.target_workers || profile.runtime.configured_parallel_workers || workerCount}</strong></span>
                           <span><Gauge size={15} /><small>Jobs claimed</small><strong>{profile.runtime.active_parallel_jobs}</strong></span>
                           <span title="Resident memory used by the KefTrade API process, including parallel worker threads"><MemoryStick size={15} /><small>API RAM</small><strong>{formatMemory(profile.runtime.resident_memory_mb)}</strong></span>
-                          <i className={poolActive ? "active" : undefined}>{poolStarting ? `Starting ${profile.runtime.starting_parallel_workers} worker${profile.runtime.starting_parallel_workers === 1 ? "" : "s"}` : poolActive ? `${profile.runtime.effective_workers ?? profile.runtime.active_parallel_workers} effective / ${profile.runtime.draining_workers ?? 0} draining` : "Workers idle"}</i>
+                          <i className={poolActive ? "active" : undefined}>{poolStarting ? `Starting ${startingWorkers} worker${startingWorkers === 1 ? "" : "s"}` : poolActive ? `${profile.runtime.effective_workers ?? profile.runtime.active_parallel_workers} effective / ${profile.runtime.draining_workers ?? 0} draining` : "Workers idle"}</i>
                         </div>
                       ) : null}
                       {profile?.profiled_jobs ? (
@@ -268,6 +270,14 @@ function formatMemory(valueMb: number) {
 
 function CampaignLoading() {
   return <div className="campaignActivityEmpty">Loading campaign activity...</div>;
+}
+
+function researchStageLabel(campaign: ResearchCampaignListRow) {
+  if (campaign.research_stage === "scout") return `Scout pass · ${campaign.scout_candidate_count ?? 0} diverse candidates`;
+  if (campaign.research_stage === "expanded") return `Focused expansion · ${campaign.expanded_routes ?? 0} evidence-backed routes`;
+  if (campaign.research_stage === "stopped_no_signal") return "Scout stopped · no route met the expansion evidence floor";
+  if (campaign.research_stage === "stopped_no_inventory") return "Scout complete · no unique expansion candidates remained";
+  return "Full search";
 }
 
 function relativeTime(value: string) {

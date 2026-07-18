@@ -23,7 +23,7 @@ const researchStages = [
   { title: "Freezing and observing markets", detail: "Hashing the exact candle dataset and building versioned asset behavior profiles." },
   { title: "Grouping measured behavior", detail: "Clustering similar assets and selecting an evidence-backed hypothesis." },
   { title: "Testing focused variations", detail: "Running controlled exploitation, nearby, and exploration candidates." },
-  { title: "Classifying the evidence", detail: "Recording every validation gate, specialist, cluster candidate, and elite." },
+  { title: "Classifying the evidence", detail: "Recording every validation gate, specialist, forward candidate, and paper-confirmed elite." },
   { title: "Learning and archiving", detail: "Updating durable knowledge and exporting a checksum-verified experiment record." }
 ] as const;
 
@@ -39,9 +39,10 @@ export function ResearchLaunchExperience({
   const reduceMotion = useReducedMotion();
   const overallProgress = campaignProgress(phase, status);
   const eliteCandidates = status?.elite_candidates ?? [];
+  const forwardCandidates = status?.forward_validation_candidates ?? [];
   const jobsByStatus = status?.analytics.jobs_by_status ?? {};
   const processed = terminalJobs(jobsByStatus);
-  const total = Number(status?.analytics.jobs_total ?? createdCampaign?.jobs_created ?? selection.estimatedJobs);
+  const total = Number(status?.analytics.jobs_total ?? createdCampaign?.jobs_created ?? selection.scoutEstimatedJobs);
 
   return (
     <motion.section
@@ -117,7 +118,13 @@ export function ResearchLaunchExperience({
             exit={{ opacity: 0 }}
           >
             <span className="eliteIcon"><Trophy size={21} /></span>
-            <div><span className="eyebrow">Elite discovery</span><strong>{eliteCandidates.length} evidence-backed {eliteCandidates.length === 1 ? "strategy" : "strategies"} found</strong><p>The strongest candidates are ready for deeper review and forward validation.</p></div>
+            <div><span className="eyebrow">Forward-validated elite</span><strong>{eliteCandidates.length} validated {eliteCandidates.length === 1 ? "strategy" : "strategies"} found</strong><p>These candidates passed backtest gates and the required paper-forward evidence.</p></div>
+            <Link className="button secondary" href="/research-intelligence">Review evidence <ExternalLink size={15} /></Link>
+          </motion.div>
+        ) : forwardCandidates.length > 0 ? (
+          <motion.div className="eliteDiscovery" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
+            <span className="eliteIcon"><Trophy size={21} /></span>
+            <div><span className="eyebrow">Forward-validation candidates</span><strong>{forwardCandidates.length} strong backtest {forwardCandidates.length === 1 ? "candidate" : "candidates"}</strong><p>These strategies are promising, but they are not elite until paper evidence passes.</p></div>
             <Link className="button secondary" href="/research-intelligence">Review evidence <ExternalLink size={15} /></Link>
           </motion.div>
         ) : null}

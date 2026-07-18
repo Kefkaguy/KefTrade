@@ -736,6 +736,10 @@ def repair_mutation_plan(evidence: dict[str, Any]) -> list[tuple[str, dict[str, 
                 "normal_volatility_max": 0.025,
                 "low_volatility_returns_5_min": 0.001,
                 "max_holding_bars": max(base_holding, 14),
+                "adaptive_volatility_profiles": True,
+                "low_vol_risk_reward": round(max(1.35, min(base_rr, 1.7)), 2),
+                "high_vol_risk_reward": round(min(2.8, max(base_rr, 2.0)), 2),
+                "high_vol_volume_change_min": round(max(0.05, base_volume), 3),
             },
         )
     )
@@ -795,6 +799,43 @@ def dedupe_candidates_by_execution_key(candidates: list[DiscoveryCandidate], lim
     return selected
 
 
+def scout_candidate_budget(max_candidates: int) -> int:
+    return min(max_candidates, max(12, min(36, round(max_candidates * 0.12))))
+
+
+def diverse_candidate_selection(candidates: list[DiscoveryCandidate], limit: int) -> list[DiscoveryCandidate]:
+    """Round-robin families and reject candidates with nearly identical numeric inputs."""
+    families: dict[str, list[DiscoveryCandidate]] = defaultdict(list)
+    for candidate in dedupe_candidates_by_execution_key(candidates, len(candidates)):
+        families[strategy_family_for_candidate(candidate)].append(candidate)
+    selected: list[DiscoveryCandidate] = []
+    while len(selected) < limit and any(families.values()):
+        for family in sorted(families):
+            while families[family]:
+                candidate = families[family].pop(0)
+                if all(candidate_parameter_distance(candidate, prior) >= 0.08 for prior in selected if strategy_family_for_candidate(prior) == family):
+                    selected.append(candidate)
+                    break
+            if len(selected) >= limit:
+                break
+    return selected
+
+
+def candidate_parameter_distance(left: DiscoveryCandidate, right: DiscoveryCandidate) -> float:
+    keys = sorted(set(left.parameters) | set(right.parameters))
+    executable = [key for key in keys if key not in {"generation_channel", "generation_stage", "hypothesis", "label", "name"}]
+    differences: list[float] = []
+    for key in executable:
+        left_value = left.parameters.get(key)
+        right_value = right.parameters.get(key)
+        if isinstance(left_value, (int, float)) and not isinstance(left_value, bool) and isinstance(right_value, (int, float)) and not isinstance(right_value, bool):
+            scale = max(abs(float(left_value)), abs(float(right_value)), 1.0)
+            differences.append(min(1.0, abs(float(left_value) - float(right_value)) / scale))
+        else:
+            differences.append(0.0 if left_value == right_value else 1.0)
+    return sum(differences) / len(differences) if differences else 0.0
+
+
 def create_research_campaign(
     conn: psycopg.Connection,
     *,
@@ -803,6 +844,7 @@ def create_research_campaign(
     max_candidates: int = 1000,
     asset_limit: int = 100,
     timeframes: list[str] | None = None,
+    search_mode: str = "full",
 ) -> dict[str, Any]:
     started = time.perf_counter()
     log_event("Research campaign launch requested", universe_key=universe_key, max_candidates=max_candidates, asset_limit=asset_limit, timeframes=timeframes)
@@ -811,8 +853,15 @@ def create_research_campaign(
     assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
     selected_timeframes = list(timeframes or universe.get("default_timeframes") or DEFAULT_CAMPAIGN_TIMEFRAMES)
     log_event("Job generation started", assets=len(assets), timeframes=len(selected_timeframes), strategies=max_candidates, expected_jobs=len(assets) * len(selected_timeframes) * max_candidates)
+    if search_mode not in {"full", "scout_expand"}:
+        raise ValueError("search_mode must be full or scout_expand")
     candidates, generation_metrics = campaign_generation_candidates(conn, universe_key=universe_key, max_candidates=max_candidates)
-    campaign_key = research_campaign_key(universe_key, assets, selected_timeframes, max_candidates)
+    queued_candidates = candidates
+    scout_ids: list[str] = []
+    if search_mode == "scout_expand":
+        queued_candidates = diverse_candidate_selection(candidates, scout_candidate_budget(max_candidates))
+        scout_ids = [candidate.candidate_id for candidate in queued_candidates]
+    campaign_key = research_campaign_key(universe_key, assets, selected_timeframes, max_candidates, search_mode=search_mode)
     campaign_name = name or f"{universe['name']} strategy discovery campaign"
     insert_started = time.perf_counter()
     log_event("Before INSERT research_campaigns", campaign_key=campaign_key, name=campaign_name)
@@ -835,6 +884,15 @@ def create_research_campaign(
                 "campaign_version": CAMPAIGN_VERSION,
                 "candidate_generation": "family_balanced_frequency_hypotheses_v1",
                 "candidate_generation_mix": generation_metrics,
+                "research_execution": {
+                    "search_mode": search_mode,
+                    "stage": "scout" if search_mode == "scout_expand" else "full",
+                    "scout_candidate_count": len(queued_candidates) if search_mode == "scout_expand" else 0,
+                    "scout_candidate_ids": scout_ids,
+                    "full_candidate_budget": max_candidates,
+                    "expanded_routes": [],
+                    "expansion_jobs_created": 0,
+                },
                 "validation_policy": "All existing trade-count, quality, walk-forward, and cross-market gates remain unchanged.",
             }),
             Jsonb(DEFAULT_SCHEDULING_CONFIG),
@@ -843,7 +901,7 @@ def create_research_campaign(
     ).fetchone()
     log_event("After INSERT research_campaigns", elapsed_ms=elapsed_ms(insert_started), rows_affected=1 if row else 0, campaign_id=row["id"] if row else None)
     campaign_id = int(row["id"])
-    created = queue_campaign_jobs(conn, campaign_id, candidates, assets, selected_timeframes)
+    created = queue_campaign_jobs(conn, campaign_id, queued_candidates, assets, selected_timeframes)
     update_campaign_counts(conn, campaign_id)
     log_event("Before COMMIT research_campaigns", campaign_id=campaign_id)
     conn.commit()
@@ -853,7 +911,9 @@ def create_research_campaign(
         "campaign": jsonable(dict(row)),
         "assets": assets,
         "timeframes": selected_timeframes,
-        "candidates_generated": len(candidates),
+        "candidates_generated": len(queued_candidates),
+        "candidate_budget": len(candidates),
+        "search_mode": search_mode,
         "jobs_created": created,
         "campaign_version": CAMPAIGN_VERSION,
         "simulation_only": True,
@@ -2629,7 +2689,13 @@ def run_research_campaign_batch(
     analytics: dict[str, Any] = {}
     if coordinate_campaign:
         if remaining == 0:
-            analytics = finalize_research_campaign(conn, campaign_id)
+            expansion = expand_scout_campaign(conn, campaign_id)
+            remaining = open_job_count(conn, campaign_id)
+            if remaining == 0:
+                analytics = finalize_research_campaign(conn, campaign_id)
+            else:
+                update_campaign_counts(conn, campaign_id)
+                analytics = {**campaign_progress_analytics(conn, campaign_id), "scout_expansion": expansion}
         else:
             update_campaign_counts(conn, campaign_id)
             analytics = campaign_progress_analytics(conn, campaign_id)
@@ -3590,7 +3656,8 @@ def heartbeat_campaign_worker(conn: psycopg.Connection, worker_id: str, *, statu
     conn.execute(
         """
         UPDATE research_campaign_workers
-        SET status = %s, heartbeat_at = NOW(), last_heartbeat_at = NOW(), latest_cycle_at = NOW()
+        SET status = CASE WHEN status = 'draining' THEN status ELSE %s END,
+            heartbeat_at = NOW(), last_heartbeat_at = NOW(), latest_cycle_at = NOW()
         WHERE worker_id = %s
         """,
         (status, worker_id),
@@ -3690,12 +3757,14 @@ def run_durable_campaign_worker_cycle(conn: psycopg.Connection, *, worker_id: st
         if target <= 0:
             continue
         if int(runtime["effective_workers"]) >= target:
-            heartbeat_campaign_worker(conn, worker_id, status="draining")
+            mark_campaign_worker_idle(conn, worker_id)
             conn.commit()
             continue
-        config = scheduling_config(dict(campaign))
-        batch_size = min(int(config.get("batch_size") or 25), int(config.get("max_jobs_per_cycle") or 50), 25)
-        result = run_research_campaign_batch(conn, campaign_id=campaign_id, batch_size=max(1, batch_size), worker_id=worker_id)
+        # Reserve capacity while the campaign row lock is still held. Other logical
+        # slots will observe this heartbeat after commit and cannot exceed target.
+        set_campaign_worker_assignment(conn, worker_id, campaign_id=campaign_id, current_job_id=None, status="starting")
+        conn.commit()
+        result = run_research_campaign_batch(conn, campaign_id=campaign_id, batch_size=1, worker_id=worker_id)
         processed = int(result.get("processed") or 0)
         if processed:
             return result
@@ -3757,6 +3826,185 @@ def run_background_campaign_worker(
     except Exception as error:
         log_exception("Worker exception", error, worker_id=worker, cycles=cycles, processed=processed, elapsed_ms=elapsed_ms(started))
         raise
+
+
+def run_background_campaign_worker_pool(
+    conn_factory,
+    *,
+    worker_id_prefix: str | None = None,
+    slots: int | None = None,
+    poll_seconds: float = 5.0,
+    max_cycles: int | None = None,
+    stop_file: str | None = None,
+    use_processes: bool = True,
+) -> dict[str, Any]:
+    """Run durable logical slots as real processes for CPU-bound simulations."""
+    slot_count = max(1, min(campaign_worker_limit(), int(slots or campaign_worker_limit())))
+    prefix = worker_id_prefix or f"{WORKER_VERSION}_{socket.gethostname()}_{os.getpid()}"
+    log_event("Worker pool started", worker_id_prefix=prefix, slots=slot_count)
+    results: list[dict[str, Any]] = []
+    executor_type = ProcessPoolExecutor if use_processes else ThreadPoolExecutor
+    executor_options = {"max_workers": slot_count}
+    if not use_processes:
+        executor_options["thread_name_prefix"] = "campaign-slot"
+    with executor_type(**executor_options) as executor:
+        futures = [
+            executor.submit(
+                run_background_campaign_worker,
+                conn_factory,
+                worker_id=f"{prefix}-slot-{index + 1}",
+                poll_seconds=poll_seconds,
+                max_cycles=max_cycles,
+                stop_file=stop_file,
+            )
+            for index in range(slot_count)
+        ]
+        for future in as_completed(futures):
+            results.append(future.result())
+    return {
+        "worker_id_prefix": prefix,
+        "slots": slot_count,
+        "processed": sum(int(row.get("processed") or 0) for row in results),
+        "workers": results,
+        "simulation_only": True,
+    }
+
+
+def scout_job_quality(job: dict[str, Any]) -> float:
+    result = dict(job.get("result") or {})
+    metrics = dict(result.get("metrics") or {})
+    if not bool((metrics.get("walk_forward") or {}).get("enabled")):
+        return 0.0
+    profit_factor = min(1.5, validation_profit_factor({"result": result}) / 1.2)
+    expectancy = finite_metric(metrics.get("expectancy_per_trade"))
+    expectancy_score = max(0.0, min(1.0, expectancy / 5.0))
+    drawdown_score = max(0.0, 1.0 - finite_metric(metrics.get("max_drawdown")) / 0.12)
+    trade_score = min(1.0, finite_metric(metrics.get("number_of_trades")) / 30.0)
+    gate_score = 1.0 if job.get("status") == "promoted" else min(1.0, finite_metric(job.get("validation_score")) / 5.0)
+    return round(0.25 * profit_factor + 0.20 * expectancy_score + 0.20 * drawdown_score + 0.20 * trade_score + 0.15 * gate_score, 6)
+
+
+def select_scout_expansion_routes(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    scored = []
+    for job in jobs:
+        result = dict(job.get("result") or {})
+        metrics = dict(result.get("metrics") or {})
+        score = scout_job_quality(job)
+        has_signal = (
+            job.get("status") == "promoted"
+            or validation_profit_factor({"result": result}) >= 1.0
+            or finite_metric(metrics.get("expectancy_per_trade")) > 0
+        )
+        if has_signal and score >= 0.5:
+            scored.append({
+                "symbol": str(job["symbol"]),
+                "timeframe": str(job["timeframe"]),
+                "strategy_family": str(job.get("strategy_family") or strategy_family_for_candidate(job.get("candidate") or {})),
+                "candidate_id": str(job["candidate_id"]),
+                "score": score,
+                "job": job,
+            })
+    best_by_route: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for row in scored:
+        key = (row["symbol"], row["timeframe"], row["strategy_family"])
+        if key not in best_by_route or row["score"] > best_by_route[key]["score"]:
+            best_by_route[key] = row
+    ranked = sorted(best_by_route.values(), key=lambda row: (row["score"], row["symbol"]), reverse=True)
+    limit = max(2, min(12, round(len(ranked) * 0.35))) if ranked else 0
+    selected = ranked[:limit]
+    # A second related asset lets genuinely transferable candidates reach the
+    # unchanged cross-asset gate instead of being mislabeled as broad elites.
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for row in ranked:
+        groups[(row["strategy_family"], row["timeframe"])].append(row)
+    for row in list(selected):
+        siblings = groups[(row["strategy_family"], row["timeframe"])]
+        if sum(1 for item in selected if item["strategy_family"] == row["strategy_family"] and item["timeframe"] == row["timeframe"]) < 2:
+            sibling = next((item for item in siblings if item["symbol"] != row["symbol"]), None)
+            if sibling and sibling not in selected:
+                selected.append(sibling)
+    return selected
+
+
+def expansion_candidate_mix(
+    base_candidates: list[DiscoveryCandidate],
+    parent_evidence: list[dict[str, Any]],
+    budget: int,
+) -> list[DiscoveryCandidate]:
+    repair_quota = round(budget * 0.70)
+    adjacent_quota = round(budget * 0.20)
+    exploratory_quota = max(0, budget - repair_quota - adjacent_quota)
+    repairs = near_pass_repair_candidates(parent_evidence, repair_quota)
+    adjacent = channel_candidates(base_candidates, adjacent_quota + max(0, repair_quota - len(repairs)), "adjacent")
+    exploratory = channel_candidates(base_candidates, exploratory_quota, "exploratory", offset=len(adjacent))
+    combined = [*repairs, *adjacent, *exploratory]
+    if len(combined) < budget:
+        combined.extend(channel_candidates(base_candidates, budget - len(combined), "exploratory_fill", offset=len(combined)))
+    return diverse_candidate_selection(combined, budget)
+
+
+def queue_campaign_route_jobs(
+    conn: psycopg.Connection,
+    campaign_id: int,
+    candidates: list[DiscoveryCandidate],
+    routes: list[dict[str, Any]],
+) -> int:
+    created = 0
+    candidates_by_family: dict[str, list[DiscoveryCandidate]] = defaultdict(list)
+    for candidate in candidates:
+        candidates_by_family[strategy_family_for_candidate(candidate)].append(candidate)
+    for route in routes:
+        matching = candidates_by_family.get(route["strategy_family"], [])
+        if matching:
+            created += queue_campaign_jobs(conn, campaign_id, matching, [route["symbol"]], [route["timeframe"]])
+    return created
+
+
+def expand_scout_campaign(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
+    # Serialize the final-scout race. The winning worker creates expansion jobs;
+    # followers observe the updated stage and cannot finalize prematurely.
+    campaign = conn.execute(
+        "SELECT * FROM research_campaigns WHERE id = %s AND simulation_only = TRUE FOR UPDATE",
+        (campaign_id,),
+    ).fetchone()
+    if not campaign:
+        return {"expanded": False, "reason": "campaign_not_found"}
+    campaign = dict(campaign)
+    controls = dict(campaign.get("controls") or {})
+    execution = dict(controls.get("research_execution") or {})
+    if execution.get("search_mode") != "scout_expand" or execution.get("stage") != "scout":
+        return {"expanded": False, "reason": "not_scout_stage"}
+    jobs = [dict(row) for row in conn.execute(
+        "SELECT * FROM research_campaign_jobs WHERE campaign_id = %s AND simulation_only = TRUE ORDER BY id",
+        (campaign_id,),
+    ).fetchall()]
+    routes = select_scout_expansion_routes(jobs)
+    if not routes:
+        execution.update({"stage": "stopped_no_signal", "expanded_routes": [], "expansion_jobs_created": 0})
+        conn.execute("UPDATE research_campaigns SET controls = %s, updated_at = NOW() WHERE id = %s", (Jsonb({**controls, "research_execution": execution}), campaign_id))
+        return {"expanded": False, "reason": "no_positive_walk_forward_routes"}
+    universe = get_universe(conn, str(campaign["universe_key"]))
+    full_budget = int(execution.get("full_candidate_budget") or campaign.get("requested_candidates") or 250)
+    base_candidates, _generation = campaign_generation_candidates(conn, universe_key=str(campaign["universe_key"]), max_candidates=full_budget)
+    parent_evidence = [
+        {"candidate": candidate_from_payload(dict(route["job"]["candidate"])), "result": route["job"].get("result") or {}, "failure_reasons": route["job"].get("failure_reasons") or []}
+        for route in routes
+    ]
+    scout_count = int(execution.get("scout_candidate_count") or 0)
+    candidates = expansion_candidate_mix(base_candidates, parent_evidence, max(0, full_budget - scout_count))
+    created = queue_campaign_route_jobs(conn, campaign_id, candidates, routes)
+    route_payload = [{key: row[key] for key in ("symbol", "timeframe", "strategy_family", "candidate_id", "score")} for row in routes]
+    execution.update({"stage": "expanded" if created else "stopped_no_inventory", "expanded_routes": route_payload, "expansion_jobs_created": created})
+    controls["research_execution"] = execution
+    controls["candidate_generation_mix"] = {
+        **dict(controls.get("candidate_generation_mix") or {}),
+        "expansion_policy": "70_percent_near_pass_repairs_20_percent_adjacent_10_percent_exploratory",
+        "walk_forward_first": True,
+        "family_asset_routing": True,
+        "near_duplicate_diversity_filter": 0.08,
+    }
+    conn.execute("UPDATE research_campaigns SET controls = %s, updated_at = NOW() WHERE id = %s", (Jsonb(jsonable(controls)), campaign_id))
+    return {"expanded": created > 0, "jobs_created": created, "routes": route_payload, "candidate_count": len(candidates), "assets_considered": len(universe.get("assets") or [])}
 
 
 def eligible_campaigns(conn: psycopg.Connection) -> list[dict[str, Any]]:
@@ -4203,8 +4451,7 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
                     if finite_metric(row_metrics.get("number_of_trades")) > 0 and finite_metric(row_metrics.get("expectancy_per_trade")) > 0:
                         regime_counter[str(regime_row.get("regime", "unknown"))] += 1
         first = rows[0]
-        summaries.append(
-            {
+        summary = {
                 "candidate_id": candidate_id,
                 "family_id": first["family_id"],
                 "strategy_name": "autonomous_strategy_discovery",
@@ -4224,8 +4471,27 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
                 "failure_reasons": sorted({reason for row in rows for reason in list(row.get("failure_reasons") or [])}),
                 "passed_markets": [{"symbol": row["symbol"], "timeframe": row["timeframe"]} for row in passed],
             }
-        )
-    return sorted(summaries, key=lambda row: (row["stability"], row["research_score"], validation_profit_factor(row)), reverse=True)
+        summary["multi_objective_score"] = multi_objective_candidate_score(summary)
+        summaries.append(summary)
+    return sorted(summaries, key=lambda row: (row["multi_objective_score"], row["stability"], row["research_score"]), reverse=True)
+
+
+def multi_objective_candidate_score(summary: dict[str, Any]) -> float:
+    profit_factor_score = min(1.0, validation_profit_factor(summary) / 1.5)
+    expectancy_score = max(0.0, min(1.0, finite_metric(summary.get("expectancy")) / 5.0))
+    drawdown_score = max(0.0, 1.0 - finite_metric(summary.get("max_drawdown")) / 0.12)
+    trade_score = min(1.0, finite_metric(summary.get("trade_count")) / 90.0)
+    stability_score = max(0.0, min(1.0, finite_metric(summary.get("stability"))))
+    cross_asset_score = min(1.0, finite_metric(summary.get("assets_passed")) / 3.0)
+    return round(
+        profit_factor_score * 0.20
+        + expectancy_score * 0.20
+        + drawdown_score * 0.15
+        + trade_score * 0.15
+        + stability_score * 0.20
+        + cross_asset_score * 0.10,
+        6,
+    )
 
 
 def passes_cross_validation(summary: dict[str, Any]) -> bool:
@@ -5255,6 +5521,7 @@ def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dic
             c.generator_version,
             c.requested_candidates,
             c.target_workers,
+            c.controls,
             c.created_at,
             c.started_at,
             c.completed_at,
@@ -5304,6 +5571,13 @@ def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dic
 
 
 def campaign_list_row_with_eta(row: dict[str, Any]) -> dict[str, Any]:
+    controls = dict(row.pop("controls", {}) or {})
+    execution = dict(controls.get("research_execution") or {})
+    row["search_mode"] = execution.get("search_mode", "full")
+    row["research_stage"] = execution.get("stage", "full")
+    row["scout_candidate_count"] = int(execution.get("scout_candidate_count") or 0)
+    row["expanded_routes"] = len(execution.get("expanded_routes") or [])
+    row["expansion_jobs_created"] = int(execution.get("expansion_jobs_created") or 0)
     total_jobs = int(row.get("total_jobs") or 0)
     terminal_jobs = int(row.get("terminal_jobs") or 0)
     blocked_jobs = int(row.get("blocked_jobs") or 0)
@@ -5362,12 +5636,12 @@ def get_campaign_performance_profile(conn: psycopg.Connection, campaign_id: int)
             AVG(CASE WHEN execution_profile->>'dataset_cache_hit' = 'true' THEN 1.0 ELSE 0.0 END) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS dataset_cache_hit_rate,
             COUNT(DISTINCT worker_id) FILTER (
                 WHERE status = 'running'
-                  AND LEFT(worker_id, 9) = 'parallel_'
+                  AND worker_id IS NOT NULL
                   AND lease_expires_at > NOW()
             ) AS active_parallel_workers,
             COUNT(*) FILTER (
                 WHERE status = 'running'
-                  AND LEFT(worker_id, 9) = 'parallel_'
+                  AND worker_id IS NOT NULL
                   AND lease_expires_at > NOW()
             ) AS active_parallel_jobs
         FROM research_campaign_jobs
@@ -5425,7 +5699,7 @@ def campaign_efficiency_metrics(conn: psycopg.Connection, campaign_id: int, runt
         """,
         (campaign_id,),
     ).fetchone() or {}
-    elite_count = int((conn.execute("SELECT COUNT(*) AS count FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE", (campaign_id,)).fetchone() or {}).get("count") or 0)
+    elite_count = int((conn.execute("SELECT COUNT(*) AS count FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE AND forward_validation_state = 'forward_validation_passed'", (campaign_id,)).fetchone() or {}).get("count") or 0)
     evaluated = int(row.get("evaluated_unique_candidates") or 0)
     duplicates_prevented = int(generation.get("duplicates_prevented") or 0) + int(dedupe.get("duplicates_prevented") or 0)
     attempted = int(generation.get("attempted_candidate_generations") or evaluated or 0)
@@ -5513,6 +5787,27 @@ def run_parallel_campaign_batch(
         """,
         (worker_count, worker_count, Jsonb(jsonable(config)), campaign_id),
     )
+    if worker_count < previous_target:
+        conn.execute(
+            """
+            WITH ranked AS (
+                SELECT worker_id,
+                       ROW_NUMBER() OVER (ORDER BY registered_at ASC, worker_id ASC) AS ordinal
+                FROM research_campaign_workers
+                WHERE campaign_id = %s
+                  AND status IN ('starting', 'running', 'draining')
+                  AND COALESCE(last_heartbeat_at, heartbeat_at) >= %s
+            )
+            UPDATE research_campaign_workers worker
+            SET status = 'draining',
+                last_heartbeat_at = NOW(),
+                heartbeat_at = NOW()
+            FROM ranked
+            WHERE worker.worker_id = ranked.worker_id
+              AND ranked.ordinal > %s
+            """,
+            (campaign_id, datetime.now(UTC) - timedelta(seconds=worker_stale_seconds()), worker_count),
+        )
     conn.commit()
     runtime = campaign_runtime_snapshot(conn, campaign_id)
     return {
@@ -5548,10 +5843,10 @@ def campaign_runtime_snapshot(conn: psycopg.Connection, campaign_id: int) -> dic
         (campaign_id, stale_cutoff),
     ).fetchall()
     rows = [dict(row) for row in workers]
-    live = [row for row in rows if row.get("status") in {"running", "idle", "starting"}]
+    live = [row for row in rows if row.get("status") in {"running", "idle", "starting", "draining"}]
     draining = [row for row in rows if row.get("status") == "draining"]
     target = min(int(campaign.get("target_workers") or 0), campaign_worker_limit())
-    effective = max(0, len(live) - len(draining))
+    effective = sum(1 for row in live if row.get("status") in {"running", "starting"})
     return {
         "worker_limit": campaign_worker_limit(),
         "target_workers": target,
@@ -5829,7 +6124,7 @@ def campaign_status(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any
         """,
         (campaign_id,),
     ).fetchall()
-    elite = conn.execute(
+    candidates = conn.execute(
         """
         SELECT *
         FROM elite_research_candidates
@@ -5840,7 +6135,17 @@ def campaign_status(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any
         (campaign_id,),
     ).fetchall()
     conn.commit()
-    return {"campaign": jsonable(campaign), "analytics": analytics, "recent_jobs": [jsonable(dict(row)) for row in jobs], "elite_candidates": [jsonable(dict(row)) for row in elite], "simulation_only": True}
+    candidate_rows = [jsonable(dict(row)) for row in candidates]
+    elite = [row for row in candidate_rows if row.get("forward_validation_state") == "forward_validation_passed"]
+    awaiting_forward = [row for row in candidate_rows if row.get("forward_validation_state") != "forward_validation_passed"]
+    return {
+        "campaign": jsonable(campaign),
+        "analytics": analytics,
+        "recent_jobs": [jsonable(dict(row)) for row in jobs],
+        "forward_validation_candidates": awaiting_forward,
+        "elite_candidates": elite,
+        "simulation_only": True,
+    }
 
 
 def list_campaign_jobs(conn: psycopg.Connection, campaign_id: int, *, status: str | None = None, limit: int = 100) -> dict[str, Any]:
@@ -6065,7 +6370,7 @@ def latest_completed_campaign_summary(conn: psycopg.Connection, rows: list[dict[
     summaries = candidate_consistency_summaries(jobs)
     lifecycle_rows = [candidate_lifecycle_summary(row) for row in summaries]
     lifecycle_counts = Counter(row["lifecycle"] for row in lifecycle_rows)
-    elite_count = int((conn.execute("SELECT COUNT(1) AS count FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE", (campaign_id,)).fetchone() or {}).get("count") or 0)
+    elite_count = int((conn.execute("SELECT COUNT(1) AS count FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE AND forward_validation_state = 'forward_validation_passed'", (campaign_id,)).fetchone() or {}).get("count") or 0)
     deployment_count = int((conn.execute("SELECT COUNT(1) AS count FROM strategy_deployments WHERE campaign_id = %s AND simulation_only = TRUE", (campaign_id,)).fetchone() or {}).get("count") or 0)
     failure_counter: Counter[str] = Counter()
     for job in jobs:
@@ -6091,6 +6396,7 @@ def latest_completed_campaign_summary(conn: psycopg.Connection, rows: list[dict[
             "rejected": lifecycle_counts.get("rejected", 0),
             "needs_more_evidence": lifecycle_counts.get("needs_more_evidence", 0),
             "research_candidate": lifecycle_counts.get("research_candidate", 0),
+            "forward_validation_candidate": max(0, lifecycle_counts.get("elite_candidate", 0) - elite_count),
             "elite_candidate": elite_count,
         },
         "cross_validation_rejected_candidates": int(campaign.get("rejected_candidates") or 0),
@@ -6311,8 +6617,9 @@ def rejection_rate(rows: list[dict[str, Any]]) -> float:
     return round(rejected / total, 4) if total else 0.0
 
 
-def research_campaign_key(universe_key: str, assets: list[str], timeframes: list[str], max_candidates: int) -> str:
-    raw = f"{CAMPAIGN_VERSION}|{universe_key}|{','.join(assets)}|{','.join(timeframes)}|{max_candidates}"
+def research_campaign_key(universe_key: str, assets: list[str], timeframes: list[str], max_candidates: int, *, search_mode: str = "full") -> str:
+    mode_suffix = "" if search_mode == "full" else f"|{search_mode}_v1"
+    raw = f"{CAMPAIGN_VERSION}|{universe_key}|{','.join(assets)}|{','.join(timeframes)}|{max_candidates}{mode_suffix}"
     return sha256(raw.encode("utf-8")).hexdigest()
 
 

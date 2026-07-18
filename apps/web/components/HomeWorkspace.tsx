@@ -188,7 +188,8 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         maxCandidates: campaignSelection.candidateCount,
         assetLimit: campaignSelection.assets.length,
         timeframes: [...RESEARCH_TIMEFRAMES],
-        architectureMode: "legacy"
+        architectureMode: "legacy",
+        searchMode: "scout_expand"
       });
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
       logLaunchDiagnostic("Campaign create response received", { campaignId: created.campaign.id, jobsCreated: created.jobs_created, elapsedMs: elapsedSince(createStartedAt) });
