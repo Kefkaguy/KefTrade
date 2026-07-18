@@ -40,21 +40,30 @@ export function ResearchCommandCenterDashboard() {
 
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    fetchResearchCommandCenter(filters)
-      .then((next) => {
+    let timer: number | undefined;
+
+    const refresh = async (initial: boolean) => {
+      if (initial) setLoading(true);
+      try {
+        const next = await fetchResearchCommandCenter(filters);
         if (!active) return;
         setData(next);
         setError("");
-      })
-      .catch((reason) => {
+        if (next.live_evidence) timer = window.setTimeout(() => void refresh(false), 5000);
+      } catch (reason) {
         if (!active) return;
         setError(reason instanceof Error ? reason.message : "Research command center unavailable.");
-      })
-      .finally(() => {
+        timer = window.setTimeout(() => void refresh(false), 5000);
+      } finally {
         if (active) setLoading(false);
-      });
-    return () => { active = false; };
+      }
+    };
+
+    void refresh(true);
+    return () => {
+      active = false;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
   }, [filterKey]);
 
   const options = data?.filter_options ?? {};

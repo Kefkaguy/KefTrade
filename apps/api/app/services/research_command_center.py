@@ -39,13 +39,27 @@ def research_command_center(
     if not campaigns:
         return empty_command_center(filters or {})
 
-    selected_id = campaign_id or int(campaigns[0]["id"])
-    campaign = next((row for row in campaigns if int(row["id"]) == selected_id), None)
-    if not campaign:
-        raise ValueError("research campaign not found")
-
-    if str(campaign.get("status") or "").lower() != "completed":
-        return live_campaign_command_center(conn, campaign, campaigns, filters or {})
+    if campaign_id is not None:
+        campaign = next((row for row in campaigns if int(row["id"]) == campaign_id), None)
+        if not campaign:
+            raise ValueError("research campaign not found")
+        scope_ids = [int(campaign_id)]
+    else:
+        scope_ids = [int(row["id"]) for row in campaigns]
+        active_statuses = {"queued", "running"}
+        campaign = {
+            "id": None,
+            "campaign_key": "all_campaign_evidence",
+            "name": "All campaign evidence",
+            "universe_key": "all",
+            "status": "running" if any(str(row.get("status") or "").lower() in active_statuses for row in campaigns) else "completed",
+            "requested_candidates": sum(int(row.get("requested_candidates") or 0) for row in campaigns),
+            "created_at": min((row.get("created_at") for row in campaigns if row.get("created_at")), default=None),
+            "started_at": min((row.get("started_at") for row in campaigns if row.get("started_at")), default=None),
+            "completed_at": max((row.get("completed_at") for row in campaigns if row.get("completed_at")), default=None),
+            "updated_at": max((row.get("updated_at") for row in campaigns if row.get("updated_at")), default=None),
+            "campaign_count": len(campaigns),
+        }
 
     jobs = [dict(row) for row in conn.execute(
         """
@@ -53,33 +67,35 @@ def research_command_center(
                status, candidate, result, validation_score, consistency_score, failure_reasons,
                attempts, failure_classification, created_at, started_at, completed_at, updated_at
         FROM research_campaign_jobs
-        WHERE campaign_id = %s AND simulation_only = TRUE
-        ORDER BY id ASC
+        WHERE campaign_id = ANY(%s) AND simulation_only = TRUE
+        ORDER BY campaign_id ASC, id ASC
         """,
-        (selected_id,),
+        (scope_ids,),
     ).fetchall()]
     elite = [dict(row) for row in conn.execute(
         """
-        SELECT candidate_id, family_id, research_score, profit_factor, expectancy, max_drawdown,
+        SELECT campaign_id, candidate_id, family_id, research_score, profit_factor, expectancy, max_drawdown,
                trade_count, stability, forward_validation_state, created_at
         FROM elite_research_candidates
-        WHERE campaign_id = %s AND simulation_only = TRUE
+        WHERE campaign_id = ANY(%s) AND simulation_only = TRUE
         """,
-        (selected_id,),
+        (scope_ids,),
     ).fetchall()]
     deployments = [dict(row) for row in conn.execute(
         """
         SELECT id, campaign_id, candidate_id, status, lifecycle_state, forward_validation_started_at,
                created_at
         FROM strategy_deployments
-        WHERE campaign_id = %s AND candidate_id IS NOT NULL AND simulation_only = TRUE
+        WHERE campaign_id = ANY(%s) AND candidate_id IS NOT NULL AND simulation_only = TRUE
         """,
-        (selected_id,),
+        (scope_ids,),
     ).fetchall()]
-    universe = conn.execute(
-        "SELECT metadata FROM research_universes WHERE universe_key = %s AND simulation_only = TRUE",
-        (campaign["universe_key"],),
-    ).fetchone()
+    universe = None
+    if campaign_id is not None:
+        universe = conn.execute(
+            "SELECT metadata FROM research_universes WHERE universe_key = %s AND simulation_only = TRUE",
+            (campaign["universe_key"],),
+        ).fetchone()
     historical = historical_research(conn)
     payload = analyze_campaign(
         campaign,
@@ -98,11 +114,12 @@ def research_command_center(
             "elite_research_candidates",
             "strategy_deployments",
         ],
-        "candidate_grain": "one candidate_id within the selected campaign",
+        "candidate_grain": "one campaign_id and candidate_id evidence unit",
         "validation_run_grain": "one research_campaign_jobs row per candidate, asset, and timeframe",
         "historical_tables": ["alpha_validation_runs", "strategy_experiments"],
         "refreshed_at": datetime.now(UTC),
     }
+    payload["live_evidence"] = any(str(row.get("status") or "").lower() in {"queued", "running"} for row in campaigns if campaign_id is None or int(row["id"]) == campaign_id)
     payload["simulation_only"] = True
     return payload
 
@@ -214,15 +231,16 @@ def analyze_campaign(
     filters: dict[str, Any] | None = None,
     default_asset_class: str = "equity",
 ) -> dict[str, Any]:
-    elite = elite or []
-    deployments = deployments or []
+    default_campaign_id = campaign.get("id")
+    elite = [{**row, "campaign_id": row.get("campaign_id", default_campaign_id)} for row in (elite or [])]
+    deployments = [{**row, "campaign_id": row.get("campaign_id", default_campaign_id)} for row in (deployments or [])]
     filters = normalized_filters(filters or {})
     prepared = [prepare_job(row, default_asset_class) for row in jobs]
     options = filter_options(prepared)
     scoped = [row for row in prepared if matches_filters(row, filters)]
-    scoped_ids = {row["candidate_id"] for row in scoped}
-    scoped_elite = [row for row in elite if row.get("candidate_id") in scoped_ids]
-    scoped_deployments = [row for row in deployments if row.get("candidate_id") in scoped_ids]
+    scoped_ids = {candidate_scope_id(row) for row in scoped}
+    scoped_elite = [row for row in elite if candidate_scope_id(row) in scoped_ids]
+    scoped_deployments = [row for row in deployments if candidate_scope_id(row) in scoped_ids]
 
     rejection = rejection_analysis(scoped)
     families = dimension_intelligence(scoped, "strategy_family")
@@ -370,10 +388,10 @@ def candidate_funnel(
         for candidate_id, rows in grouped.items()
     )
     research = sum(any(row["status"] == "promoted" for row in rows) for rows in grouped.values())
-    elite_ids = {str(row.get("candidate_id")) for row in elite}
-    deployed_ids = {str(row.get("candidate_id")) for row in deployments}
+    elite_ids = {candidate_scope_id(row) for row in elite}
+    deployed_ids = {candidate_scope_id(row) for row in deployments}
     forward_ids = {
-        str(row.get("candidate_id"))
+        candidate_scope_id(row)
         for row in deployments
         if str(row.get("lifecycle_state") or "") in FORWARD_STATES
         and str(row.get("status") or "") == "active"
@@ -416,10 +434,10 @@ def candidate_funnel(
 def rejection_analysis(jobs: list[dict[str, Any]]) -> dict[str, Any]:
     rejected = [row for row in jobs if row["status"] == "rejected"]
     gate_counter = Counter(gate for row in rejected for gate in row["failed_gates"])
-    rejected_candidates = len({row["candidate_id"] for row in rejected})
+    rejected_candidates = len({candidate_scope_id(row) for row in rejected})
     validation_rules = []
     for gate, count in gate_counter.most_common():
-        candidate_count = len({row["candidate_id"] for row in rejected if gate in row["failed_gates"]})
+        candidate_count = len({candidate_scope_id(row) for row in rejected if gate in row["failed_gates"]})
         validation_rules.append({
             "name": gate,
             "count": count,
@@ -482,7 +500,8 @@ def near_pass_candidates(jobs: list[dict[str, Any]], limit: int = 20) -> list[di
         best = min(evaluated, key=lambda row: (row["mean_distance"], len(row["failed_gates"]), -row["validation_score"]))
         if len(best["failed_gates"]) > 2 or best["mean_distance"] > 0.25:
             continue
-        best["candidate_id"] = candidate_id
+        best["candidate_id"] = str(rows[0]["candidate_id"])
+        best["campaign_id"] = rows[0].get("campaign_id")
         best["validation_runs"] = len(evaluated)
         candidates.append(best)
     return sorted(candidates, key=lambda row: (row["mean_distance"], len(row["failed_gates"]), -row["validation_score"]))[:limit]
@@ -580,7 +599,7 @@ def dimension_intelligence(jobs: list[dict[str, Any]], field: str) -> list[dict[
         failures = Counter(gate for row in rejected for gate in row["failed_gates"])
         row = {
             "name": name,
-            "candidates_tested": len({item["candidate_id"] for item in terminal}),
+            "candidates_tested": len({candidate_scope_id(item) for item in terminal}),
             "validation_runs": len(terminal),
             "rejection_rate": ratio(len(rejected), len(terminal)),
             "pass_rate": ratio(len(promoted), len(terminal)),
@@ -695,8 +714,9 @@ def grouped_experiment_history(jobs: list[dict[str, Any]], limit: int = 100) -> 
         failures = sorted({gate for row in rows for gate in row["failed_gates"]})
         statuses = Counter(str(row["status"]) for row in rows)
         result.append({
-            "experiment_id": f"campaign-{best.get('campaign_id')}-candidate-{candidate_id}",
-            "candidate_id": candidate_id,
+            "experiment_id": f"campaign-{best.get('campaign_id')}-candidate-{best.get('candidate_id')}",
+            "candidate_id": str(best.get("candidate_id")),
+            "campaign_id": best.get("campaign_id"),
             "strategy_family": best["strategy_family"],
             "assets": sorted({row["symbol"] for row in rows}),
             "timeframes": sorted({row["timeframe"] for row in rows}),
@@ -834,7 +854,7 @@ def next_campaign_proposal(
     deprioritize_assets = [row["name"] for row in assets if row["deprioritize"]]
     retain_timeframes = [row["name"] for row in timeframes if not row["deprioritize"]]
     deprioritize_timeframes = [row["name"] for row in timeframes if row["deprioritize"]]
-    unique_candidates = len({row["candidate_id"] for row in jobs})
+    unique_candidates = len({candidate_scope_id(row) for row in jobs})
     duplicate_work = int(duplicates["exact_duplicates"]) + int(duplicates["near_duplicates"])
     return {
         "proposal_version": f"phase_9_6_candidate_quality_v2_campaign_{campaign.get('id')}",
@@ -1035,8 +1055,14 @@ def weighted_metric(metrics: list[dict[str, Any]], key: str) -> float:
 def group_candidates(jobs: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in jobs:
-        grouped[str(row["candidate_id"])].append(row)
+        grouped[candidate_scope_id(row)].append(row)
     return grouped
+
+
+def candidate_scope_id(row: dict[str, Any]) -> str:
+    campaign_id = row.get("campaign_id")
+    candidate_id = str(row.get("candidate_id") or "")
+    return f"{campaign_id}:{candidate_id}" if campaign_id is not None else candidate_id
 
 
 def completed_candidate_count(jobs: list[dict[str, Any]]) -> int:

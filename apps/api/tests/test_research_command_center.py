@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import json
 
-from app.services.research_command_center import analyze_campaign
+from app.services.research_command_center import analyze_campaign, research_command_center
 
 
 CAMPAIGN = {
@@ -227,3 +227,54 @@ def test_next_campaign_proposal_is_review_only_and_preserves_thresholds() -> Non
     assert proposal["status"] == "review_required"
     assert proposal["launch_authorized"] is False
     assert proposal["validation_thresholds_changed"] is False
+
+
+class Result:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+
+class AllCampaignConn:
+    def __init__(self):
+        now = datetime(2026, 7, 18, tzinfo=UTC)
+        self.campaigns = [
+            {"id": 2, "campaign_key": "two", "name": "Running campaign", "universe_key": "two", "status": "running", "requested_candidates": 1, "analytics": {}, "created_at": now, "started_at": now, "completed_at": None, "updated_at": now},
+            {"id": 1, "campaign_key": "one", "name": "Completed campaign", "universe_key": "one", "status": "completed", "requested_candidates": 1, "analytics": {}, "created_at": now, "started_at": now, "completed_at": now, "updated_at": now},
+        ]
+        first = job(1, "shared-id", status="rejected")
+        first["campaign_id"] = 1
+        second = job(2, "shared-id", status="promoted", profit_factor=1.4, expectancy=2, trades=40)
+        second["campaign_id"] = 2
+        self.jobs = [first, second]
+
+    def execute(self, query, params=None):
+        if "FROM research_campaigns" in query:
+            return Result(self.campaigns)
+        if "FROM research_campaign_jobs" in query:
+            return Result(self.jobs)
+        if "FROM elite_research_candidates" in query or "FROM strategy_deployments" in query:
+            return Result([])
+        if "COUNT(*) AS count FROM alpha_validation_runs" in query or "COUNT(*) AS count FROM strategy_experiments" in query:
+            return Result([{"count": 0}])
+        if "FROM alpha_validation_runs" in query or "FROM strategy_experiments" in query:
+            return Result([])
+        raise AssertionError(query)
+
+
+def test_all_scope_combines_campaigns_and_keeps_running_evidence_visible(monkeypatch) -> None:
+    monkeypatch.setattr("app.services.research_command_center.ensure_campaign_tables", lambda _conn: None)
+
+    payload = research_command_center(AllCampaignConn())
+
+    assert payload["campaign"]["name"] == "All campaign evidence"
+    assert payload["live_evidence"] is True
+    assert payload["overview"]["campaign_jobs"] == 2
+    assert payload["overview"]["candidates_generated"] == 2
+    assert payload["overview"]["candidates_tested"] == 2
+    assert len(payload["experiment_history"]) == 2
