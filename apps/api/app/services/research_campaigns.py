@@ -3171,6 +3171,7 @@ def research_campaign_preflight(conn: psycopg.Connection, *, assets: list[str], 
     issues: list[dict[str, Any]] = []
     classifications: Counter[str] = Counter()
     eligible_datasets = 0
+    eligible_by_symbol: dict[str, set[str]] = {symbol: set() for symbol in normalized_assets}
     for symbol in normalized_assets:
         symbol_row = symbols.get(symbol)
         for timeframe in normalized_timeframes:
@@ -3214,12 +3215,21 @@ def research_campaign_preflight(conn: psycopg.Connection, *, assets: list[str], 
                     )
             else:
                 eligible_datasets += 1
+                eligible_by_symbol.setdefault(symbol, set()).add(timeframe)
 
     dataset_count = len(normalized_assets) * len(normalized_timeframes)
     blocked_datasets = dataset_count - eligible_datasets
+    required_timeframes = set(normalized_timeframes)
+    executable_assets = [symbol for symbol in normalized_assets if eligible_by_symbol.get(symbol, set()) >= required_timeframes]
+    excluded_assets = [symbol for symbol in normalized_assets if symbol not in executable_assets]
     result = {
         "ready": blocked_datasets == 0,
+        "can_launch": bool(executable_assets),
         "assets_total": len(normalized_assets),
+        "executable_assets": executable_assets,
+        "executable_assets_total": len(executable_assets),
+        "excluded_assets": excluded_assets,
+        "excluded_assets_total": len(excluded_assets),
         "timeframes": normalized_timeframes,
         "datasets_total": dataset_count,
         "eligible_datasets": eligible_datasets,

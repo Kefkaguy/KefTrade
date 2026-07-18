@@ -138,7 +138,12 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         preflight = prepared.readiness;
         logLaunchDiagnostic("Prepare complete", { ready: preflight.ready, prepared: prepared.prepared.length, errors: prepared.errors.length, elapsedMs: elapsedSince(prepareStartedAt) });
       }
-      if (!preflight.ready) {
+      const executableSymbols = new Set((preflight.executable_assets ?? []).map((symbol) => symbol.toUpperCase()));
+      const campaignAssets = preflight.ready || !executableSymbols.size
+        ? nextSelection.assets
+        : nextSelection.assets.filter((asset) => executableSymbols.has(asset.apiSymbol.toUpperCase()));
+
+      if (!preflight.ready && !campaignAssets.length) {
         const firstIssue = preflight.issues[0];
         const issueDetail = firstIssue
           ? `${firstIssue.symbol} ${firstIssue.timeframe}: ${firstIssue.reason}`
@@ -150,28 +155,30 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
 
       const universeKey = researchUniverseKey(nextSelection);
       const universeStartedAt = now();
-      logLaunchDiagnostic("Universe save started", { universeKey, assets: nextSelection.assets.length });
+      logLaunchDiagnostic("Universe save started", { universeKey, assets: campaignAssets.length, excludedAssets: preflight.excluded_assets_total ?? 0 });
       await saveResearchUniverse({
         universe_key: universeKey,
         name: `${nextSelection.scopeLabel} research universe`,
         description: "User-defined research universe created from the KefTrade Home research builder.",
-        assets: nextSelection.assets.map((asset) => asset.apiSymbol),
+        assets: campaignAssets.map((asset) => asset.apiSymbol),
         default_timeframes: [...RESEARCH_TIMEFRAMES],
         metadata: {
           source: "home_research_builder",
           scope: nextSelection.scopeId,
-          display_assets: nextSelection.assets.map((asset) => asset.id)
+          display_assets: campaignAssets.map((asset) => asset.id),
+          requested_assets: nextSelection.assets.map((asset) => asset.apiSymbol),
+          excluded_assets: preflight.excluded_assets ?? []
         }
       });
       logLaunchDiagnostic("Universe save complete", { universeKey, elapsedMs: elapsedSince(universeStartedAt) });
 
       const createStartedAt = now();
-      logLaunchDiagnostic("Campaign create request sent", { universeKey, maxCandidates: nextSelection.candidateCount, assetLimit: nextSelection.assets.length });
+      logLaunchDiagnostic("Campaign create request sent", { universeKey, maxCandidates: nextSelection.candidateCount, assetLimit: campaignAssets.length });
       const created = await createResearchCampaign({
         universeKey,
         name: `${nextSelection.scopeLabel} hypothesis research`,
         maxCandidates: nextSelection.candidateCount,
-        assetLimit: nextSelection.assets.length,
+        assetLimit: campaignAssets.length,
         timeframes: [...RESEARCH_TIMEFRAMES]
       });
       if (!aliveRef.current || generation !== runGenerationRef.current) return;

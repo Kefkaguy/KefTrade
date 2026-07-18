@@ -1093,7 +1093,12 @@ export type ResearchCampaignBatchResult = {
 
 export type ResearchCampaignPreflight = {
   ready: boolean;
+  can_launch?: boolean;
   assets_total: number;
+  executable_assets?: string[];
+  executable_assets_total?: number;
+  excluded_assets?: string[];
+  excluded_assets_total?: number;
   timeframes: string[];
   datasets_total: number;
   eligible_datasets: number;

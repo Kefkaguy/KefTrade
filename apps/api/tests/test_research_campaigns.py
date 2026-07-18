@@ -21,6 +21,7 @@ from app.services.research_campaigns import (
     passes_single_market_validation,
     overfit_regime_robustness_blueprint,
     quality_first_campaign_blueprint,
+    research_campaign_preflight,
     research_heatmaps,
     run_parallel_campaign_batch,
     run_research_campaign_batch,
@@ -510,6 +511,46 @@ def test_data_readiness_blocks_stale_campaign_jobs() -> None:
     assert readiness["ready"] is False
     assert readiness["status"] == "blocked_data"
     assert readiness["failure_classification"] == "stale_data"
+
+
+def test_campaign_preflight_exposes_executable_assets_when_some_symbols_are_blocked(monkeypatch) -> None:
+    class PreflightConn:
+        def execute(self, query, params=None):
+            if "FROM symbols" in query:
+                return Result(
+                    [
+                        {"symbol": "AAPL", "asset_class": "equity", "provider_symbol": "AAPL", "primary_provider": "alpaca_iex", "is_active": True},
+                        {"symbol": "AAA", "asset_class": "etf", "provider_symbol": "AAA", "primary_provider": "alpaca_iex", "is_active": True},
+                    ]
+                )
+            if "FROM candles" in query:
+                return Result(
+                    [
+                        {"symbol": "AAPL", "timeframe": "1h", "candle_count": 200, "latest_candle_timestamp": datetime(2026, 7, 18, tzinfo=UTC)},
+                        {"symbol": "AAPL", "timeframe": "4h", "candle_count": 200, "latest_candle_timestamp": datetime(2026, 7, 18, tzinfo=UTC)},
+                        {"symbol": "AAA", "timeframe": "1h", "candle_count": 200, "latest_candle_timestamp": datetime(2020, 1, 1, tzinfo=UTC)},
+                        {"symbol": "AAA", "timeframe": "4h", "candle_count": 200, "latest_candle_timestamp": datetime(2026, 7, 18, tzinfo=UTC)},
+                    ]
+                )
+            if "FROM features" in query:
+                return Result(
+                    [
+                        {"symbol": "AAPL", "timeframe": "1h", "feature_count": 200},
+                        {"symbol": "AAPL", "timeframe": "4h", "feature_count": 200},
+                        {"symbol": "AAA", "timeframe": "1h", "feature_count": 200},
+                        {"symbol": "AAA", "timeframe": "4h", "feature_count": 200},
+                    ]
+                )
+            raise AssertionError(query)
+
+    monkeypatch.setattr(research_campaigns, "data_freshness", lambda timestamp, timeframe, asset_class: {"stale": timestamp.year < 2026, "classification": "stale_latest_candle" if timestamp.year < 2026 else "healthy", "reason": "stale" if timestamp.year < 2026 else "fresh"})
+
+    preflight = research_campaign_preflight(PreflightConn(), assets=["AAPL", "AAA"], timeframes=["1h", "4h"])
+
+    assert preflight["ready"] is False
+    assert preflight["can_launch"] is True
+    assert preflight["executable_assets"] == ["AAPL"]
+    assert preflight["excluded_assets"] == ["AAA"]
 
 
 def test_forward_validation_transition_requires_real_paper_sample() -> None:
