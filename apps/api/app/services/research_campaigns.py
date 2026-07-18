@@ -204,7 +204,10 @@ def _ensure_campaign_tables(conn: psycopg.Connection) -> None:
             ADD COLUMN IF NOT EXISTS daily_budget_date DATE,
             ADD COLUMN IF NOT EXISTS target_workers INTEGER NOT NULL DEFAULT 0,
             ADD COLUMN IF NOT EXISTS execution_status TEXT NOT NULL DEFAULT 'idle',
-            ADD COLUMN IF NOT EXISTS execution_updated_at TIMESTAMPTZ
+            ADD COLUMN IF NOT EXISTS execution_updated_at TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS dataset_id BIGINT,
+            ADD COLUMN IF NOT EXISTS dataset_mode TEXT,
+            ADD COLUMN IF NOT EXISTS generator_version TEXT
         """
     )
     conn.execute(

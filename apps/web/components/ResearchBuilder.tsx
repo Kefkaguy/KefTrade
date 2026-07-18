@@ -50,6 +50,7 @@ const scopeIcons = {
 
 const preferredSymbols = ["TSLA", "NVDA", "AAPL", "MSFT", "SPY", "QQQ", "AMZN", "META", "GOOGL", "AMD"];
 const fallbackStocks = FALLBACK_RESEARCH_ASSETS.filter((asset) => asset.market !== "Crypto");
+const MAX_RANDOM_STOCKS = 100;
 
 export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   const reduceMotion = useReducedMotion();
@@ -67,6 +68,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   );
   const selection = useMemo(() => buildResearchSelection(scopeId, selectedAssets), [scopeId, selectedAssets]);
   const selectedStockCount = selectedAssets.filter((asset) => asset.market !== "Crypto").length;
+  const maxStockSelection = Math.max(1, Math.min(stockCatalog.length, MAX_PROFILE_ASSETS, MAX_RANDOM_STOCKS));
   const visibleAssets = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
     const matches = query
@@ -128,8 +130,14 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   }
 
   function chooseAssetCount(rawCount: number) {
-    const count = Math.max(1, Math.min(stockCatalog.length, MAX_PROFILE_ASSETS, Math.floor(rawCount || 1)));
+    const count = boundedStockCount(rawCount, stockCatalog.length);
     setAssetIds(prioritizeAssets(stockCatalog).slice(0, count).map((asset) => asset.id));
+    setScopeId("custom");
+  }
+
+  function chooseRandomAssetCount(rawCount: number) {
+    const count = boundedStockCount(rawCount, stockCatalog.length);
+    setAssetIds(randomStocks(stockCatalog, count).map((asset) => asset.id));
     setScopeId("custom");
   }
 
@@ -208,7 +216,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                   id="asset-count"
                   type="range"
                   min="1"
-                  max={Math.max(1, Math.min(stockCatalog.length, MAX_PROFILE_ASSETS))}
+                  max={maxStockSelection}
                   value={Math.max(1, selectedStockCount)}
                   onChange={(event) => chooseAssetCount(Number(event.target.value))}
                 />
@@ -216,13 +224,24 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                   <input
                     type="number"
                     min="1"
-                    max={Math.max(1, Math.min(stockCatalog.length, MAX_PROFILE_ASSETS))}
+                    max={maxStockSelection}
                     value={Math.max(1, selectedStockCount)}
                     onChange={(event) => chooseAssetCount(Number(event.target.value))}
                     aria-label="Number of stock assets"
                   />
-                  <span>up to {Math.min(stockCatalog.length, MAX_PROFILE_ASSETS).toLocaleString()}</span>
+                  <span>up to {maxStockSelection.toLocaleString()}</span>
                 </div>
+                <button
+                  className="button secondary compact randomAssetButton"
+                  type="button"
+                  onClick={() => chooseRandomAssetCount(selectedStockCount || maxStockSelection)}
+                  disabled={!stockCatalog.length}
+                >
+                  <Sparkles size={14} /> Random {Math.max(1, Math.min(selectedStockCount || maxStockSelection, maxStockSelection))}
+                </button>
+                <small className="assetCountHelp">
+                  Count and random selection use the full {stockCatalog.length.toLocaleString()} stock catalog, not the {visibleAssets.length.toLocaleString()} visible search rows.
+                </small>
               </div>
             )}
 
@@ -321,6 +340,19 @@ function prioritizeAssets(assets: ResearchAsset[]) {
     const rightPriority = priority.get(right.id) ?? Number.MAX_SAFE_INTEGER;
     return leftPriority - rightPriority || left.id.localeCompare(right.id);
   });
+}
+
+function boundedStockCount(rawCount: number, available: number) {
+  return Math.max(1, Math.min(available, MAX_PROFILE_ASSETS, MAX_RANDOM_STOCKS, Math.floor(rawCount || 1)));
+}
+
+function randomStocks(assets: ResearchAsset[], count: number) {
+  const pool = [...assets];
+  for (let index = pool.length - 1; index > 0; index -= 1) {
+    const swapIndex = Math.floor(Math.random() * (index + 1));
+    [pool[index], pool[swapIndex]] = [pool[swapIndex], pool[index]];
+  }
+  return pool.slice(0, count);
 }
 
 function readinessScore(asset: ResearchAsset) {

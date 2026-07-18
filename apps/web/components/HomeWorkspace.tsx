@@ -142,6 +142,12 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
       const campaignAssets = preflight.ready || !executableSymbols.size
         ? nextSelection.assets
         : nextSelection.assets.filter((asset) => executableSymbols.has(asset.apiSymbol.toUpperCase()));
+      if (!preflight.ready && executableSymbols.size && campaignAssets.length < nextSelection.assets.length) {
+        const missing = nextSelection.assets.length - campaignAssets.length;
+        setLaunchError(`Only ${campaignAssets.length.toLocaleString()} of ${nextSelection.assets.length.toLocaleString()} selected assets are executable after data preparation. ${missing.toLocaleString()} selected assets still need candles or features, so no smaller campaign was launched.`);
+        setPhase("error");
+        return;
+      }
       const campaignSelection = campaignAssets.length === nextSelection.assets.length
         ? nextSelection
         : buildResearchSelection("custom", campaignAssets);
