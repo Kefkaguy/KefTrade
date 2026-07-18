@@ -11,7 +11,7 @@ from typing import Any, Iterable
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.services.research_campaigns import CAMPAIGN_VERSION, ensure_campaign_tables
+from app.services.research_campaigns import CAMPAIGN_VERSION
 from app.services.strategy_research import finite_metric
 
 
@@ -28,16 +28,19 @@ def research_command_center(
     campaign_id: int | None = None,
     filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    ensure_campaign_tables(conn)
-    campaigns = [dict(row) for row in conn.execute(
-        """
-        SELECT id, campaign_key, name, universe_key, status, requested_candidates,
-               analytics, created_at, started_at, completed_at, updated_at
-        FROM research_campaigns
-        WHERE simulation_only = TRUE
-        ORDER BY created_at DESC, id DESC
-        """
-    ).fetchall()]
+    try:
+        campaigns = [dict(row) for row in conn.execute(
+            """
+            SELECT id, campaign_key, name, universe_key, status, requested_candidates,
+                   analytics, created_at, started_at, completed_at, updated_at
+            FROM research_campaigns
+            WHERE simulation_only = TRUE
+            ORDER BY created_at DESC, id DESC
+            """
+        ).fetchall()]
+    except psycopg.errors.UndefinedTable:
+        conn.rollback()
+        return empty_command_center(filters or {})
     if not campaigns:
         return empty_command_center(filters or {})
 
@@ -46,6 +49,12 @@ def research_command_center(
         if not campaign:
             raise ValueError("research campaign not found")
         scope_ids = [int(campaign_id)]
+        job_count = int(conn.execute(
+            "SELECT COUNT(*) AS count FROM research_campaign_jobs WHERE campaign_id = %s AND simulation_only = TRUE",
+            (campaign_id,),
+        ).fetchone()["count"])
+        if job_count > 5000 or str(campaign.get("status") or "").lower() in {"queued", "running"}:
+            return aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {})
     else:
         scope_ids = [int(row["id"]) for row in campaigns]
         active_statuses = {"queued", "running"}
@@ -62,6 +71,7 @@ def research_command_center(
             "updated_at": max((row.get("updated_at") for row in campaigns if row.get("updated_at")), default=None),
             "campaign_count": len(campaigns),
         }
+        return aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {})
 
     jobs = [dict(row) for row in conn.execute(
         """
@@ -222,6 +232,220 @@ def live_campaign_command_center(
         }
     )
     return payload
+
+
+def aggregate_command_center(
+    conn: psycopg.Connection,
+    campaign: dict[str, Any],
+    campaigns: list[dict[str, Any]],
+    scope_ids: list[int],
+    filters: dict[str, Any],
+) -> dict[str, Any]:
+    """Build the all-campaign Research page without loading every job JSON payload."""
+    normalized = normalized_filters(filters)
+    clauses = ["campaign_id = ANY(%s)", "simulation_only = TRUE"]
+    params: list[Any] = [scope_ids]
+    if normalized.get("asset"):
+        clauses.append("symbol = %s")
+        params.append(normalized["asset"])
+    if normalized.get("timeframe"):
+        clauses.append("timeframe = %s")
+        params.append(normalized["timeframe"])
+    if normalized.get("strategy_family"):
+        clauses.append("strategy_family = %s")
+        params.append(normalized["strategy_family"])
+    if normalized.get("candidate_state"):
+        clauses.append("status = %s")
+        params.append(normalized["candidate_state"])
+    where_sql = " AND ".join(clauses)
+
+    overview = dict(conn.execute(
+        f"""
+        SELECT
+            COUNT(*) AS campaign_jobs,
+            COUNT(DISTINCT candidate_id) AS candidates_generated,
+            COUNT(DISTINCT candidate_id) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS candidates_tested,
+            COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'rejected') AS candidates_rejected,
+            COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'completed') AS candidates_completed,
+            COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'promoted') AS research_candidates,
+            COUNT(*) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS terminal_jobs
+        FROM research_campaign_jobs
+        WHERE {where_sql}
+        """,
+        tuple(params),
+    ).fetchone() or {})
+    dimensions = dict(conn.execute(
+        f"""
+        SELECT
+            ARRAY_AGG(DISTINCT symbol ORDER BY symbol) AS assets,
+            ARRAY_AGG(DISTINCT timeframe ORDER BY timeframe) AS timeframes,
+            ARRAY_AGG(DISTINCT strategy_family ORDER BY strategy_family) FILTER (WHERE strategy_family IS NOT NULL) AS strategy_families,
+            ARRAY_AGG(DISTINCT status ORDER BY status) AS candidate_states
+        FROM research_campaign_jobs
+        WHERE {where_sql}
+        """,
+        tuple(params),
+    ).fetchone() or {})
+    top_assets = [dict(row) for row in conn.execute(
+        f"""
+        SELECT symbol AS name, COUNT(*) AS total_runs,
+               COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
+               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs
+        FROM research_campaign_jobs
+        WHERE {where_sql}
+        GROUP BY symbol
+        ORDER BY total_runs DESC, symbol
+        LIMIT 20
+        """,
+        tuple(params),
+    ).fetchall()]
+    top_timeframes = [dict(row) for row in conn.execute(
+        f"""
+        SELECT timeframe AS name, COUNT(*) AS total_runs,
+               COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
+               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs
+        FROM research_campaign_jobs
+        WHERE {where_sql}
+        GROUP BY timeframe
+        ORDER BY total_runs DESC, timeframe
+        LIMIT 20
+        """,
+        tuple(params),
+    ).fetchall()]
+    top_families = [dict(row) for row in conn.execute(
+        f"""
+        SELECT COALESCE(strategy_family, family_id) AS name, COUNT(*) AS total_runs,
+               COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
+               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs
+        FROM research_campaign_jobs
+        WHERE {where_sql}
+        GROUP BY COALESCE(strategy_family, family_id)
+        ORDER BY total_runs DESC, name
+        LIMIT 20
+        """,
+        tuple(params),
+    ).fetchall()]
+    elite_count = int(conn.execute(
+        "SELECT COUNT(DISTINCT candidate_id) AS count FROM elite_research_candidates WHERE campaign_id = ANY(%s) AND simulation_only = TRUE",
+        (scope_ids,),
+    ).fetchone()["count"])
+    deployment_count = int(conn.execute(
+        "SELECT COUNT(*) AS count FROM strategy_deployments WHERE campaign_id = ANY(%s) AND candidate_id IS NOT NULL AND simulation_only = TRUE",
+        (scope_ids,),
+    ).fetchone()["count"])
+
+    generated = int(overview.get("candidates_generated") or 0)
+    tested = int(overview.get("candidates_tested") or 0)
+    rejected = int(overview.get("candidates_rejected") or 0)
+    completed = int(overview.get("candidates_completed") or 0)
+    promoted = int(overview.get("research_candidates") or 0)
+    needs_more = max(0, tested - rejected - promoted)
+    overview_payload = {
+        "campaign_jobs": int(overview.get("campaign_jobs") or 0),
+        "candidates_generated": generated,
+        "candidates_tested": tested,
+        "candidates_rejected": rejected,
+        "candidates_completed": completed,
+        "needs_more_evidence": needs_more,
+        "research_candidates": promoted,
+        "elite_candidates": elite_count,
+        "candidate_linked_deployments": deployment_count,
+    }
+    funnel = aggregate_funnel(generated, tested, rejected, needs_more, promoted, elite_count, deployment_count)
+    payload = empty_command_center(filters)
+    payload.update(
+        {
+            "campaign": campaign,
+            "campaigns": campaigns,
+            "filters": normalized,
+            "overview": overview_payload,
+            "candidate_funnel": funnel,
+            "filter_options": {
+                "assets": list(dimensions.get("assets") or []),
+                "asset_classes": ["equity"],
+                "timeframes": list(dimensions.get("timeframes") or []),
+                "strategy_families": list(dimensions.get("strategy_families") or []),
+                "candidate_states": list(dimensions.get("candidate_states") or []),
+                "validation_rules": [],
+                "regimes": [],
+            },
+            "strategy_intelligence": {"rows": aggregate_dimension_rows(top_families), "highlights": {}},
+            "asset_intelligence": {"rows": aggregate_dimension_rows(top_assets), "highlights": {}},
+            "timeframe_intelligence": {"rows": aggregate_dimension_rows(top_timeframes), "highlights": {}},
+            "duplicate_analysis": {"unique_candidates": generated, "exact_duplicates": 0, "near_duplicates": 0, "duplicate_validation_outcomes": 0, "redundant_parameter_regions": []},
+            "historical_research": historical_research(conn),
+            "terminology": terminology(),
+            "source": {
+                "authoritative_tables": ["research_campaigns", "research_campaign_jobs", "elite_research_candidates", "strategy_deployments"],
+                "candidate_grain": "aggregate all-campaign evidence; select one campaign for candidate-level analysis",
+                "refreshed_at": datetime.now(UTC),
+            },
+            "live_evidence": any(str(row.get("status") or "").lower() in {"queued", "running"} for row in campaigns),
+            "simulation_only": True,
+        }
+    )
+    return payload
+
+
+def aggregate_funnel(generated: int, tested: int, rejected: int, needs_more: int, research: int, elite: int, deployed: int) -> list[dict[str, Any]]:
+    stages = [
+        ("generated", "Generated", generated),
+        ("tested", "Tested", tested),
+        ("rejected", "Rejected", rejected),
+        ("needs_more_evidence", "Needs More Evidence", needs_more),
+        ("research_candidate", "Research Candidate", research),
+        ("elite_candidate", "Elite Candidate", elite),
+        ("paper_deployed", "Paper Deployed", deployed),
+    ]
+    counts = {key: count for key, _label, count in stages}
+    conversion_basis = {
+        "tested": "generated",
+        "rejected": "tested",
+        "needs_more_evidence": "tested",
+        "research_candidate": "tested",
+        "elite_candidate": "research_candidate",
+        "paper_deployed": "elite_candidate",
+    }
+    return [
+        {
+            "key": key,
+            "label": label,
+            "count": int(count),
+            "conversion_from_previous": round(count / counts[basis], 4) if (basis := conversion_basis.get(key)) and counts.get(basis) else None,
+            "conversion_basis": conversion_basis.get(key),
+            "rate_from_generated": round(count / generated, 4) if generated else 0,
+        }
+        for key, label, count in stages
+    ]
+
+
+def aggregate_dimension_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result = []
+    for row in rows:
+        total = int(row.get("total_runs") or 0)
+        passed = int(row.get("passed_runs") or 0)
+        rejected = int(row.get("rejected_runs") or 0)
+        result.append(
+            {
+                "name": row.get("name") or "unknown",
+                "candidates_tested": total,
+                "validation_runs": total,
+                "rejection_rate": ratio(rejected, total),
+                "pass_rate": ratio(passed, total),
+                "average_profit_factor": None,
+                "average_expectancy": None,
+                "median_trade_count": None,
+                "median_drawdown": None,
+                "stability_pass_rate": None,
+                "confidence_interval_pass_rate": None,
+                "candidate_quality_score": round(ratio(passed, total) * 100, 2) if total else 0,
+                "dominant_failure_reason": "aggregate_view" if rejected else None,
+                "best_asset": None,
+                "best_timeframe": None,
+                "inactive": total == 0,
+            }
+        )
+    return result
 
 
 def analyze_campaign(
