@@ -21,7 +21,7 @@ from app.services.evidence_alerts import create_evidence_alert
 from app.services.backtester import build_market_arrays, combine_candles_features
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
-from app.services.research_learning import learn_from_completed_campaign
+from app.services.research_learning import learn_from_completed_campaign, research_generation_guidance, score_candidate_for_guidance
 from app.services.strategy_discovery import (
     SAFETY_STATEMENT,
     DiscoveryCandidate,
@@ -607,14 +607,30 @@ def upsert_research_universe(
 def campaign_generation_candidates(conn: psycopg.Connection, *, universe_key: str, max_candidates: int) -> tuple[list[DiscoveryCandidate], dict[str, Any]]:
     if universe_key == "research_core_ten":
         return elite_focused_research_core_candidates(conn, max_candidates=max_candidates)
-    candidates = dedupe_candidates_by_execution_key(generate_balanced_discovery_candidates(max_candidates=max_candidates * 2), max_candidates)
+    guidance = research_generation_guidance(conn)
+    generated = generate_balanced_discovery_candidates(max_candidates=max_candidates * 3)
+    ranked = rank_candidates_with_learning(generated, guidance)
+    candidates = dedupe_candidates_by_execution_key(ranked, max_candidates)
     return candidates, {
-        "mode": "balanced",
-        "attempted_candidate_generations": len(candidates),
-        "duplicates_prevented": max(0, max_candidates - len(candidates)),
+        "mode": "global_learning_guided_balanced" if guidance.get("available") else "balanced",
+        "attempted_candidate_generations": len(generated),
+        "duplicates_prevented": max(0, len(generated) - len(candidates)),
         "jobs_skipped": max(0, max_candidates - len(candidates)),
-        "channels": {"balanced": len(candidates)},
+        "channels": {"learning_guided": len(candidates)} if guidance.get("available") else {"balanced": len(candidates)},
+        "learning_guidance": {
+            "available": bool(guidance.get("available")),
+            "calculation_version": guidance.get("calculation_version"),
+            "policy": "rank generation candidates by accumulated evidence; keep deterministic exploration; validation thresholds unchanged",
+        },
     }
+
+
+def rank_candidates_with_learning(candidates: list[DiscoveryCandidate], guidance: dict[str, Any]) -> list[DiscoveryCandidate]:
+    if not guidance.get("available"):
+        return candidates
+    indexed = list(enumerate(candidates))
+    indexed.sort(key=lambda item: (score_candidate_for_guidance(item[1], guidance), -item[0], item[1].candidate_id), reverse=True)
+    return [candidate for _index, candidate in indexed]
 
 
 def elite_focused_research_core_candidates(conn: psycopg.Connection, *, max_candidates: int) -> tuple[list[DiscoveryCandidate], dict[str, Any]]:

@@ -74,7 +74,7 @@ from app.services.research_campaigns import (
     upsert_research_universe,
 )
 from app.services.research_command_center import candidate_library, candidate_profile, research_command_center
-from app.services.research_learning import get_learning_table, get_strategy_timeline, learn_from_completed_campaign, research_learning_summary
+from app.services.research_learning import get_learning_table, get_strategy_timeline, learn_from_all_research, learn_from_completed_campaign, research_learning_summary
 from app.services.strategy_discovery import discovery_dashboard, evolve_discovered_strategies, generate_discovery_candidates, rule_library_payload, run_strategy_discovery
 from app.services.strategy_experiments import list_strategy_experiments, run_strategy_experiment
 from app.services.strategy_research import run_strategy_research
@@ -911,6 +911,13 @@ def learn_from_large_scale_research_campaign(
 @router.get("/research/learning")
 def get_research_learning_summary(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     return research_learning_summary(conn)
+
+
+@router.post("/research/learning/refresh-global")
+def refresh_global_research_learning(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    result = learn_from_all_research(conn, persist=True)
+    conn.commit()
+    return result
 
 
 @router.get("/research/knowledge-base")

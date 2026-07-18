@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from decimal import Decimal
 from hashlib import sha256
+import json
 from statistics import median
 from typing import Any
 
@@ -13,6 +14,7 @@ from psycopg.types.json import Jsonb
 from app.services.strategy_research import finite_metric
 
 LEARNING_VERSION = "research_learning_v2"
+GLOBAL_LEARNING_VERSION = "research_learning_global_v1"
 SAFETY_STATEMENT = "Deterministic simulation-only research learning. No live trading, broker routing, or opaque ML decisioning."
 
 
@@ -157,6 +159,51 @@ def ensure_research_learning_tables(conn: psycopg.Connection) -> None:
         )
         """
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS research_candidate_objects (
+            id BIGSERIAL PRIMARY KEY,
+            candidate_scope_key TEXT NOT NULL UNIQUE,
+            candidate_id TEXT NOT NULL,
+            campaign_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+            state TEXT NOT NULL,
+            strategy_family TEXT NOT NULL,
+            assets JSONB NOT NULL DEFAULT '[]'::jsonb,
+            timeframes JSONB NOT NULL DEFAULT '[]'::jsonb,
+            lineage JSONB NOT NULL DEFAULT '{}'::jsonb,
+            generation_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+            validation_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+            repair_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+            promotion_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+            deployment_history JSONB NOT NULL DEFAULT '[]'::jsonb,
+            forward_evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
+            learning_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+            calculation_version TEXT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            simulation_only BOOLEAN NOT NULL DEFAULT TRUE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS research_global_learning_snapshots (
+            id BIGSERIAL PRIMARY KEY,
+            snapshot_key TEXT NOT NULL UNIQUE,
+            evidence_window JSONB NOT NULL DEFAULT '{}'::jsonb,
+            elite_explanations JSONB NOT NULL DEFAULT '[]'::jsonb,
+            decision_intelligence JSONB NOT NULL DEFAULT '{}'::jsonb,
+            forward_intelligence JSONB NOT NULL DEFAULT '{}'::jsonb,
+            duplicate_intelligence JSONB NOT NULL DEFAULT '{}'::jsonb,
+            candidate_object_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+            campaign_guidance JSONB NOT NULL DEFAULT '{}'::jsonb,
+            constraints JSONB NOT NULL DEFAULT '{}'::jsonb,
+            calculation_version TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            simulation_only BOOLEAN NOT NULL DEFAULT TRUE
+        )
+        """
+    )
 
 
 def learn_from_completed_campaign(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
@@ -175,7 +222,93 @@ def learn_from_completed_campaign(conn: psycopg.Connection, campaign_id: int) ->
     ).fetchall()
     learning = build_campaign_learning(dict(campaign), [dict(row) for row in jobs])
     persist_campaign_learning(conn, learning)
+    global_learning = learn_from_all_research(conn, persist=True)
+    learning["global_learning"] = {
+        "snapshot_key": global_learning["snapshot_key"],
+        "elite_candidates_analyzed": len(global_learning["elite_explanations"]),
+        "candidate_objects": global_learning["candidate_object_summary"],
+        "campaign_guidance": global_learning["campaign_guidance"],
+    }
     return learning
+
+
+def learn_from_all_research(conn: psycopg.Connection, *, persist: bool = True) -> dict[str, Any]:
+    ensure_research_learning_tables(conn)
+    campaigns = [dict(row) for row in conn.execute(
+        """
+        SELECT id, name, status, campaign_key, universe_key, created_at, completed_at, analytics
+        FROM research_campaigns
+        WHERE simulation_only = TRUE
+        ORDER BY id ASC
+        """
+    ).fetchall()]
+    jobs = [normalize_job(dict(row)) for row in conn.execute(
+        """
+        SELECT id, campaign_id, candidate_id, family_id, strategy_family, symbol, timeframe,
+               status, candidate, result, validation_score, consistency_score, failure_reasons,
+               attempts, failure_classification, created_at, started_at, completed_at, updated_at
+        FROM research_campaign_jobs
+        WHERE simulation_only = TRUE
+          AND status IN ('completed', 'rejected', 'promoted', 'failed', 'blocked_data')
+        ORDER BY campaign_id ASC, candidate_id ASC, id ASC
+        """
+    ).fetchall()]
+    elite = [dict(row) for row in conn.execute(
+        "SELECT * FROM elite_research_candidates WHERE simulation_only = TRUE ORDER BY created_at ASC"
+    ).fetchall()]
+    deployments = [dict(row) for row in conn.execute(
+        "SELECT * FROM strategy_deployments WHERE simulation_only = TRUE AND candidate_id IS NOT NULL ORDER BY created_at ASC"
+    ).fetchall()]
+    drift = [dict(row) for row in conn.execute(
+        "SELECT * FROM elite_candidate_evidence_drift WHERE simulation_only = TRUE ORDER BY detected_at DESC, id DESC LIMIT 500"
+    ).fetchall()]
+    rollups = [dict(row) for row in conn.execute(
+        "SELECT * FROM elite_candidate_paper_rollups WHERE simulation_only = TRUE ORDER BY calculated_at DESC, id DESC LIMIT 500"
+    ).fetchall()]
+
+    candidate_objects = build_research_candidate_objects(jobs, elite, deployments, drift, rollups)
+    elite_explanations = explain_elite_candidates(candidate_objects, jobs, elite, drift, rollups)
+    decision_intelligence = build_global_decision_intelligence(jobs, candidate_objects)
+    forward_intelligence = build_forward_intelligence(elite, deployments, drift, rollups)
+    duplicate_intelligence = build_global_duplicate_intelligence(candidate_objects, jobs)
+    campaign_guidance = build_global_campaign_guidance(decision_intelligence, duplicate_intelligence, forward_intelligence)
+    snapshot = {
+        "snapshot_key": stable_key("global_learning", GLOBAL_LEARNING_VERSION, str(len(jobs)), str(len(elite)), str(len(candidate_objects))),
+        "evidence_window": {
+            "campaigns": len(campaigns),
+            "jobs": len(jobs),
+            "candidate_objects": len(candidate_objects),
+            "elite_candidates": len(elite),
+            "deployments": len(deployments),
+            "started_at": min((row.get("created_at") for row in campaigns if row.get("created_at")), default=None),
+            "completed_at": max((row.get("completed_at") for row in campaigns if row.get("completed_at")), default=None),
+        },
+        "elite_explanations": elite_explanations,
+        "decision_intelligence": decision_intelligence,
+        "forward_intelligence": forward_intelligence,
+        "duplicate_intelligence": duplicate_intelligence,
+        "candidate_object_summary": {
+            "total": len(candidate_objects),
+            "states": dict(Counter(row["state"] for row in candidate_objects)),
+            "families": dict(Counter(row["strategy_family"] for row in candidate_objects)),
+        },
+        "campaign_guidance": campaign_guidance,
+        "constraints": {
+            "phase": "9.9",
+            "begin_phase_10": False,
+            "live_trading": False,
+            "broker_connections": False,
+            "threshold_changes": False,
+            "automatic_promotion": False,
+            "decisioning": "deterministic_evidence_based",
+        },
+        "calculation_version": GLOBAL_LEARNING_VERSION,
+        "safety": {"simulation_only": True, "statement": SAFETY_STATEMENT},
+        "simulation_only": True,
+    }
+    if persist:
+        persist_global_learning(conn, snapshot, candidate_objects)
+    return snapshot
 
 
 def build_campaign_learning(campaign: dict[str, Any], jobs: list[dict[str, Any]]) -> dict[str, Any]:
@@ -191,7 +324,7 @@ def build_campaign_learning(campaign: dict[str, Any], jobs: list[dict[str, Any]]
     elite_rankings = rank_elite_candidates(normalized, confidence_scores)
     return {
         "campaign_id": campaign.get("id"),
-        "calculation_version": LEARNING_VERSION,
+            "calculation_version": GLOBAL_LEARNING_VERSION,
         "knowledge": knowledge,
         "failure_patterns": failure_patterns,
         "success_patterns": success_patterns,
@@ -211,6 +344,233 @@ def build_campaign_learning(campaign: dict[str, Any], jobs: list[dict[str, Any]]
         },
         "safety": {"simulation_only": True, "statement": SAFETY_STATEMENT},
         "simulation_only": True,
+    }
+
+
+def build_research_candidate_objects(
+    jobs: list[dict[str, Any]],
+    elite: list[dict[str, Any]],
+    deployments: list[dict[str, Any]],
+    drift: list[dict[str, Any]],
+    rollups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    elite_by_scope = {candidate_scope_key(row.get("campaign_id"), row.get("candidate_id")): row for row in elite}
+    deployments_by_scope: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in deployments:
+        deployments_by_scope[candidate_scope_key(row.get("campaign_id"), row.get("candidate_id"))].append(row)
+    drift_by_scope: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in drift:
+        drift_by_scope[candidate_scope_key(row.get("campaign_id"), row.get("candidate_id"))].append(row)
+    rollups_by_scope: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rollups:
+        rollups_by_scope[candidate_scope_key(row.get("campaign_id"), row.get("candidate_id"))].append(row)
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in jobs:
+        grouped[candidate_scope_key(row.get("campaign_id"), row.get("candidate_id"))].append(row)
+
+    objects = []
+    for scope, rows in grouped.items():
+        best = max(rows, key=lambda item: (item["promoted"], item["validation_score"], item["consistency_score"]))
+        current_elite = elite_by_scope.get(scope)
+        current_deployments = deployments_by_scope.get(scope, [])
+        state = candidate_object_state(rows, current_elite, current_deployments)
+        promotions = [row for row in rows if row["promoted"]]
+        rejections = [row for row in rows if row["rejected"]]
+        objects.append(
+            {
+                "candidate_scope_key": scope,
+                "candidate_id": best["candidate_id"],
+                "campaign_ids": sorted({int(row["campaign_id"]) for row in rows if row.get("campaign_id") is not None}),
+                "state": state,
+                "strategy_family": best["strategy_family"],
+                "assets": sorted({row["symbol"] for row in rows}),
+                "timeframes": sorted({row["timeframe"] for row in rows}),
+                "lineage": {
+                    "parent_candidate_id": best.get("parent_candidate_id"),
+                    "family_id": best["family_id"],
+                    "canonical_key": best["candidate"].get("canonical_key") if isinstance(best.get("candidate"), dict) else None,
+                    "generation": best["parameters"].get("generation") or best["candidate"].get("generation") if isinstance(best.get("candidate"), dict) else None,
+                },
+                "generation_history": [
+                    {
+                        "campaign_id": row.get("campaign_id"),
+                        "job_id": row["job_id"],
+                        "channel": row["parameters"].get("generation_channel") or row["candidate"].get("generation_method") if isinstance(row.get("candidate"), dict) else None,
+                        "created_at": row.get("created_at"),
+                    }
+                    for row in rows
+                ],
+                "validation_history": [
+                    {
+                        "job_id": row["job_id"],
+                        "campaign_id": row.get("campaign_id"),
+                        "asset": row["symbol"],
+                        "timeframe": row["timeframe"],
+                        "status": row["status"],
+                        "metrics": compact_metrics(row["metrics"]),
+                        "failure_reasons": row["failure_reasons"],
+                        "validation_score": row["validation_score"],
+                        "consistency_score": row["consistency_score"],
+                    }
+                    for row in rows
+                ],
+                "repair_history": [
+                    {
+                        "job_id": row["job_id"],
+                        "parent_candidate_id": row.get("parent_candidate_id"),
+                        "channel": row["parameters"].get("generation_channel"),
+                        "status": row["status"],
+                        "evidence_ref": row["evidence_ref"],
+                    }
+                    for row in rows
+                    if row.get("parent_candidate_id") or "repair" in str(row["parameters"].get("generation_channel") or "")
+                ],
+                "promotion_history": [
+                    {
+                        "job_id": row["job_id"],
+                        "campaign_id": row.get("campaign_id"),
+                        "asset": row["symbol"],
+                        "timeframe": row["timeframe"],
+                        "metrics": compact_metrics(row["metrics"]),
+                        "completed_at": row.get("completed_at"),
+                    }
+                    for row in promotions
+                ],
+                "deployment_history": [jsonable(row) for row in current_deployments],
+                "forward_evidence": {
+                    "rollups": [jsonable(row) for row in rollups_by_scope.get(scope, [])],
+                    "drift": [jsonable(row) for row in drift_by_scope.get(scope, [])],
+                    "latest_state": current_elite.get("forward_validation_state") if current_elite else None,
+                    "drift_status": current_elite.get("drift_status") if current_elite else None,
+                },
+                "learning_summary": {
+                    "promotion_rate": round(len(promotions) / len(rows), 4) if rows else 0,
+                    "rejection_rate": round(len(rejections) / len(rows), 4) if rows else 0,
+                    "best_metrics": compact_metrics(best["metrics"]),
+                    "elite_drivers": elite_driver_components(current_elite or {}, rows),
+                    "duplicate_signature": candidate_signature(best),
+                },
+                "calculation_version": GLOBAL_LEARNING_VERSION,
+                "simulation_only": True,
+            }
+        )
+    return sorted(objects, key=lambda row: (state_rank(row["state"]), row["candidate_scope_key"]), reverse=True)
+
+
+def explain_elite_candidates(
+    candidate_objects: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    elite: list[dict[str, Any]],
+    drift: list[dict[str, Any]],
+    rollups: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    research_candidates = [row for row in candidate_objects if row["state"] in {"Research Candidate", "Elite", "Forward Active", "Forward Passed"}]
+    rejected = [row for row in candidate_objects if row["state"] == "Rejected"]
+    elite_by_scope = {candidate_scope_key(row.get("campaign_id"), row.get("candidate_id")): row for row in elite}
+    rows = []
+    for item in candidate_objects:
+        elite_row = elite_by_scope.get(item["candidate_scope_key"])
+        if not elite_row:
+            continue
+        drivers = elite_driver_components(elite_row, [row for row in jobs if candidate_scope_key(row.get("campaign_id"), row.get("candidate_id")) == item["candidate_scope_key"]])
+        rows.append(
+            {
+                "candidate_id": item["candidate_id"],
+                "campaign_ids": item["campaign_ids"],
+                "strategy_family": item["strategy_family"],
+                "assets": item["assets"],
+                "timeframes": item["timeframes"],
+                "promotion_drivers": drivers,
+                "compared_to_research_candidates": compare_candidate_to_population(item, research_candidates),
+                "compared_to_rejected_candidates": compare_candidate_to_population(item, rejected),
+                "forward_evidence": item["forward_evidence"],
+                "why_elite": elite_explanation_text(drivers, item),
+                "constraints": "Elite explanation only; no threshold changes or automatic promotion.",
+                "evidence_refs": [f"elite_candidate:{elite_row.get('id')}", *[f"campaign:{campaign_id}" for campaign_id in item["campaign_ids"]]],
+            }
+        )
+    return rows
+
+
+def build_global_decision_intelligence(jobs: list[dict[str, Any]], candidate_objects: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "strategy_families": score_dimension(jobs, "strategy_family"),
+        "assets": score_dimension(jobs, "symbol"),
+        "timeframes": score_dimension(jobs, "timeframe"),
+        "parameter_regions": score_parameter_regions(jobs),
+        "repair_effectiveness": score_repair_attempts(candidate_objects),
+        "market_regimes": regime_statistics(jobs),
+    }
+
+
+def build_forward_intelligence(elite: list[dict[str, Any]], deployments: list[dict[str, Any]], drift: list[dict[str, Any]], rollups: list[dict[str, Any]]) -> dict[str, Any]:
+    drift_counts = Counter(str(row.get("drift_classification") or "unknown") for row in drift)
+    state_counts = Counter(str(row.get("forward_validation_state") or "unknown") for row in elite)
+    return {
+        "elite_forward_states": dict(state_counts),
+        "deployment_count": len(deployments),
+        "drift_classifications": dict(drift_counts),
+        "divergence_alerts": [
+            {
+                "candidate_id": row.get("candidate_id"),
+                "campaign_id": row.get("campaign_id"),
+                "metric": row.get("metric_name"),
+                "classification": row.get("drift_classification"),
+                "historical_value": row.get("historical_value"),
+                "paper_value": row.get("paper_value"),
+            }
+            for row in drift
+            if row.get("drift_classification") in {"moderate", "severe"}
+        ][:25],
+        "latest_rollups": [jsonable(row) for row in rollups[:25]],
+        "decision": "Forward evidence can down-rank future research priorities, but cannot auto-promote or lower thresholds.",
+    }
+
+
+def build_global_duplicate_intelligence(candidate_objects: list[dict[str, Any]], jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    signatures: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in candidate_objects:
+        signatures[str(row["learning_summary"].get("duplicate_signature"))].append(row)
+    exact = [rows for rows in signatures.values() if len(rows) > 1]
+    failed_parameters = Counter()
+    for row in jobs:
+        if row["rejected"]:
+            failed_parameters.update(parameter_buckets(row["parameters"]).values())
+    return {
+        "candidate_objects": len(candidate_objects),
+        "exact_duplicate_groups": [{"signature": rows[0]["learning_summary"]["duplicate_signature"], "candidate_ids": [row["candidate_id"] for row in rows[:10]], "count": len(rows)} for rows in exact[:20]],
+        "exact_duplicates": sum(len(rows) - 1 for rows in exact),
+        "repeated_failed_parameter_regions": [{"region": key, "failures": count} for key, count in failed_parameters.most_common(25)],
+        "generation_policy": "Down-rank exact duplicate signatures and repeatedly failed parameter buckets before allocating exploratory budget.",
+    }
+
+
+def build_global_campaign_guidance(decision: dict[str, Any], duplicate: dict[str, Any], forward: dict[str, Any]) -> dict[str, Any]:
+    preferred_families = [row["name"] for row in decision["strategy_families"] if row["priority_score"] > 0][:8]
+    preferred_assets = [row["name"] for row in decision["assets"] if row["priority_score"] > 0][:12]
+    preferred_timeframes = [row["name"] for row in decision["timeframes"] if row["priority_score"] > 0][:4]
+    avoid_parameters = [row["region"] for row in duplicate["repeated_failed_parameter_regions"][:15]]
+    return {
+        "hypothesis_ranking": preferred_families,
+        "search_prioritization": {
+            "strategy_families": preferred_families,
+            "assets": preferred_assets,
+            "timeframes": preferred_timeframes,
+            "avoid_parameter_regions": avoid_parameters,
+        },
+        "campaign_budgeting": {
+            "confirm_promising_regions_pct": 0.55,
+            "repair_near_pass_pct": 0.25,
+            "diversity_exploration_pct": 0.20,
+            "reason": "Preserve exploration while shifting most budget toward repeatable evidence.",
+        },
+        "repair_recommendations": decision["repair_effectiveness"][:10],
+        "exploration_efficiency": {
+            "duplicate_signatures_to_skip": [row["signature"] for row in duplicate["exact_duplicate_groups"][:20]],
+            "forward_divergence_penalty": forward["drift_classifications"],
+        },
+        "constraints": "Guidance changes ranking and budget allocation only; validation thresholds and promotions remain unchanged.",
     }
 
 
@@ -248,7 +608,243 @@ def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
         "created_at": job.get("created_at"),
         "completed_at": job.get("completed_at"),
         "evidence_ref": f"campaign_job:{job.get('id') or candidate_id}",
+        "candidate": candidate,
     }
+
+
+def persist_global_learning(conn: psycopg.Connection, snapshot: dict[str, Any], candidate_objects: list[dict[str, Any]]) -> None:
+    for row in candidate_objects:
+        conn.execute(
+            """
+            INSERT INTO research_candidate_objects(
+                candidate_scope_key, candidate_id, campaign_ids, state, strategy_family, assets, timeframes,
+                lineage, generation_history, validation_history, repair_history, promotion_history,
+                deployment_history, forward_evidence, learning_summary, calculation_version, updated_at, simulation_only
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), TRUE)
+            ON CONFLICT(candidate_scope_key) DO UPDATE
+            SET campaign_ids = EXCLUDED.campaign_ids,
+                state = EXCLUDED.state,
+                strategy_family = EXCLUDED.strategy_family,
+                assets = EXCLUDED.assets,
+                timeframes = EXCLUDED.timeframes,
+                lineage = EXCLUDED.lineage,
+                generation_history = EXCLUDED.generation_history,
+                validation_history = EXCLUDED.validation_history,
+                repair_history = EXCLUDED.repair_history,
+                promotion_history = EXCLUDED.promotion_history,
+                deployment_history = EXCLUDED.deployment_history,
+                forward_evidence = EXCLUDED.forward_evidence,
+                learning_summary = EXCLUDED.learning_summary,
+                calculation_version = EXCLUDED.calculation_version,
+                updated_at = NOW()
+            """,
+            (
+                row["candidate_scope_key"],
+                row["candidate_id"],
+                Jsonb(jsonable(row["campaign_ids"])),
+                row["state"],
+                row["strategy_family"],
+                Jsonb(jsonable(row["assets"])),
+                Jsonb(jsonable(row["timeframes"])),
+                Jsonb(jsonable(row["lineage"])),
+                Jsonb(jsonable(row["generation_history"])),
+                Jsonb(jsonable(row["validation_history"])),
+                Jsonb(jsonable(row["repair_history"])),
+                Jsonb(jsonable(row["promotion_history"])),
+                Jsonb(jsonable(row["deployment_history"])),
+                Jsonb(jsonable(row["forward_evidence"])),
+                Jsonb(jsonable(row["learning_summary"])),
+                LEARNING_VERSION,
+            ),
+        )
+    conn.execute(
+        """
+        INSERT INTO research_global_learning_snapshots(
+            snapshot_key, evidence_window, elite_explanations, decision_intelligence, forward_intelligence,
+            duplicate_intelligence, candidate_object_summary, campaign_guidance, constraints, calculation_version, simulation_only
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+        ON CONFLICT(snapshot_key) DO NOTHING
+        """,
+        (
+            snapshot["snapshot_key"],
+            Jsonb(jsonable(snapshot["evidence_window"])),
+            Jsonb(jsonable(snapshot["elite_explanations"])),
+            Jsonb(jsonable(snapshot["decision_intelligence"])),
+            Jsonb(jsonable(snapshot["forward_intelligence"])),
+            Jsonb(jsonable(snapshot["duplicate_intelligence"])),
+            Jsonb(jsonable(snapshot["candidate_object_summary"])),
+            Jsonb(jsonable(snapshot["campaign_guidance"])),
+            Jsonb(jsonable(snapshot["constraints"])),
+            LEARNING_VERSION,
+        ),
+    )
+
+
+def research_generation_guidance(conn: psycopg.Connection) -> dict[str, Any]:
+    try:
+        ensure_research_learning_tables(conn)
+        row = conn.execute(
+            """
+            SELECT campaign_guidance
+            FROM research_global_learning_snapshots
+            WHERE simulation_only = TRUE
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    except Exception:
+        rollback = getattr(conn, "rollback", None)
+        if callable(rollback):
+            rollback()
+        return {"available": False, "reason": "global learning guidance unavailable", "calculation_version": GLOBAL_LEARNING_VERSION}
+    if not row:
+        return {"available": False, "reason": "no global learning snapshot yet", "calculation_version": GLOBAL_LEARNING_VERSION}
+    guidance = dict(row.get("campaign_guidance") or {})
+    guidance["available"] = True
+    guidance["calculation_version"] = GLOBAL_LEARNING_VERSION
+    return guidance
+
+
+def score_candidate_for_guidance(candidate: Any, guidance: dict[str, Any]) -> float:
+    if not guidance.get("available"):
+        return 0.0
+    priority = guidance.get("search_prioritization") or {}
+    preferred_families = set(priority.get("strategy_families") or [])
+    avoid_regions = set(priority.get("avoid_parameter_regions") or [])
+    params = dict(getattr(candidate, "parameters", {}) or {})
+    blocks = dict(getattr(candidate, "blocks", {}) or {})
+    score = 0.0
+    for value in {str(params.get("entry") or ""), *[str(item) for item in blocks.values()]}:
+        if value in preferred_families:
+            score += 3.0
+    for bucket in parameter_buckets(params).values():
+        if bucket in avoid_regions:
+            score -= 2.0
+    if "repair" in str(params.get("generation_channel") or ""):
+        score += 0.75
+    return round(score, 6)
+
+
+def candidate_scope_key(campaign_id: Any, candidate_id: Any) -> str:
+    return f"{campaign_id or 'global'}:{candidate_id or 'unknown'}"
+
+
+def candidate_object_state(rows: list[dict[str, Any]], elite: dict[str, Any] | None, deployments: list[dict[str, Any]]) -> str:
+    if elite and str(elite.get("forward_validation_state")) == "forward_validation_passed":
+        return "Forward Passed"
+    if deployments:
+        return "Forward Active" if any(str(row.get("status")) == "active" for row in deployments) else "Paper Deployed"
+    if elite:
+        return "Elite"
+    if any(row["promoted"] for row in rows):
+        return "Research Candidate"
+    if any(row["status"] in {"completed", "rejected", "promoted"} for row in rows) and not all(row["status"] in {"completed", "rejected", "promoted", "failed", "canceled", "blocked_data"} for row in rows):
+        return "Needs More Evidence"
+    if any(row["rejected"] for row in rows):
+        return "Rejected"
+    return "Observed"
+
+
+def state_rank(state: str) -> int:
+    return {"Forward Passed": 7, "Forward Active": 6, "Paper Deployed": 5, "Elite": 4, "Research Candidate": 3, "Needs More Evidence": 2, "Rejected": 1}.get(state, 0)
+
+
+def compact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "profit_factor": finite_metric(metrics.get("profit_factor")),
+        "expectancy": finite_metric(metrics.get("expectancy_per_trade")),
+        "trade_count": finite_metric(metrics.get("number_of_trades")),
+        "drawdown": finite_metric(metrics.get("max_drawdown")),
+        "win_rate": finite_metric(metrics.get("win_rate")),
+        "walk_forward_enabled": bool((metrics.get("walk_forward") or {}).get("enabled")),
+    }
+
+
+def elite_driver_components(elite: dict[str, Any], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    passed_assets = sorted({row["symbol"] for row in rows if row["promoted"]})
+    passed_timeframes = sorted({row["timeframe"] for row in rows if row["promoted"]})
+    return {
+        "profit_factor": finite_metric(elite.get("profit_factor") or average(row["metrics"].get("profit_factor") for row in rows)),
+        "expectancy": finite_metric(elite.get("expectancy") or average(row["metrics"].get("expectancy_per_trade") for row in rows)),
+        "trade_count": int(finite_metric(elite.get("trade_count") or sum(finite_metric(row["metrics"].get("number_of_trades")) for row in rows))),
+        "drawdown": finite_metric(elite.get("max_drawdown") or average(row["metrics"].get("max_drawdown") for row in rows)),
+        "stability": finite_metric(elite.get("stability") or average(row.get("consistency_score") for row in rows)),
+        "assets_passed": int(elite.get("assets_passed") or len(passed_assets)),
+        "timeframes_passed": int(elite.get("timeframes_passed") or len(passed_timeframes)),
+        "passed_assets": passed_assets,
+        "passed_timeframes": passed_timeframes,
+    }
+
+
+def compare_candidate_to_population(candidate: dict[str, Any], population: list[dict[str, Any]]) -> dict[str, Any]:
+    if not population:
+        return {"population_size": 0}
+    metrics = candidate["learning_summary"]["best_metrics"]
+    return {
+        "population_size": len(population),
+        "profit_factor_delta": round(finite_metric(metrics.get("profit_factor")) - average(row["learning_summary"]["best_metrics"].get("profit_factor") for row in population), 4),
+        "expectancy_delta": round(finite_metric(metrics.get("expectancy")) - average(row["learning_summary"]["best_metrics"].get("expectancy") for row in population), 4),
+        "drawdown_delta": round(finite_metric(metrics.get("drawdown")) - average(row["learning_summary"]["best_metrics"].get("drawdown") for row in population), 4),
+        "trade_count_delta": round(finite_metric(metrics.get("trade_count")) - average(row["learning_summary"]["best_metrics"].get("trade_count") for row in population), 4),
+    }
+
+
+def elite_explanation_text(drivers: dict[str, Any], candidate: dict[str, Any]) -> str:
+    return (
+        f"{candidate['candidate_id']} became elite because it combined PF {drivers['profit_factor']}, "
+        f"positive expectancy {drivers['expectancy']}, drawdown {drivers['drawdown']}, "
+        f"{drivers['trade_count']} trades, stability {drivers['stability']}, and passed "
+        f"{drivers['assets_passed']} assets across {drivers['timeframes_passed']} timeframe(s)."
+    )
+
+
+def score_dimension(jobs: list[dict[str, Any]], field: str) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in jobs:
+        grouped[str(row.get(field) or "unknown")].append(row)
+    rows = []
+    for name, items in grouped.items():
+        promoted = [row for row in items if row["promoted"]]
+        rejected = [row for row in items if row["rejected"]]
+        tested = [row for row in items if row["status"] in {"completed", "rejected", "promoted"}]
+        score = round(
+            ratio(len(promoted), len(tested)) * 50
+            + max(0.0, average(row["metrics"].get("expectancy_per_trade") for row in promoted)) * 10
+            + max(0.0, average(row["metrics"].get("profit_factor") for row in promoted) - 1) * 20
+            - ratio(len(rejected), len(tested)) * 10,
+            4,
+        )
+        rows.append({"name": name, "tested": len(tested), "promoted": len(promoted), "rejected": len(rejected), "priority_score": score, "promotion_rate": ratio(len(promoted), len(tested))})
+    return sorted(rows, key=lambda row: (row["priority_score"], row["tested"], row["name"]), reverse=True)
+
+
+def score_parameter_regions(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in jobs:
+        for bucket in parameter_buckets(row["parameters"]).values():
+            grouped[bucket].append(row)
+    rows = []
+    for region, items in grouped.items():
+        promoted = sum(1 for row in items if row["promoted"])
+        rejected = sum(1 for row in items if row["rejected"])
+        rows.append({"region": region, "tested": len(items), "promoted": promoted, "rejected": rejected, "promotion_rate": ratio(promoted, len(items)), "failure_rate": ratio(rejected, len(items))})
+    return sorted(rows, key=lambda row: (row["promotion_rate"], -row["failure_rate"], row["tested"]), reverse=True)[:100]
+
+
+def score_repair_attempts(candidate_objects: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for item in candidate_objects:
+        repairs = item["repair_history"]
+        if not repairs:
+            continue
+        rows.append({"candidate_id": item["candidate_id"], "state": item["state"], "repair_attempts": len(repairs), "successful": item["state"] in {"Research Candidate", "Elite", "Forward Active", "Forward Passed"}, "channels": sorted({str(row.get("channel") or "unknown") for row in repairs})})
+    return sorted(rows, key=lambda row: (row["successful"], row["repair_attempts"], row["candidate_id"]), reverse=True)
+
+
+def candidate_signature(row: dict[str, Any]) -> str:
+    return stable_key(canonical_json(row.get("blocks") or {}), canonical_json(parameter_buckets(row.get("parameters") or {})))
 
 
 def infer_metric_failure_reasons(metrics: dict[str, Any]) -> list[str]:
@@ -767,6 +1363,17 @@ def research_learning_summary(conn: psycopg.Connection, limit: int = 5) -> dict[
         "medium": sum(1 for score in scores if 50 <= score < 75),
         "low": sum(1 for score in scores if score < 50),
     }
+    global_snapshot = conn.execute(
+        """
+        SELECT snapshot_key, evidence_window, elite_explanations, decision_intelligence,
+               forward_intelligence, duplicate_intelligence, candidate_object_summary,
+               campaign_guidance, constraints, calculation_version, created_at
+        FROM research_global_learning_snapshots
+        WHERE simulation_only = TRUE
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
     return {
         "current_priorities": [row.get("recommendation") for row in recommendations],
         "strongest_emerging_ideas": [row.get("description") for row in successes],
@@ -775,6 +1382,11 @@ def research_learning_summary(conn: psycopg.Connection, limit: int = 5) -> dict[
         "recommendation_queue": [jsonable(row) for row in recommendations],
         "evolving_strategy_families": [row.get("value") for row in successes if row.get("pattern_type") == "strategy_family_range"],
         "confidence_distribution": distribution,
+        "global_learning": jsonable(dict(global_snapshot)) if global_snapshot else {
+            "available": False,
+            "refresh_endpoint": "/research/learning/refresh-global",
+            "reason": "No global Phase 9.9 learning snapshot has been persisted yet.",
+        },
         "safety": {"simulation_only": True, "statement": SAFETY_STATEMENT},
     }
 
@@ -886,6 +1498,14 @@ def strategy_family(blocks: dict[str, Any]) -> str:
 def average(values: Any) -> float:
     nums = [finite_metric(value) for value in values if value is not None]
     return round(sum(nums) / len(nums), 4) if nums else 0.0
+
+
+def ratio(numerator: int | float, denominator: int | float) -> float:
+    return round(float(numerator) / float(denominator), 4) if denominator else 0.0
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(jsonable(value), sort_keys=True, separators=(",", ":"))
 
 
 def stable_key(*parts: str) -> str:

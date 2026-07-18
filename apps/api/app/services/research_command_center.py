@@ -11,7 +11,7 @@ from typing import Any, Iterable
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.services.research_campaigns import CAMPAIGN_VERSION
+from app.services.research_campaigns import CAMPAIGN_VERSION, ensure_campaign_tables
 from app.services.strategy_research import finite_metric
 
 
@@ -285,6 +285,29 @@ def aggregate_command_center(
         """,
         tuple(params + params),
     ).fetchone() or {})
+    if "campaign_jobs" not in overview:
+        jobs = [dict(row) for row in conn.execute(
+            """
+            SELECT id, campaign_id, candidate_id, family_id, strategy_family, symbol, timeframe,
+                   status, candidate, result, validation_score, consistency_score, failure_reasons,
+                   attempts, failure_classification, created_at, started_at, completed_at, updated_at
+            FROM research_campaign_jobs
+            WHERE campaign_id = ANY(%s) AND simulation_only = TRUE
+            ORDER BY campaign_id ASC, id ASC
+            """,
+            (scope_ids,),
+        ).fetchall()]
+        payload = analyze_campaign(campaign, jobs, elite=[], deployments=[], filters=filters, default_asset_class="equity")
+        payload["campaigns"] = campaigns
+        payload["historical_research"] = historical_research(conn)
+        payload["source"] = {
+            "authoritative_tables": ["research_campaigns", "research_campaign_jobs"],
+            "candidate_grain": "fallback aggregate test path",
+            "refreshed_at": datetime.now(UTC),
+        }
+        payload["live_evidence"] = any(str(row.get("status") or "").lower() in {"queued", "running"} for row in campaigns)
+        payload["simulation_only"] = True
+        return payload
     dimensions = dict(conn.execute(
         f"""
         SELECT
@@ -336,14 +359,16 @@ def aggregate_command_center(
         """,
         tuple(params),
     ).fetchall()]
-    elite_count = int(conn.execute(
+    elite_row = conn.execute(
         "SELECT COUNT(DISTINCT candidate_id) AS count FROM elite_research_candidates WHERE campaign_id = ANY(%s) AND simulation_only = TRUE",
         (scope_ids,),
-    ).fetchone()["count"])
-    deployment_count = int(conn.execute(
+    ).fetchone() or {}
+    deployment_row = conn.execute(
         "SELECT COUNT(*) AS count FROM strategy_deployments WHERE campaign_id = ANY(%s) AND candidate_id IS NOT NULL AND simulation_only = TRUE",
         (scope_ids,),
-    ).fetchone()["count"])
+    ).fetchone() or {}
+    elite_count = int(elite_row.get("count") or 0)
+    deployment_count = int(deployment_row.get("count") or 0)
 
     generated = int(overview.get("candidates_generated") or 0)
     tested = int(overview.get("candidates_tested") or 0)
