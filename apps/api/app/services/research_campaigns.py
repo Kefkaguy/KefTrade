@@ -3847,7 +3847,7 @@ def run_background_campaign_worker(
                 conn.commit()
             log_event("Task completed", task="worker_cycle", worker_id=worker, cycle=cycles + 1, processed=result.get("processed"), elapsed_ms=elapsed_ms(cycle_started))
             cycles += 1
-            if max_cycles is None or cycles < max_cycles:
+            if (max_cycles is None or cycles < max_cycles) and int(result.get("processed") or 0) == 0:
                 time.sleep(poll_seconds)
         with conn_factory() as conn:
             stop_campaign_worker(conn, worker)

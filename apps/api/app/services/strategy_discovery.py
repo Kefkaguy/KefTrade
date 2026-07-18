@@ -233,7 +233,7 @@ def generate_family_discovery_candidates(
             "phase2_generation_role": role,
             "phase2_generation_seed": int(seed),
             "frequency_screen_min_opportunities": 30,
-            "recent_candle_window_bars": 220,
+            "recent_candle_window_bars": 80,
             "swing_lookback": int(combination.get("pause_bars") or combination.get("range_lookback") or 5),
         }
         canonical_key = canonical_candidate_key(blocks, params)

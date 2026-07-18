@@ -457,9 +457,9 @@ def strategy_family_decision(
 ) -> StrategyDecision:
     family = str(params.get("phase2_strategy_family") or "")
     strategy_family_spec(family)
-    candles = [dict(row) for row in recent_candles]
+    candles = recent_candles
     if not candles or candles[-1].get("timestamp") != candle.get("timestamp"):
-        candles.append(dict(candle))
+        candles = [*candles, candle]
     decision = {
         "Breakout": _breakout_signal,
         "Momentum": _momentum_signal,
@@ -498,7 +498,7 @@ def _breakout_signal(candle: dict[str, Any], feature: dict[str, Any], candles: l
     prior_high = max(_float(row["high"]) for row in prior)
     close = _float(candle["close"])
     breakout_distance = close / prior_high - 1 if prior_high else 0.0
-    prior_ranges = _true_ranges(candles[:-1])[-20:]
+    prior_ranges = _true_ranges(candles[-22:-1])[-20:]
     recent_ranges = prior_ranges[-compression_lookback:]
     compression = median(recent_ranges) / median(prior_ranges) if prior_ranges and median(prior_ranges) else 99.0
     volume_ratio = _volume_ratio(candles, 20)
@@ -543,8 +543,8 @@ def _pullback_signal(candle: dict[str, Any], feature: dict[str, Any], candles: l
     lookback = int(params["pullback_lookback"])
     if len(candles) < max(lookback + 1, 52):
         return False, "Pullback requires trend and peak history.", {}
-    fast = _ema(candles, 20)
-    slow = _ema(candles, 50)
+    fast = _number(feature.get("ema_20")) or _ema(candles, 20)
+    slow = _number(feature.get("ema_50")) or _ema(candles, 50)
     close = _float(candle["close"])
     peak = max(_float(row["high"]) for row in candles[-lookback:])
     depth = (peak - close) / peak if peak else 0.0
@@ -590,7 +590,7 @@ def _volatility_expansion_signal(candle: dict[str, Any], feature: dict[str, Any]
     lookback = int(params["range_baseline_lookback"])
     if len(candles) < lookback + 2:
         return False, "Volatility expansion requires baseline range history.", {}
-    ranges = _true_ranges(candles)
+    ranges = _true_ranges(candles[-lookback - 2 :])
     baseline = median(ranges[-lookback - 1 : -1])
     expansion = ranges[-1] / baseline if baseline else 0.0
     close_location = _close_location(candle)
@@ -638,8 +638,8 @@ def _continuation_signal(candle: dict[str, Any], feature: dict[str, Any], candle
     pause_depth = (impulse_end - pause_low) / impulse_end if impulse_end else 99.0
     close = _float(candle["close"])
     resumption = close / pause_high - 1 if pause_high else 0.0
-    fast = _ema(candles, 20)
-    slow = _ema(candles, 50)
+    fast = _number(feature.get("ema_20")) or _ema(candles, 20)
+    slow = _number(feature.get("ema_50")) or _ema(candles, 50)
     passed = (
         impulse_return >= float(params["impulse_return_min"])
         and pause_depth <= float(params["pause_depth_max"])
@@ -674,7 +674,7 @@ def _family_stop(strategy_family: str, candle: dict[str, Any], candles: list[dic
     close = _decimal(candle.get("close"))
     if close is None:
         return None
-    ranges = _true_ranges(candles)
+    ranges = _true_ranges(candles[-15:])
     atr = Decimal(str(median(ranges[-14:]))) if ranges else close * Decimal("0.01")
     atr_stop = close - atr * Decimal(str(params.get("atr_multiplier", 1.6)))
     lookback = min(len(candles), max(2, int(params.get("swing_lookback", 5))))

@@ -88,6 +88,7 @@ def test_family_candidate_generation_is_deterministic_deduplicated_and_balanced(
         assert [row.candidate_id for row in first] == [row.candidate_id for row in second]
         assert len({candidate_execution_key(row) for row in first}) == 25
         assert all(row.parameters["phase2_strategy_family"] == family for row in first)
+        assert all(row.parameters["recent_candle_window_bars"] == 80 for row in first)
         hypothesis = {
             "id": 9,
             "hypothesis_key": f"test_{family}",
@@ -169,6 +170,16 @@ def test_each_family_has_a_distinct_executable_signal_path() -> None:
         assert decision.stop_loss is not None and decision.stop_loss < rows[-1]["close"]
         explanations.add(decision.explanation[0])
     assert len(explanations) == len(PHASE_2_FAMILY_NAMES)
+
+
+def test_family_decision_does_not_copy_or_mutate_recent_history() -> None:
+    rows = [candle(i, 100, 101, 99, 100, 1000) for i in range(80)]
+    original_ids = [id(row) for row in rows]
+
+    strategy_family_decision(rows[-1], standard_feature(), rows, default_params("Breakout"))
+
+    assert len(rows) == 80
+    assert [id(row) for row in rows] == original_ids
 
 
 def test_phase2_hypotheses_preserve_post_hoc_and_independent_confirmation_rules() -> None:
