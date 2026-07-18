@@ -129,6 +129,13 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  certbot:
+    image: certbot/certbot:latest
+    profiles: ["tls"]
+    volumes:
+      - ./certbot/www:/var/www/certbot
+      - ./certbot/conf:/etc/letsencrypt
+
 volumes:
   postgres-data:
   nginx-cache:
