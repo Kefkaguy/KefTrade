@@ -2,6 +2,10 @@ import { CreateDeployment, PauseDeploymentButton } from "@/components/PaperActio
 import { Card, DataTable, EmptyState, PageTitle } from "@/components/ResearchUI";
 import { getPaperSnapshot } from "@/lib/paper";
 
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
+
 export default async function StrategyDeploymentsPage() {
   const snapshot = await getPaperSnapshot();
   return (
