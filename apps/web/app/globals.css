@@ -506,6 +506,12 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .selectedAssetStrip strong, .selectedAssetStrip small { display: block; }
 .selectedAssetStrip strong { color: var(--accent); font: 700 10px var(--font-mono); }
 .selectedAssetStrip small { max-height: 88px; margin-top: 5px; overflow: auto; color: var(--muted); font-size: 9px; line-height: 1.6; word-break: break-word; }
+.selectedEvidenceGroups { display: grid; flex: 1 1 auto; gap: 8px; }
+.selectedEvidenceGroup { padding-left: 9px; border-left: 2px solid var(--line-strong); }
+.selectedEvidenceGroup span { display: block; color: var(--muted); font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.selectedEvidenceGroup.established { border-color: var(--success); }
+.selectedEvidenceGroup.exploration { border-color: var(--accent-2); }
+.selectedEvidenceGroup.deprioritized { border-color: var(--error); }
 .evidenceBadge { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 5px; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line)); border-radius: var(--radius-small); background: var(--accent-soft); color: var(--accent); font-size: 8px; font-weight: 800; text-transform: uppercase; }
 .scopeSelector { display: grid; border-top: 1px solid var(--line); }
 .scopeOption { display: grid; min-height: 66px; grid-template-columns: 25px minmax(0, 1fr) 24px; align-items: center; gap: 12px; padding: 10px 8px; border-bottom: 1px solid var(--line); background: transparent; color: var(--muted); cursor: pointer; text-align: left; transition: color .2s ease, background .2s ease; }
@@ -522,12 +528,30 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .assetOption { display: grid; min-width: 0; min-height: 112px; align-content: space-between; padding: 13px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); color: var(--muted); cursor: pointer; text-align: left; transition: border-color .2s ease, background .2s ease, color .2s ease, box-shadow .2s ease; }
 .assetOption:hover { border-color: var(--accent-2); color: var(--ink); }
 .assetOption.selected { border-color: color-mix(in srgb, var(--accent) 58%, var(--line)); background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent); }
+.assetOption.evidence-established { border-left: 3px solid var(--success); }
+.assetOption.evidence-exploration { border-left: 3px solid var(--accent-2); }
+.assetOption.evidence-deprioritized { border-left: 3px solid var(--error); opacity: .72; }
 .assetOptionTop { display: flex; min-height: 20px; align-items: center; justify-content: space-between; }
 .assetOptionTop > span { display: grid; width: 20px; height: 20px; place-items: center; border-radius: 4px; background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .assetOption strong, .assetOption small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .assetOption strong { margin-top: 16px; color: var(--ink); font: 700 15px var(--font-mono); }
 .assetOption small { margin-top: 2px; font-size: 8px; }
+.assetEvidenceDetails { display: grid; gap: 2px; margin-top: 8px; }
+.assetEvidenceDetails b { color: var(--accent); font-size: 8px; letter-spacing: 0; }
+.assetEvidenceDetails em { display: block; overflow: hidden; color: var(--muted); font-size: 7px; font-style: normal; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .assetSearchEmpty { padding: 24px 0; text-align: center; font-size: 10px; }
+.researchAssetProfile { display: grid; gap: 14px; margin-top: 14px; padding: 16px; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line)); border-radius: var(--radius-small); background: color-mix(in srgb, var(--panel-soft) 70%, var(--bg)); }
+.researchAssetProfileHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.researchAssetProfileHeader span, .profileBasedOn span, .profileScoreGrid span { display: block; color: var(--muted); font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.researchAssetProfileHeader strong { display: block; margin-top: 4px; color: var(--accent); font: 800 20px var(--font-mono); }
+.researchAssetProfileHeader small { display: block; margin-top: 2px; color: var(--muted-accent); font-size: 9px; }
+.researchAssetProfileHeader button { min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--bg); color: var(--muted); cursor: pointer; font-size: 8px; font-weight: 800; text-transform: uppercase; }
+.researchAssetProfileHeader button:hover { border-color: var(--accent-2); color: var(--ink); }
+.profileScoreGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--line); }
+.profileScoreGrid > div { min-width: 0; min-height: 58px; padding: 10px; background: var(--bg); }
+.profileScoreGrid strong { display: block; margin-top: 5px; overflow: hidden; color: var(--ink); font: 750 11px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+.profileBasedOn { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.profileBasedOn small { padding: 5px 8px; border: 1px solid var(--line); border-radius: var(--radius-small); color: var(--muted-accent); font-size: 8px; }
 .builderPromise { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 13px; margin-top: 44px; padding-top: 28px; border-top: 1px solid var(--line); }
 .builderPromise > svg { color: var(--accent); }
 .builderPromise strong { display: block; font-size: 11px; }
@@ -864,6 +888,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   .builderIntro h2 { font-size: 31px; }
   .builderControls, .campaignPreview { padding: 26px 22px; }
   .assetSelector { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .profileScoreGrid { grid-template-columns: 1fr; }
   .assetCountControl { grid-template-columns: 1fr; }
   .assetCountControl > input[type="range"] { grid-column: 1; }
   .assetCountInput { justify-self: start; }

@@ -32,12 +32,41 @@ import {
   type ResearchScopeId,
   type ResearchSelection
 } from "@/lib/home-research";
-import { getResearchLearning, getSymbols, type ResearchLearningSummary } from "@/lib/api";
+import {
+  fetchResearchCommandCenter,
+  getResearchLearning,
+  getSymbols,
+  type ResearchCommandCenter,
+  type ResearchLearningSummary
+} from "@/lib/api";
 import { useEffect, useMemo, useState } from "react";
 
 type ResearchBuilderProps = {
   launching: boolean;
   onLaunch: (selection: ResearchSelection) => void;
+};
+
+type EvidenceTier = "established" | "exploration" | "deprioritized";
+
+type AssetEvidence = {
+  symbol: string;
+  tier: EvidenceTier;
+  score: number;
+  confidence: "High" | "Medium" | "Low";
+  campaigns: number;
+  validationRuns: number;
+  researchCandidates: number;
+  eliteCandidates: number;
+  forwardDeployments: number;
+  profitFactor: number;
+  expectancy: number;
+  tradeCount: number;
+  drawdown: number;
+  bestFamily?: string | null;
+  bestTimeframe?: string | null;
+  dominantFailure?: string | null;
+  repairSuccess?: number | null;
+  reasons: string[];
 };
 
 const scopeIcons = {
@@ -62,21 +91,26 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   const [stockCatalog, setStockCatalog] = useState<ResearchAsset[]>(fallbackStocks);
   const [assetIds, setAssetIds] = useState<ResearchAssetId[]>(["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "AMZN", "SPY", "QQQ"]);
   const [learningSummary, setLearningSummary] = useState<ResearchLearningSummary | null>(null);
+  const [commandCenter, setCommandCenter] = useState<ResearchCommandCenter | null>(null);
+  const [profileAssetId, setProfileAssetId] = useState<ResearchAssetId | null>(null);
   const [learningState, setLearningState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [catalogState, setCatalogState] = useState<"loading" | "ready" | "fallback">("loading");
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const allAssets = useMemo(() => [...stockCatalog, ...CRYPTO_RESEARCH_ASSETS], [stockCatalog]);
   const assetById = useMemo(() => new Map(allAssets.map((asset) => [asset.id, asset])), [allAssets]);
-  const evidenceGuidance = useMemo(() => establishedGuidance(learningSummary), [learningSummary]);
+  const evidenceGuidance = useMemo(() => establishedGuidance(learningSummary, commandCenter), [commandCenter, learningSummary]);
+  const evidenceBySymbol = useMemo(() => new Map(evidenceGuidance.assetEvidence.map((row) => [row.symbol.toUpperCase(), row])), [evidenceGuidance.assetEvidence]);
   const establishedAssets = useMemo(
-    () => learnedAssets(stockCatalog, evidenceGuidance.assets),
-    [stockCatalog, evidenceGuidance.assets]
+    () => learnedAssets(stockCatalog, evidenceGuidance.assets, evidenceGuidance.deprioritizedAssets, evidenceAllocation),
+    [evidenceAllocation, evidenceGuidance.assets, evidenceGuidance.deprioritizedAssets, stockCatalog]
   );
   const selectedAssets = useMemo(
     () => assetIds.map((id) => assetById.get(id)).filter((asset): asset is ResearchAsset => Boolean(asset)),
     [assetById, assetIds]
   );
+  const profileAsset = profileAssetId ? assetById.get(profileAssetId) ?? null : null;
+  const profileEvidence = profileAsset ? evidenceBySymbol.get(profileAsset.apiSymbol.toUpperCase()) ?? null : null;
   const selection = useMemo(
     () => buildResearchSelection(scopeId, selectedAssets, {
       universeMode,
@@ -94,20 +128,28 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   const maxEstablishedSelection = Math.max(1, Math.min(establishedAssets.length || readyStockCatalog.length || stockCatalog.length, MAX_PROFILE_ASSETS, MAX_RANDOM_STOCKS));
   const visibleAssets = useMemo(() => {
     const query = searchQuery.trim().toLowerCase();
+    const baseAssets = universeMode === "established" ? selectedFirst(learnedAssets(stockCatalog, evidenceGuidance.assets, evidenceGuidance.deprioritizedAssets, evidenceAllocation), assetIds) : allAssets;
     const matches = query
       ? allAssets.filter((asset) => asset.id.toLowerCase().includes(query) || asset.name.toLowerCase().includes(query))
-      : prioritizeAssets(allAssets);
+      : universeMode === "established" ? baseAssets : prioritizeAssets(allAssets);
     return selectedFirst(matches, assetIds).slice(0, 40);
-  }, [allAssets, assetIds, searchQuery]);
+  }, [allAssets, assetIds, evidenceAllocation, evidenceGuidance.assets, evidenceGuidance.deprioritizedAssets, searchQuery, stockCatalog, universeMode]);
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([getSymbols(), getResearchLearning()])
-      .then(([symbolsResult, learningResult]) => {
+    void Promise.allSettled([getSymbols(), getResearchLearning(), fetchResearchCommandCenter()])
+      .then(([symbolsResult, learningResult, commandCenterResult]) => {
         if (!active) return;
         if (learningResult.status === "fulfilled") {
           setLearningSummary(learningResult.value);
-          setLearningState(learningResult.value.global_learning?.snapshot_key ? "ready" : "unavailable");
+        }
+        if (commandCenterResult.status === "fulfilled") {
+          setCommandCenter(commandCenterResult.value);
+        }
+        if (learningResult.status === "fulfilled" || commandCenterResult.status === "fulfilled") {
+          const hasLearning = learningResult.status === "fulfilled" && Boolean(learningResult.value.global_learning?.snapshot_key);
+          const hasProposal = commandCenterResult.status === "fulfilled" && Boolean(commandCenterResult.value.next_campaign_proposal);
+          setLearningState(hasLearning || hasProposal ? "ready" : "unavailable");
         } else {
           setLearningState("unavailable");
         }
@@ -159,6 +201,10 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   }
 
   function toggleAsset(assetId: ResearchAssetId) {
+    if (universeMode === "established") {
+      setProfileAssetId(assetId);
+      return;
+    }
     if (scopeId === "single") {
       setAssetIds([assetId]);
       return;
@@ -300,7 +346,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                   <div className="evidenceGuidancePanel">
                     <div>
                       <strong>Evidence-guided</strong>
-                      <span>{establishedAssets.length ? `${establishedAssets.length.toLocaleString()} ranked assets` : learningState === "loading" ? "Loading learning snapshot" : "Using ready catalog until learning produces asset evidence"}</span>
+                      <span>{evidenceGuidance.assets.length ? `${evidenceGuidance.assets.length.toLocaleString()} retained assets` : learningState === "loading" ? "Loading learning snapshot" : "Using ready catalog until learning produces asset evidence"}</span>
                     </div>
                     <label>
                       <span>Evidence-guided allocation</span>
@@ -360,10 +406,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
             </label>
 
             <div className="selectedAssetStrip" aria-label="Selected stocks">
-              <div>
-                <strong>{selectedAssets.length.toLocaleString()} chosen</strong>
-                <small>{selectedAssets.map((asset) => asset.id).join(", ")}</small>
-              </div>
+              <EvidenceAssetGroups assets={selectedAssets} evidenceBySymbol={evidenceBySymbol} universeMode={universeMode} />
               {universeMode === "established" ? <span className="evidenceBadge"><Brain size={13} /> Evidence-guided</span> : null}
             </div>
 
@@ -372,11 +415,12 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                 const selected = assetIds.includes(asset.id);
                 const unavailable = !selected && assetIds.length >= MAX_PROFILE_ASSETS;
                 const AssetIcon = asset.market === "Crypto" ? Bitcoin : asset.market === "ETF" ? Layers3 : TrendingUp;
+                const evidence = evidenceBySymbol.get(asset.apiSymbol.toUpperCase());
                 return (
                   <motion.button
                     key={asset.id}
                     type="button"
-                    className={`assetOption ${selected ? "selected" : ""}`}
+                    className={`assetOption ${selected ? "selected" : ""} ${universeMode === "established" && evidence ? `evidence-${evidence.tier}` : ""}`}
                     aria-pressed={selected}
                     disabled={unavailable}
                     onClick={() => toggleAsset(asset.id)}
@@ -386,11 +430,23 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                     <span className="assetOptionTop"><AssetIcon size={16} /><span>{selected ? <Check size={13} /> : null}</span></span>
                     <strong>{asset.id}</strong>
                     <small>{asset.name}</small>
+                    {universeMode === "established" && evidence ? (
+                      <span className="assetEvidenceDetails">
+                        <b>{starsForScore(evidence.score)}</b>
+                        <em>Evidence Score {Math.round(evidence.score)}</em>
+                        <em>Confidence {evidence.confidence}</em>
+                        <em>{evidence.researchCandidates.toLocaleString()} candidates / {evidence.eliteCandidates.toLocaleString()} elite</em>
+                        <em>{evidence.reasons.slice(0, 2).join(" / ")}</em>
+                      </span>
+                    ) : null}
                   </motion.button>
                 );
               })}
             </div>
             {searchQuery && visibleAssets.length === 0 ? <p className="assetSearchEmpty">No Alpaca assets match this search.</p> : null}
+            {universeMode === "established" && profileAsset && profileEvidence ? (
+              <ResearchAssetProfile asset={profileAsset} evidence={profileEvidence} onClose={() => setProfileAssetId(null)} />
+            ) : null}
           </div>
 
           <div className="builderPromise">
@@ -485,19 +541,97 @@ function selectedFirst(assets: ResearchAsset[], selectedIds: ResearchAssetId[]) 
   });
 }
 
-function establishedGuidance(summary: ResearchLearningSummary | null) {
+function establishedGuidance(summary: ResearchLearningSummary | null, commandCenter: ResearchCommandCenter | null) {
   const global = summary?.global_learning;
   const priority = global?.campaign_guidance?.search_prioritization ?? {};
   const decision = global?.decision_intelligence ?? {};
+  const proposal = commandCenter?.next_campaign_proposal ?? {};
+  const retainedAssets = stringList(proposal.assets_to_retain);
+  const deprioritizedAssets = stringList(proposal.assets_to_deprioritize);
   const decisionAssets = rankedNames(decision.assets, "priority_score");
   const decisionFamilies = rankedNames(decision.strategy_families, "priority_score");
   const decisionTimeframes = rankedNames(decision.timeframes, "priority_score");
+  const assetRows = commandCenter?.asset_intelligence?.rows ?? [];
+  const rowEvidence = assetRows.map((row) => assetEvidenceFromRow(row, retainedAssets, deprioritizedAssets));
+  const retainedEvidence = retainedAssets.map((symbol) => rowEvidence.find((row) => row.symbol === symbol.toUpperCase()) ?? fallbackAssetEvidence(symbol, "established"));
+  const deprioritizedEvidence = deprioritizedAssets.map((symbol) => rowEvidence.find((row) => row.symbol === symbol.toUpperCase()) ?? fallbackAssetEvidence(symbol, "deprioritized"));
+  const remainingEvidence = rowEvidence.filter(
+    (row) => !retainedAssets.some((symbol) => symbol.toUpperCase() === row.symbol) && !deprioritizedAssets.some((symbol) => symbol.toUpperCase() === row.symbol)
+  );
 
   return {
     snapshotKey: global?.snapshot_key ?? null,
-    assets: mergeStable(priority.assets ?? [], decisionAssets),
+    assets: mergeStable(retainedAssets, mergeStable(priority.assets ?? [], decisionAssets)).filter(
+      (symbol) => !deprioritizedAssets.some((deprioritized) => deprioritized.toUpperCase() === symbol.toUpperCase())
+    ),
+    deprioritizedAssets,
+    assetEvidence: [...retainedEvidence, ...remainingEvidence, ...deprioritizedEvidence],
     strategyFamilies: mergeStable(priority.strategy_families ?? [], decisionFamilies),
     timeframes: mergeStable(priority.timeframes ?? [], decisionTimeframes)
+  };
+}
+
+function assetEvidenceFromRow(row: Record<string, unknown>, retainedAssets: string[], deprioritizedAssets: string[]): AssetEvidence {
+  const symbol = String(row.name ?? "").toUpperCase();
+  const score = boundedScore(Number(row.candidate_quality_score ?? 0));
+  const campaigns = Math.round(Number(row.campaign_count ?? 0));
+  const validationRuns = Math.round(Number(row.validation_runs ?? 0));
+  const researchCandidates = Math.round(Number(row.pass_rate ?? 0) * Number(row.validation_runs ?? 0));
+  const tier = deprioritizedAssets.some((asset) => asset.toUpperCase() === symbol)
+    ? "deprioritized"
+    : retainedAssets.some((asset) => asset.toUpperCase() === symbol) || score >= 40
+      ? "established"
+      : "exploration";
+  const reasons = [
+    score >= 40 ? "Positive historical quality" : null,
+    Number(row.average_profit_factor ?? 0) > 0 ? `PF ${formatMetric(row.average_profit_factor)}` : null,
+    Number(row.average_expectancy ?? 0) > 0 ? `Expectancy ${formatMetric(row.average_expectancy)}` : null,
+    Number(row.median_trade_count ?? 0) > 0 ? `${Math.round(Number(row.median_trade_count))} median trades` : null,
+    tier === "deprioritized" ? readableFailure(row.dominant_failure_reason) : null
+  ].filter((reason): reason is string => Boolean(reason));
+
+  return {
+    symbol,
+    tier,
+    score,
+    confidence: confidenceForEvidence(campaigns, validationRuns, researchCandidates),
+    campaigns,
+    validationRuns,
+    researchCandidates,
+    eliteCandidates: Number(row.elite_candidates ?? 0),
+    forwardDeployments: Number(row.forward_deployments ?? 0),
+    profitFactor: Number(row.average_profit_factor ?? 0),
+    expectancy: Number(row.average_expectancy ?? 0),
+    tradeCount: Number(row.median_trade_count ?? 0),
+    drawdown: Number(row.median_drawdown ?? 0),
+    bestFamily: typeof row.best_strategy_family === "string" ? row.best_strategy_family : null,
+    bestTimeframe: typeof row.best_timeframe === "string" ? row.best_timeframe : null,
+    dominantFailure: typeof row.dominant_failure_reason === "string" ? row.dominant_failure_reason : null,
+    repairSuccess: typeof row.repair_success_rate === "number" ? row.repair_success_rate : null,
+    reasons: reasons.length ? reasons : [tier === "deprioritized" ? "Repeated historical failures" : "Selected for controlled exploration"]
+  };
+}
+
+function fallbackAssetEvidence(symbol: string, tier: EvidenceTier): AssetEvidence {
+  return {
+    symbol: symbol.toUpperCase(),
+    tier,
+    score: tier === "established" ? 60 : tier === "deprioritized" ? 15 : 30,
+    confidence: "Low",
+    campaigns: 0,
+    validationRuns: 0,
+    researchCandidates: 0,
+    eliteCandidates: 0,
+    forwardDeployments: 0,
+    profitFactor: 0,
+    expectancy: 0,
+    tradeCount: 0,
+    drawdown: 0,
+    bestFamily: null,
+    bestTimeframe: null,
+    dominantFailure: null,
+    repairSuccess: null,
+    reasons: [tier === "established" ? "Retained by latest campaign proposal" : tier === "deprioritized" ? "Deprioritized by latest campaign proposal" : "Selected for controlled exploration"]
   };
 }
 
@@ -526,13 +660,51 @@ function mergeStable(first: string[], second: string[]) {
   return merged;
 }
 
-function learnedAssets(stockCatalog: ResearchAsset[], rankedSymbols: string[]) {
+function learnedAssets(stockCatalog: ResearchAsset[], rankedSymbols: string[], deprioritizedSymbols: string[], evidenceAllocationPct: number) {
   const bySymbol = new Map(stockCatalog.map((asset) => [asset.apiSymbol.toUpperCase(), asset]));
-  const rankedAssets = rankedSymbols
+  const retainedAssets = rankedSymbols
     .map((symbol) => bySymbol.get(symbol.toUpperCase()))
     .filter((asset): asset is ResearchAsset => Boolean(asset));
-  const selected = rankedAssets.filter(isResearchReadyStock);
-  return selected.length ? selected : rankedAssets;
+  const retained = retainedAssets.filter(isResearchReadyStock);
+  const retainedPool = retained.length ? retained : retainedAssets;
+  const retainedSymbols = new Set(retainedPool.map((asset) => asset.apiSymbol.toUpperCase()));
+  const deprioritizedSet = new Set(deprioritizedSymbols.map((symbol) => symbol.toUpperCase()));
+  const explorationPool = prioritizeAssets(stockCatalog).filter((asset) => !retainedSymbols.has(asset.apiSymbol.toUpperCase()) && !deprioritizedSet.has(asset.apiSymbol.toUpperCase()));
+  const deprioritizedPool = deprioritizedSymbols
+    .map((symbol) => bySymbol.get(symbol.toUpperCase()))
+    .filter((asset): asset is ResearchAsset => Boolean(asset));
+  const evidenceSlots = Math.max(1, Math.round(MAX_RANDOM_STOCKS * (evidenceAllocationPct / 100)));
+  return [...retainedPool.slice(0, evidenceSlots), ...explorationPool, ...retainedPool.slice(evidenceSlots), ...deprioritizedPool];
+}
+
+function stringList(value: unknown) {
+  return Array.isArray(value) ? value.map((item) => String(item)).filter(Boolean) : [];
+}
+
+function boundedScore(value: number) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(100, value));
+}
+
+function readableFailure(value: unknown) {
+  const raw = String(value ?? "").replaceAll("_", " ");
+  return raw && raw !== "aggregate view" ? raw : "Repeated historical failures";
+}
+
+function formatMetric(value: unknown) {
+  const number = Number(value ?? 0);
+  return Number.isFinite(number) ? number.toFixed(number >= 10 ? 0 : 2) : "0";
+}
+
+function confidenceForEvidence(campaigns: number, validationRuns: number, researchCandidates: number): "High" | "Medium" | "Low" {
+  if (campaigns >= 10 && validationRuns >= 200 && researchCandidates >= 5) return "High";
+  if (campaigns >= 4 && validationRuns >= 60 && researchCandidates >= 1) return "Medium";
+  return "Low";
+}
+
+function starsForScore(score: number) {
+  const filled = Math.max(1, Math.min(5, Math.round(score / 20)));
+  return `${"★".repeat(filled)}${"☆".repeat(5 - filled)}`;
 }
 
 function readinessScore(asset: ResearchAsset) {
@@ -549,6 +721,93 @@ function isResearchReadyStock(asset: ResearchAsset) {
     (asset.ready1hFeatures ?? 0) >= 80 &&
     (asset.ready4hFeatures ?? 0) >= 80
   );
+}
+
+function EvidenceAssetGroups({
+  assets,
+  evidenceBySymbol,
+  universeMode
+}: {
+  assets: ResearchAsset[];
+  evidenceBySymbol: Map<string, AssetEvidence>;
+  universeMode: "random" | "established";
+}) {
+  if (universeMode !== "established") {
+    return (
+      <div>
+        <strong>{assets.length.toLocaleString()} chosen</strong>
+        <small>{assets.map((asset) => asset.id).join(", ")}</small>
+      </div>
+    );
+  }
+
+  const groups: Array<{ tier: EvidenceTier; label: string; assets: ResearchAsset[] }> = [
+    { tier: "established", label: "Established", assets: [] },
+    { tier: "exploration", label: "Exploration", assets: [] },
+    { tier: "deprioritized", label: "Deprioritized", assets: [] }
+  ];
+  const byTier = new Map(groups.map((group) => [group.tier, group]));
+  for (const asset of assets) {
+    const evidence = evidenceBySymbol.get(asset.apiSymbol.toUpperCase());
+    byTier.get(evidence?.tier ?? "exploration")?.assets.push(asset);
+  }
+
+  return (
+    <div className="selectedEvidenceGroups">
+      <strong>{assets.length.toLocaleString()} chosen</strong>
+      {groups.filter((group) => group.assets.length).map((group) => (
+        <section key={group.tier} className={`selectedEvidenceGroup ${group.tier}`}>
+          <span>{group.label} / {group.assets.length.toLocaleString()}</span>
+          <small>{group.assets.map((asset) => asset.id).join(", ")}</small>
+        </section>
+      ))}
+    </div>
+  );
+}
+
+function ResearchAssetProfile({ asset, evidence, onClose }: { asset: ResearchAsset; evidence: AssetEvidence; onClose: () => void }) {
+  return (
+    <aside className="researchAssetProfile" aria-label={`${asset.id} research profile`}>
+      <div className="researchAssetProfileHeader">
+        <div>
+          <span>Research Profile</span>
+          <strong>{asset.id}</strong>
+          <small>{asset.name}</small>
+        </div>
+        <button type="button" onClick={onClose} aria-label="Close research profile">Close</button>
+      </div>
+
+      <div className="profileScoreGrid">
+        <ProfileMetric label="Evidence Score" value={String(Math.round(evidence.score))} />
+        <ProfileMetric label="Confidence" value={evidence.confidence} />
+        <ProfileMetric label="Campaigns" value={evidence.campaigns.toLocaleString()} />
+        <ProfileMetric label="Validation Runs" value={evidence.validationRuns.toLocaleString()} />
+      </div>
+
+      <div className="profileBasedOn">
+        <span>Based on</span>
+        <small>{evidence.campaigns.toLocaleString()} campaigns</small>
+        <small>{evidence.validationRuns.toLocaleString()} validation runs</small>
+        <small>{evidence.forwardDeployments.toLocaleString()} forward deployments</small>
+      </div>
+
+      <div className="profileScoreGrid">
+        <ProfileMetric label="Research Candidates" value={evidence.researchCandidates.toLocaleString()} />
+        <ProfileMetric label="Elite" value={evidence.eliteCandidates.toLocaleString()} />
+        <ProfileMetric label="Forward" value={evidence.forwardDeployments.toLocaleString()} />
+        <ProfileMetric label="Best Timeframe" value={evidence.bestTimeframe ?? "Not measured"} />
+        <ProfileMetric label="Best Family" value={evidence.bestFamily ?? "Not measured"} />
+        <ProfileMetric label="Most Common Failure" value={evidence.dominantFailure ? readableFailure(evidence.dominantFailure) : "None observed"} />
+        <ProfileMetric label="Repair Success" value={evidence.repairSuccess == null ? "Not measured" : `${Math.round(evidence.repairSuccess * 100)}%`} />
+        <ProfileMetric label="Expected PF" value={formatMetric(evidence.profitFactor)} />
+        <ProfileMetric label="Expected Expectancy" value={formatMetric(evidence.expectancy)} />
+      </div>
+    </aside>
+  );
+}
+
+function ProfileMetric({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function PreviewValue({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {

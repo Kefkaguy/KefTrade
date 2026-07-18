@@ -327,7 +327,7 @@ def aggregate_command_center(
     ).fetchone() or {})
     top_assets = [dict(row) for row in conn.execute(
         f"""
-        SELECT symbol AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(*) AS total_runs,
+        SELECT symbol AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(DISTINCT campaign_id) AS campaign_count, COUNT(*) AS total_runs,
                COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
                COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs,
                AVG({profit_factor_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS average_profit_factor,
@@ -344,7 +344,7 @@ def aggregate_command_center(
     ).fetchall()]
     top_timeframes = [dict(row) for row in conn.execute(
         f"""
-        SELECT timeframe AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(*) AS total_runs,
+        SELECT timeframe AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(DISTINCT campaign_id) AS campaign_count, COUNT(*) AS total_runs,
                COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
                COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs,
                AVG({profit_factor_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS average_profit_factor,
@@ -361,7 +361,7 @@ def aggregate_command_center(
     ).fetchall()]
     top_families = [dict(row) for row in conn.execute(
         f"""
-        SELECT COALESCE(strategy_family, family_id) AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(*) AS total_runs,
+        SELECT COALESCE(strategy_family, family_id) AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(DISTINCT campaign_id) AS campaign_count, COUNT(*) AS total_runs,
                COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
                COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs,
                AVG({profit_factor_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS average_profit_factor,
@@ -495,6 +495,7 @@ def aggregate_dimension_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
             {
                 "name": row.get("name") or "unknown",
                 "candidates_tested": candidate_count,
+                "campaign_count": int(row.get("campaign_count") or 0),
                 "validation_runs": total,
                 "rejection_rate": ratio(rejected, total),
                 "pass_rate": ratio(passed, total),
@@ -1103,6 +1104,7 @@ def dimension_intelligence(jobs: list[dict[str, Any]], field: str) -> list[dict[
         row = {
             "name": name,
             "candidates_tested": len({candidate_scope_id(item) for item in terminal}),
+            "campaign_count": len({item.get("campaign_id") for item in terminal if item.get("campaign_id") is not None}),
             "validation_runs": len(terminal),
             "rejection_rate": ratio(len(rejected), len(terminal)),
             "pass_rate": ratio(len(promoted), len(terminal)),
