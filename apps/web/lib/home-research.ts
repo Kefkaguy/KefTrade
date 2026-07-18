@@ -10,6 +10,9 @@ export type ResearchAsset = {
   ready4hCandles?: number;
   ready1hFeatures?: number;
   ready4hFeatures?: number;
+  researchReady?: boolean;
+  latest1hCandleAt?: string | null;
+  latest4hCandleAt?: string | null;
 };
 
 export type ResearchScopeId = "single" | "core" | "technology" | "crypto" | "index" | "universe" | "custom";

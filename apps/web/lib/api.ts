@@ -308,8 +308,12 @@ export type SymbolRow = {
   is_active: boolean;
   ready_1h_candles?: number;
   ready_4h_candles?: number;
+  latest_1h_candle_timestamp?: string | null;
+  latest_4h_candle_timestamp?: string | null;
   ready_1h_features?: number;
   ready_4h_features?: number;
+  research_ready?: boolean;
+  research_readiness?: Record<string, Record<string, unknown>>;
 };
 
 export type ResearchHypothesis = {

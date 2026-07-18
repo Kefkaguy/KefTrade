@@ -373,13 +373,13 @@ function formatPreflightBlockers(preflight: ResearchCampaignPreflight) {
     issuesBySymbol.set(issue.symbol, existing);
   }
   const excludedDetails = (preflight.excluded_assets ?? [])
-    .slice(0, 20)
+    .slice(0, 8)
     .map((symbol) => {
       const details = issuesBySymbol.get(symbol);
       return details?.length ? `${symbol} (${details.join("; ")})` : symbol;
     })
     .join(", ");
-  const remaining = Math.max(0, (preflight.excluded_assets_total ?? 0) - 20);
+  const remaining = Math.max(0, (preflight.excluded_assets_total ?? 0) - 8);
   const excludedSummary = excludedDetails
     ? `Excluded: ${excludedDetails}${remaining ? `, +${remaining.toLocaleString()} more` : ""}.`
     : "Excluded symbols were not reported.";

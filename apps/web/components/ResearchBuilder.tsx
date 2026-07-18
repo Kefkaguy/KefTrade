@@ -95,7 +95,10 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
             ready1hCandles: Number(symbol.ready_1h_candles ?? 0),
             ready4hCandles: Number(symbol.ready_4h_candles ?? 0),
             ready1hFeatures: Number(symbol.ready_1h_features ?? 0),
-            ready4hFeatures: Number(symbol.ready_4h_features ?? 0)
+            ready4hFeatures: Number(symbol.ready_4h_features ?? 0),
+            researchReady: Boolean(symbol.research_ready),
+            latest1hCandleAt: symbol.latest_1h_candle_timestamp ?? null,
+            latest4hCandleAt: symbol.latest_4h_candle_timestamp ?? null
           }));
         setStockCatalog(imported.length ? imported : fallbackStocks);
         setCatalogState(imported.length ? "ready" : "fallback");
@@ -132,8 +135,9 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   }
 
   function chooseAssetCount(rawCount: number) {
-    const count = boundedStockCount(rawCount, stockCatalog.length);
-    setAssetIds(prioritizeAssets(stockCatalog).slice(0, count).map((asset) => asset.id));
+    const pool = readyStockCatalog.length >= rawCount ? readyStockCatalog : stockCatalog;
+    const count = boundedStockCount(rawCount, pool.length);
+    setAssetIds(prioritizeAssets(pool).slice(0, count).map((asset) => asset.id));
     setScopeId("custom");
   }
 
@@ -385,10 +389,11 @@ function selectedFirst(assets: ResearchAsset[], selectedIds: ResearchAssetId[]) 
 function readinessScore(asset: ResearchAsset) {
   const candleReady = Math.min(asset.ready1hCandles ?? 0, 120) + Math.min(asset.ready4hCandles ?? 0, 120);
   const featureReady = Math.min(asset.ready1hFeatures ?? 0, 80) + Math.min(asset.ready4hFeatures ?? 0, 80);
-  return candleReady + featureReady;
+  return candleReady + featureReady + (asset.researchReady ? 1000 : 0);
 }
 
 function isResearchReadyStock(asset: ResearchAsset) {
+  if (asset.researchReady !== undefined) return asset.researchReady;
   return (
     (asset.ready1hCandles ?? 0) >= 120 &&
     (asset.ready4hCandles ?? 0) >= 120 &&
