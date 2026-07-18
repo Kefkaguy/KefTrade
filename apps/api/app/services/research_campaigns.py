@@ -584,13 +584,15 @@ def campaign_generation_candidates(conn: psycopg.Connection, *, universe_key: st
 def elite_focused_research_core_candidates(conn: psycopg.Connection, *, max_candidates: int) -> tuple[list[DiscoveryCandidate], dict[str, Any]]:
     attempted = max(max_candidates * 4, 250)
     base = generate_balanced_discovery_candidates(max_candidates=attempted)
-    parents = load_research_core_parent_candidates(conn, limit=max_candidates)
-    survivor_quota = int(max_candidates * 0.70)
+    parent_evidence = load_research_core_parent_evidence(conn, limit=max_candidates)
+    parents = [row["candidate"] for row in parent_evidence]
+    survivor_quota = int(max_candidates * 0.55)
+    repair_quota = int(max_candidates * 0.25)
     adjacent_quota = int(max_candidates * 0.20)
-    exploratory_quota = max_candidates - survivor_quota - adjacent_quota
+    exploratory_quota = max_candidates - survivor_quota - repair_quota - adjacent_quota
     selected: list[DiscoveryCandidate] = []
-    selected.extend(channel_candidates(parents, survivor_quota, "survivor"))
-    selected.extend(channel_candidates(base, adjacent_quota + max(0, survivor_quota - len(selected)), "adjacent", offset=len(selected)))
+    selected.extend(near_pass_repair_candidates(parent_evidence, survivor_quota + repair_quota))
+    selected.extend(channel_candidates(base, adjacent_quota + max(0, survivor_quota + repair_quota - len(selected)), "adjacent", offset=len(selected)))
     selected.extend(channel_candidates(base, exploratory_quota, "exploratory", offset=len(selected) + adjacent_quota))
     if len(selected) < max_candidates:
         selected.extend(channel_candidates(base, max_candidates - len(selected), "exploratory_fill", offset=len(selected)))
@@ -599,20 +601,21 @@ def elite_focused_research_core_candidates(conn: psycopg.Connection, *, max_cand
         deduped = dedupe_candidates_by_execution_key([*deduped, *channel_candidates(base, max_candidates, "exploratory_fill", offset=len(deduped))], max_candidates)
     channels = Counter(str(candidate.parameters.get("generation_channel") or "unknown") for candidate in deduped)
     return deduped, {
-        "mode": "elite_focused_70_20_10",
+        "mode": "elite_focused_repair_55_25_20",
         "attempted_candidate_generations": len(selected),
         "duplicates_prevented": max(0, len(selected) - len(deduped)),
         "jobs_skipped": max(0, max_candidates - len(deduped)),
         "channels": dict(channels),
-        "quota_policy": "survivor_then_adjacent_then_exploratory_without_execution_key_duplicates",
+        "quota_policy": "near_pass_repair_then_adjacent_then_exploratory_without_execution_key_duplicates",
+        "repair_policy": "profit_factor_trade_count_stability_and_cross_asset_mutations_without_gate_relaxation",
     }
 
 
-def load_research_core_parent_candidates(conn: psycopg.Connection, *, limit: int) -> list[DiscoveryCandidate]:
+def load_research_core_parent_evidence(conn: psycopg.Connection, *, limit: int) -> list[dict[str, Any]]:
     try:
         rows = conn.execute(
             """
-            SELECT candidate
+            SELECT candidate, result, failure_reasons, symbol, timeframe, validation_score, status
             FROM research_campaign_jobs
             WHERE simulation_only = TRUE
               AND candidate IS NOT NULL
@@ -631,13 +634,127 @@ def load_research_core_parent_candidates(conn: psycopg.Connection, *, limit: int
     except Exception:
         safe_rollback(conn)
         rows = []
-    candidates: list[DiscoveryCandidate] = []
+    evidence: list[dict[str, Any]] = []
     for row in rows:
         try:
-            candidates.append(candidate_from_payload(dict(row["candidate"])))
+            data = dict(row)
+            evidence.append({**data, "candidate": candidate_from_payload(dict(data["candidate"]))})
         except Exception:
             continue
-    return candidates
+    return evidence
+
+
+def near_pass_repair_candidates(parent_evidence: list[dict[str, Any]], count: int) -> list[DiscoveryCandidate]:
+    if count <= 0:
+        return []
+    variants: list[DiscoveryCandidate] = []
+    for evidence in parent_evidence:
+        parent = evidence["candidate"]
+        for channel, changes in repair_mutation_plan(evidence):
+            variants.append(candidate_with_parameter_changes(parent, changes, channel))
+            if len(variants) >= count:
+                return variants
+    return variants
+
+
+def repair_mutation_plan(evidence: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    parent: DiscoveryCandidate = evidence["candidate"]
+    params = parent.parameters
+    result = evidence.get("result") or {}
+    metrics = result.get("metrics") or {}
+    failures = {str(reason) for reason in (evidence.get("failure_reasons") or result.get("failure_reasons") or [])}
+    trade_count = finite_metric(metrics.get("number_of_trades"))
+    profit_factor = validation_profit_factor({"result": result})
+    expectancy = finite_metric(metrics.get("expectancy_per_trade"))
+    base_entry_distance = float(params.get("entry_distance_to_ema20_max", 0.035))
+    base_volume = float(params.get("volume_change_min", -0.25))
+    base_rr = float(params.get("risk_reward", 2))
+    base_holding = int(params.get("max_holding_bars") or 0)
+    plan: list[tuple[str, dict[str, Any]]] = []
+
+    if profit_factor >= 1.0 or "weak_profit_factor" in failures:
+        plan.extend(
+            [
+                (
+                    "profit_factor_repair",
+                    {
+                        "entry_distance_to_ema20_max": round(max(0.01, base_entry_distance * 0.72), 4),
+                        "volume_change_min": round(max(base_volume, -0.05), 3),
+                        "risk_reward": round(min(2.8, base_rr + 0.25), 2),
+                        "block_sideways": True,
+                        "sideways_distance_from_ema50_min": 0.012,
+                    },
+                ),
+                (
+                    "profit_factor_repair",
+                    {
+                        "entry_distance_to_ema20_max": round(max(0.012, base_entry_distance * 0.85), 4),
+                        "risk_reward": round(min(3.0, base_rr + 0.4), 2),
+                        "max_holding_bars": max(base_holding, 12),
+                    },
+                ),
+            ]
+        )
+    if trade_count < 35 or "insufficient_trades" in failures or "projected_trade_count_below_gate" in failures:
+        plan.extend(
+            [
+                (
+                    "trade_count_repair",
+                    {
+                        "entry_distance_to_ema20_max": round(min(0.08, base_entry_distance * 1.35), 4),
+                        "volume_change_min": round(min(base_volume, -0.18), 3),
+                        "risk_reward": round(max(1.35, min(base_rr, 1.8)), 2),
+                        "max_holding_bars": max(base_holding, 10),
+                    },
+                ),
+                (
+                    "trade_count_repair",
+                    {
+                        "frequency_screen_min_opportunities": 20,
+                        "entry_distance_to_ema20_max": round(min(0.07, base_entry_distance * 1.2), 4),
+                        "rsi_min": max(40, float(params.get("rsi_min", 55)) - 5),
+                    },
+                ),
+            ]
+        )
+    if expectancy > 0:
+        plan.append(
+            (
+                "cross_asset_robustness",
+                {
+                    "phase_9_11_require_4h_positive_returns": True,
+                    "phase_9_11_require_4h_ema_positive": True,
+                    "risk_reward": round(min(2.6, max(base_rr, 1.8)), 2),
+                },
+            )
+        )
+    plan.append(
+        (
+            "stability_repair",
+            {
+                "normal_volatility_min": 0.006,
+                "normal_volatility_max": 0.025,
+                "low_volatility_returns_5_min": 0.001,
+                "max_holding_bars": max(base_holding, 14),
+            },
+        )
+    )
+    return plan
+
+
+def candidate_with_parameter_changes(parent: DiscoveryCandidate, changes: dict[str, Any], channel: str) -> DiscoveryCandidate:
+    params = {**parent.parameters, **changes, "generation_channel": channel, "elite_repair_version": "elite_repair_v1"}
+    key = canonical_candidate_key(parent.blocks, params, parent.candidate_id)
+    return DiscoveryCandidate(
+        candidate_id=f"sd_{sha256(key.encode()).hexdigest()[:14]}",
+        family_id=parent.family_id,
+        parent_candidate_id=parent.candidate_id,
+        generation=parent.generation + 1,
+        blocks=dict(parent.blocks),
+        parameters=params,
+        complexity=parent.complexity + 1,
+        canonical_key=key,
+    )
 
 
 def channel_candidates(candidates: list[DiscoveryCandidate], count: int, channel: str, *, offset: int = 0) -> list[DiscoveryCandidate]:

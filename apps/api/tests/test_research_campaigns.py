@@ -16,6 +16,7 @@ from app.services.research_campaigns import (
     forward_validation_state,
     generate_discovery_candidates,
     campaign_list_row_with_eta,
+    near_pass_repair_candidates,
     passes_cross_validation,
     passes_single_market_validation,
     overfit_regime_robustness_blueprint,
@@ -422,6 +423,30 @@ def test_campaign_eta_uses_rolling_or_profiled_backend_method() -> None:
     assert calculated["eta_method"] == "rolling_5m"
     assert calculated["eta_seconds"] == 1200
     assert calculated["executable_remaining_jobs"] == 80
+
+
+def test_near_pass_repair_candidates_change_executable_parameters() -> None:
+    parent = generate_discovery_candidates(max_candidates=1)[0]
+    evidence = {
+        "candidate": parent,
+        "result": {
+            "metrics": {
+                "profit_factor": 1.18,
+                "expectancy_per_trade": 8.0,
+                "number_of_trades": 26,
+                "max_drawdown": 0.04,
+            }
+        },
+        "failure_reasons": ["weak_profit_factor", "insufficient_trades"],
+    }
+
+    variants = near_pass_repair_candidates([evidence], 4)
+
+    assert len(variants) == 4
+    assert len({research_campaigns.candidate_execution_key(row) for row in variants}) == 4
+    assert {row.parameters["generation_channel"] for row in variants} >= {"profit_factor_repair", "trade_count_repair"}
+    assert any(row.parameters.get("block_sideways") for row in variants)
+    assert any(row.parameters.get("frequency_screen_min_opportunities") == 20 for row in variants)
 
 
 def test_consistency_summary_records_failure_causes() -> None:
