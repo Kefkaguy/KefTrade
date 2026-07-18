@@ -20,6 +20,7 @@ TESTED_STATUSES = {"completed", "rejected", "promoted"}
 FORWARD_STATES = {"active_forward_validation", "collecting_forward_evidence"}
 REQUIRED_MARKET_REGIMES = ("bull_trend", "sideways", "bear_trend")
 ETF_SYMBOLS = {"SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "TLT", "GLD", "VNQ"}
+NUMERIC_JSON_TEXT_PATTERN = r"^-?[0-9]+(\.[0-9]+)?$"
 
 
 def research_command_center(
@@ -258,6 +259,10 @@ def aggregate_command_center(
         clauses.append("status = %s")
         params.append(normalized["candidate_state"])
     where_sql = " AND ".join(clauses)
+    profit_factor_expr = metric_json_number_sql("profit_factor")
+    expectancy_expr = metric_json_number_sql("expectancy_per_trade")
+    trade_count_expr = metric_json_number_sql("number_of_trades")
+    drawdown_expr = metric_json_number_sql("max_drawdown")
 
     overview = dict(conn.execute(
         f"""
@@ -324,7 +329,11 @@ def aggregate_command_center(
         f"""
         SELECT symbol AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(*) AS total_runs,
                COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
-               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs
+               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs,
+               AVG({profit_factor_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS average_profit_factor,
+               AVG({expectancy_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS average_expectancy,
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {trade_count_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS median_trade_count,
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {drawdown_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS median_drawdown
         FROM research_campaign_jobs
         WHERE {where_sql}
         GROUP BY symbol
@@ -337,7 +346,11 @@ def aggregate_command_center(
         f"""
         SELECT timeframe AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(*) AS total_runs,
                COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
-               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs
+               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs,
+               AVG({profit_factor_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS average_profit_factor,
+               AVG({expectancy_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS average_expectancy,
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {trade_count_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS median_trade_count,
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {drawdown_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS median_drawdown
         FROM research_campaign_jobs
         WHERE {where_sql}
         GROUP BY timeframe
@@ -350,7 +363,11 @@ def aggregate_command_center(
         f"""
         SELECT COALESCE(strategy_family, family_id) AS name, COUNT(DISTINCT candidate_id) AS candidate_count, COUNT(*) AS total_runs,
                COUNT(*) FILTER (WHERE status = 'promoted') AS passed_runs,
-               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs
+               COUNT(*) FILTER (WHERE status = 'rejected') AS rejected_runs,
+               AVG({profit_factor_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS average_profit_factor,
+               AVG({expectancy_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS average_expectancy,
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {trade_count_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS median_trade_count,
+               PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY {drawdown_expr}) FILTER (WHERE status IN ('completed', 'rejected', 'promoted')) AS median_drawdown
         FROM research_campaign_jobs
         WHERE {where_sql}
         GROUP BY COALESCE(strategy_family, family_id)
@@ -369,6 +386,7 @@ def aggregate_command_center(
     ).fetchone() or {}
     elite_count = int(elite_row.get("count") or 0)
     deployment_count = int(deployment_row.get("count") or 0)
+    aggregate_rejection = aggregate_rejection_analysis(conn, where_sql, params)
 
     generated = int(overview.get("candidates_generated") or 0)
     tested = int(overview.get("candidates_tested") or 0)
@@ -408,7 +426,11 @@ def aggregate_command_center(
             "strategy_intelligence": {"rows": aggregate_dimension_rows(top_families), "highlights": {}},
             "asset_intelligence": {"rows": aggregate_dimension_rows(top_assets), "highlights": {}},
             "timeframe_intelligence": {"rows": aggregate_dimension_rows(top_timeframes), "highlights": {}},
+            "rejection_analysis": aggregate_rejection,
+            "near_pass_candidates": aggregate_near_pass_candidates(conn, where_sql, params),
             "duplicate_analysis": {"unique_candidates": generated, "exact_duplicates": 0, "near_duplicates": 0, "duplicate_validation_outcomes": 0, "redundant_parameter_regions": []},
+            "recommendations": aggregate_recommendations(campaign, aggregate_rejection, aggregate_dimension_rows(top_families), aggregate_dimension_rows(top_assets), aggregate_dimension_rows(top_timeframes)),
+            "next_campaign_proposal": aggregate_next_campaign_proposal(campaign, aggregate_dimension_rows(top_families), aggregate_dimension_rows(top_assets), aggregate_dimension_rows(top_timeframes)),
             "historical_research": historical_research(conn),
             "terminology": terminology(),
             "source": {
@@ -455,6 +477,13 @@ def aggregate_funnel(generated: int, tested: int, rejected: int, needs_more: int
     ]
 
 
+def metric_json_number_sql(metric: str) -> str:
+    return (
+        f"CASE WHEN result->'metrics'->>'{metric}' ~ '{NUMERIC_JSON_TEXT_PATTERN}' "
+        f"THEN (result->'metrics'->>'{metric}')::double precision END"
+    )
+
+
 def aggregate_dimension_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     result = []
     for row in rows:
@@ -469,20 +498,231 @@ def aggregate_dimension_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
                 "validation_runs": total,
                 "rejection_rate": ratio(rejected, total),
                 "pass_rate": ratio(passed, total),
-                "average_profit_factor": None,
-                "average_expectancy": None,
-                "median_trade_count": None,
-                "median_drawdown": None,
+                "average_profit_factor": finite_metric(row.get("average_profit_factor")),
+                "average_expectancy": finite_metric(row.get("average_expectancy")),
+                "median_trade_count": finite_metric(row.get("median_trade_count")),
+                "median_drawdown": finite_metric(row.get("median_drawdown")),
                 "stability_pass_rate": None,
                 "confidence_interval_pass_rate": None,
                 "candidate_quality_score": round(ratio(passed, total) * 100, 2) if total else 0,
                 "dominant_failure_reason": "aggregate_view" if rejected else None,
                 "best_asset": None,
                 "best_timeframe": None,
+                "deprioritize": total >= 3 and passed == 0,
                 "inactive": total == 0,
             }
         )
     return result
+
+
+def aggregate_rejection_analysis(conn: psycopg.Connection, where_sql: str, params: list[Any]) -> dict[str, Any]:
+    rejected_total = int((conn.execute(
+        f"SELECT COUNT(*) AS count FROM research_campaign_jobs WHERE {where_sql} AND status = 'rejected'",
+        tuple(params),
+    ).fetchone() or {}).get("count") or 0)
+    families = aggregate_distribution(conn, where_sql, params, "COALESCE(strategy_family, family_id)", "status = 'rejected'")
+    assets = aggregate_distribution(conn, where_sql, params, "symbol", "status = 'rejected'")
+    timeframes = aggregate_distribution(conn, where_sql, params, "timeframe", "status = 'rejected'")
+    gates = inferred_gate_distribution(conn, where_sql, params)
+    return {
+        "rejected_validation_runs": rejected_total,
+        "rejected_candidates_observed": rejected_total,
+        "validation_rules": gates,
+        "strategy_families": families,
+        "assets": assets,
+        "timeframes": timeframes,
+        "market_regimes": [],
+        "parameter_ranges": [],
+        "metric_ranges": aggregate_metric_failure_ranges(conn, where_sql, params),
+        "dominant_reasons": gates[:5],
+    }
+
+
+def aggregate_distribution(conn: psycopg.Connection, where_sql: str, params: list[Any], expression: str, extra_where: str) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        f"""
+        SELECT {expression} AS name, COUNT(*) AS count
+        FROM research_campaign_jobs
+        WHERE {where_sql} AND {extra_where}
+        GROUP BY {expression}
+        ORDER BY count DESC, name
+        LIMIT 20
+        """,
+        tuple(params),
+    ).fetchall()
+    total = sum(int(row["count"] or 0) for row in rows)
+    return [{"name": row["name"], "count": int(row["count"] or 0), "rate": ratio(int(row["count"] or 0), total)} for row in rows]
+
+
+def inferred_gate_distribution(conn: psycopg.Connection, where_sql: str, params: list[Any]) -> list[dict[str, Any]]:
+    profit_factor_expr = metric_json_number_sql("profit_factor")
+    expectancy_expr = metric_json_number_sql("expectancy_per_trade")
+    trade_count_expr = metric_json_number_sql("number_of_trades")
+    drawdown_expr = metric_json_number_sql("max_drawdown")
+    rows = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) FILTER (WHERE COALESCE({trade_count_expr}, 0) < 30) AS minimum_trade_count,
+            COUNT(*) FILTER (WHERE COALESCE({profit_factor_expr}, 0) < 1.1) AS profit_factor,
+            COUNT(*) FILTER (WHERE COALESCE({expectancy_expr}, 0) <= 0) AS positive_expectancy,
+            COUNT(*) FILTER (WHERE COALESCE({drawdown_expr}, 0) > 0.15) AS maximum_drawdown
+        FROM research_campaign_jobs
+        WHERE {where_sql} AND status = 'rejected'
+        """,
+        tuple(params),
+    ).fetchone() or {}
+    total = sum(int(rows.get(key) or 0) for key in ("minimum_trade_count", "profit_factor", "positive_expectancy", "maximum_drawdown"))
+    result = []
+    for key in ("minimum_trade_count", "profit_factor", "positive_expectancy", "maximum_drawdown"):
+        count = int(rows.get(key) or 0)
+        if count:
+            result.append({"name": key, "count": count, "rate": ratio(count, total), "candidate_count": count, "candidate_rate": ratio(count, total)})
+    return sorted(result, key=lambda row: (row["count"], row["name"]), reverse=True)
+
+
+def aggregate_metric_failure_ranges(conn: psycopg.Connection, where_sql: str, params: list[Any]) -> list[dict[str, Any]]:
+    profit_factor_expr = metric_json_number_sql("profit_factor")
+    expectancy_expr = metric_json_number_sql("expectancy_per_trade")
+    trade_count_expr = metric_json_number_sql("number_of_trades")
+    drawdown_expr = metric_json_number_sql("max_drawdown")
+    row = conn.execute(
+        f"""
+        SELECT
+            COUNT(*) FILTER (WHERE COALESCE({trade_count_expr}, 0) < 30) AS low_trade_count,
+            COUNT(*) FILTER (WHERE COALESCE({profit_factor_expr}, 0) < 1.1) AS weak_profit_factor,
+            COUNT(*) FILTER (WHERE COALESCE({expectancy_expr}, 0) <= 0) AS non_positive_expectancy,
+            COUNT(*) FILTER (WHERE COALESCE({drawdown_expr}, 0) > 0.15) AS high_drawdown
+        FROM research_campaign_jobs
+        WHERE {where_sql} AND status = 'rejected'
+        """,
+        tuple(params),
+    ).fetchone() or {}
+    specs = [
+        ("Trade count", "< 30", "low_trade_count"),
+        ("Profit factor", "< 1.1", "weak_profit_factor"),
+        ("Expectancy", "<= 0", "non_positive_expectancy"),
+        ("Drawdown", "> 15%", "high_drawdown"),
+    ]
+    return [{"metric": metric, "range": value_range, "rejected_runs": int(row.get(key) or 0)} for metric, value_range, key in specs if int(row.get(key) or 0)]
+
+
+def aggregate_near_pass_candidates(conn: psycopg.Connection, where_sql: str, params: list[Any], limit: int = 20) -> list[dict[str, Any]]:
+    profit_factor_expr = metric_json_number_sql("profit_factor")
+    expectancy_expr = metric_json_number_sql("expectancy_per_trade")
+    trade_count_expr = metric_json_number_sql("number_of_trades")
+    drawdown_expr = metric_json_number_sql("max_drawdown")
+    rows = conn.execute(
+        f"""
+        SELECT campaign_id, candidate_id, symbol, timeframe, COALESCE(strategy_family, family_id) AS strategy_family,
+               validation_score,
+               {profit_factor_expr} AS profit_factor,
+               {expectancy_expr} AS expectancy,
+               {trade_count_expr} AS trade_count,
+               {drawdown_expr} AS drawdown
+        FROM research_campaign_jobs
+        WHERE {where_sql}
+          AND status = 'rejected'
+          AND (
+            COALESCE({profit_factor_expr}, 0) >= 1.0
+            OR COALESCE({expectancy_expr}, 0) > 0
+            OR COALESCE({trade_count_expr}, 0) >= 24
+          )
+        ORDER BY validation_score DESC NULLS LAST
+        LIMIT %s
+        """,
+        tuple([*params, limit]),
+    ).fetchall()
+    result = []
+    for row in rows:
+        metrics = {
+            "profit_factor": finite_metric(row.get("profit_factor")),
+            "expectancy": finite_metric(row.get("expectancy")),
+            "trade_count": finite_metric(row.get("trade_count")),
+            "drawdown": finite_metric(row.get("drawdown")),
+        }
+        failed = []
+        if metrics["profit_factor"] < 1.1:
+            failed.append({"name": "profit_factor", "actual": metrics["profit_factor"], "threshold": 1.1, "comparator": ">=", "distance": gate_distance("profit_factor", metrics["profit_factor"], 1.1, False)})
+        if metrics["expectancy"] <= 0:
+            failed.append({"name": "positive_expectancy", "actual": metrics["expectancy"], "threshold": 0, "comparator": ">", "distance": gate_distance("positive_expectancy", metrics["expectancy"], 0, False)})
+        if metrics["trade_count"] < 30:
+            failed.append({"name": "minimum_trade_count", "actual": metrics["trade_count"], "threshold": 30, "comparator": ">=", "distance": gate_distance("minimum_trade_count", metrics["trade_count"], 30, False)})
+        if metrics["drawdown"] > 0.15:
+            failed.append({"name": "maximum_drawdown", "actual": metrics["drawdown"], "threshold": 0.15, "comparator": "<=", "distance": gate_distance("maximum_drawdown", metrics["drawdown"], 0.15, False)})
+        if not failed or len(failed) > 2:
+            continue
+        mean_distance = sum(finite_metric(gate["distance"]) for gate in failed) / len(failed)
+        if mean_distance > 0.25:
+            continue
+        result.append({
+            "candidate_id": row["candidate_id"],
+            "campaign_id": row["campaign_id"],
+            "asset": row["symbol"],
+            "timeframe": row["timeframe"],
+            "strategy_family": row["strategy_family"],
+            "failed_gates": failed,
+            "strongest_metric": min(failed, key=lambda gate: gate["distance"]),
+            "weakest_metric": max(failed, key=lambda gate: gate["distance"]),
+            "mean_distance": round(mean_distance, 4),
+            "validation_score": finite_metric(row.get("validation_score")),
+            "recommendation": "Run a bounded follow-up test",
+            "further_testing_justified": True,
+        })
+    return result
+
+
+def aggregate_recommendations(campaign: dict[str, Any], rejection: dict[str, Any], families: list[dict[str, Any]], assets: list[dict[str, Any]], timeframes: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    recommendations = []
+    dominant = (rejection.get("dominant_reasons") or [None])[0]
+    if dominant:
+        recommendations.append(recommendation(
+            f"Reduce repeated {dominant['name'].replace('_', ' ')} failures in the next research allocation.",
+            "aggregate_rejection_analysis.validation_rules",
+            int(dominant.get("candidate_count") or dominant.get("count") or 0),
+            finite_metric(dominant.get("candidate_rate") or dominant.get("rate")),
+            "Improve exploration efficiency without changing validation thresholds.",
+            f"A bounded follow-up must lower {dominant['name']} failures while preserving all existing gates.",
+            campaign,
+        ))
+    weak_family = next((row for row in reversed(families) if row["validation_runs"] >= 3 and row["pass_rate"] == 0), None)
+    if weak_family:
+        recommendations.append(recommendation(
+            f"Deprioritize {weak_family['name']} until a falsifiable repair hypothesis improves aggregate evidence.",
+            "aggregate_strategy_intelligence.rows",
+            int(weak_family["candidates_tested"]),
+            finite_metric(weak_family["rejection_rate"]),
+            "Reserve campaign budget for stronger or more diverse research regions.",
+            "A future cohort must improve pass rate without lowering stored gates.",
+            campaign,
+        ))
+    return recommendations
+
+
+def aggregate_next_campaign_proposal(campaign: dict[str, Any], families: list[dict[str, Any]], assets: list[dict[str, Any]], timeframes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    retained_families = [row["name"] for row in families if row["pass_rate"] > 0][:5]
+    retained_assets = [row["name"] for row in assets if row["pass_rate"] > 0][:10]
+    retained_timeframes = [row["name"] for row in timeframes if row["pass_rate"] > 0][:3]
+    deprioritized_families = [row["name"] for row in families if row["deprioritize"]][:5]
+    deprioritized_assets = [row["name"] for row in assets if row["deprioritize"]][:10]
+    if not (retained_families or deprioritized_families or retained_assets or deprioritized_assets):
+        return None
+    return {
+        "proposal_version": "aggregate_research_guidance_v1",
+        "strategy_families_to_retain": retained_families,
+        "strategy_families_to_deprioritize": deprioritized_families,
+        "assets_to_retain": retained_assets,
+        "assets_to_deprioritize": deprioritized_assets,
+        "timeframes_to_retain": retained_timeframes,
+        "timeframes_to_deprioritize": [row["name"] for row in timeframes if row["deprioritize"]][:3],
+        "candidate_count": int(sum(row["candidates_tested"] for row in families)),
+        "expected_duplicate_work_reduction": 0,
+        "new_hypothesis_tests": [
+            "Confirm aggregate promising regions with unchanged validation thresholds.",
+            "Allocate a bounded exploration slice to diverse non-duplicate hypotheses.",
+        ],
+        "source_campaign_version": str(campaign.get("campaign_key") or CAMPAIGN_VERSION),
+        "validation_thresholds_changed": False,
+    }
 
 
 def analyze_campaign(
