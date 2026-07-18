@@ -83,6 +83,8 @@ DEFAULT_FORWARD_THRESHOLDS: dict[str, Any] = {
 }
 _CAMPAIGN_SCHEMA_LOCK = Lock()
 _CAMPAIGN_SCHEMA_READY = False
+_UNIVERSE_SCHEMA_LOCK = Lock()
+_UNIVERSE_SCHEMA_READY = False
 _PARALLEL_POOLS_LOCK = Lock()
 _PARALLEL_POOLS: dict[int, dict[str, Any]] = {}
 DRIFT_THRESHOLDS: dict[str, dict[str, float]] = {
@@ -497,8 +499,39 @@ def ensure_campaign_tables(conn: psycopg.Connection) -> None:
             _CAMPAIGN_SCHEMA_READY = True
 
 
+def ensure_universe_table(conn: psycopg.Connection) -> None:
+    global _UNIVERSE_SCHEMA_READY
+    is_real_connection = conn.__class__.__module__.startswith("psycopg")
+    if is_real_connection and (_UNIVERSE_SCHEMA_READY or _CAMPAIGN_SCHEMA_READY):
+        return
+    with _UNIVERSE_SCHEMA_LOCK:
+        if is_real_connection and (_UNIVERSE_SCHEMA_READY or _CAMPAIGN_SCHEMA_READY):
+            return
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS research_universes (
+                id BIGSERIAL PRIMARY KEY,
+                universe_key TEXT NOT NULL UNIQUE,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL,
+                assets JSONB NOT NULL,
+                default_timeframes JSONB NOT NULL DEFAULT '[]'::jsonb,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
+                CONSTRAINT research_universes_simulation_only_check CHECK (simulation_only = TRUE)
+            )
+            """
+        )
+        if is_real_connection:
+            conn.commit()
+            _UNIVERSE_SCHEMA_READY = True
+
+
 def seed_default_universes(conn: psycopg.Connection) -> None:
-    ensure_campaign_tables(conn)
+    ensure_universe_table(conn)
     for universe in DEFAULT_UNIVERSES:
         conn.execute(
             """
@@ -3768,7 +3801,7 @@ def run_durable_campaign_worker_cycle(
     worker_id: str,
     dataset_cache: dict[tuple[Any, ...], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    ensure_campaign_tables(conn)
+    ensure_universe_table(conn)
     register_campaign_worker(conn, worker_id=worker_id, status="idle")
     campaigns = executable_target_campaigns(conn)
     for campaign in campaigns:

@@ -1502,7 +1502,7 @@ export function saveResearchUniverse(payload: ResearchUniverseInput) {
   return request<Record<string, unknown>>("/research/universes", {
     method: "POST",
     body: JSON.stringify(payload),
-    timeoutMs: 30000
+    timeoutMs: 120000
   });
 }
 
