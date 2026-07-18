@@ -70,9 +70,5 @@ def list_symbols(conn: psycopg.Connection = Depends(get_connection)) -> list[dic
             and not one_hour_freshness["stale"]
             and not four_hour_freshness["stale"]
         )
-        symbol["research_readiness"] = {
-            "1h": one_hour_freshness,
-            "4h": four_hour_freshness,
-        }
     symbols.sort(key=lambda item: (not item["research_ready"], item["symbol"]))
     return symbols

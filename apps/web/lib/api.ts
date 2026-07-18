@@ -313,7 +313,6 @@ export type SymbolRow = {
   ready_1h_features?: number;
   ready_4h_features?: number;
   research_ready?: boolean;
-  research_readiness?: Record<string, Record<string, unknown>>;
 };
 
 export type ResearchHypothesis = {
@@ -1459,7 +1458,7 @@ export function getCopilotInteractions() {
 }
 
 export function getSymbols() {
-  return request<SymbolRow[]>("/symbols");
+  return request<SymbolRow[]>("/symbols", { timeoutMs: 30000 });
 }
 
 export function getResearchHypotheses() {
