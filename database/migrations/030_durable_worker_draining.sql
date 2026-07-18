@@ -8,6 +8,3 @@ ALTER TABLE research_campaign_workers
 CREATE INDEX IF NOT EXISTS research_campaign_workers_campaign_live_idx
     ON research_campaign_workers(campaign_id, status, last_heartbeat_at DESC)
     WHERE campaign_id IS NOT NULL;
-
-CREATE INDEX IF NOT EXISTS research_campaign_jobs_dataset_claim_idx
-    ON research_campaign_jobs(campaign_id, status, symbol, timeframe, id);
