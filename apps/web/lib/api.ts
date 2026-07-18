@@ -123,6 +123,44 @@ export type ResearchCommandCenter = {
   simulation_only: boolean;
 };
 
+export type PersistedCandidateProfile = {
+  candidate_id: string;
+  campaign_ids: number[];
+  state: string;
+  deployment_status: string;
+  asset: string;
+  assets: string[];
+  timeframe: string;
+  timeframes: string[];
+  strategy_family: string;
+  generation_method?: string;
+  parent_candidate?: string | null;
+  complete_parameter_set: Record<string, unknown>;
+  research_score?: number | string | null;
+  profit_factor?: number | string | null;
+  expectancy?: number | string | null;
+  trade_count?: number | string | null;
+  maximum_drawdown?: number | string | null;
+  stability?: number | string | null;
+  strategy_definition: Record<string, unknown>;
+  research_metrics: Record<string, unknown>;
+  validation_gates: Array<Record<string, unknown>>;
+  walk_forward_evidence: Array<Record<string, unknown>>;
+  out_of_sample_evidence: Array<Record<string, unknown>>;
+  regime_evidence: Array<Record<string, unknown>>;
+  cross_asset_evidence: Array<Record<string, unknown>>;
+  campaign_lineage: Array<Record<string, unknown>>;
+  repair_history: Array<Record<string, unknown>>;
+  paper_deployment_status: Array<Record<string, unknown>>;
+  forward_performance: Record<string, unknown>;
+  backtest_versus_forward: Record<string, unknown>;
+  readiness_blockers: string[];
+  evidence_plan: { missing_evidence_reason: string; status: string; steps: Array<Record<string, unknown>> };
+  diagnostic_report: string;
+  technical_details: Record<string, unknown>;
+  simulation_only: boolean;
+};
+
 export type AlphaDiscoveryRow = {
   rank: number;
   candidate_id: string;
@@ -1351,6 +1389,13 @@ export function fetchResearchCommandCenter(filters: ResearchCommandCenterFilters
   if (filters.dateTo) params.set("date_to", filters.dateTo);
   const suffix = params.size ? `?${params.toString()}` : "";
   return request<ResearchCommandCenter>(`/research/command-center${suffix}`, { timeoutMs: 60000 });
+}
+
+export function getPersistedCandidateProfile(candidateId: string, options?: { campaignId?: number }) {
+  const params = new URLSearchParams();
+  if (options?.campaignId) params.set("campaign_id", String(options.campaignId));
+  const suffix = params.size ? `?${params.toString()}` : "";
+  return request<PersistedCandidateProfile>(`/research/candidates/${encodeURIComponent(candidateId)}${suffix}`, { timeoutMs: 60000 });
 }
 
 export function runAlphaDiscovery(input: number | AlphaDiscoveryInput = 250) {

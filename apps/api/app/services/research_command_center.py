@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from datetime import UTC, datetime
+from decimal import Decimal
 from hashlib import sha256
 import json
 from statistics import median
 from typing import Any, Iterable
 
 import psycopg
+from psycopg.types.json import Jsonb
 
 from app.services.research_campaigns import CAMPAIGN_VERSION, ensure_campaign_tables
 from app.services.strategy_research import finite_metric
@@ -731,6 +733,523 @@ def grouped_experiment_history(jobs: list[dict[str, Any]], limit: int = 100) -> 
     return sorted(result, key=lambda row: str(row.get("created_at") or ""), reverse=True)[:limit]
 
 
+def candidate_library(
+    conn: psycopg.Connection,
+    *,
+    search: str | None = None,
+    state: str | None = None,
+    deployment_status: str | None = None,
+    asset: str | None = None,
+    family: str | None = None,
+    timeframe: str | None = None,
+    campaign_id: int | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    jobs = load_candidate_jobs(conn, campaign_id=campaign_id)
+    elite = load_elite_rows(conn, campaign_id=campaign_id)
+    deployments = load_candidate_deployments(conn, campaign_id=campaign_id)
+    filters = {
+        "search": str(search or "").strip().lower(),
+        "state": str(state or "").strip(),
+        "deployment_status": str(deployment_status or "").strip(),
+        "asset": str(asset or "").strip(),
+        "family": str(family or "").strip(),
+        "timeframe": str(timeframe or "").strip(),
+    }
+    rows = []
+    for profile in build_candidate_profiles(jobs, elite, deployments).values():
+        if filters["search"] and filters["search"] not in canonical_json(profile).lower():
+            continue
+        if filters["state"] and profile["state"] != filters["state"]:
+            continue
+        if filters["deployment_status"] and profile["deployment_status"] != filters["deployment_status"]:
+            continue
+        if filters["asset"] and filters["asset"] not in profile["assets"]:
+            continue
+        if filters["family"] and profile["strategy_family"] != filters["family"]:
+            continue
+        if filters["timeframe"] and filters["timeframe"] not in profile["timeframes"]:
+            continue
+        rows.append(profile)
+    rows = sorted(rows, key=lambda row: (state_rank(row["state"]), str(row.get("updated_at") or row.get("created_at") or "")), reverse=True)[:limit]
+    return {
+        "filters": filters,
+        "summary": {
+            "total": len(rows),
+            "state_counts": dict(Counter(row["state"] for row in rows)),
+            "deployment_counts": dict(Counter(row["deployment_status"] for row in rows)),
+        },
+        "candidates": rows,
+        "source": {
+            "authoritative_tables": ["research_campaign_jobs", "elite_research_candidates", "strategy_deployments"],
+            "candidate_grain": "persisted campaign_id plus candidate_id",
+        },
+        "simulation_only": True,
+    }
+
+
+def candidate_profile(conn: psycopg.Connection, candidate_id: str, *, campaign_id: int | None = None) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    jobs = load_candidate_jobs(conn, candidate_id=candidate_id, campaign_id=campaign_id)
+    if not jobs:
+        raise ValueError("candidate not found")
+    elite = load_elite_rows(conn, candidate_id=candidate_id, campaign_id=campaign_id)
+    deployments = load_candidate_deployments(conn, candidate_id=candidate_id, campaign_id=campaign_id)
+    profile = next(iter(build_candidate_profiles(jobs, elite, deployments).values()))
+    orders = load_candidate_orders(conn, candidate_id=profile["candidate_id"], campaign_ids=profile["campaign_ids"])
+    fills = load_candidate_fills(conn, candidate_id=profile["candidate_id"], campaign_ids=profile["campaign_ids"])
+    events = load_candidate_execution_events(conn, candidate_id=profile["candidate_id"], deployment_ids=[row["id"] for row in deployments])
+    evidence_plan = deterministic_evidence_plan(profile)
+    persist_evidence_plan(conn, profile, evidence_plan)
+    conn.commit()
+    return {
+        **profile,
+        "strategy_definition": readable_strategy_definition(profile),
+        "research_metrics": profile["best_metrics"],
+        "validation_gates": validation_gate_summary(profile["runs"]),
+        "walk_forward_evidence": evidence_bucket(profile["runs"], "walk_forward_metrics"),
+        "out_of_sample_evidence": evidence_bucket(profile["runs"], "out_of_sample_metrics"),
+        "regime_evidence": regime_profile(profile["runs"]),
+        "cross_asset_evidence": cross_asset_profile(profile["runs"]),
+        "campaign_lineage": campaign_lineage(profile["runs"]),
+        "repair_history": repair_history(profile["runs"]),
+        "paper_deployment_status": deployment_profile(deployments),
+        "forward_performance": forward_profile(profile, deployments, orders, fills),
+        "backtest_versus_forward": backtest_forward_comparison(profile, fills),
+        "readiness_blockers": readiness_blockers(profile, evidence_plan),
+        "evidence_plan": evidence_plan,
+        "technical_details": {
+            "candidate_payloads": [row["candidate"] for row in profile["runs"]],
+            "deployment_rows": deployments,
+            "orders": orders,
+            "fills": fills,
+            "events": events,
+        },
+        "diagnostic_report": diagnostic_report(profile, deployments, orders, fills, evidence_plan),
+        "simulation_only": True,
+    }
+
+
+def load_candidate_jobs(conn: psycopg.Connection, *, candidate_id: str | None = None, campaign_id: int | None = None) -> list[dict[str, Any]]:
+    clauses = ["simulation_only = TRUE"]
+    params: list[Any] = []
+    if candidate_id:
+        clauses.append("candidate_id = %s")
+        params.append(candidate_id)
+    if campaign_id:
+        clauses.append("campaign_id = %s")
+        params.append(campaign_id)
+    rows = conn.execute(
+        f"""
+        SELECT id, campaign_id, candidate_id, family_id, strategy_family, symbol, timeframe,
+               status, candidate, result, validation_score, consistency_score, failure_reasons,
+               attempts, failure_classification, created_at, started_at, completed_at, updated_at
+        FROM research_campaign_jobs
+        WHERE {" AND ".join(clauses)}
+        ORDER BY campaign_id DESC, candidate_id ASC, id ASC
+        LIMIT 5000
+        """,
+        tuple(params),
+    ).fetchall()
+    return [prepare_job(dict(row), "equity") for row in rows]
+
+
+def load_elite_rows(conn: psycopg.Connection, *, candidate_id: str | None = None, campaign_id: int | None = None) -> list[dict[str, Any]]:
+    clauses = ["simulation_only = TRUE"]
+    params: list[Any] = []
+    if candidate_id:
+        clauses.append("candidate_id = %s")
+        params.append(candidate_id)
+    if campaign_id:
+        clauses.append("campaign_id = %s")
+        params.append(campaign_id)
+    rows = conn.execute(f"SELECT * FROM elite_research_candidates WHERE {' AND '.join(clauses)} ORDER BY created_at DESC", tuple(params)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_candidate_deployments(conn: psycopg.Connection, *, candidate_id: str | None = None, campaign_id: int | None = None) -> list[dict[str, Any]]:
+    clauses = ["simulation_only = TRUE", "candidate_id IS NOT NULL"]
+    params: list[Any] = []
+    if candidate_id:
+        clauses.append("candidate_id = %s")
+        params.append(candidate_id)
+    if campaign_id:
+        clauses.append("campaign_id = %s")
+        params.append(campaign_id)
+    rows = conn.execute(f"SELECT * FROM strategy_deployments WHERE {' AND '.join(clauses)} ORDER BY created_at DESC", tuple(params)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_candidate_orders(conn: psycopg.Connection, *, candidate_id: str, campaign_ids: list[int]) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM paper_orders
+        WHERE simulation_only = TRUE AND candidate_id = %s AND campaign_id = ANY(%s)
+        ORDER BY submitted_at DESC, id DESC
+        """,
+        (candidate_id, campaign_ids),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_candidate_fills(conn: psycopg.Connection, *, candidate_id: str, campaign_ids: list[int]) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM paper_fills
+        WHERE simulation_only = TRUE AND candidate_id = %s AND campaign_id = ANY(%s)
+        ORDER BY filled_at DESC, id DESC
+        """,
+        (candidate_id, campaign_ids),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def load_candidate_execution_events(conn: psycopg.Connection, *, candidate_id: str, deployment_ids: list[int]) -> list[dict[str, Any]]:
+    if not deployment_ids:
+        return []
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM execution_logs
+        WHERE simulation_only = TRUE
+          AND deployment_id = ANY(%s)
+        ORDER BY created_at DESC, id DESC
+        LIMIT 200
+        """,
+        (deployment_ids,),
+    ).fetchall()
+    return [dict(row) for row in rows if candidate_id in canonical_json(dict(row.get("payload") or {})) or row.get("deployment_id") in deployment_ids]
+
+
+def build_candidate_profiles(jobs: list[dict[str, Any]], elite: list[dict[str, Any]], deployments: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    elite_by_scope = {candidate_scope_id(row): row for row in elite}
+    deployments_by_scope: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in deployments:
+        deployments_by_scope[candidate_scope_id(row)].append(row)
+    profiles = {}
+    for scope, runs in group_candidates(jobs).items():
+        best = max(runs, key=lambda row: finite_metric(row.get("validation_score")))
+        current_elite = elite_by_scope.get(scope)
+        current_deployments = deployments_by_scope.get(scope, [])
+        state = persisted_candidate_state(runs, current_elite, current_deployments)
+        profiles[scope] = {
+            "scope_id": scope,
+            "candidate_id": str(best["candidate_id"]),
+            "campaign_ids": sorted({int(row["campaign_id"]) for row in runs if row.get("campaign_id") is not None}),
+            "asset": best["symbol"],
+            "assets": sorted({row["symbol"] for row in runs}),
+            "timeframe": best["timeframe"],
+            "timeframes": sorted({row["timeframe"] for row in runs}),
+            "strategy_family": best["strategy_family"],
+            "family_id": best.get("family_id"),
+            "state": state,
+            "deployment_status": deployment_state(current_deployments),
+            "generation_method": str(best["parameters"].get("generation_channel") or best["candidate"].get("generation_method") or "campaign_generation"),
+            "parent_candidate": best["candidate"].get("parent_candidate_id") or best["candidate"].get("parent") or best["result"].get("parent_candidate_id"),
+            "complete_parameter_set": best["parameters"],
+            "blocks": best["blocks"],
+            "best_metrics": best["metrics"],
+            "research_score": current_elite.get("research_score") if current_elite else best.get("validation_score"),
+            "profit_factor": current_elite.get("profit_factor") if current_elite else best["metrics"].get("profit_factor"),
+            "expectancy": current_elite.get("expectancy") if current_elite else best["metrics"].get("expectancy_per_trade"),
+            "trade_count": current_elite.get("trade_count") if current_elite else best["metrics"].get("number_of_trades"),
+            "maximum_drawdown": current_elite.get("max_drawdown") if current_elite else best["metrics"].get("max_drawdown"),
+            "stability": current_elite.get("stability") if current_elite else best.get("consistency_score"),
+            "promotion_timestamp": current_elite.get("created_at") if current_elite else first_completed_at(runs, status="promoted"),
+            "paper_deployment_ids": [row["id"] for row in current_deployments],
+            "forward_validation_state": current_elite.get("forward_validation_state") if current_elite else deployment_state(current_deployments),
+            "elite_evidence": current_elite,
+            "runs": runs,
+            "created_at": min((row.get("created_at") for row in runs if row.get("created_at")), default=None),
+            "updated_at": max((row.get("updated_at") for row in runs if row.get("updated_at")), default=None),
+        }
+    return profiles
+
+
+def persisted_candidate_state(runs: list[dict[str, Any]], elite: dict[str, Any] | None, deployments: list[dict[str, Any]]) -> str:
+    if elite and any(str(row.get("forward_validation_state")) == "forward_validation_passed" for row in [elite]):
+        return "Forward Passed"
+    if deployments and any(str(row.get("status")) == "active" and str(row.get("lifecycle_state")) in FORWARD_STATES for row in deployments):
+        return "Forward Active"
+    if deployments:
+        return "Paper Deployed"
+    if elite:
+        return "Elite"
+    if any(row["status"] == "promoted" for row in runs):
+        return "Research Candidate"
+    if any(row["status"] in TESTED_STATUSES for row in runs) and not all(row["status"] in TERMINAL_STATUSES for row in runs):
+        return "Needs More Evidence"
+    if any(row["status"] == "rejected" for row in runs):
+        return "Rejected"
+    return candidate_result_label(Counter(str(row["status"]) for row in runs))
+
+
+def deployment_state(deployments: list[dict[str, Any]]) -> str:
+    if not deployments:
+        return "Not Deployed"
+    if any(str(row.get("status")) == "active" and str(row.get("lifecycle_state")) in FORWARD_STATES for row in deployments):
+        return "Forward Active"
+    if any(str(row.get("status")) == "paused" for row in deployments):
+        return "Paused"
+    return "Paper Deployed"
+
+
+def state_rank(state: str) -> int:
+    order = {"Forward Passed": 8, "Forward Active": 7, "Paper Deployed": 6, "Elite": 5, "Research Candidate": 4, "Needs More Evidence": 3, "Rejected": 2}
+    return order.get(state, 1)
+
+
+def deterministic_evidence_plan(profile: dict[str, Any]) -> dict[str, Any]:
+    failed = sorted({gate for row in profile["runs"] for gate in row["failed_gates"]})
+    reason = ", ".join(label_gate(gate) for gate in failed) or "No missing evidence gate recorded"
+    plan = [evidence_plan_step(gate, profile) for gate in failed] or [{
+        "missing_evidence_reason": reason,
+        "recommended_test": "No bounded follow-up required from stored failed gates.",
+        "test_scope": "Monitor persisted evidence only.",
+        "falsification_condition": "Any future stored validation gate failure blocks promotion.",
+        "status": "not_required",
+        "result": None,
+    }]
+    return {
+        "candidate_id": profile["candidate_id"],
+        "campaign_ids": profile["campaign_ids"],
+        "missing_evidence_reason": reason,
+        "status": "blocked_from_paper_deployment" if profile["state"] == "Needs More Evidence" else "informational",
+        "steps": plan,
+    }
+
+
+def evidence_plan_step(gate: str, profile: dict[str, Any]) -> dict[str, Any]:
+    mapping = {
+        "minimum_trade_count": ("Longer historical-window test or bounded entry-frequency repair", "Same frozen parameters on a longer window for the same asset/timeframe", "Fails if trade count remains below the stored threshold or any profitability gate degrades."),
+        "stability": ("Rolling and expanding walk-forward validation", "Frozen parameters across rolling market windows", "Fails if stability remains below the stored gate."),
+        "walk_forward_oos": ("Recent holdout and walk-forward retest", "Frozen parameters on unseen recent data", "Fails if OOS expectancy or walk-forward availability does not pass."),
+        "profit_factor": ("Profit-factor falsification retest", "Same strategy structure across retained assets/timeframes", "Fails if profit factor remains below the stored threshold."),
+        "positive_expectancy": ("Expectancy holdout retest", "Recent holdout without parameter mutation", "Fails if net expectancy remains non-positive."),
+        "maximum_drawdown": ("Drawdown stress validation", "Bull, sideways, bear, high-volatility, and low-volatility windows", "Fails if drawdown exceeds the stored maximum."),
+        "confidence_interval": ("Increase independent samples", "Additional independent assets or folds using frozen parameters", "Fails if confidence interval still crosses the rejection boundary."),
+    }
+    test, scope, falsification = mapping.get(gate, ("Targeted missing-evidence retest", "Frozen candidate definition", "Fails if the named gate remains failed."))
+    return {
+        "missing_evidence_reason": label_gate(gate),
+        "recommended_test": test,
+        "test_scope": scope,
+        "falsification_condition": falsification,
+        "status": "planned" if profile["state"] == "Needs More Evidence" else "informational",
+        "result": None,
+        "created_at": datetime.now(UTC),
+        "completed_at": None,
+    }
+
+
+def persist_evidence_plan(conn: psycopg.Connection, profile: dict[str, Any], plan: dict[str, Any]) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS candidate_missing_evidence_plans (
+            id BIGSERIAL PRIMARY KEY,
+            candidate_id TEXT NOT NULL,
+            campaign_id BIGINT,
+            missing_evidence_reason TEXT NOT NULL,
+            recommended_test TEXT NOT NULL,
+            test_scope TEXT NOT NULL,
+            falsification_condition TEXT NOT NULL,
+            status TEXT NOT NULL,
+            result JSONB,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            completed_at TIMESTAMPTZ,
+            simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
+            CONSTRAINT candidate_missing_evidence_plans_simulation_only_check CHECK (simulation_only = TRUE)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS candidate_missing_evidence_plan_unique
+        ON candidate_missing_evidence_plans(candidate_id, COALESCE(campaign_id, 0), missing_evidence_reason)
+        """
+    )
+    campaign_id = profile["campaign_ids"][0] if profile["campaign_ids"] else None
+    for step in plan["steps"]:
+        conn.execute(
+            """
+            DELETE FROM candidate_missing_evidence_plans
+            WHERE candidate_id = %s
+              AND COALESCE(campaign_id, 0) = COALESCE(%s, 0)
+              AND missing_evidence_reason = %s
+            """,
+            (profile["candidate_id"], campaign_id, step["missing_evidence_reason"]),
+        )
+        conn.execute(
+            """
+            INSERT INTO candidate_missing_evidence_plans(
+                candidate_id, campaign_id, missing_evidence_reason, recommended_test,
+                test_scope, falsification_condition, status, result, completed_at, simulation_only
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            """,
+            (
+                profile["candidate_id"],
+                campaign_id,
+                step["missing_evidence_reason"],
+                step["recommended_test"],
+                step["test_scope"],
+                step["falsification_condition"],
+                step["status"],
+                Jsonb(step.get("result")),
+                step.get("completed_at"),
+            ),
+        )
+
+
+def label_gate(value: str) -> str:
+    return str(value or "unknown").replace("_", " ").title()
+
+
+def readable_strategy_definition(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "strategy_family": profile["strategy_family"],
+        "entry_logic": profile["blocks"].get("entry"),
+        "exit_logic": profile["blocks"].get("exit"),
+        "stop_logic": profile["blocks"].get("stop") or profile["complete_parameter_set"].get("stop_loss"),
+        "target_logic": profile["blocks"].get("target") or profile["complete_parameter_set"].get("risk_reward"),
+        "filters": {key: value for key, value in profile["blocks"].items() if key not in {"entry", "exit", "stop", "target"}},
+        "parameters": profile["complete_parameter_set"],
+    }
+
+
+def validation_gate_summary(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    gates = sorted({gate for row in runs for gate in row["failed_gates"]} | {"profit_factor", "positive_expectancy", "minimum_trade_count", "maximum_drawdown"})
+    return [{"gate": label_gate(gate), "passed": not any(gate in row["failed_gates"] for row in runs), "failed_runs": sum(gate in row["failed_gates"] for row in runs)} for gate in gates]
+
+
+def evidence_bucket(runs: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    return [{"asset": row["symbol"], "timeframe": row["timeframe"], "evidence": row["result"].get(key) or row["metrics"].get(key) or {}} for row in runs]
+
+
+def regime_profile(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"asset": row["symbol"], "timeframe": row["timeframe"], "regimes": (row["result"].get("regime_analysis") or {})} for row in runs]
+
+
+def cross_asset_profile(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"asset": row["symbol"], "timeframe": row["timeframe"], "status": row["status"], "metrics": row["metrics"]} for row in runs]
+
+
+def campaign_lineage(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{"campaign_id": row["campaign_id"], "job_id": row["id"], "candidate_id": row["candidate_id"], "status": row["status"], "created_at": row.get("created_at"), "completed_at": row.get("completed_at")} for row in runs]
+
+
+def repair_history(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    repairs = []
+    for row in runs:
+        params = row["parameters"]
+        if params.get("repair_type") or params.get("generation_channel") in {"near_pass_repair", "bounded_repair"}:
+            repairs.append({"job_id": row["id"], "repair_type": params.get("repair_type") or params.get("generation_channel"), "parameters": params})
+    return repairs
+
+
+def deployment_profile(deployments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{
+        "deployment_id": row["id"],
+        "status": row.get("status"),
+        "lifecycle_state": row.get("lifecycle_state"),
+        "strategy_version": row.get("strategy_version"),
+        "parameter_snapshot": row.get("parameters"),
+        "forward_validation_started_at": row.get("forward_validation_started_at"),
+        "deployment_origin": row.get("deployment_origin"),
+    } for row in deployments]
+
+
+def forward_profile(profile: dict[str, Any], deployments: list[dict[str, Any]], orders: list[dict[str, Any]], fills: list[dict[str, Any]]) -> dict[str, Any]:
+    closed = [row for row in fills if str(row.get("side")) == "sell"]
+    thresholds = dict((profile.get("elite_evidence") or {}).get("forward_validation_thresholds") or {})
+    return {
+        "state": profile["forward_validation_state"],
+        "expected_trade_count": profile.get("trade_count"),
+        "actual_trade_count": len(closed),
+        "expected_profit_factor": profile.get("profit_factor"),
+        "realized_profit_factor": realized_profit_factor(fills),
+        "expected_expectancy": profile.get("expectancy"),
+        "realized_expectancy": realized_expectancy(fills),
+        "expected_drawdown": profile.get("maximum_drawdown"),
+        "realized_drawdown": (profile.get("elite_evidence") or {}).get("paper_performance", {}).get("paper_max_drawdown"),
+        "slippage": average_decimal(Decimal(str(row.get("slippage") or 0)) for row in fills),
+        "days_active": max((age_days(row.get("forward_validation_started_at")) for row in deployments), default=0),
+        "closed_trades": len(closed),
+        "minimum_evidence_requirement": {**{"minimum_closed_trades": 5, "minimum_active_paper_days": 5}, **thresholds},
+    }
+
+
+def backtest_forward_comparison(profile: dict[str, Any], fills: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "profit_factor_delta": finite_metric(realized_profit_factor(fills)) - finite_metric(profile.get("profit_factor")),
+        "expectancy_delta": finite_metric(realized_expectancy(fills)) - finite_metric(profile.get("expectancy")),
+        "closed_forward_trades": sum(1 for row in fills if str(row.get("side")) == "sell"),
+        "interpretation": "Forward evidence remains insufficient until minimum closed-trade and active-day requirements are met.",
+    }
+
+
+def readiness_blockers(profile: dict[str, Any], plan: dict[str, Any]) -> list[str]:
+    blockers = []
+    if profile["state"] == "Needs More Evidence":
+        blockers.append("Candidate needs more evidence and is blocked from paper deployment.")
+    if profile["state"] not in {"Elite", "Paper Deployed", "Forward Active", "Forward Passed"} and profile["deployment_status"] != "Not Deployed":
+        blockers.append("Deployment state must be reconciled against elite status.")
+    blockers.extend(step["missing_evidence_reason"] for step in plan["steps"] if step["status"] == "planned")
+    return blockers
+
+
+def diagnostic_report(profile: dict[str, Any], deployments: list[dict[str, Any]], orders: list[dict[str, Any]], fills: list[dict[str, Any]], plan: dict[str, Any]) -> str:
+    elite = profile.get("elite_evidence")
+    lines = [
+        f"Candidate {profile['candidate_id']} is classified as {profile['state']} from persisted campaign evidence.",
+        f"Campaigns: {', '.join(map(str, profile['campaign_ids']))}. Assets: {', '.join(profile['assets'])}. Timeframes: {', '.join(profile['timeframes'])}.",
+    ]
+    if elite:
+        lines.append(f"Elite qualification used persisted elite_research_candidates metrics: PF={elite.get('profit_factor')}, expectancy={elite.get('expectancy')}, trades={elite.get('trade_count')}, drawdown={elite.get('max_drawdown')}, stability={elite.get('stability')}.")
+    else:
+        lines.append("No elite_research_candidates row exists, so this profile does not claim elite qualification.")
+    lines.append(f"Deployment lineage rows: {len(deployments)} deployments, {len(orders)} candidate-linked orders, {len(fills)} candidate-linked fills.")
+    lines.append(f"Missing evidence plan: {plan['missing_evidence_reason']}.")
+    lines.append("Simulation-only constraints remain active; this profile does not authorize live routing or threshold changes.")
+    return "\n".join(lines)
+
+
+def first_completed_at(runs: list[dict[str, Any]], *, status: str) -> Any:
+    return min((row.get("completed_at") for row in runs if row["status"] == status and row.get("completed_at")), default=None)
+
+
+def realized_profit_factor(fills: list[dict[str, Any]]) -> float:
+    sells = [Decimal(str(row.get("gross_amount") or 0)) for row in fills if str(row.get("side")) == "sell"]
+    buys = [Decimal(str(row.get("gross_amount") or 0)) for row in fills if str(row.get("side")) == "buy"]
+    pnl = sum(sells, Decimal("0")) - sum(buys, Decimal("0"))
+    return 999.0 if pnl > 0 else 0.0
+
+
+def realized_expectancy(fills: list[dict[str, Any]]) -> float:
+    sells = [Decimal(str(row.get("gross_amount") or 0)) for row in fills if str(row.get("side")) == "sell"]
+    buys = [Decimal(str(row.get("gross_amount") or 0)) for row in fills if str(row.get("side")) == "buy"]
+    closed = max(1, len(sells))
+    return float((sum(sells, Decimal("0")) - sum(buys, Decimal("0"))) / Decimal(closed))
+
+
+def average_decimal(values: Iterable[Decimal]) -> float:
+    materialized = list(values)
+    if not materialized:
+        return 0.0
+    return float(sum(materialized, Decimal("0")) / Decimal(len(materialized)))
+
+
+def age_days(value: Any) -> int:
+    if not value:
+        return 0
+    if isinstance(value, str):
+        value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return max(0, (datetime.now(UTC) - value).days)
+
+
 def research_recommendations(
     campaign: dict[str, Any],
     jobs: list[dict[str, Any]],
@@ -856,6 +1375,7 @@ def next_campaign_proposal(
     deprioritize_timeframes = [row["name"] for row in timeframes if row["deprioritize"]]
     unique_candidates = len({candidate_scope_id(row) for row in jobs})
     duplicate_work = int(duplicates["exact_duplicates"]) + int(duplicates["near_duplicates"])
+    attempted_candidates = unique_candidates + duplicate_work
     return {
         "proposal_version": f"phase_9_6_candidate_quality_v2_campaign_{campaign.get('id')}",
         "status": "review_required",
@@ -869,7 +1389,7 @@ def next_campaign_proposal(
         "parameter_regions_to_exclude": duplicates["redundant_parameter_regions"],
         "new_hypothesis_tests": [row["falsification_test"] for row in recommendations],
         "candidate_count": unique_candidates,
-        "expected_duplicate_work_reduction": ratio(duplicate_work, max(1, unique_candidates)),
+        "expected_duplicate_work_reduction": bounded_ratio(duplicate_work, attempted_candidates),
         "source_campaign_version": str(campaign.get("campaign_key") or CAMPAIGN_VERSION),
         "validation_thresholds_changed": False,
     }
@@ -1138,6 +1658,12 @@ def sha(value: str) -> str:
 
 def ratio(numerator: int | float, denominator: int | float) -> float:
     return round(float(numerator) / float(denominator), 4) if denominator else 0.0
+
+
+def bounded_ratio(numerator: int | float, denominator: int | float) -> float:
+    if not denominator:
+        return 0.0
+    return round(max(0.0, min(1.0, float(numerator) / float(denominator))), 4)
 
 
 def unique(rows: list[dict[str, Any]], field: str) -> list[str]:

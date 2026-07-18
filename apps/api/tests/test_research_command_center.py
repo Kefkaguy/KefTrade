@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import json
 
-from app.services.research_command_center import analyze_campaign, research_command_center
+from app.services.research_command_center import analyze_campaign, deterministic_evidence_plan, prepare_job, research_command_center
 
 
 CAMPAIGN = {
@@ -227,6 +227,37 @@ def test_next_campaign_proposal_is_review_only_and_preserves_thresholds() -> Non
     assert proposal["status"] == "review_required"
     assert proposal["launch_authorized"] is False
     assert proposal["validation_thresholds_changed"] is False
+
+
+def test_duplicate_reduction_is_clamped_to_valid_percentage_range() -> None:
+    rows = [
+        job(1, "candidate-a", canonical="same", parameter=20),
+        job(2, "candidate-b", canonical="same", parameter=20),
+        job(3, "candidate-c", canonical="different", parameter=30),
+    ]
+    proposal = analyze(rows)["next_campaign_proposal"]
+
+    assert 0 <= proposal["expected_duplicate_work_reduction"] <= 1
+    assert proposal["expected_duplicate_work_reduction"] == 0.5
+
+
+def test_needs_more_evidence_plan_is_deterministic_and_blocks_deployment() -> None:
+    row = job(1, "candidate-a", trades=12, profit_factor=1.3, expectancy=2, status="completed")
+    prepared = analyze([row])["experiment_history"][0]
+    profile = {
+        "candidate_id": "candidate-a",
+        "campaign_ids": [7],
+        "state": "Needs More Evidence",
+        "runs": [prepare_job(row, "equity")],
+    }
+
+    plan = deterministic_evidence_plan(profile)
+
+    assert plan["status"] == "blocked_from_paper_deployment"
+    assert plan["missing_evidence_reason"] == "Minimum Trade Count"
+    assert plan["steps"][0]["recommended_test"] == "Longer historical-window test or bounded entry-frequency repair"
+    assert "trade count" in plan["steps"][0]["falsification_condition"]
+    assert prepared["candidate_id"] == "candidate-a"
 
 
 class Result:

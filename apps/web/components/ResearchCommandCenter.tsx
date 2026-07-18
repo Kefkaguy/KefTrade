@@ -9,6 +9,7 @@ import {
   ArrowRight,
   BarChart3,
   Beaker,
+  CheckCircle2,
   Copy,
   Database,
   Filter,
@@ -16,6 +17,7 @@ import {
   Layers3,
   RefreshCw,
   Search,
+  ShieldCheck,
   Target,
 } from "lucide-react";
 import { CampaignActivity } from "@/components/CampaignActivity";
@@ -90,6 +92,16 @@ export function ResearchCommandCenterDashboard() {
   const duplicates = data.duplicate_analysis ?? {};
   const proposal = data.next_campaign_proposal;
   const hasEvidence = Number(overview.campaign_jobs ?? 0) > 0 || Number(overview.candidates_generated ?? 0) > 0;
+  const sectionNav = [
+    ["overview", "Overview"],
+    ["funnel", "Funnel"],
+    ["rejections", "Rejections"],
+    ["near-pass", "Near pass"],
+    ["strategy", "Strategy"],
+    ["markets", "Markets"],
+    ["history", "Duplicates"],
+    ["proposal", "Proposal"],
+  ];
 
   if (!hasEvidence) {
     return <ResearchStartingWorkspace campaignCount={data.campaigns.length} reduceMotion={Boolean(reduceMotion)} />;
@@ -101,9 +113,32 @@ export function ResearchCommandCenterDashboard() {
         <div>
           <span className="eyebrow">Authoritative campaign evidence</span>
           <h1>Research evidence</h1>
-          <p>Trace how strategy ideas moved from generation through validation, rejection, and promotion.</p>
+          <p>Trace how strategy ideas moved from generation through validation, rejection, promotion, and paper-only forward evidence.</p>
+          <div className="researchHeroActions">
+            <Link className="button" href="/#research-builder">Start another campaign <ArrowRight size={16} /></Link>
+            <span><ShieldCheck size={15} /> Simulation only</span>
+          </div>
         </div>
-        <Link className="button" href="/#research-builder">Start another campaign <ArrowRight size={16} /></Link>
+        <div className="researchHeroPanel" aria-label="Current research snapshot">
+          <div className="researchHeroPanelHeader">
+            <span>Lifecycle snapshot</span>
+            <strong>{String(data.campaign?.status ?? "unknown")}</strong>
+          </div>
+          <div className="researchHeroStats">
+            <HeroStat label="Tested" value={overview.candidates_tested ?? 0} />
+            <HeroStat label="Research" value={overview.research_candidates ?? 0} />
+            <HeroStat label="Elite" value={overview.elite_candidates ?? 0} />
+            <HeroStat label="Forward" value={overview.candidate_linked_deployments ?? 0} />
+          </div>
+          <div className="researchHeroQuality">
+            <span>Strongest family</span>
+            <strong>{data.strategy_intelligence.highlights?.highest_observed_quality ?? data.strategy_intelligence.highlights?.most_promising ?? "No signal yet"}</strong>
+          </div>
+          <div className="researchGuardrailStrip">
+            <span><CheckCircle2 size={13} /> No live routing</span>
+            <span><CheckCircle2 size={13} /> Thresholds unchanged</span>
+          </div>
+        </div>
       </motion.header>
 
       {data.live_evidence ? (
@@ -112,6 +147,11 @@ export function ResearchCommandCenterDashboard() {
           <div><strong>Campaign evidence is still forming</strong><span>Live counts are available now. Candidate-level rejection, regime, duplicate, and recommendation analysis will finalize when the campaign completes.</span></div>
         </div>
       ) : null}
+
+      <nav className="researchSectionNav" aria-label="Research evidence sections">
+        {sectionNav.map(([href, text]) => <a key={href} href={`#${href}`}>{text}</a>)}
+      </nav>
+
       <section className="researchFilterBand" aria-label="Research filters">
         <div className="researchFilterTitle">
           <Filter size={16} />
@@ -276,6 +316,10 @@ export function ResearchCommandCenterDashboard() {
       </details>
     </div>
   );
+}
+
+function HeroStat({ label, value }: { label: string; value: string | number }) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
 function ResearchStartingWorkspace({ campaignCount, reduceMotion }: { campaignCount: number; reduceMotion: boolean }) {

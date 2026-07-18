@@ -73,7 +73,7 @@ from app.services.research_campaigns import (
     update_campaign_scheduling_config,
     upsert_research_universe,
 )
-from app.services.research_command_center import research_command_center
+from app.services.research_command_center import candidate_library, candidate_profile, research_command_center
 from app.services.research_learning import get_learning_table, get_strategy_timeline, learn_from_completed_campaign, research_learning_summary
 from app.services.strategy_discovery import discovery_dashboard, evolve_discovered_strategies, generate_discovery_candidates, rule_library_payload, run_strategy_discovery
 from app.services.strategy_experiments import list_strategy_experiments, run_strategy_experiment
@@ -111,6 +111,43 @@ def get_research_command_center(
             "date_to": date_to,
         },
     )
+
+
+@router.get("/research/candidates")
+def get_persisted_candidate_library(
+    search: str | None = Query(None),
+    state: str | None = Query(None),
+    deployment_status: str | None = Query(None),
+    asset: str | None = Query(None),
+    family: str | None = Query(None),
+    timeframe: str | None = Query(None),
+    campaign_id: int | None = Query(None),
+    limit: int = Query(200, ge=1, le=500),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return candidate_library(
+        conn,
+        search=search,
+        state=state,
+        deployment_status=deployment_status,
+        asset=asset,
+        family=family,
+        timeframe=timeframe,
+        campaign_id=campaign_id,
+        limit=limit,
+    )
+
+
+@router.get("/research/candidates/{candidate_id}")
+def get_persisted_candidate_profile(
+    candidate_id: str,
+    campaign_id: int | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    try:
+        return candidate_profile(conn, candidate_id, campaign_id=campaign_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 class ResearchUniversePayload(BaseModel):
