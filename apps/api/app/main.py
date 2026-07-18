@@ -5,6 +5,7 @@ from typing import Callable
 
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.db import connect
 from app.observability import (
@@ -67,6 +68,18 @@ app.add_middleware(
 )
 
 
+def apply_error_cors_headers(request: Request, response: Response) -> None:
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    allowed_origins = cors_origin_list()
+    if "*" not in allowed_origins and origin not in allowed_origins:
+        return
+    response.headers["Access-Control-Allow-Origin"] = origin if "*" in allowed_origins else origin
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    response.headers["Vary"] = "Origin"
+
+
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next: Callable[[Request], Response]) -> Response:
     request_id = request.headers.get("X-Request-ID") or new_request_id()
@@ -82,7 +95,10 @@ async def request_logging_middleware(request: Request, call_next: Callable[[Requ
         return response
     except Exception as exc:
         log_exception("Unhandled request exception", exc, elapsed_ms=elapsed_ms(started), stack_trace=traceback.format_exc())
-        raise
+        response = JSONResponse(status_code=500, content={"detail": "Internal Server Error", "request_id": request_id})
+        response.headers["X-Request-ID"] = request_id
+        apply_error_cors_headers(request, response)
+        return response
     finally:
         reset_request_context(tokens)
 

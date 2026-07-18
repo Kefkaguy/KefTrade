@@ -67,7 +67,7 @@ def test_start_for_limit_requests_multi_year_hourly_research_window() -> None:
     assert timedelta(days=1370) < age < timedelta(days=1390)
 
 
-def test_fetch_stock_bars_returns_latest_paginated_tail(monkeypatch) -> None:
+def test_fetch_stock_bars_stops_after_latest_requested_bars(monkeypatch) -> None:
     class FakeResponse:
         def __init__(self, payload):
             self.status_code = 200
@@ -92,26 +92,18 @@ def test_fetch_stock_bars_returns_latest_paginated_tail(monkeypatch) -> None:
 
         async def get(self, endpoint, params):
             self.calls += 1
+            assert params["sort"] == "desc"
             if self.calls == 1:
                 return FakeResponse(
                     {
                         "bars": [
-                            {"t": "2025-06-23T18:00:00Z", "o": 1, "h": 1, "l": 1, "c": 1, "v": 1},
-                            {"t": "2025-06-23T19:00:00Z", "o": 2, "h": 2, "l": 2, "c": 2, "v": 1},
+                            {"t": "2026-07-10T19:00:00Z", "o": 4, "h": 4, "l": 4, "c": 4, "v": 1},
+                            {"t": "2026-07-10T18:00:00Z", "o": 3, "h": 3, "l": 3, "c": 3, "v": 1},
                         ],
                         "next_page_token": "next",
                     }
                 )
-            assert params["page_token"] == "next"
-            return FakeResponse(
-                {
-                    "bars": [
-                        {"t": "2026-07-10T18:00:00Z", "o": 3, "h": 3, "l": 3, "c": 3, "v": 1},
-                        {"t": "2026-07-10T19:00:00Z", "o": 4, "h": 4, "l": 4, "c": 4, "v": 1},
-                    ],
-                    "next_page_token": None,
-                }
-            )
+            raise AssertionError("fetch_stock_bars should not request another page after enough bars are received")
 
     monkeypatch.setattr(alpaca.httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(alpaca.settings, "alpaca_api_key", "key")
@@ -120,7 +112,7 @@ def test_fetch_stock_bars_returns_latest_paginated_tail(monkeypatch) -> None:
     _status, bars, request_log, _request_id = asyncio.run(fetch_stock_bars("TSLA", "1h", 2))
 
     assert [bar["t"] for bar in bars] == ["2026-07-10T18:00:00Z", "2026-07-10T19:00:00Z"]
-    assert len(request_log) == 2
+    assert len(request_log) == 1
 
 
 def test_normalize_alpaca_asset_keeps_active_tradable_us_equities() -> None:

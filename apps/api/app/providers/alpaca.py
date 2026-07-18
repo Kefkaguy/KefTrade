@@ -207,7 +207,7 @@ async def fetch_stock_bars(symbol: str, timeframe: str, limit: int) -> tuple[int
         "limit": page_limit,
         "adjustment": "all",
         "feed": ALPACA_FEED,
-        "sort": "asc",
+        "sort": "desc",
     }
     headers = {
         "APCA-API-KEY-ID": settings.alpaca_api_key,
@@ -240,12 +240,16 @@ async def fetch_stock_bars(symbol: str, timeframe: str, limit: int) -> tuple[int
                 }
             )
             bars.extend(page_bars)
+            if len(bars) >= requested_limit:
+                break
             token = payload.get("next_page_token")
             if not token or not page_bars:
                 break
             params["page_token"] = token
 
-    return status, bars[-requested_limit:], request_log, request_id
+    selected = bars[:requested_limit]
+    selected.sort(key=lambda row: str(row.get("t") or ""))
+    return status, selected, request_log, request_id
 
 
 def start_for_limit(timeframe: str, limit: int) -> datetime:
