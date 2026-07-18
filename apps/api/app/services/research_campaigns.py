@@ -16,6 +16,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.observability import elapsed_ms, log_event, log_exception
+from app.settings import settings
 from app.services.evidence_alerts import create_evidence_alert
 from app.services.backtester import build_market_arrays, combine_candles_features
 from app.services.features import load_candles
@@ -24,6 +25,7 @@ from app.services.research_learning import learn_from_completed_campaign
 from app.services.strategy_discovery import (
     SAFETY_STATEMENT,
     DiscoveryCandidate,
+    candidate_execution_key,
     canonical_candidate_key,
     evaluate_candidate,
     generate_balanced_discovery_candidates,
@@ -68,6 +70,7 @@ DEFAULT_SCHEDULING_CONFIG: dict[str, Any] = {
     "job_timeout_seconds": 1200,
     "max_generated_candidates": 5000,
     "max_database_queue_depth": 100000,
+    "target_workers": 0,
 }
 DEFAULT_FORWARD_THRESHOLDS: dict[str, Any] = {
     "minimum_active_paper_days": 5,
@@ -198,7 +201,10 @@ def _ensure_campaign_tables(conn: psycopg.Connection) -> None:
             ADD COLUMN IF NOT EXISTS last_scheduler_cycle_at TIMESTAMPTZ,
             ADD COLUMN IF NOT EXISTS next_scheduler_cycle_at TIMESTAMPTZ,
             ADD COLUMN IF NOT EXISTS daily_jobs_executed INTEGER NOT NULL DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS daily_budget_date DATE
+            ADD COLUMN IF NOT EXISTS daily_budget_date DATE,
+            ADD COLUMN IF NOT EXISTS target_workers INTEGER NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS execution_status TEXT NOT NULL DEFAULT 'idle',
+            ADD COLUMN IF NOT EXISTS execution_updated_at TIMESTAMPTZ
         """
     )
     conn.execute(
@@ -392,18 +398,31 @@ def ensure_operations_tables(conn: psycopg.Connection) -> None:
         """
         CREATE TABLE IF NOT EXISTS research_campaign_workers (
             worker_id TEXT PRIMARY KEY,
+            campaign_id BIGINT REFERENCES research_campaigns(id) ON DELETE SET NULL,
             process_id TEXT,
             hostname TEXT,
             status TEXT NOT NULL DEFAULT 'starting',
             registered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            current_job_id BIGINT,
             stopped_at TIMESTAMPTZ,
             latest_cycle_at TIMESTAMPTZ,
             latest_error TEXT,
             processed_jobs INTEGER NOT NULL DEFAULT 0,
+            error_count INTEGER NOT NULL DEFAULT 0,
             simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
             CONSTRAINT research_campaign_workers_simulation_only_check CHECK (simulation_only = TRUE)
         )
+        """
+    )
+    conn.execute(
+        """
+        ALTER TABLE research_campaign_workers
+            ADD COLUMN IF NOT EXISTS campaign_id BIGINT REFERENCES research_campaigns(id) ON DELETE SET NULL,
+            ADD COLUMN IF NOT EXISTS last_heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            ADD COLUMN IF NOT EXISTS current_job_id BIGINT,
+            ADD COLUMN IF NOT EXISTS error_count INTEGER NOT NULL DEFAULT 0
         """
     )
     conn.execute(
@@ -549,6 +568,116 @@ def upsert_research_universe(
     return jsonable(dict(row))
 
 
+def campaign_generation_candidates(conn: psycopg.Connection, *, universe_key: str, max_candidates: int) -> tuple[list[DiscoveryCandidate], dict[str, Any]]:
+    if universe_key == "research_core_ten":
+        return elite_focused_research_core_candidates(conn, max_candidates=max_candidates)
+    candidates = dedupe_candidates_by_execution_key(generate_balanced_discovery_candidates(max_candidates=max_candidates * 2), max_candidates)
+    return candidates, {
+        "mode": "balanced",
+        "attempted_candidate_generations": len(candidates),
+        "duplicates_prevented": max(0, max_candidates - len(candidates)),
+        "jobs_skipped": max(0, max_candidates - len(candidates)),
+        "channels": {"balanced": len(candidates)},
+    }
+
+
+def elite_focused_research_core_candidates(conn: psycopg.Connection, *, max_candidates: int) -> tuple[list[DiscoveryCandidate], dict[str, Any]]:
+    attempted = max(max_candidates * 4, 250)
+    base = generate_balanced_discovery_candidates(max_candidates=attempted)
+    parents = load_research_core_parent_candidates(conn, limit=max_candidates)
+    survivor_quota = int(max_candidates * 0.70)
+    adjacent_quota = int(max_candidates * 0.20)
+    exploratory_quota = max_candidates - survivor_quota - adjacent_quota
+    selected: list[DiscoveryCandidate] = []
+    selected.extend(channel_candidates(parents, survivor_quota, "survivor"))
+    selected.extend(channel_candidates(base, adjacent_quota + max(0, survivor_quota - len(selected)), "adjacent", offset=len(selected)))
+    selected.extend(channel_candidates(base, exploratory_quota, "exploratory", offset=len(selected) + adjacent_quota))
+    if len(selected) < max_candidates:
+        selected.extend(channel_candidates(base, max_candidates - len(selected), "exploratory_fill", offset=len(selected)))
+    deduped = dedupe_candidates_by_execution_key(selected, max_candidates)
+    if len(deduped) < max_candidates:
+        deduped = dedupe_candidates_by_execution_key([*deduped, *channel_candidates(base, max_candidates, "exploratory_fill", offset=len(deduped))], max_candidates)
+    channels = Counter(str(candidate.parameters.get("generation_channel") or "unknown") for candidate in deduped)
+    return deduped, {
+        "mode": "elite_focused_70_20_10",
+        "attempted_candidate_generations": len(selected),
+        "duplicates_prevented": max(0, len(selected) - len(deduped)),
+        "jobs_skipped": max(0, max_candidates - len(deduped)),
+        "channels": dict(channels),
+        "quota_policy": "survivor_then_adjacent_then_exploratory_without_execution_key_duplicates",
+    }
+
+
+def load_research_core_parent_candidates(conn: psycopg.Connection, *, limit: int) -> list[DiscoveryCandidate]:
+    try:
+        rows = conn.execute(
+            """
+            SELECT candidate
+            FROM research_campaign_jobs
+            WHERE simulation_only = TRUE
+              AND candidate IS NOT NULL
+              AND status IN ('promoted', 'rejected', 'completed')
+              AND (
+                status = 'promoted'
+                OR validation_score > 0
+                OR COALESCE((result->'metrics'->>'expectancy_per_trade')::double precision, 0) > 0
+                OR COALESCE((result->'metrics'->>'profit_factor')::double precision, 0) >= 1.0
+              )
+            ORDER BY validation_score DESC, updated_at DESC
+            LIMIT %s
+            """,
+            (limit,),
+        ).fetchall()
+    except Exception:
+        safe_rollback(conn)
+        rows = []
+    candidates: list[DiscoveryCandidate] = []
+    for row in rows:
+        try:
+            candidates.append(candidate_from_payload(dict(row["candidate"])))
+        except Exception:
+            continue
+    return candidates
+
+
+def channel_candidates(candidates: list[DiscoveryCandidate], count: int, channel: str, *, offset: int = 0) -> list[DiscoveryCandidate]:
+    if count <= 0 or not candidates:
+        return []
+    result = []
+    for candidate in candidates[offset:]:
+        params = {**candidate.parameters, "generation_channel": channel}
+        key = canonical_candidate_key(candidate.blocks, params, candidate.parent_candidate_id)
+        result.append(
+            DiscoveryCandidate(
+                candidate_id=f"sd_{sha256(key.encode()).hexdigest()[:14]}",
+                family_id=candidate.family_id,
+                parent_candidate_id=candidate.parent_candidate_id,
+                generation=candidate.generation,
+                blocks=dict(candidate.blocks),
+                parameters=params,
+                complexity=candidate.complexity,
+                canonical_key=key,
+            )
+        )
+        if len(result) >= count:
+            break
+    return result
+
+
+def dedupe_candidates_by_execution_key(candidates: list[DiscoveryCandidate], limit: int) -> list[DiscoveryCandidate]:
+    selected: list[DiscoveryCandidate] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = candidate_execution_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(candidate)
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 def create_research_campaign(
     conn: psycopg.Connection,
     *,
@@ -565,7 +694,7 @@ def create_research_campaign(
     assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
     selected_timeframes = list(timeframes or universe.get("default_timeframes") or DEFAULT_CAMPAIGN_TIMEFRAMES)
     log_event("Job generation started", assets=len(assets), timeframes=len(selected_timeframes), strategies=max_candidates, expected_jobs=len(assets) * len(selected_timeframes) * max_candidates)
-    candidates = generate_balanced_discovery_candidates(max_candidates=max_candidates)
+    candidates, generation_metrics = campaign_generation_candidates(conn, universe_key=universe_key, max_candidates=max_candidates)
     campaign_key = research_campaign_key(universe_key, assets, selected_timeframes, max_candidates)
     campaign_name = name or f"{universe['name']} strategy discovery campaign"
     insert_started = time.perf_counter()
@@ -588,6 +717,7 @@ def create_research_campaign(
                 "timeframes": selected_timeframes,
                 "campaign_version": CAMPAIGN_VERSION,
                 "candidate_generation": "family_balanced_frequency_hypotheses_v1",
+                "candidate_generation_mix": generation_metrics,
                 "validation_policy": "All existing trade-count, quality, walk-forward, and cross-market gates remain unchanged.",
             }),
             Jsonb(DEFAULT_SCHEDULING_CONFIG),
@@ -2177,6 +2307,8 @@ def queue_campaign_jobs(
     timeframes: list[str],
 ) -> int:
     started = time.perf_counter()
+    original_candidates = len(candidates)
+    candidates = dedupe_candidates_by_execution_key(candidates, len(candidates))
     expected_jobs = len(candidates) * len(assets) * len(timeframes)
     log_event("Generating jobs", campaign_id=campaign_id, assets=len(assets), strategies=len(candidates), timeframes=len(timeframes), expected_jobs=expected_jobs)
     created = 0
@@ -2206,6 +2338,27 @@ def queue_campaign_jobs(
                     batch_job_count += 1
                     conn.execute("UPDATE research_campaign_batches SET job_count = job_count + 1, updated_at = NOW() WHERE id = %s", (batch_id,))
     log_event("Jobs inserted", campaign_id=campaign_id, expected_jobs=expected_jobs, actual_jobs_inserted=created, elapsed_ms=elapsed_ms(started))
+    if original_candidates != len(candidates):
+        conn.execute(
+            """
+            UPDATE research_campaigns
+            SET controls = controls || %s::jsonb,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (
+                Jsonb(
+                    {
+                        "execution_key_deduplication": {
+                            "attempted_candidate_generations": original_candidates,
+                            "duplicates_prevented": original_candidates - len(candidates),
+                            "jobs_skipped": (original_candidates - len(candidates)) * len(assets) * len(timeframes),
+                        }
+                    }
+                ),
+                campaign_id,
+            ),
+        )
     return created
 
 
@@ -2302,6 +2455,8 @@ def run_research_campaign_batch(
     for job in jobs:
         started = time.perf_counter()
         try:
+            set_campaign_worker_assignment(conn, worker_id, campaign_id=campaign_id, current_job_id=int(job["id"]), status="running")
+            conn.commit()
             readiness = data_readiness_for_job(conn, dict(job))
             if not readiness["ready"]:
                 mark_claimed_job_deferred(conn, dict(job), readiness)
@@ -2352,6 +2507,7 @@ def run_research_campaign_batch(
             conn.commit()
             best_effort_worker_heartbeat(conn, worker_id, status="running")
             failed.append({"job_id": job["id"], "candidate_id": job["candidate_id"], "symbol": job["symbol"], "timeframe": job["timeframe"], "error": str(error)})
+    set_campaign_worker_assignment(conn, worker_id, campaign_id=None, current_job_id=None, status="idle")
     remaining = open_job_count(conn, campaign_id)
     analytics: dict[str, Any] = {}
     if coordinate_campaign:
@@ -3121,6 +3277,26 @@ def scheduling_config(campaign: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
+def campaign_worker_limit() -> int:
+    configured = settings.max_campaign_workers
+    if configured is not None:
+        return max(1, int(configured))
+    cpu_count = os.cpu_count() or 2
+    return max(1, min(8, max(2, cpu_count - 1)))
+
+
+def default_campaign_workers() -> int:
+    return min(campaign_worker_limit(), max(2, (os.cpu_count() or 2) - 1))
+
+
+def worker_stale_seconds() -> int:
+    return max(15, int(settings.campaign_worker_stale_seconds or 45))
+
+
+def worker_heartbeat_seconds() -> int:
+    return max(5, int(settings.campaign_worker_heartbeat_seconds or 10))
+
+
 def update_campaign_scheduling_config(conn: psycopg.Connection, campaign_id: int, updates: dict[str, Any]) -> dict[str, Any]:
     ensure_campaign_tables(conn)
     campaign = get_campaign(conn, campaign_id)
@@ -3267,11 +3443,12 @@ def register_campaign_worker(conn: psycopg.Connection, *, worker_id: str, status
     ensure_operations_tables(conn)
     row = conn.execute(
         """
-        INSERT INTO research_campaign_workers(worker_id, process_id, hostname, status, heartbeat_at, latest_cycle_at, simulation_only)
-        VALUES (%s, %s, %s, %s, NOW(), NOW(), TRUE)
+        INSERT INTO research_campaign_workers(worker_id, process_id, hostname, status, heartbeat_at, last_heartbeat_at, latest_cycle_at, simulation_only)
+        VALUES (%s, %s, %s, %s, NOW(), NOW(), NOW(), TRUE)
         ON CONFLICT(worker_id) DO UPDATE
         SET status = EXCLUDED.status,
             heartbeat_at = NOW(),
+            last_heartbeat_at = NOW(),
             latest_cycle_at = NOW(),
             stopped_at = NULL,
             latest_error = NULL
@@ -3286,10 +3463,33 @@ def heartbeat_campaign_worker(conn: psycopg.Connection, worker_id: str, *, statu
     conn.execute(
         """
         UPDATE research_campaign_workers
-        SET status = %s, heartbeat_at = NOW(), latest_cycle_at = NOW()
+        SET status = %s, heartbeat_at = NOW(), last_heartbeat_at = NOW(), latest_cycle_at = NOW()
         WHERE worker_id = %s
         """,
         (status, worker_id),
+    )
+
+
+def set_campaign_worker_assignment(
+    conn: psycopg.Connection,
+    worker_id: str,
+    *,
+    campaign_id: int | None,
+    current_job_id: int | None = None,
+    status: str = "running",
+) -> None:
+    conn.execute(
+        """
+        UPDATE research_campaign_workers
+        SET campaign_id = %s,
+            current_job_id = %s,
+            status = %s,
+            heartbeat_at = NOW(),
+            last_heartbeat_at = NOW(),
+            latest_cycle_at = NOW()
+        WHERE worker_id = %s
+        """,
+        (campaign_id, current_job_id, status, worker_id),
     )
 
 
@@ -3305,7 +3505,10 @@ def mark_campaign_worker_idle(conn: psycopg.Connection, worker_id: str, processe
         """
         UPDATE research_campaign_workers
         SET status = 'idle',
+            campaign_id = NULL,
+            current_job_id = NULL,
             heartbeat_at = NOW(),
+            last_heartbeat_at = NOW(),
             latest_cycle_at = NOW(),
             processed_jobs = processed_jobs + %s
         WHERE worker_id = %s
@@ -3318,7 +3521,11 @@ def mark_campaign_worker_error(conn: psycopg.Connection, worker_id: str, error: 
     conn.execute(
         """
         UPDATE research_campaign_workers
-        SET status = 'error', heartbeat_at = NOW(), latest_error = %s
+        SET status = 'error',
+            heartbeat_at = NOW(),
+            last_heartbeat_at = NOW(),
+            latest_error = %s,
+            error_count = error_count + 1
         WHERE worker_id = %s
         """,
         (error, worker_id),
@@ -3330,7 +3537,12 @@ def stop_campaign_worker(conn: psycopg.Connection, worker_id: str) -> dict[str, 
     row = conn.execute(
         """
         UPDATE research_campaign_workers
-        SET status = 'stopped', stopped_at = NOW(), heartbeat_at = NOW()
+        SET status = 'stopped',
+            campaign_id = NULL,
+            current_job_id = NULL,
+            stopped_at = NOW(),
+            heartbeat_at = NOW(),
+            last_heartbeat_at = NOW()
         WHERE worker_id = %s
         RETURNING *
         """,
@@ -3338,6 +3550,46 @@ def stop_campaign_worker(conn: psycopg.Connection, worker_id: str) -> dict[str, 
     ).fetchone()
     conn.commit()
     return {"worker": jsonable(dict(row)) if row else None, "simulation_only": True}
+
+
+def run_durable_campaign_worker_cycle(conn: psycopg.Connection, *, worker_id: str) -> dict[str, Any]:
+    ensure_campaign_tables(conn)
+    register_campaign_worker(conn, worker_id=worker_id, status="idle")
+    campaigns = executable_target_campaigns(conn)
+    for campaign in campaigns:
+        campaign_id = int(campaign["id"])
+        target = min(int(campaign.get("target_workers") or 0), campaign_worker_limit())
+        runtime = campaign_runtime_snapshot(conn, campaign_id)
+        if target <= 0:
+            continue
+        if int(runtime["effective_workers"]) >= target:
+            heartbeat_campaign_worker(conn, worker_id, status="draining")
+            conn.commit()
+            continue
+        config = scheduling_config(dict(campaign))
+        batch_size = min(int(config.get("batch_size") or 25), int(config.get("max_jobs_per_cycle") or 50), 25)
+        result = run_research_campaign_batch(conn, campaign_id=campaign_id, batch_size=max(1, batch_size), worker_id=worker_id)
+        processed = int(result.get("processed") or 0)
+        if processed:
+            return result
+    mark_campaign_worker_idle(conn, worker_id)
+    conn.commit()
+    return {"worker_id": worker_id, "processed": 0, "campaigns": [], "simulation_only": True}
+
+
+def executable_target_campaigns(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM research_campaigns
+        WHERE simulation_only = TRUE
+          AND status IN ('queued', 'running', 'failed')
+          AND target_workers > 0
+        ORDER BY updated_at ASC, id ASC
+        FOR UPDATE SKIP LOCKED
+        """
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def run_background_campaign_worker(
@@ -3364,7 +3616,7 @@ def run_background_campaign_worker(
             cycle_started = time.perf_counter()
             with conn_factory() as conn:
                 heartbeat_campaign_worker(conn, worker)
-                result = run_campaign_scheduler_cycle(conn, force=False, worker_id=worker)
+                result = run_durable_campaign_worker_cycle(conn, worker_id=worker)
                 processed += int(result.get("processed") or 0)
                 conn.commit()
             log_event("Task completed", task="worker_cycle", worker_id=worker, cycle=cycles + 1, processed=result.get("processed"), elapsed_ms=elapsed_ms(cycle_started))
@@ -3477,9 +3729,9 @@ def worker_status(conn: psycopg.Connection) -> dict[str, Any]:
         row = dict(registry)
         claimed = claimed_by_worker.get(row["worker_id"], {})
         current = current_jobs.get(row["worker_id"])
-        heartbeat = parse_timestamp(row.get("heartbeat_at"))
+        heartbeat = parse_timestamp(row.get("last_heartbeat_at") or row.get("heartbeat_at"))
         registered = parse_timestamp(row.get("registered_at"))
-        healthy = heartbeat is not None and (now - heartbeat) <= timedelta(minutes=5) and row.get("status") not in {"stopped", "error"}
+        healthy = heartbeat is not None and (now - heartbeat) <= timedelta(seconds=worker_stale_seconds()) and row.get("status") not in {"stopped", "error"}
         heartbeat_age = round((now - heartbeat).total_seconds(), 2) if heartbeat else None
         uptime_seconds = round((now - registered).total_seconds(), 2) if registered and row.get("status") not in {"stopped"} else 0
         workers.append({
@@ -4875,6 +5127,7 @@ def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dic
             c.dataset_mode,
             c.generator_version,
             c.requested_candidates,
+            c.target_workers,
             c.created_at,
             c.started_at,
             c.completed_at,
@@ -4889,6 +5142,17 @@ def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dic
                 WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')
                   AND j.updated_at >= NOW() - INTERVAL '15 minutes'
             ) AS recent_terminal_jobs,
+            COUNT(j.id) FILTER (
+                WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')
+                  AND j.updated_at >= NOW() - INTERVAL '5 minutes'
+            ) AS terminal_jobs_5m,
+            COUNT(j.id) FILTER (
+                WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')
+                  AND j.updated_at >= NOW() - INTERVAL '15 minutes'
+            ) AS terminal_jobs_15m,
+            AVG(j.execution_runtime_ms) FILTER (WHERE j.execution_runtime_ms IS NOT NULL) AS average_profiled_runtime_ms,
+            COUNT(j.id) FILTER (WHERE j.execution_runtime_ms IS NOT NULL) AS profiled_jobs,
+            AVG(EXTRACT(EPOCH FROM (j.claimed_at - j.created_at)) * 1000) FILTER (WHERE j.claimed_at IS NOT NULL) AS average_queue_delay_ms,
             COUNT(j.id) FILTER (WHERE j.status = 'promoted') AS promoted_jobs,
             COUNT(j.id) FILTER (WHERE j.status = 'rejected') AS rejected_jobs
         FROM research_campaigns c
@@ -4916,22 +5180,42 @@ def campaign_list_row_with_eta(row: dict[str, Any]) -> dict[str, Any]:
     total_jobs = int(row.get("total_jobs") or 0)
     terminal_jobs = int(row.get("terminal_jobs") or 0)
     blocked_jobs = int(row.get("blocked_jobs") or 0)
-    remaining_jobs = max(total_jobs - terminal_jobs - blocked_jobs, 0)
-    recent_terminal_jobs = int(row.pop("recent_terminal_jobs", 0) or 0)
-    jobs_per_minute = recent_terminal_jobs / 15 if recent_terminal_jobs > 0 else 0.0
-
-    started_at = row.get("started_at")
-    if jobs_per_minute <= 0 and terminal_jobs > 0 and isinstance(started_at, datetime):
-        if started_at.tzinfo is None:
-            started_at = started_at.replace(tzinfo=UTC)
-        elapsed_minutes = max((datetime.now(UTC) - started_at).total_seconds() / 60, 1)
-        jobs_per_minute = terminal_jobs / elapsed_minutes
-
-    if row.get("status") in {"queued", "running"} and remaining_jobs > 0 and jobs_per_minute > 0:
-        row["estimated_seconds_remaining"] = round((remaining_jobs / jobs_per_minute) * 60)
-    else:
-        row["estimated_seconds_remaining"] = None
-    row["jobs_per_minute"] = round(jobs_per_minute, 2)
+    deferred_jobs = int(row.get("deferred_jobs") or 0)
+    executable_remaining = max(total_jobs - terminal_jobs - blocked_jobs - deferred_jobs, 0)
+    terminal_5m = int(row.pop("terminal_jobs_5m", 0) or 0)
+    terminal_15m = int(row.pop("terminal_jobs_15m", 0) or 0)
+    row.pop("recent_terminal_jobs", None)
+    jobs_per_minute_5m = terminal_5m / 5 if terminal_5m > 0 else 0.0
+    jobs_per_minute_15m = terminal_15m / 15 if terminal_15m > 0 else 0.0
+    average_runtime_ms = finite_metric(row.get("average_profiled_runtime_ms"))
+    profiled_jobs = int(row.get("profiled_jobs") or 0)
+    effective_workers = max(1, int(row.get("target_workers") or 0))
+    eta_seconds = None
+    eta_method = "estimating"
+    sampled_terminal_jobs = 0
+    if row.get("status") in {"queued", "running"} and executable_remaining > 0:
+        if terminal_5m >= 20 and jobs_per_minute_5m > 0:
+            eta_seconds = round((executable_remaining / jobs_per_minute_5m) * 60)
+            eta_method = "rolling_5m"
+            sampled_terminal_jobs = terminal_5m
+        elif terminal_15m >= 20 and jobs_per_minute_15m > 0:
+            eta_seconds = round((executable_remaining / jobs_per_minute_15m) * 60)
+            eta_method = "rolling_15m"
+            sampled_terminal_jobs = terminal_15m
+        elif profiled_jobs >= 5 and average_runtime_ms > 0:
+            jobs_per_second = effective_workers / max(average_runtime_ms / 1000, 0.001)
+            eta_seconds = round(executable_remaining / jobs_per_second)
+            eta_method = "profiled_runtime"
+            sampled_terminal_jobs = profiled_jobs
+    row["estimated_seconds_remaining"] = eta_seconds
+    row["eta_seconds"] = eta_seconds
+    row["eta_method"] = eta_method
+    row["sampled_terminal_jobs"] = sampled_terminal_jobs
+    row["jobs_per_minute"] = round(jobs_per_minute_5m or jobs_per_minute_15m, 2)
+    row["jobs_per_minute_5m"] = round(jobs_per_minute_5m, 2)
+    row["jobs_per_minute_15m"] = round(jobs_per_minute_15m, 2)
+    row["executable_remaining_jobs"] = executable_remaining
+    row["average_queue_delay_ms"] = round(finite_metric(row.get("average_queue_delay_ms")), 2)
     return jsonable(row)
 
 
@@ -4965,6 +5249,8 @@ def get_campaign_performance_profile(conn: psycopg.Connection, campaign_id: int)
         (campaign_id,),
     ).fetchone() or {}
     pool = parallel_pool_snapshot(campaign_id)
+    durable_runtime = campaign_runtime_snapshot(conn, campaign_id)
+    efficiency = campaign_efficiency_metrics(conn, campaign_id, durable_runtime)
     active_parallel_workers = max(int(row.get("active_parallel_workers") or 0), int(pool.get("live_workers") or 0))
     return {
         "campaign_id": campaign_id,
@@ -4979,18 +5265,55 @@ def get_campaign_performance_profile(conn: psycopg.Connection, campaign_id: int)
         },
         "dataset_cache_hit_rate": round(finite_metric(row.get("dataset_cache_hit_rate")), 4),
         "runtime": {
-            "active_parallel_workers": active_parallel_workers,
+            "active_parallel_workers": max(active_parallel_workers, int(durable_runtime["effective_workers"])),
             "active_parallel_jobs": int(row.get("active_parallel_jobs") or 0),
-            "configured_parallel_workers": int(pool.get("workers") or active_parallel_workers),
-            "starting_parallel_workers": int(pool.get("starting_workers") or 0),
-            "parallel_pool_active": bool(pool.get("active")),
-            "parallel_pool_status": str(pool.get("status") or "idle"),
+            "configured_parallel_workers": int(durable_runtime["target_workers"] or pool.get("workers") or active_parallel_workers),
+            "starting_parallel_workers": int(durable_runtime["starting_workers"] or pool.get("starting_workers") or 0),
+            "parallel_pool_active": bool(durable_runtime["target_workers"] or pool.get("active")),
+            "parallel_pool_status": "running" if durable_runtime["target_workers"] else str(pool.get("status") or "idle"),
             "processed_parallel_jobs": int(pool.get("processed_jobs") or 0),
             "preloaded_datasets": int(pool.get("preloaded_datasets") or 0),
             "resident_memory_mb": round(process_resident_memory_bytes() / (1024 * 1024), 1),
-            "worker_limit": 8,
+            **durable_runtime,
         },
+        "efficiency": efficiency,
         "simulation_only": True,
+    }
+
+
+def campaign_efficiency_metrics(conn: psycopg.Connection, campaign_id: int, runtime: dict[str, Any] | None = None) -> dict[str, Any]:
+    campaign = get_campaign(conn, campaign_id)
+    controls = dict(campaign.get("controls") or {})
+    generation = dict(controls.get("candidate_generation_mix") or {})
+    dedupe = dict(controls.get("execution_key_deduplication") or {})
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(DISTINCT candidate_id) FILTER (WHERE status IN ('completed', 'promoted', 'rejected', 'failed')) AS evaluated_unique_candidates,
+            COUNT(DISTINCT candidate_id) FILTER (WHERE status = 'promoted') AS near_pass_candidates,
+            AVG(execution_runtime_ms) FILTER (WHERE execution_runtime_ms IS NOT NULL) AS average_simulation_time_ms,
+            AVG(EXTRACT(EPOCH FROM (claimed_at - created_at)) * 1000) FILTER (WHERE claimed_at IS NOT NULL) AS average_queue_delay_ms
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s
+        """,
+        (campaign_id,),
+    ).fetchone() or {}
+    elite_count = int((conn.execute("SELECT COUNT(*) AS count FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE", (campaign_id,)).fetchone() or {}).get("count") or 0)
+    evaluated = int(row.get("evaluated_unique_candidates") or 0)
+    duplicates_prevented = int(generation.get("duplicates_prevented") or 0) + int(dedupe.get("duplicates_prevented") or 0)
+    attempted = int(generation.get("attempted_candidate_generations") or evaluated or 0)
+    runtime = runtime or campaign_runtime_snapshot(conn, campaign_id)
+    target = max(1, int(runtime.get("target_workers") or 1))
+    effective = int(runtime.get("effective_workers") or 0)
+    return {
+        "duplicate_candidates_prevented": duplicates_prevented,
+        "jobs_skipped": int(generation.get("jobs_skipped") or 0) + int(dedupe.get("jobs_skipped") or 0),
+        "near_pass_ratio": round(int(row.get("near_pass_candidates") or 0) / evaluated, 4) if evaluated else 0,
+        "elite_ratio": round(elite_count / evaluated, 4) if evaluated else 0,
+        "worker_utilization": round(effective / target, 4) if target else 0,
+        "duplicate_prevention_rate": round(duplicates_prevented / attempted, 4) if attempted else 0,
+        "average_simulation_time_ms": round(finite_metric(row.get("average_simulation_time_ms")), 2),
+        "average_queue_delay_ms": round(finite_metric(row.get("average_queue_delay_ms")), 2),
     }
 
 
@@ -5044,73 +5367,36 @@ def run_parallel_campaign_batch(
     campaign = get_campaign(conn, campaign_id)
     if campaign["status"] in {"paused", "canceled", "completed"}:
         raise ValueError(f"Campaign must be queued or running before parallel execution; current status is {campaign['status']}.")
-    worker_count = max(1, min(8, int(workers)))
+    worker_count = max(1, min(campaign_worker_limit(), int(workers)))
     batch_size = max(1, min(100, int(jobs_per_worker)))
-
-    with _PARALLEL_POOLS_LOCK:
-        existing = _PARALLEL_POOLS.get(campaign_id)
-        if existing and bool(existing.get("active", True)):
-            return {
-                "campaign_id": campaign_id,
-                "started": False,
-                "already_active": True,
-                "workers": int(existing.get("workers") or 1),
-                "jobs_per_worker": int(existing.get("jobs_per_worker") or batch_size),
-                "remaining": open_job_count(conn, campaign_id),
-                "simulation_only": True,
-            }
-
-        config = scheduling_config(campaign)
-        recover_expired_campaign_jobs(conn, campaign_id=campaign_id, retry_limit=int(config["retry_limit"]), recovery_worker_id=f"parallel_coordinator_{campaign_id}")
-        conn.execute(
-            """
-            UPDATE research_campaigns
-            SET status = 'running', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
-            WHERE id = %s AND status IN ('queued', 'running', 'failed')
-            """,
-            (campaign_id,),
-        )
-        conn.commit()
-        pool_id = f"parallel_pool_{campaign_id}_{int(time.time() * 1000)}"
-        _PARALLEL_POOLS[campaign_id] = {
-            "pool_id": pool_id,
-            "active": True,
-            "status": "starting",
-            "workers": worker_count,
-            "live_workers": 0,
-            "starting_workers": worker_count,
-            "jobs_per_worker": batch_size,
-            "preloaded_datasets": 0,
-            "processed_jobs": 0,
-            "started_at": datetime.now(UTC).isoformat(),
-        }
-
-    try:
-        log_event("Task created", task="parallel_pool_coordinator", campaign_id=campaign_id, pool_id=pool_id, workers=worker_count, jobs_per_worker=batch_size)
-        Thread(
-            target=_run_persistent_parallel_pool,
-            name=f"campaign-{campaign_id}-coordinator",
-            kwargs={
-                "pool_id": pool_id,
-                "campaign_id": campaign_id,
-                "worker_count": worker_count,
-                "batch_size": batch_size,
-            },
-            daemon=True,
-        ).start()
-    except Exception as error:
-        log_exception("Task creation failed", error, task="parallel_pool_coordinator", campaign_id=campaign_id, pool_id=pool_id)
-        with _PARALLEL_POOLS_LOCK:
-            _PARALLEL_POOLS.pop(campaign_id, None)
-        raise
-
+    previous_target = int(campaign.get("target_workers") or 0)
+    config = {**scheduling_config(campaign), "batch_size": batch_size, "target_workers": worker_count}
+    recover_expired_campaign_jobs(conn, campaign_id=campaign_id, retry_limit=int(config["retry_limit"]), recovery_worker_id=f"durable_coordinator_{campaign_id}")
+    conn.execute(
+        """
+        UPDATE research_campaigns
+        SET status = 'running',
+            started_at = COALESCE(started_at, NOW()),
+            target_workers = %s,
+            execution_status = CASE WHEN %s > 0 THEN 'running' ELSE 'idle' END,
+            execution_updated_at = NOW(),
+            scheduling_config = %s,
+            updated_at = NOW()
+        WHERE id = %s AND status IN ('queued', 'running', 'failed')
+        """,
+        (worker_count, worker_count, Jsonb(jsonable(config)), campaign_id),
+    )
+    conn.commit()
+    runtime = campaign_runtime_snapshot(conn, campaign_id)
     return {
         "campaign_id": campaign_id,
-        "started": True,
-        "already_active": False,
+        "started": previous_target == 0 and worker_count > 0,
+        "already_active": previous_target > 0,
+        "scaled": worker_count != previous_target,
         "workers": worker_count,
         "jobs_per_worker": batch_size,
         "remaining": open_job_count(conn, campaign_id),
+        "runtime": runtime,
         "simulation_only": True,
     }
 
@@ -5118,6 +5404,37 @@ def run_parallel_campaign_batch(
 def parallel_pool_snapshot(campaign_id: int) -> dict[str, Any]:
     with _PARALLEL_POOLS_LOCK:
         return dict(_PARALLEL_POOLS.get(campaign_id) or {})
+
+
+def campaign_runtime_snapshot(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
+    campaign = get_campaign(conn, campaign_id)
+    stale_cutoff = datetime.now(UTC) - timedelta(seconds=worker_stale_seconds())
+    workers = conn.execute(
+        """
+        SELECT *
+        FROM research_campaign_workers
+        WHERE simulation_only = TRUE
+          AND campaign_id = %s
+          AND COALESCE(last_heartbeat_at, heartbeat_at) >= %s
+          AND status NOT IN ('stopped', 'error')
+        """,
+        (campaign_id, stale_cutoff),
+    ).fetchall()
+    rows = [dict(row) for row in workers]
+    live = [row for row in rows if row.get("status") in {"running", "idle", "starting"}]
+    draining = [row for row in rows if row.get("status") == "draining"]
+    target = min(int(campaign.get("target_workers") or 0), campaign_worker_limit())
+    effective = max(0, len(live) - len(draining))
+    return {
+        "worker_limit": campaign_worker_limit(),
+        "target_workers": target,
+        "live_workers": len(live),
+        "starting_workers": sum(1 for row in live if row.get("status") == "starting"),
+        "draining_workers": len(draining),
+        "effective_workers": min(effective, target),
+        "heartbeat_seconds": worker_heartbeat_seconds(),
+        "stale_after_seconds": worker_stale_seconds(),
+    }
 
 
 def _execute_parallel_campaign_worker(

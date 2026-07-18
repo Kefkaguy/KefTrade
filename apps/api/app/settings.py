@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
@@ -24,6 +25,9 @@ class Settings(BaseSettings):
     alpaca_trading_base_url: str = "https://paper-api.alpaca.markets"
     alpaca_intraday_max_lookback_days: int = 1825
     paper_scan_max_candle_age_hours: int = 96
+    max_campaign_workers: int | None = Field(default=None, validation_alias="KEFTRADE_MAX_CAMPAIGN_WORKERS")
+    campaign_worker_heartbeat_seconds: int = Field(default=10, validation_alias="KEFTRADE_CAMPAIGN_WORKER_HEARTBEAT_SECONDS")
+    campaign_worker_stale_seconds: int = Field(default=45, validation_alias="KEFTRADE_CAMPAIGN_WORKER_STALE_SECONDS")
 
     model_config = SettingsConfigDict(env_file=ROOT_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
 

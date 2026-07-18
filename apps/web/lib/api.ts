@@ -1147,7 +1147,15 @@ export type ResearchCampaignListRow = {
   promoted_jobs: number;
   rejected_jobs: number;
   estimated_seconds_remaining?: number | null;
+  eta_seconds?: number | null;
+  eta_method?: string;
+  sampled_terminal_jobs?: number;
   jobs_per_minute?: number;
+  jobs_per_minute_5m?: number;
+  jobs_per_minute_15m?: number;
+  executable_remaining_jobs?: number;
+  target_workers?: number;
+  average_queue_delay_ms?: number;
   created_at: string;
   started_at?: string | null;
   completed_at?: string | null;
@@ -1180,6 +1188,10 @@ export type ResearchCampaignProfile = {
     active_parallel_workers: number;
     active_parallel_jobs: number;
     configured_parallel_workers: number;
+    target_workers: number;
+    live_workers: number;
+    draining_workers: number;
+    effective_workers: number;
     starting_parallel_workers: number;
     parallel_pool_active: boolean;
     parallel_pool_status: "idle" | "starting" | "running";
@@ -1546,7 +1558,7 @@ export function getResearchCampaignProfile(campaignId: number) {
   return request<ResearchCampaignProfile>(`/research/campaigns/${campaignId}/profile`, { timeoutMs: 60000 });
 }
 
-export function runParallelResearchCampaign(campaignId: number, workers = 1, jobsPerWorker = 10) {
+export function runParallelResearchCampaign(campaignId: number, workers = 4, jobsPerWorker = 25) {
   const params = new URLSearchParams({ workers: String(workers), jobs_per_worker: String(jobsPerWorker) });
   return request<{ campaign_id: number; started: boolean; already_active: boolean; workers: number; jobs_per_worker: number; remaining: number }>(`/research/campaigns/${campaignId}/run-parallel?${params.toString()}`, {
     method: "POST",

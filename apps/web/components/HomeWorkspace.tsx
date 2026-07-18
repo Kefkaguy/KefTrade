@@ -54,7 +54,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
     const startedAt = now();
     logLaunchDiagnostic("Parallel launch started", { campaignId });
     try {
-      await runParallelResearchCampaign(campaignId, 1, 10);
+      await runParallelResearchCampaign(campaignId, 4, 25);
       if (!aliveRef.current || generation !== runGenerationRef.current) return;
       logLaunchDiagnostic("Parallel launch finished", { campaignId, elapsedMs: elapsedSince(startedAt) });
       const nextStatus = await getResearchCampaign(campaignId);

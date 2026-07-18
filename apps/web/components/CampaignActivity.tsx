@@ -176,9 +176,11 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
             const canControl = ["running", "queued", "paused", "failed"].includes(campaign.status);
             const canDelete = !["running", "completed"].includes(campaign.status);
             const isActive = ["running", "queued"].includes(campaign.status);
-            const eta = isActive ? formatEta(estimatedSecondsRemaining(campaign)) : null;
+            const eta = isActive ? formatEta(campaign.eta_seconds ?? campaign.estimated_seconds_remaining, campaign.eta_method) : null;
             const poolActive = Boolean(profile?.runtime.parallel_pool_active) && executionId === campaign.id;
             const poolStarting = poolActive && profile?.runtime.parallel_pool_status === "starting";
+            const workerLimit = profile?.runtime.worker_limit ?? 8;
+            const workerOptions = [1, 2, 4, 8].filter((count) => count <= workerLimit);
             return (
               <motion.article key={campaign.id} className="campaignRow" layout initial={reduceMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, height: 0 }}>
                 <div className="campaignState">
@@ -216,14 +218,14 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                     <motion.div className="campaignExecutionPanel" initial={reduceMotion ? false : { opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}>
                       <div className="campaignExecutionHeading"><div><strong>Parallel simulations</strong><span>Keep the selected worker pool active until the campaign is paused or finished.</span></div><small>Optional</small></div>
                       <div className="workerSelector" role="group" aria-label="Concurrent simulation workers">
-                        {[1, 2, 4, 8].map((count) => <button key={count} type="button" className={workerCount === count ? "active" : undefined} onClick={() => setWorkerCount(count)} disabled={busyId === campaign.id || poolActive}>{count} worker{count === 1 ? "" : "s"}</button>)}
+                        {workerOptions.map((count) => <button key={count} type="button" className={workerCount === count ? "active" : undefined} onClick={() => setWorkerCount(count)} disabled={busyId === campaign.id}>{count} worker{count === 1 ? "" : "s"}</button>)}
                       </div>
                       {profile ? (
                         <div className="campaignRuntime" aria-label="Live parallel worker resource usage">
-                          <span><Cpu size={15} /><small>Workers alive</small><strong>{profile.runtime.active_parallel_workers} / {profile.runtime.configured_parallel_workers || workerCount}</strong></span>
+                          <span><Cpu size={15} /><small>Workers alive</small><strong>{profile.runtime.live_workers ?? profile.runtime.active_parallel_workers} / {profile.runtime.target_workers || profile.runtime.configured_parallel_workers || workerCount}</strong></span>
                           <span><Gauge size={15} /><small>Jobs claimed</small><strong>{profile.runtime.active_parallel_jobs}</strong></span>
                           <span title="Resident memory used by the KefTrade API process, including parallel worker threads"><MemoryStick size={15} /><small>API RAM</small><strong>{formatMemory(profile.runtime.resident_memory_mb)}</strong></span>
-                          <i className={poolActive ? "active" : undefined}>{poolStarting ? `Starting ${profile.runtime.starting_parallel_workers} worker${profile.runtime.starting_parallel_workers === 1 ? "" : "s"}` : poolActive ? `Worker pool active / ${profile.runtime.preloaded_datasets} dataset caches ready` : "Workers idle"}</i>
+                          <i className={poolActive ? "active" : undefined}>{poolStarting ? `Starting ${profile.runtime.starting_parallel_workers} worker${profile.runtime.starting_parallel_workers === 1 ? "" : "s"}` : poolActive ? `${profile.runtime.effective_workers ?? profile.runtime.active_parallel_workers} effective / ${profile.runtime.draining_workers ?? 0} draining` : "Workers idle"}</i>
                         </div>
                       ) : null}
                       {profile?.profiled_jobs ? (
@@ -235,7 +237,7 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                           <ProfileMetric label="Total" value={profile.average_ms.total} />
                         </div>
                       ) : <p className="campaignProfileEmpty">Timing data appears after the first completed batch.</p>}
-                      <button type="button" className="button" onClick={() => void runParallel(campaign.id)} disabled={busyId === campaign.id || poolActive}>{busyId === campaign.id || poolStarting ? "Starting workers..." : poolActive ? `${profile?.runtime.active_parallel_workers ?? 0} worker${profile?.runtime.active_parallel_workers === 1 ? "" : "s"} running` : `Start ${workerCount} worker${workerCount === 1 ? "" : "s"}`}</button>
+                      <button type="button" className="button" onClick={() => void runParallel(campaign.id)} disabled={busyId === campaign.id}>{busyId === campaign.id || poolStarting ? "Updating workers..." : poolActive ? `Set ${workerCount} worker${workerCount === 1 ? "" : "s"}` : `Start ${workerCount} worker${workerCount === 1 ? "" : "s"}`}</button>
                     </motion.div>
                   ) : null}
                   {deleteId === campaign.id ? (
@@ -279,9 +281,9 @@ function relativeTime(value: string) {
   return `Updated ${Math.floor(hours / 24)}d ago`;
 }
 
-function formatEta(value: number | null | undefined) {
+function formatEta(value: number | null | undefined, method?: string) {
   if (!value || value <= 0) {
-    return { label: "ETA calculating", title: "Not enough recent completed jobs to estimate time remaining yet." };
+    return { label: "Estimating...", title: method === "estimating" ? "Waiting for enough terminal jobs to calculate rolling throughput." : "Not enough recent completed jobs to estimate time remaining yet." };
   }
   const minutes = Math.ceil(value / 60);
   if (minutes < 60) {

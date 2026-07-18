@@ -15,11 +15,13 @@ from app.services.research_campaigns import (
     data_readiness_for_job,
     forward_validation_state,
     generate_discovery_candidates,
+    campaign_list_row_with_eta,
     passes_cross_validation,
     passes_single_market_validation,
     overfit_regime_robustness_blueprint,
     quality_first_campaign_blueprint,
     research_heatmaps,
+    run_parallel_campaign_batch,
     run_research_campaign_batch,
     single_asset_generalization_blueprint,
     strategy_redesign_blueprint,
@@ -48,6 +50,7 @@ class CampaignConn:
         self.jobs = []
         self.batches = []
         self.elite = []
+        self.workers = []
         self.commits = 0
 
     def execute(self, query, params=None):
@@ -96,6 +99,9 @@ class CampaignConn:
                 "promoted_candidates": 0,
                 "analytics": {},
                 "controls": jsonb(params[4]),
+                "scheduling_config": jsonb(params[5]),
+                "target_workers": 0,
+                "execution_status": "idle",
                 "safety_statement": params[6],
                 "created_at": self.now,
                 "updated_at": self.now,
@@ -162,10 +168,49 @@ class CampaignConn:
             return Result([{"candle_count": 200, "latest_candle_timestamp": self.now}])
         if "COUNT(*) AS feature_count" in query:
             return Result([{"feature_count": 200}])
+        if "UPDATE research_campaigns" in query and "target_workers" in query:
+            campaign = self.campaign(params[3])
+            campaign["status"] = "running"
+            campaign["target_workers"] = params[0]
+            campaign["scheduling_config"] = jsonb(params[2])
+            return Result([])
         if "UPDATE research_campaigns" in query and "status = 'running'" in query:
             campaign = self.campaign(params[0])
             campaign["status"] = "running"
             return Result([])
+        if "INSERT INTO research_campaign_workers" in query:
+            existing = next((row for row in self.workers if row["worker_id"] == params[0]), None)
+            row = existing or {
+                "worker_id": params[0],
+                "campaign_id": None,
+                "process_id": params[1],
+                "hostname": params[2],
+                "status": params[3],
+                "registered_at": self.now,
+                "heartbeat_at": self.now,
+                "last_heartbeat_at": self.now,
+                "current_job_id": None,
+                "processed_jobs": 0,
+                "error_count": 0,
+                "simulation_only": True,
+            }
+            row["status"] = params[3]
+            if existing is None:
+                self.workers.append(row)
+            return Result([row])
+        if "UPDATE research_campaign_workers" in query and "current_job_id" in query:
+            worker = next((row for row in self.workers if row["worker_id"] == params[3]), None)
+            if worker:
+                worker["campaign_id"] = params[0]
+                worker["current_job_id"] = params[1]
+                worker["status"] = params[2]
+            return Result([])
+        if "UPDATE research_campaign_workers" in query:
+            return Result([])
+        if "FROM research_campaign_workers" in query and "campaign_id" in query:
+            return Result([row for row in self.workers if row.get("campaign_id") == params[0]])
+        if "FROM research_campaign_workers" in query:
+            return Result(self.workers)
         if "FROM research_campaign_jobs" in query and "status = 'queued'" in query and "LIMIT" in query:
             rows = [row for row in self.jobs if row["campaign_id"] == params[0] and row["status"] == "queued"]
             return Result(rows[: params[1]])
@@ -343,29 +388,40 @@ def test_worker_dataset_cache_survives_multiple_claim_batches(monkeypatch) -> No
     assert observed_caches == [shared_cache, shared_cache]
 
 
-def test_parallel_pool_start_is_idempotent_when_pool_is_active() -> None:
+def test_parallel_scale_request_persists_new_target_without_api_pool() -> None:
     conn = CampaignConn()
     created = create_research_campaign(conn, universe_key="sp500_leaders", max_candidates=1, asset_limit=2, timeframes=["1h"])
     campaign_id = created["campaign"]["id"]
-    research_campaigns._PARALLEL_POOLS[campaign_id] = {
-        "pool_id": "existing_pool",
-        "active": True,
-        "workers": 1,
-        "jobs_per_worker": 10,
-    }
-    try:
-        result = research_campaigns.run_parallel_campaign_batch(
-            conn,
-            campaign_id=campaign_id,
-            workers=8,
-            jobs_per_worker=20,
-        )
-    finally:
-        research_campaigns._PARALLEL_POOLS.pop(campaign_id, None)
 
-    assert result["started"] is False
-    assert result["already_active"] is True
-    assert result["workers"] == 1
+    first = run_parallel_campaign_batch(conn, campaign_id=campaign_id, workers=1, jobs_per_worker=20)
+    second = run_parallel_campaign_batch(conn, campaign_id=campaign_id, workers=8, jobs_per_worker=20)
+
+    assert first["started"] is True
+    assert second["already_active"] is True
+    assert second["scaled"] is True
+    assert second["workers"] == min(8, research_campaigns.campaign_worker_limit())
+    assert conn.campaign(campaign_id)["target_workers"] == second["workers"]
+
+
+def test_campaign_eta_uses_rolling_or_profiled_backend_method() -> None:
+    row = {
+        "status": "running",
+        "total_jobs": 100,
+        "terminal_jobs": 20,
+        "blocked_jobs": 0,
+        "deferred_jobs": 0,
+        "terminal_jobs_5m": 20,
+        "terminal_jobs_15m": 20,
+        "average_profiled_runtime_ms": 2500,
+        "profiled_jobs": 20,
+        "target_workers": 4,
+    }
+
+    calculated = campaign_list_row_with_eta(row)
+
+    assert calculated["eta_method"] == "rolling_5m"
+    assert calculated["eta_seconds"] == 1200
+    assert calculated["executable_remaining_jobs"] == 80
 
 
 def test_consistency_summary_records_failure_causes() -> None:
