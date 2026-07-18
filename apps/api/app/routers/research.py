@@ -61,6 +61,7 @@ from app.services.research_campaigns import (
     list_campaign_jobs,
     list_research_campaigns,
     list_research_universes,
+    MIN_CAMPAIGN_CANDLES,
     refresh_elite_candidate_forward_evidence,
     research_campaign_preflight,
     retry_campaign_job,
@@ -533,36 +534,47 @@ async def prepare_large_scale_research_campaign(
     request_started = time.perf_counter()
     prepared: list[dict[str, Any]] = []
     errors: list[dict[str, str]] = []
-    for symbol in payload.assets:
+    initial_readiness = research_campaign_preflight(conn, assets=payload.assets, timeframes=payload.timeframes)
+    remediable = {"missing_dataset", "insufficient_historical_depth", "feature_generation_failure", "stale_data"}
+    targets = [
+        {"symbol": issue["symbol"], "timeframe": issue["timeframe"], "classification": issue["classification"]}
+        for issue in initial_readiness.get("issues", [])
+        if issue.get("classification") in remediable
+    ]
+    sync_limit = max(400, MIN_CAMPAIGN_CANDLES * 3)
+    for target in targets:
+        symbol = str(target["symbol"])
+        timeframe = str(target["timeframe"])
         provider_name = "binance_dev" if symbol.upper().endswith("USDT") else "alpaca_iex" if settings.alpaca_api_key and settings.alpaca_api_secret else "yfinance_research"
         provider = get_market_data_provider(provider_name)
-        for timeframe in payload.timeframes:
-            asset_started = time.perf_counter()
-            log_event("Starting asset sync", asset=symbol, provider=provider_name, timeframe=timeframe, retry_count=0)
-            try:
-                download_started = time.perf_counter()
-                log_event("Download start", asset=symbol, provider=provider_name, timeframe=timeframe)
-                candles = await provider.sync_candles(conn, symbol=symbol, timeframe=timeframe, limit=5000)
-                log_event("Download finished", asset=symbol, provider=provider_name, timeframe=timeframe, candles_received=candles.candle_count, elapsed_ms=elapsed_ms(download_started))
-                feature_started = time.perf_counter()
-                features = sync_features(conn, symbol=symbol, timeframe=timeframe)
-                log_event("Features calculated", asset=symbol, provider=provider_name, timeframe=timeframe, features=features["usable"], elapsed_ms=elapsed_ms(feature_started))
-                prepared.append({
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "provider": provider_name,
-                    "candles": candles.candle_count,
-                    "features": features["usable"],
-                })
-                log_event("Features committed", asset=symbol, provider=provider_name, timeframe=timeframe, elapsed_ms=elapsed_ms(asset_started))
-            except Exception as error:
-                log_exception("Asset sync failure", error, asset=symbol, provider=provider_name, timeframe=timeframe, retry_count=0, elapsed_ms=elapsed_ms(asset_started))
-                conn.rollback()
-                errors.append({"symbol": symbol, "timeframe": timeframe, "reason": str(error)})
+        asset_started = time.perf_counter()
+        log_event("Starting asset sync", asset=symbol, provider=provider_name, timeframe=timeframe, classification=target["classification"], retry_count=0)
+        try:
+            download_started = time.perf_counter()
+            log_event("Download start", asset=symbol, provider=provider_name, timeframe=timeframe, limit=sync_limit)
+            candles = await provider.sync_candles(conn, symbol=symbol, timeframe=timeframe, limit=sync_limit)
+            log_event("Download finished", asset=symbol, provider=provider_name, timeframe=timeframe, candles_received=candles.candle_count, elapsed_ms=elapsed_ms(download_started))
+            feature_started = time.perf_counter()
+            features = sync_features(conn, symbol=symbol, timeframe=timeframe)
+            log_event("Features calculated", asset=symbol, provider=provider_name, timeframe=timeframe, features=features["usable"], elapsed_ms=elapsed_ms(feature_started))
+            prepared.append({
+                "symbol": symbol,
+                "timeframe": timeframe,
+                "provider": provider_name,
+                "candles": candles.candle_count,
+                "features": features["usable"],
+            })
+            log_event("Features committed", asset=symbol, provider=provider_name, timeframe=timeframe, elapsed_ms=elapsed_ms(asset_started))
+        except Exception as error:
+            log_exception("Asset sync failure", error, asset=symbol, provider=provider_name, timeframe=timeframe, retry_count=0, elapsed_ms=elapsed_ms(asset_started))
+            conn.rollback()
+            errors.append({"symbol": symbol, "timeframe": timeframe, "reason": str(error)})
     readiness = research_campaign_preflight(conn, assets=payload.assets, timeframes=payload.timeframes)
     log_event("Campaign prepare finished", ready=readiness["ready"], prepared=len(prepared), errors=len(errors), elapsed_ms=elapsed_ms(request_started))
     return {
         "ready": readiness["ready"],
+        "initial_readiness": initial_readiness,
+        "datasets_considered": len(targets),
         "prepared": prepared,
         "errors": errors,
         "readiness": readiness,

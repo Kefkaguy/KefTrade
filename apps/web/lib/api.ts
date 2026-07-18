@@ -1114,6 +1114,8 @@ export type ResearchCampaignPreflight = {
 
 export type ResearchCampaignPreparation = {
   ready: boolean;
+  initial_readiness?: ResearchCampaignPreflight;
+  datasets_considered?: number;
   prepared: Array<{ symbol: string; timeframe: string; provider: string; candles: number; features: number }>;
   errors: Array<{ symbol: string; timeframe: string; reason: string }>;
   readiness: ResearchCampaignPreflight;
@@ -1487,7 +1489,7 @@ export function prepareResearchCampaign(assets: string[], timeframes: string[]) 
   return request<ResearchCampaignPreparation>("/research/campaigns/prepare", {
     method: "POST",
     body: JSON.stringify({ assets, timeframes }),
-    timeoutMs: 600000
+    timeoutMs: 900000
   });
 }
 
