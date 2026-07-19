@@ -9,15 +9,15 @@ The platform is designed around one rule: strategies advance only when stored ev
 
 New campaigns use the reproducible research architecture: exact dataset snapshots, versioned asset profiles, measured clusters, evidence-scored hypotheses, focused 70/20/10 candidate generation, explicit specialist/elite levels, complete rejection funnels, and checksum-verified campaign archives. See [Reproducible Research Architecture](docs/reproducible-research-architecture.md).
 
-KefTrade is still research and simulation only. It does not route broker orders, does not connect to an external broker paper account, does not trade live capital, and does not support leverage, margin, shorting, or automatic live execution.
+KefTrade is still research and simulation only. It can now connect to an Alpaca Paper account for read-only synchronization, deterministic reconciliation, and observe-only shadow execution. It does not route broker orders, does not trade live capital, and does not support leverage, margin, shorting, or automatic live execution.
 
 ## Current State
 
 KefTrade is currently in:
 
-**Phase 9.12 - Elite Candidate Forward Validation**
+**Phase 10 - Read-Only Alpaca Paper Foundation**
 
-The research platform has completed the Phase 9 research campaigns that produced elite candidates. KefTrade now has six elite research candidates and six candidate-linked simulation deployments. Phase 10 remains locked until candidate-linked forward validation produces enough eligible closed forward trades and independent prospective evidence.
+The research platform has completed the Phase 9 research campaigns that produced elite candidates and candidate-linked simulation deployments. Phase 10 has started only as a read-only Alpaca Paper foundation. The current implementation allows KefTrade to observe a paper account, reconcile external broker state, and run shadow execution for approved elite deployments without submitting orders.
 
 Current operating status:
 
@@ -26,12 +26,14 @@ Current operating status:
 - Candidate lifecycle tracking is functional.
 - Mission Control is functional.
 - Paper-trading infrastructure is simulation-only and functional.
-- Six elite candidates exist.
-- Six candidate-linked simulation deployments exist.
-- Eligible closed forward trades are still required before Phase 10 can unlock.
-- Historical campaign evidence is not a substitute for prospective forward evidence.
+- Alpaca Paper synchronization is functional in read-only mode.
+- Broker reconciliation is functional and deterministic over persisted snapshots.
+- One external paper deployment can run in `enabled_observe_only`.
+- Shadow execution can record what KefTrade would have done without broker mutation.
+- Broker order submission is disabled by feature flags, adapter behavior, and database constraints.
+- Historical campaign evidence is not a substitute for prospective observe-only or paper evidence.
 
-Phase 10 must not start until the existing readiness gates pass from eligible candidate-linked forward-validation evidence.
+Phase 10 first pass stops at observe-only shadow execution. Broker order submission remains out of scope.
 
 ## Product Phases
 
@@ -81,7 +83,7 @@ Phase 9 introduced deterministic strategy generation and mutation from reusable 
 
 Later Phase 9 campaigns added quality-first research, transferability testing, sample-size testing, overfit diagnosis, regime robustness, single-asset generalization, strategy redesign, and volatility-adaptive relative-strength research.
 
-### Current - Phase 9.12: Candidate-Linked Forward Validation
+### Complete - Phase 9.12: Candidate-Linked Forward Validation
 
 Phase 9.12 connects elite research candidates to internal simulation-only deployments. Each deployment is linked to a specific elite candidate so future forward evidence can be separated from legacy simulation data.
 
@@ -101,11 +103,38 @@ Phase 9.12 adds:
 - Scheduler-driven forward scans.
 - Deployment health diagnostics.
 
-### Locked - Phase 10: External Broker Paper Trading
+### Current - Phase 10: Read-Only Alpaca Paper Foundation
 
-Phase 10 is locked until candidate-linked forward validation satisfies the existing readiness requirements.
+Phase 10 connects KefTrade to an external Alpaca Paper account in read-only mode.
 
-Phase 10 would connect KefTrade to an external broker paper environment while keeping activity simulated. It must remain separate from live trading and must preserve explicit safeguards around routing, account type, permissions, and validation standards.
+The current Phase 10 scope includes:
+
+- Read-only Alpaca Paper adapter.
+- Immutable raw broker evidence ingestion.
+- Versioned normalization into current broker state.
+- Complete broker sync runs with trace IDs.
+- Deterministic reconciliation over persisted snapshots.
+- Scoped halts and audit events.
+- Versioned risk, eligibility, deployment configuration, and adapter policies.
+- Execution epochs for observe-only deployment approvals.
+- Shadow execution records that capture signals, eligibility, risk, proposed orders, rejection reasons, and `would_submit`.
+- Read-only broker APIs and Mission Control visibility.
+- Audited VPS CLI controls for enable, reapprove, halt, resume, disable, sync, and reconcile.
+
+The first pass highest reachable state is:
+
+```text
+enabled_observe_only
+```
+
+The following remain disabled:
+
+```env
+BROKER_ORDER_SUBMISSION_ENABLED=false
+EXTERNAL_PAPER_EXECUTION_ENABLED=false
+```
+
+KefTrade cannot submit Alpaca Paper orders in the current implementation.
 
 ### Future - Phase 11: Optional Live Trading
 
@@ -116,7 +145,6 @@ Live trading is not part of the current platform. It should only be considered a
 KefTrade currently does not implement:
 
 - Live trading.
-- External broker paper trading.
 - Broker order routing.
 - Real-money execution.
 - Margin.
@@ -129,7 +157,18 @@ KefTrade currently does not implement:
 
 Any strategy that has not passed the required gates remains research evidence only.
 
-Historical backtest evidence does not unlock Phase 10 by itself. Phase 10 requires eligible candidate-linked forward-validation evidence.
+Historical backtest evidence does not unlock broker execution by itself. Phase 10 observe-only requires elite candidate lineage, a frozen deployment configuration, clean broker reconciliation, compatible adapter metadata, and explicit CLI approval.
+
+Broker safety boundaries:
+
+- Only Alpaca Paper is supported.
+- Broker sync may call Alpaca.
+- Reconciliation never calls Alpaca; it reads persisted snapshots.
+- Raw broker payloads are immutable evidence.
+- Browser-accessible broker endpoints are read-only.
+- The adapter raises `BrokerMutationDisabled` for order submission.
+- `enabled_execution` is prohibited while execution flags are disabled.
+- Automatic resume is not allowed.
 
 ## What KefTrade Does Today
 
@@ -153,11 +192,16 @@ KefTrade can:
 - Collect candidate-linked simulated orders, fills, positions, logs, and forward evidence.
 - Audit Phase 10 readiness from forward-validation evidence.
 - Separate legacy simulation records from eligible candidate-linked forward evidence.
+- Sync Alpaca Paper account, clock, orders, positions, and account activities in read-only mode.
+- Persist raw broker evidence and normalized latest broker state.
+- Reconcile broker state against KefTrade state and create scoped findings/halts.
+- Run observe-only shadow execution for approved elite deployments.
+- Record proposed shadow orders without sending anything to Alpaca.
 - Provide Ask Kef as a read-only research copilot over stored evidence.
 
 ## Research Campaigns
 
-Recent Phase 9 campaigns focused on candidate quality rather than candidate quantity.
+Recent Phase 9 and Phase 10 work focused on candidate quality, forward observation, and broker safety rather than candidate quantity.
 
 Campaign themes included:
 
@@ -173,7 +217,7 @@ Campaign themes included:
 - Volatility-adaptive relative-strength research.
 - Elite promotion and candidate-linked deployment.
 
-The strongest historical research evidence has repeatedly concentrated around AAPL 1h Pullback-style strategies. Phase 9.12 exists to test whether promoted elite candidates continue to perform prospectively under candidate-linked simulation.
+The strongest historical research evidence must still be tested prospectively. Phase 9.12 and Phase 10 observe-only exist to test whether promoted elite candidates continue to behave correctly under candidate-linked forward observation.
 
 ## Interface Modes
 
@@ -283,6 +327,13 @@ Core API areas:
 - Deployment management: `/paper/deployment-management`
 - Paper scheduler: `/paper/scheduler`
 - Forward alerts and reviews: `/paper/alerts`, `/paper/signal-reviews`
+- Broker status: `/broker/status`
+- Broker account: `/broker/account`
+- Broker clock: `/broker/clock`
+- Broker orders: `/broker/orders`
+- Broker positions: `/broker/positions`
+- Broker reconciliation: `/broker/reconciliation`
+- Broker execution readiness: `/broker/execution-readiness`
 
 ## Candidate-Linked Forward Validation
 
@@ -305,9 +356,46 @@ If eligible forward evidence is empty, the platform should report:
 - Eligible forward profit: unavailable
 - Phase 10 evidence: not started
 
+## External Paper Observe-Only
+
+Phase 10 external paper support is observe-only.
+
+Broker data flow:
+
+```text
+Alpaca Paper response
+-> immutable raw ingest event
+-> versioned normalization
+-> latest broker state
+-> completed sync snapshot
+-> deterministic reconciliation
+-> optional shadow execution
+```
+
+Shadow execution flow:
+
+```text
+completed bar
+-> elite strategy decision
+-> eligibility checks
+-> risk and sizing checks
+-> proposed order if valid
+-> shadow execution record
+-> no broker mutation
+```
+
+Shadow execution answers:
+
+- Would the strategy have acted?
+- Why was it blocked?
+- What order would have been proposed?
+- Which policy, configuration, epoch, trace ID, and broker snapshot governed the decision?
+
+Shadow execution does not place Alpaca Paper orders.
+
 ## Paper Trading and Deployment Management
 
-The Paper Trading area now focuses on candidate-linked forward validation instead of the older TSLA-specific simulation workflow.
+The Paper Trading area focuses on candidate-linked forward validation instead of the older TSLA-specific simulation workflow.
 
 Current behavior:
 
@@ -391,6 +479,13 @@ cd apps/web
 npm run build
 ```
 
+Run focused Phase 10 safety tests:
+
+```powershell
+cd apps/api
+..\..\.venv\Scripts\python.exe -m pytest tests/test_phase10_broker_safety.py
+```
+
 Check PostgreSQL sessions:
 
 ```powershell
@@ -407,21 +502,70 @@ docker exec keftrade-postgres psql -U keftrade -d keftrade -c "select state, use
 - Equity research provider: `yfinance_research`
 - Default crypto symbol/timeframe: `BTCUSDT` / `4h`
 - Current primary elite research asset/timeframe: `AAPL` / `1h`
+- Phase 10 broker provider: `alpaca`
+- Phase 10 broker environment: `paper`
+- Phase 10 highest reachable external state: `enabled_observe_only`
+
+## Production Phase 10 Operations
+
+Required first-pass production feature flags:
+
+```env
+BROKER_SYNC_ENABLED=true
+BROKER_RECONCILIATION_ENABLED=true
+BROKER_SHADOW_EXECUTION_ENABLED=true
+BROKER_ORDER_SUBMISSION_ENABLED=false
+EXTERNAL_PAPER_EXECUTION_ENABLED=false
+```
+
+Useful VPS commands:
+
+```bash
+cd /opt/keftrade/deploy/production
+
+docker compose -f docker-compose.prod.yml exec -T api \
+  python -m app.cli.broker sync
+
+docker compose -f docker-compose.prod.yml exec -T api \
+  python -m app.cli.broker reconcile
+
+docker compose -f docker-compose.prod.yml exec -T api \
+  curl -s http://127.0.0.1:8000/broker/status | jq
+
+docker compose -f docker-compose.prod.yml exec -T api \
+  curl -s http://127.0.0.1:8000/broker/execution-readiness | jq
+```
+
+Enable observe-only for a verified deployment:
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T api \
+  python -m app.cli.deployments enable-external-paper <deployment_id> \
+  --confirm-deployment-id <deployment_id>
+```
+
+Do not enable broker order submission in the current phase.
 
 ## Operational Notes
 
-- Do not start Phase 10 until candidate-linked forward evidence passes the existing readiness gates.
 - Do not lower validation thresholds to promote candidates.
 - Do not change strategies or parameters during forward validation.
 - Do not mix legacy simulation profit with eligible candidate-linked forward performance.
 - Do not classify evidence-rejected research jobs as operational failures.
-- Keep broker and live-trading code disabled unless a future phase explicitly changes that boundary.
+- Keep broker order submission and live-trading code disabled unless a future phase explicitly changes that boundary.
 - Use aggregate read models for UI pages that need multi-account paper state.
+- Use internal API/container calls for heavy administrative refreshes if nginx returns a proxy timeout.
 
 ## Recent Fixes and Additions
 
 Recent work added and fixed:
 
+- Phase 10 read-only Alpaca Paper foundation.
+- Immutable broker raw ingest events and normalized latest broker state.
+- Broker sync, reconciliation, read-only APIs, and broker worker.
+- Versioned policies, deployment configurations, adapter manifests, execution epochs, halts, audit events, and shadow execution.
+- CLI controls for sync, reconcile, enable, reapprove, halt, resume, and disable.
+- Regression fix for campaign-scoped research candidate objects used by Phase 10 lineage checks.
 - Phase 9.12 elite candidate persistence.
 - Six candidate-linked simulation deployments for elite candidates.
 - Candidate-linked orders and fills.
@@ -443,11 +587,11 @@ Recent work added and fixed:
 
 Near-term engineering priorities:
 
-- Continue collecting eligible candidate-linked forward-validation evidence.
-- Keep Phase 10 locked until readiness gates pass.
+- Continue collecting observe-only shadow evidence for elite deployments.
+- Keep Alpaca Paper order submission disabled until shadow evidence, risk decisions, and reconciliation behavior are reviewed.
 - Preserve deterministic campaign behavior.
 - Keep Simple Mode and Advanced Mode aligned to the same authoritative data.
 - Expand aggregate read models where UI pages need multi-table state.
 - Maintain strong tests around candidate lifecycle totals, campaign summaries, forward evidence, and safety boundaries.
-- Review security and broker-boundary controls before any future broker-connected phase.
+- Review security and broker-boundary controls before any future order-submission phase.
 
