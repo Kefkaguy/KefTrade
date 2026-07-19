@@ -10,7 +10,7 @@ import pytest
 from app.brokers.alpaca_paper import AlpacaPaperBrokerAdapter
 from app.brokers.base import BrokerMutationDisabled
 from app.services.external_execution import assert_execution_disabled, bar_is_complete, feature_flags
-from app.services.broker_sync import sanitize_value
+from app.services.broker_sync import canonical_json, normalize_account, normalize_order, sanitize_value
 from app.settings import settings
 
 
@@ -128,3 +128,10 @@ def test_raw_evidence_sanitization_rejects_nested_credentials() -> None:
     assert "Authorization" not in sanitized
     assert "APCA-API-SECRET-KEY" not in sanitized["nested"]
     assert sanitized["nested"]["safe"] == "value"
+
+
+def test_normalized_broker_metrics_are_json_serializable() -> None:
+    account = normalize_account({"cash": "100000.00", "equity": "100000.00", "buying_power": "400000.00"})
+    order = normalize_order({"id": "order-1", "symbol": "AAPL", "side": "buy", "qty": "1", "filled_qty": "0"})
+    assert '"cash":"100000.00"' in canonical_json(account)
+    assert '"requested_quantity":"1"' in canonical_json(order)

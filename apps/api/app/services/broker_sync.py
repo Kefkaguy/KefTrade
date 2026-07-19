@@ -193,9 +193,9 @@ def persist_normalized_state(
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT(broker_account_id) DO UPDATE SET sync_run_id=EXCLUDED.sync_run_id, raw_event_id=EXCLUDED.raw_event_id, status=EXCLUDED.status, currency=EXCLUDED.currency, cash=EXCLUDED.cash, equity=EXCLUDED.equity, buying_power=EXCLUDED.buying_power, trading_blocked=EXCLUDED.trading_blocked, account_blocked=EXCLUDED.account_blocked, trade_suspended_by_user=EXCLUDED.trade_suspended_by_user, normalized=EXCLUDED.normalized, updated_at=NOW()
         """,
-        (account_id, sync_run_id, account_raw_id, account["status"], account["currency"], account["cash"], account["equity"], account["buying_power"], account["trading_blocked"], account["account_blocked"], account["trade_suspended_by_user"], Jsonb(account)),
+        (account_id, sync_run_id, account_raw_id, account["status"], account["currency"], account["cash"], account["equity"], account["buying_power"], account["trading_blocked"], account["account_blocked"], account["trade_suspended_by_user"], jsonb_value(account)),
     )
-    conn.execute("INSERT INTO broker_account_snapshots(broker_account_id, sync_run_id, trace_id, raw_event_id, state) VALUES (%s,%s,%s,%s,%s)", (account_id, sync_run_id, trace_id, account_raw_id, Jsonb(account)))
+    conn.execute("INSERT INTO broker_account_snapshots(broker_account_id, sync_run_id, trace_id, raw_event_id, state) VALUES (%s,%s,%s,%s,%s)", (account_id, sync_run_id, trace_id, account_raw_id, jsonb_value(account)))
     conn.execute(
         """
         INSERT INTO broker_clock_state(broker_account_id, sync_run_id, raw_event_id, timestamp, is_open, next_open, next_close)
@@ -204,7 +204,7 @@ def persist_normalized_state(
         """,
         (account_id, sync_run_id, clock_raw_id, clock["timestamp"], clock["is_open"], clock["next_open"], clock["next_close"]),
     )
-    conn.execute("INSERT INTO broker_clock_snapshots(broker_account_id, sync_run_id, trace_id, raw_event_id, state) VALUES (%s,%s,%s,%s,%s)", (account_id, sync_run_id, trace_id, clock_raw_id, Jsonb(clock)))
+    conn.execute("INSERT INTO broker_clock_snapshots(broker_account_id, sync_run_id, trace_id, raw_event_id, state) VALUES (%s,%s,%s,%s,%s)", (account_id, sync_run_id, trace_id, clock_raw_id, jsonb_value(clock)))
     persist_orders(conn, account_id, sync_run_id, responses["orders"])
     persist_fills(conn, account_id, sync_run_id, responses["fill_activities"])
     persist_positions(conn, account_id, sync_run_id, trace_id, responses["positions"])
@@ -220,7 +220,7 @@ def persist_orders(conn: psycopg.Connection, account_id: int, sync_run_id: int, 
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT(broker_account_id, broker_order_id) DO UPDATE SET sync_run_id=EXCLUDED.sync_run_id, raw_event_id=EXCLUDED.raw_event_id, filled_quantity=EXCLUDED.filled_quantity, filled_average_price=EXCLUDED.filled_average_price, status=EXCLUDED.status, filled_at=EXCLUDED.filled_at, canceled_at=EXCLUDED.canceled_at, expired_at=EXCLUDED.expired_at, normalized=EXCLUDED.normalized, updated_at=NOW()
             """,
-            (account_id, row["broker_order_id"], row["client_order_id"], sync_run_id, raw_event_id, row["symbol"], row["side"], row["order_type"], row["time_in_force"], row["requested_quantity"], row["filled_quantity"], row["filled_average_price"], row["status"], row["submitted_at"], row["filled_at"], row["canceled_at"], row["expired_at"], Jsonb(row)),
+            (account_id, row["broker_order_id"], row["client_order_id"], sync_run_id, raw_event_id, row["symbol"], row["side"], row["order_type"], row["time_in_force"], row["requested_quantity"], row["filled_quantity"], row["filled_average_price"], row["status"], row["submitted_at"], row["filled_at"], row["canceled_at"], row["expired_at"], jsonb_value(row)),
         )
 
 
@@ -234,7 +234,7 @@ def persist_fills(conn: psycopg.Connection, account_id: int, sync_run_id: int, s
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'alpaca_account_activity',FALSE,%s,%s)
             ON CONFLICT(broker_account_id, broker_activity_id) DO NOTHING
             """,
-            (account_id, row["broker_order_id"], row["broker_activity_id"], sync_run_id, raw_event_id, row["symbol"], row["side"], row["quantity"], row["price"], row["cumulative_quantity"], row["leaves_quantity"], row["transaction_at"], Jsonb(row)),
+            (account_id, row["broker_order_id"], row["broker_activity_id"], sync_run_id, raw_event_id, row["symbol"], row["side"], row["quantity"], row["price"], row["cumulative_quantity"], row["leaves_quantity"], row["transaction_at"], jsonb_value(row)),
         )
 
 
@@ -250,9 +250,9 @@ def persist_positions(conn: psycopg.Connection, account_id: int, sync_run_id: in
             VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
             ON CONFLICT(broker_account_id, symbol) DO UPDATE SET sync_run_id=EXCLUDED.sync_run_id, raw_event_id=EXCLUDED.raw_event_id, quantity=EXCLUDED.quantity, average_entry_price=EXCLUDED.average_entry_price, market_value=EXCLUDED.market_value, unrealized_pl=EXCLUDED.unrealized_pl, normalized=EXCLUDED.normalized, updated_at=NOW()
             """,
-            (account_id, row["symbol"], sync_run_id, raw_event_id, row["quantity"], row["average_entry_price"], row["market_value"], row["unrealized_pl"], Jsonb(row)),
+            (account_id, row["symbol"], sync_run_id, raw_event_id, row["quantity"], row["average_entry_price"], row["market_value"], row["unrealized_pl"], jsonb_value(row)),
         )
-        conn.execute("INSERT INTO broker_position_snapshots(broker_account_id, sync_run_id, trace_id, raw_event_id, symbol, state) VALUES (%s,%s,%s,%s,%s,%s)", (account_id, sync_run_id, trace_id, raw_event_id, row["symbol"], Jsonb(row)))
+        conn.execute("INSERT INTO broker_position_snapshots(broker_account_id, sync_run_id, trace_id, raw_event_id, symbol, state) VALUES (%s,%s,%s,%s,%s,%s)", (account_id, sync_run_id, trace_id, raw_event_id, row["symbol"], jsonb_value(row)))
     if symbols:
         conn.execute("DELETE FROM broker_positions WHERE broker_account_id = %s AND NOT (symbol = ANY(%s))", (account_id, symbols))
     else:
@@ -340,6 +340,10 @@ def sanitize_value(value: Any) -> Any:
 
 def canonical_json(value: Any) -> str:
     return json.dumps(sanitize_value(value), sort_keys=True, separators=(",", ":"), default=str)
+
+
+def jsonb_value(value: Any) -> Jsonb:
+    return Jsonb(sanitize_value(value))
 
 
 def decimal(value: Any) -> Decimal:
