@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 from app.services.research_learning import (
     build_adaptive_campaign_plan,
     build_campaign_learning,
+    build_research_candidate_objects,
     calculate_campaign_confidence,
     detect_failure_patterns,
     detect_success_patterns,
@@ -149,3 +150,14 @@ def test_full_campaign_learning_builds_versioned_knowledge_timeline_and_rankings
     assert any(event["event_type"] == "rejection" for event in learning["timeline"])
     assert learning["elite_rankings"][0]["candidate_id"] == "elite_a"
     assert learning["safety"]["simulation_only"] is True
+
+
+def test_candidate_objects_preserve_campaign_scope_for_phase10_lineage() -> None:
+    normalized = [normalize_job(row) for row in sample_jobs()]
+
+    objects = build_research_candidate_objects(normalized, [], [], [], [])
+    elite_object = next(row for row in objects if row["candidate_id"] == "elite_a")
+
+    assert elite_object["candidate_scope_key"] == "42:elite_a"
+    assert elite_object["campaign_ids"] == [42]
+    assert elite_object["validation_history"][0]["campaign_id"] == 42

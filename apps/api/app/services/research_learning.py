@@ -590,6 +590,7 @@ def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
         failure_reasons.extend(infer_metric_failure_reasons(metrics))
     return {
         "job_id": job.get("id"),
+        "campaign_id": job.get("campaign_id"),
         "candidate_id": candidate_id,
         "family_id": str(job.get("family_id") or candidate.get("family_id") or "unknown"),
         "parent_candidate_id": candidate.get("parent_candidate_id") or job.get("parent_candidate_id"),
