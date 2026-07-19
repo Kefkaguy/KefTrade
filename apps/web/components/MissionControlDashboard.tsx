@@ -47,6 +47,7 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
   const databaseIssue = snapshot.subsystem_errors.find((item) => item.subsystem.toLowerCase().includes("database"));
   const databaseStatus: MissionControlStatus = databaseIssue ? "Error" : "Healthy";
   const readiness = snapshot.readiness;
+  const broker = snapshot.external_broker_paper;
   const reveal = reduceMotion ? undefined : { hidden: { opacity: 0, y: 12 }, visible: { opacity: 1, y: 0 } };
 
   return (
@@ -104,6 +105,21 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
       </motion.section>
 
       <motion.section className="surface activityBand" variants={reveal}>
+        <div className="sectionHeading"><div><span className="eyebrow">External paper observation</span><h2>Alpaca Paper foundation</h2></div><span className={`statusChip ${broker?.execution_enabled ? "error" : "success"}`}>{broker?.execution_enabled ? "Execution enabled" : "No order routing"}</span></div>
+        <div className="compactMetrics twoColumns">
+          <Metric label="Environment" value={broker ? title(broker.environment) : "Unavailable"} />
+          <Metric label="Adapter" value={broker?.adapter?.adapter_version ?? "Not synchronized"} />
+          <Metric label="Last sync" value={broker?.latest_sync?.status ?? "No snapshot"} />
+          <Metric label="Reconciliation" value={broker?.latest_reconciliation?.status ?? "No run"} />
+          <Metric label="Observe-only deployments" value={(broker?.deployments ?? []).filter((item) => item.state === "enabled_observe_only").length} />
+          <Metric label="Active halts" value={broker?.active_halts?.length ?? 0} />
+          <Metric label="Execution epochs" value={broker?.epochs?.length ?? 0} />
+          <Metric label="Shadow decisions" value={broker?.shadow_executions?.length ?? 0} />
+        </div>
+        <p className="surfaceNote">Broker state is read from persisted snapshots. Order submission and external execution remain disabled.</p>
+      </motion.section>
+
+      <motion.section className="surface activityBand" variants={reveal}>
         <div className="sectionHeading"><div><span className="eyebrow">Recent operations</span><h2>Latest system events</h2></div><Link className="textLink" href="/journal">Full journal <ArrowRight size={14} /></Link></div>
         <div className="operationList">
           {snapshot.recent_activity.slice(0, 5).map((item) => (
@@ -153,6 +169,9 @@ function collectIssues(snapshot: MissionControlSnapshot, deploymentManagement: D
     issues.push({ title: "Deployment management unavailable", detail: deploymentError, source: "Forward validation", severity: "warning", action: "Refresh after the deployment service recovers." });
   } else if (deploymentManagement && numberValue(deploymentManagement.summary.error_count) > 0) {
     issues.push({ title: "Deployment health errors", detail: `${deploymentManagement.summary.error_count} deployment records report an error state.`, source: "Forward validation", severity: "error", action: "Open Forward Validation and inspect deployment health." });
+  }
+  for (const halt of snapshot.external_broker_paper?.active_halts ?? []) {
+    issues.push({ title: `External paper ${title(String(halt.scope_type ?? "broker"))} halt`, detail: String(halt.reason ?? "An external paper safety control is active."), source: "Alpaca Paper", severity: String(halt.severity ?? "warning").toLowerCase() === "critical" ? "error" : "warning", action: "Review the persisted reconciliation evidence and use the audited VPS CLI for any resume." });
   }
   return dedupeIssues(issues).slice(0, 8);
 }

@@ -24,6 +24,24 @@ class Settings(BaseSettings):
     alpaca_data_base_url: str = "https://data.alpaca.markets"
     alpaca_trading_base_url: str = "https://paper-api.alpaca.markets"
     alpaca_intraday_max_lookback_days: int = 1825
+    broker_provider: str = Field(default="alpaca", validation_alias="BROKER_PROVIDER")
+    alpaca_paper_base_url: str = Field(default="https://paper-api.alpaca.markets", validation_alias="ALPACA_PAPER_BASE_URL")
+    alpaca_paper_api_key: str | None = Field(default=None, validation_alias="ALPACA_PAPER_API_KEY")
+    alpaca_paper_secret_key: str | None = Field(default=None, validation_alias="ALPACA_PAPER_SECRET_KEY")
+    broker_sync_enabled: bool = Field(default=True, validation_alias="BROKER_SYNC_ENABLED")
+    broker_reconciliation_enabled: bool = Field(default=True, validation_alias="BROKER_RECONCILIATION_ENABLED")
+    broker_shadow_execution_enabled: bool = Field(default=True, validation_alias="BROKER_SHADOW_EXECUTION_ENABLED")
+    broker_order_submission_enabled: bool = Field(default=False, validation_alias="BROKER_ORDER_SUBMISSION_ENABLED")
+    external_paper_execution_enabled: bool = Field(default=False, validation_alias="EXTERNAL_PAPER_EXECUTION_ENABLED")
+    broker_allocated_capital: float = Field(default=10000, validation_alias="KEFTRADE_BROKER_ALLOCATED_CAPITAL")
+    max_broker_risk_per_trade_pct: float = Field(default=0.01, validation_alias="KEFTRADE_MAX_RISK_PER_TRADE_PCT")
+    max_broker_total_exposure_pct: float = Field(default=0.03, validation_alias="KEFTRADE_MAX_TOTAL_EXPOSURE_PCT")
+    broker_daily_loss_limit_pct: float = Field(default=0.02, validation_alias="KEFTRADE_DAILY_LOSS_LIMIT_PCT")
+    broker_weekly_loss_limit_pct: float = Field(default=0.05, validation_alias="KEFTRADE_WEEKLY_LOSS_LIMIT_PCT")
+    broker_max_open_positions: int = Field(default=2, validation_alias="KEFTRADE_MAX_OPEN_POSITIONS")
+    broker_max_open_orders: int = Field(default=2, validation_alias="KEFTRADE_MAX_OPEN_ORDERS")
+    broker_raw_snapshot_retention_days: int = Field(default=30, validation_alias="BROKER_RAW_SNAPSHOT_RETENTION_DAYS")
+    broker_worker_poll_seconds: int = Field(default=60, validation_alias="BROKER_WORKER_POLL_SECONDS")
     paper_scan_max_candle_age_hours: int = 96
     max_campaign_workers: int | None = Field(default=None, validation_alias="KEFTRADE_MAX_CAMPAIGN_WORKERS")
     campaign_worker_heartbeat_seconds: int = Field(default=10, validation_alias="KEFTRADE_CAMPAIGN_WORKER_HEARTBEAT_SECONDS")

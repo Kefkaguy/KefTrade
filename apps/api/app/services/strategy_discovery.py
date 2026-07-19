@@ -838,77 +838,7 @@ def insert_discovery_run(conn: psycopg.Connection, symbol: str, timeframe: str, 
 
 
 def ensure_strategy_discovery_tables(conn: psycopg.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS strategy_discovery_runs (
-            id BIGSERIAL PRIMARY KEY,
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            requested_candidates INTEGER NOT NULL,
-            discovery_version TEXT NOT NULL,
-            safety_statement TEXT NOT NULL,
-            simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS strategy_discovery_strategies (
-            id BIGSERIAL PRIMARY KEY,
-            candidate_id TEXT NOT NULL,
-            family_id TEXT NOT NULL,
-            parent_candidate_id TEXT,
-            discovery_run_id BIGINT REFERENCES strategy_discovery_runs(id),
-            symbol TEXT NOT NULL,
-            timeframe TEXT NOT NULL,
-            generation INTEGER NOT NULL,
-            blocks JSONB NOT NULL,
-            parameters JSONB NOT NULL,
-            complexity INTEGER NOT NULL,
-            metrics JSONB NOT NULL,
-            validation_metrics JSONB NOT NULL,
-            walk_forward_metrics JSONB NOT NULL,
-            out_of_sample_metrics JSONB NOT NULL,
-            regime_analysis JSONB NOT NULL,
-            feature_correlations JSONB NOT NULL,
-            paper_readiness JSONB NOT NULL,
-            research_score NUMERIC NOT NULL,
-            status TEXT NOT NULL,
-            failure_reasons JSONB NOT NULL,
-            explanation TEXT NOT NULL,
-            discovery_version TEXT NOT NULL,
-            simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE(candidate_id, symbol, timeframe)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS strategy_discovery_events (
-            id BIGSERIAL PRIMARY KEY,
-            candidate_id TEXT NOT NULL,
-            parent_candidate_id TEXT,
-            event_type TEXT NOT NULL,
-            details JSONB NOT NULL,
-            simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS strategy_discovery_strategies_status_score_idx
-        ON strategy_discovery_strategies(status, research_score DESC, created_at DESC)
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS strategy_discovery_events_created_idx
-        ON strategy_discovery_events(created_at DESC)
-        """
-    )
+    return None
 
 
 def persist_discovered_strategy(conn: psycopg.Connection, run_id: int, symbol: str, timeframe: str, candidate: DiscoveryCandidate, row: dict[str, Any]) -> None:

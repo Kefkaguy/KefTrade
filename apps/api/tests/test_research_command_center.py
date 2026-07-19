@@ -298,9 +298,7 @@ class AllCampaignConn:
         raise AssertionError(query)
 
 
-def test_all_scope_combines_campaigns_and_keeps_running_evidence_visible(monkeypatch) -> None:
-    monkeypatch.setattr("app.services.research_command_center.ensure_campaign_tables", lambda _conn: None)
-
+def test_all_scope_combines_campaigns_and_keeps_running_evidence_visible() -> None:
     payload = research_command_center(AllCampaignConn())
 
     assert payload["campaign"]["name"] == "All campaign evidence"

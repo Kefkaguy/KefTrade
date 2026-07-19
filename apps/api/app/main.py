@@ -21,7 +21,7 @@ from app.observability import (
     reset_request_context,
     set_request_context,
 )
-from app.routers import alpha, backtests, data, features, paper, regimes, research, research_copilot, research_intelligence, research_lab, risk, signals, symbols, validation
+from app.routers import alpha, backtests, broker, data, features, paper, regimes, research, research_copilot, research_intelligence, research_lab, risk, signals, symbols, validation
 from app.settings import cors_origin_list, settings
 from app.services.paper_scheduler import start_scheduler, stop_scheduler
 
@@ -32,6 +32,8 @@ configure_logging()
 async def lifespan(app: FastAPI):
     started = time.perf_counter()
     log_event("Startup started", environment=settings.environment, git_commit=git_commit(), log_level=settings.log_level)
+    if settings.broker_order_submission_enabled or settings.external_paper_execution_enabled:
+        raise RuntimeError("Phase 10 read-only foundation forbids external paper execution and broker order submission")
     try:
         conn = connect()
         try:
@@ -118,6 +120,7 @@ app.include_router(alpha.router)
 app.include_router(validation.router)
 app.include_router(risk.router)
 app.include_router(paper.router)
+app.include_router(broker.router)
 
 
 @app.get("/health")

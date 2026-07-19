@@ -52,6 +52,7 @@ _FORWARD_EVIDENCE_SCHEMA_READY = False
 
 
 def ensure_validation_tables(conn: psycopg.Connection) -> None:
+    return None
     global _VALIDATION_SCHEMA_READY
     if _VALIDATION_SCHEMA_READY:
         return
@@ -583,6 +584,7 @@ def paper_ledger_reconciliation(conn: psycopg.Connection, persist: bool = False)
 
 
 def ensure_forward_evidence_tables(conn: psycopg.Connection) -> None:
+    return None
     global _FORWARD_EVIDENCE_SCHEMA_READY
     if _FORWARD_EVIDENCE_SCHEMA_READY:
         return

@@ -137,19 +137,15 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
 
   useEffect(() => {
     let active = true;
-    void Promise.allSettled([getSymbols(), getResearchLearning(), fetchResearchCommandCenter()])
-      .then(([symbolsResult, learningResult, commandCenterResult]) => {
+    void Promise.allSettled([getSymbols(), getResearchLearning()])
+      .then(([symbolsResult, learningResult]) => {
         if (!active) return;
         if (learningResult.status === "fulfilled") {
           setLearningSummary(learningResult.value);
         }
-        if (commandCenterResult.status === "fulfilled") {
-          setCommandCenter(commandCenterResult.value);
-        }
-        if (learningResult.status === "fulfilled" || commandCenterResult.status === "fulfilled") {
+        if (learningResult.status === "fulfilled") {
           const hasLearning = learningResult.status === "fulfilled" && Boolean(learningResult.value.global_learning?.snapshot_key);
-          const hasProposal = commandCenterResult.status === "fulfilled" && Boolean(commandCenterResult.value.next_campaign_proposal);
-          setLearningState(hasLearning || hasProposal ? "ready" : "unavailable");
+          setLearningState(hasLearning ? "ready" : "unavailable");
         } else {
           setLearningState("unavailable");
         }
@@ -245,6 +241,11 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   function chooseUniverseMode(nextMode: "random" | "established") {
     setUniverseMode(nextMode);
     if (nextMode === "established") {
+      if (!commandCenter) {
+        void fetchResearchCommandCenter()
+          .then(setCommandCenter)
+          .catch(() => undefined);
+      }
       chooseEstablishedAssetCount(Math.min(Math.max(selectedStockCount, 1), maxEstablishedSelection));
     }
   }

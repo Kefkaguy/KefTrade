@@ -155,51 +155,7 @@ def deployment_block_reason(conn: psycopg.Connection, account_id: int, deploymen
 
 
 def ensure_forward_lineage_columns(conn: psycopg.Connection) -> None:
-    try:
-        conn.execute(
-            """
-            ALTER TABLE strategy_deployments
-                ADD COLUMN IF NOT EXISTS campaign_id BIGINT,
-                ADD COLUMN IF NOT EXISTS candidate_id TEXT,
-                ADD COLUMN IF NOT EXISTS strategy_id TEXT,
-                ADD COLUMN IF NOT EXISTS forward_validation_started_at TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS evidence_version TEXT,
-                ADD COLUMN IF NOT EXISTS lifecycle_state TEXT NOT NULL DEFAULT 'manual_simulation',
-                ADD COLUMN IF NOT EXISTS deployment_origin TEXT NOT NULL DEFAULT 'manual_simulation'
-            """
-        )
-        conn.execute(
-            """
-            ALTER TABLE paper_orders
-                ADD COLUMN IF NOT EXISTS campaign_id BIGINT,
-                ADD COLUMN IF NOT EXISTS candidate_id TEXT,
-                ADD COLUMN IF NOT EXISTS strategy_id TEXT,
-                ADD COLUMN IF NOT EXISTS strategy_version TEXT,
-                ADD COLUMN IF NOT EXISTS decision_id TEXT,
-                ADD COLUMN IF NOT EXISTS signal_timestamp TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS evidence_origin TEXT NOT NULL DEFAULT 'manual_simulation'
-            """
-        )
-        conn.execute(
-            """
-            ALTER TABLE paper_fills
-                ADD COLUMN IF NOT EXISTS campaign_id BIGINT,
-                ADD COLUMN IF NOT EXISTS candidate_id TEXT,
-                ADD COLUMN IF NOT EXISTS deployment_id BIGINT,
-                ADD COLUMN IF NOT EXISTS strategy_id TEXT,
-                ADD COLUMN IF NOT EXISTS strategy_version TEXT,
-                ADD COLUMN IF NOT EXISTS decision_id TEXT,
-                ADD COLUMN IF NOT EXISTS signal_timestamp TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS evidence_origin TEXT NOT NULL DEFAULT 'manual_simulation'
-            """
-        )
-    except Exception:
-        rollback = getattr(conn, "rollback", None)
-        if callable(rollback):
-            try:
-                rollback()
-            except Exception:
-                pass
+    return None
 
 
 def get_deployment(conn: psycopg.Connection, deployment_id: int | None) -> dict[str, Any] | None:

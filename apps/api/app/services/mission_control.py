@@ -10,6 +10,7 @@ import psycopg
 from app.services.research_campaigns import campaign_mission_control_summary
 from app.services.production_validation import validation_mission_control_summary
 from app.services.research_learning import research_learning_summary
+from app.services.broker_read_models import broker_status
 
 FRESHNESS_BY_TIMEFRAME_HOURS = {
     "15m": 2,
@@ -63,6 +64,7 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
     campaigns = section("research_campaigns", lambda: campaign_mission_control_summary(conn), {})
     learning = section("research_learning", lambda: research_learning_summary(conn), {})
     validation = section("production_validation", lambda: validation_mission_control_summary(conn), {})
+    external_broker_paper = section("external_broker_paper", lambda: broker_status(conn), {})
 
     asset_keys = monitored_asset_keys(symbols, deployments, alerts, reviews, positions)
     latest_candles = section("market_data", lambda: latest_candles_for(conn, asset_keys), {})
@@ -123,6 +125,7 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
         "research_campaigns": campaigns,
         "research_learning": learning,
         "production_validation": validation,
+        "external_broker_paper": external_broker_paper,
         "recent_activity": recent_activity,
         "daily_summary": daily,
         "subsystem_errors": diagnostics["active"],

@@ -11,7 +11,8 @@ from typing import Any, Iterable
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.services.research_campaigns import CAMPAIGN_VERSION, ensure_campaign_tables
+from app.services.research_campaigns import CAMPAIGN_VERSION
+from app.services.research_command_center_cache import cached_command_center_payload, remember_command_center_payload
 from app.services.strategy_research import finite_metric
 
 
@@ -29,6 +30,10 @@ def research_command_center(
     campaign_id: int | None = None,
     filters: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    cache_key = command_center_cache_key(campaign_id, filters or {})
+    cached = cached_command_center_payload(cache_key)
+    if cached is not None:
+        return cached
     try:
         campaigns = [dict(row) for row in conn.execute(
             """
@@ -41,9 +46,9 @@ def research_command_center(
         ).fetchall()]
     except psycopg.errors.UndefinedTable:
         conn.rollback()
-        return empty_command_center(filters or {})
+        return remember_command_center_payload(cache_key, empty_command_center(filters or {}))
     if not campaigns:
-        return empty_command_center(filters or {})
+        return remember_command_center_payload(cache_key, empty_command_center(filters or {}))
 
     if campaign_id is not None:
         campaign = next((row for row in campaigns if int(row["id"]) == campaign_id), None)
@@ -55,7 +60,7 @@ def research_command_center(
             (campaign_id,),
         ).fetchone()["count"])
         if job_count > 5000 or str(campaign.get("status") or "").lower() in {"queued", "running"}:
-            return aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {})
+            return remember_command_center_payload(cache_key, aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {}))
     else:
         scope_ids = [int(row["id"]) for row in campaigns]
         active_statuses = {"queued", "running"}
@@ -72,7 +77,13 @@ def research_command_center(
             "updated_at": max((row.get("updated_at") for row in campaigns if row.get("updated_at")), default=None),
             "campaign_count": len(campaigns),
         }
-        return aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {})
+        if not has_active_filters(filters or {}):
+            snapshot = latest_command_center_snapshot(conn)
+            if snapshot is not None:
+                snapshot["campaigns"] = campaigns
+                snapshot["live_evidence"] = any(str(row.get("status") or "").lower() in active_statuses for row in campaigns)
+                return remember_command_center_payload(cache_key, snapshot)
+        return remember_command_center_payload(cache_key, aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {}))
 
     jobs = [dict(row) for row in conn.execute(
         """
@@ -134,6 +145,41 @@ def research_command_center(
     }
     payload["live_evidence"] = any(str(row.get("status") or "").lower() in {"queued", "running"} for row in campaigns if campaign_id is None or int(row["id"]) == campaign_id)
     payload["simulation_only"] = True
+    return remember_command_center_payload(cache_key, payload)
+
+
+def command_center_cache_key(campaign_id: int | None, filters: dict[str, Any]) -> str:
+    return json.dumps({"campaign_id": campaign_id, "filters": filters}, sort_keys=True, default=str)
+
+
+def has_active_filters(filters: dict[str, Any]) -> bool:
+    return any(value not in (None, "", [], {}) for value in filters.values())
+
+
+def latest_command_center_snapshot(conn: psycopg.Connection) -> dict[str, Any] | None:
+    try:
+        row = conn.execute(
+            """
+            SELECT payload
+            FROM research_command_center_snapshots
+            WHERE simulation_only = TRUE
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    except Exception:
+        rollback = getattr(conn, "rollback", None)
+        if callable(rollback):
+            rollback()
+        return None
+    if not row:
+        return None
+    payload = dict(row).get("payload") or {}
+    if not isinstance(payload, dict) or not payload:
+        return None
+    source = dict(payload.get("source") or {})
+    source["served_from"] = "research_command_center_snapshots"
+    payload["source"] = source
     return payload
 
 
@@ -1248,7 +1294,6 @@ def candidate_library(
     campaign_id: int | None = None,
     limit: int = 200,
 ) -> dict[str, Any]:
-    ensure_campaign_tables(conn)
     jobs = load_candidate_jobs(conn, campaign_id=campaign_id)
     elite = load_elite_rows(conn, campaign_id=campaign_id)
     deployments = load_candidate_deployments(conn, campaign_id=campaign_id)
@@ -1293,7 +1338,6 @@ def candidate_library(
 
 
 def candidate_profile(conn: psycopg.Connection, candidate_id: str, *, campaign_id: int | None = None) -> dict[str, Any]:
-    ensure_campaign_tables(conn)
     jobs = load_candidate_jobs(conn, candidate_id=candidate_id, campaign_id=campaign_id)
     if not jobs:
         raise ValueError("candidate not found")
@@ -1549,31 +1593,6 @@ def evidence_plan_step(gate: str, profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def persist_evidence_plan(conn: psycopg.Connection, profile: dict[str, Any], plan: dict[str, Any]) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS candidate_missing_evidence_plans (
-            id BIGSERIAL PRIMARY KEY,
-            candidate_id TEXT NOT NULL,
-            campaign_id BIGINT,
-            missing_evidence_reason TEXT NOT NULL,
-            recommended_test TEXT NOT NULL,
-            test_scope TEXT NOT NULL,
-            falsification_condition TEXT NOT NULL,
-            status TEXT NOT NULL,
-            result JSONB,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            completed_at TIMESTAMPTZ,
-            simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
-            CONSTRAINT candidate_missing_evidence_plans_simulation_only_check CHECK (simulation_only = TRUE)
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE UNIQUE INDEX IF NOT EXISTS candidate_missing_evidence_plan_unique
-        ON candidate_missing_evidence_plans(candidate_id, COALESCE(campaign_id, 0), missing_evidence_reason)
-        """
-    )
     campaign_id = profile["campaign_ids"][0] if profile["campaign_ids"] else None
     for step in plan["steps"]:
         conn.execute(

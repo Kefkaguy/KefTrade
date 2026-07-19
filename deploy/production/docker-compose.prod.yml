@@ -129,6 +129,31 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  broker-worker:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: ["python", "-m", "app.workers.broker_runner"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; assert os.environ.get('DATABASE_URL'); assert os.environ.get('BROKER_ORDER_SUBMISSION_ENABLED','false').lower() == 'false'; assert os.environ.get('EXTERNAL_PAPER_EXECUTION_ENABLED','false').lower() == 'false'"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
   certbot:
     image: certbot/certbot:latest
     profiles: ["tls"]

@@ -21,6 +21,7 @@ from app.services.evidence_alerts import create_evidence_alert
 from app.services.backtester import build_market_arrays, combine_candles_features
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
+from app.services.research_command_center_cache import clear_command_center_cache
 from app.services.research_learning import learn_from_completed_campaign, research_generation_guidance, score_candidate_for_guidance
 from app.services.strategy_discovery import (
     SAFETY_STATEMENT,
@@ -150,6 +151,7 @@ DEFAULT_UNIVERSES: tuple[dict[str, Any], ...] = (
 
 
 def _ensure_campaign_tables(conn: psycopg.Connection) -> None:
+    return None
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS research_universes (
@@ -295,6 +297,7 @@ def _ensure_campaign_tables(conn: psycopg.Connection) -> None:
 
 
 def ensure_worker_tables(conn: psycopg.Connection) -> None:
+    return None
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS research_campaign_scheduler (
@@ -383,6 +386,7 @@ def ensure_worker_tables(conn: psycopg.Connection) -> None:
 
 
 def ensure_operations_tables(conn: psycopg.Connection) -> None:
+    return None
     conn.execute(
         """
         ALTER TABLE research_campaign_jobs
@@ -469,6 +473,21 @@ def ensure_operations_tables(conn: psycopg.Connection) -> None:
     )
     conn.execute(
         """
+        CREATE TABLE IF NOT EXISTS research_command_center_snapshots (
+            id BIGSERIAL PRIMARY KEY,
+            snapshot_key TEXT NOT NULL UNIQUE,
+            payload JSONB NOT NULL,
+            campaign_count INTEGER NOT NULL DEFAULT 0,
+            completed_campaign_count INTEGER NOT NULL DEFAULT 0,
+            calculation_version TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
+            CONSTRAINT research_command_center_snapshots_simulation_only_check CHECK (simulation_only = TRUE)
+        )
+        """
+    )
+    conn.execute(
+        """
         CREATE TABLE IF NOT EXISTS research_campaign_reports (
             id BIGSERIAL PRIMARY KEY,
             campaign_id BIGINT NOT NULL REFERENCES research_campaigns(id) ON DELETE CASCADE,
@@ -500,6 +519,7 @@ def ensure_campaign_tables(conn: psycopg.Connection) -> None:
 
 
 def ensure_universe_table(conn: psycopg.Connection) -> None:
+    return None
     global _UNIVERSE_SCHEMA_READY
     is_real_connection = conn.__class__.__module__.startswith("psycopg")
     if is_real_connection and (_UNIVERSE_SCHEMA_READY or _CAMPAIGN_SCHEMA_READY):
@@ -4355,6 +4375,7 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
         else:
             rejected += 1
     analytics = campaign_analytics(jobs, summaries)
+    analytics = {**analytics, **campaign_operational_intelligence(conn, campaign_id, jobs)}
     conn.execute(
         """
         UPDATE research_campaigns
@@ -4405,6 +4426,8 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
         "UPDATE research_campaigns SET analytics = %s, updated_at = NOW() WHERE id = %s",
         (Jsonb(jsonable(analytics)), campaign_id),
     )
+    persist_campaign_analytics_snapshot(conn, campaign_id, analytics)
+    refresh_command_center_aggregate_snapshot(conn)
     return analytics
 
 
@@ -5407,6 +5430,221 @@ def persist_campaign_analytics_snapshot(conn: psycopg.Connection, campaign_id: i
     )
 
 
+def refresh_command_center_aggregate_snapshot(conn: psycopg.Connection) -> dict[str, Any]:
+    campaigns = [
+        jsonable(dict(row))
+        for row in conn.execute(
+            """
+            SELECT id, campaign_key, name, universe_key, status, requested_candidates,
+                   analytics, created_at, started_at, completed_at, updated_at
+            FROM research_campaigns
+            WHERE simulation_only = TRUE
+            ORDER BY created_at DESC, id DESC
+            """
+        ).fetchall()
+    ]
+    completed_campaigns = [row for row in campaigns if row.get("status") == "completed"]
+    overview = aggregate_snapshot_overview(completed_campaigns)
+    assets = aggregate_snapshot_dimension(completed_campaigns, "asset_intelligence")
+    families = aggregate_snapshot_dimension(completed_campaigns, "strategy_family_intelligence")
+    timeframes = aggregate_snapshot_dimension(completed_campaigns, "timeframe_intelligence")
+    rejection = aggregate_snapshot_rejections(completed_campaigns)
+    payload = {
+        "campaign": {
+            "id": None,
+            "campaign_key": "all_campaign_evidence",
+            "name": "All campaign evidence",
+            "universe_key": "all",
+            "status": "completed",
+            "requested_candidates": sum(int(row.get("requested_candidates") or 0) for row in campaigns),
+            "campaign_count": len(campaigns),
+        },
+        "campaigns": campaigns,
+        "filters": {},
+        "overview": overview,
+        "candidate_funnel": snapshot_funnel(overview),
+        "filter_options": {
+            "assets": [row["name"] for row in assets],
+            "asset_classes": ["equity"],
+            "timeframes": [row["name"] for row in timeframes],
+            "strategy_families": [row["name"] for row in families],
+            "candidate_states": ["completed", "rejected", "promoted"],
+            "validation_rules": [row["name"] for row in rejection["validation_rules"]],
+            "regimes": [],
+        },
+        "strategy_intelligence": {"rows": families, "highlights": {}},
+        "asset_intelligence": {"rows": assets, "highlights": {}},
+        "timeframe_intelligence": {"rows": timeframes, "highlights": {}},
+        "rejection_analysis": rejection,
+        "near_pass_candidates": [],
+        "duplicate_analysis": {"unique_candidates": overview["candidates_generated"], "exact_duplicates": 0, "near_duplicates": 0, "duplicate_validation_outcomes": 0, "redundant_parameter_regions": []},
+        "recommendations": snapshot_recommendations(rejection, families, assets),
+        "next_campaign_proposal": snapshot_next_campaign_proposal(families, assets, timeframes),
+        "historical_research": {},
+        "terminology": {},
+        "source": {
+            "authoritative_tables": ["research_campaigns", "research_campaign_analytics_snapshots", "research_command_center_snapshots"],
+            "candidate_grain": "persisted completed-campaign aggregate intelligence",
+            "refreshed_at": datetime.now(UTC),
+        },
+        "live_evidence": any(row.get("status") in {"queued", "running"} for row in campaigns),
+        "simulation_only": True,
+    }
+    snapshot_key = sha256(f"command_center|{len(completed_campaigns)}|{max((str(row.get('updated_at') or '') for row in completed_campaigns), default='none')}".encode()).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO research_command_center_snapshots(
+            snapshot_key, payload, campaign_count, completed_campaign_count, calculation_version, simulation_only
+        )
+        VALUES (%s, %s, %s, %s, %s, TRUE)
+        ON CONFLICT(snapshot_key) DO UPDATE
+        SET payload = EXCLUDED.payload,
+            campaign_count = EXCLUDED.campaign_count,
+            completed_campaign_count = EXCLUDED.completed_campaign_count,
+            created_at = NOW()
+        """,
+        (snapshot_key, Jsonb(jsonable(payload)), len(campaigns), len(completed_campaigns), "command_center_aggregate_v1"),
+    )
+    clear_command_center_cache()
+    return payload
+
+
+def aggregate_snapshot_overview(campaigns: list[dict[str, Any]]) -> dict[str, int]:
+    generated = sum(int((row.get("analytics") or {}).get("strategies_generated") or 0) for row in campaigns)
+    tested = sum(int((row.get("analytics") or {}).get("strategies_tested") or 0) for row in campaigns)
+    rejected = sum(int((row.get("analytics") or {}).get("rejected") or 0) for row in campaigns)
+    promoted = sum(int((row.get("analytics") or {}).get("promoted") or 0) for row in campaigns)
+    jobs = sum(int((row.get("analytics") or {}).get("jobs_total") or 0) for row in campaigns)
+    return {
+        "campaign_jobs": jobs,
+        "candidates_generated": generated,
+        "candidates_tested": tested,
+        "candidates_rejected": rejected,
+        "candidates_completed": tested,
+        "needs_more_evidence": max(0, tested - rejected - promoted),
+        "research_candidates": promoted,
+        "elite_candidates": promoted,
+        "candidate_linked_deployments": 0,
+    }
+
+
+def aggregate_snapshot_dimension(campaigns: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = defaultdict(lambda: {"campaigns": set(), "validation_runs": 0, "passed": 0, "rejected": 0, "pf": [], "expectancy": [], "drawdown": []})
+    for campaign in campaigns:
+        campaign_id = campaign.get("id")
+        for row in (campaign.get("analytics") or {}).get(key) or []:
+            name = str(row.get("name") or "unknown")
+            group = grouped[name]
+            group["campaigns"].add(campaign_id)
+            runs = int(row.get("strategies_tested") or row.get("validation_runs") or 0)
+            group["validation_runs"] += runs
+            group["passed"] += int(row.get("promoted") or 0)
+            group["rejected"] += int(row.get("rejected") or 0)
+            if runs:
+                group["pf"].append((finite_metric(row.get("average_profit_factor")), runs))
+                group["expectancy"].append((finite_metric(row.get("average_expectancy")), runs))
+                group["drawdown"].append((finite_metric(row.get("average_drawdown") or row.get("median_drawdown")), runs))
+    result = []
+    for name, group in grouped.items():
+        runs = int(group["validation_runs"])
+        passed = int(group["passed"])
+        rejected = int(group["rejected"])
+        pass_rate = round(passed / runs, 4) if runs else 0
+        result.append({
+            "name": name,
+            "candidates_tested": runs,
+            "campaign_count": len(group["campaigns"]),
+            "validation_runs": runs,
+            "rejection_rate": round(rejected / runs, 4) if runs else 0,
+            "pass_rate": pass_rate,
+            "average_profit_factor": weighted_average(group["pf"]),
+            "average_expectancy": weighted_average(group["expectancy"]),
+            "median_trade_count": None,
+            "median_drawdown": weighted_average(group["drawdown"]),
+            "stability_pass_rate": None,
+            "confidence_interval_pass_rate": None,
+            "candidate_quality_score": round(pass_rate * 100, 2),
+            "dominant_failure_reason": "Aggregate View" if rejected else None,
+            "best_asset": None,
+            "best_timeframe": None,
+            "deprioritize": runs >= 3 and passed == 0,
+            "inactive": runs == 0,
+        })
+    return sorted(result, key=lambda row: (row["candidate_quality_score"], row["validation_runs"], row["name"]), reverse=True)[:20]
+
+
+def aggregate_snapshot_rejections(campaigns: list[dict[str, Any]]) -> dict[str, Any]:
+    counter: Counter[str] = Counter()
+    for campaign in campaigns:
+        for row in (campaign.get("analytics") or {}).get("failure_distribution") or []:
+            counter[str(row.get("reason") or "unknown")] += int(row.get("count") or 0)
+    total = sum(counter.values())
+    rules = [{"name": name, "count": count, "rate": round(count / total, 4) if total else 0, "candidate_count": count, "candidate_rate": round(count / total, 4) if total else 0} for name, count in counter.most_common(20)]
+    return {
+        "rejected_validation_runs": total,
+        "rejected_candidates_observed": total,
+        "validation_rules": rules,
+        "strategy_families": [],
+        "assets": [],
+        "timeframes": [],
+        "market_regimes": [],
+        "parameter_ranges": [],
+        "metric_ranges": [{"metric": row["name"], "range": "stored campaign failures", "rejected_runs": row["count"]} for row in rules[:10]],
+        "dominant_reasons": rules[:5],
+    }
+
+
+def snapshot_funnel(overview: dict[str, int]) -> list[dict[str, Any]]:
+    generated = overview["candidates_generated"]
+    stages = [
+        ("generated", "Generated", generated),
+        ("tested", "Tested", overview["candidates_tested"]),
+        ("rejected", "Rejected", overview["candidates_rejected"]),
+        ("needs_more_evidence", "Needs More Evidence", overview["needs_more_evidence"]),
+        ("research_candidate", "Research Candidate", overview["research_candidates"]),
+        ("elite_candidate", "Elite Candidate", overview["elite_candidates"]),
+        ("paper_deployed", "Paper Deployed", overview["candidate_linked_deployments"]),
+    ]
+    return [{"key": key, "label": label, "count": count, "rate_from_generated": round(count / generated, 4) if generated else 0} for key, label, count in stages]
+
+
+def snapshot_recommendations(rejection: dict[str, Any], families: list[dict[str, Any]], assets: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    recommendations = []
+    dominant = (rejection.get("dominant_reasons") or [None])[0]
+    if dominant:
+        recommendations.append({"recommendation": f"Reduce repeated {str(dominant['name']).replace('_', ' ')} failures in the next research allocation.", "evidence_source": "research_command_center_snapshots.rejection_analysis", "candidate_count": dominant["count"], "support_rate": dominant["rate"], "validation_thresholds_changed": False})
+    weak_asset = next((row for row in reversed(assets) if row["deprioritize"]), None)
+    if weak_asset:
+        recommendations.append({"recommendation": f"Deprioritize {weak_asset['name']} until a repair hypothesis improves aggregate evidence.", "evidence_source": "research_command_center_snapshots.asset_intelligence", "candidate_count": weak_asset["validation_runs"], "support_rate": weak_asset["rejection_rate"], "validation_thresholds_changed": False})
+    return recommendations
+
+
+def snapshot_next_campaign_proposal(families: list[dict[str, Any]], assets: list[dict[str, Any]], timeframes: list[dict[str, Any]]) -> dict[str, Any] | None:
+    retain_assets = [row["name"] for row in assets if not row["deprioritize"]][:10]
+    deprioritize_assets = [row["name"] for row in assets if row["deprioritize"]][:10]
+    if not retain_assets and not deprioritize_assets:
+        return None
+    return {
+        "proposal_version": "command_center_aggregate_v1",
+        "strategy_families_to_retain": [row["name"] for row in families if not row["deprioritize"]][:5],
+        "strategy_families_to_deprioritize": [row["name"] for row in families if row["deprioritize"]][:5],
+        "assets_to_retain": retain_assets,
+        "assets_to_deprioritize": deprioritize_assets,
+        "timeframes_to_retain": [row["name"] for row in timeframes if not row["deprioritize"]][:3],
+        "timeframes_to_deprioritize": [row["name"] for row in timeframes if row["deprioritize"]][:3],
+        "candidate_count": sum(row["validation_runs"] for row in families),
+        "expected_duplicate_work_reduction": 0,
+        "new_hypothesis_tests": ["Confirm promising aggregate regions with unchanged validation thresholds."],
+        "source_campaign_version": CAMPAIGN_VERSION,
+        "validation_thresholds_changed": False,
+    }
+
+
+def weighted_average(values: list[tuple[float, int]]) -> float:
+    total_weight = sum(weight for _value, weight in values)
+    return round(sum(value * weight for value, weight in values) / total_weight, 4) if total_weight else 0.0
+
+
 def campaign_analytics(jobs: list[dict[str, Any]], summaries: list[dict[str, Any]]) -> dict[str, Any]:
     statuses = Counter(str(row["status"]) for row in jobs)
     completed = [row for row in jobs if row["status"] in {"completed", "rejected", "promoted"}]
@@ -5590,7 +5828,6 @@ def campaign_progress_analytics(
 
 
 def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dict[str, Any]:
-    ensure_campaign_tables(conn)
     rows = conn.execute(
         """
         SELECT

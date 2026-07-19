@@ -19,6 +19,7 @@ SAFETY_STATEMENT = "Deterministic simulation-only research learning. No live tra
 
 
 def ensure_research_learning_tables(conn: psycopg.Connection) -> None:
+    return None
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS research_knowledge_versions (

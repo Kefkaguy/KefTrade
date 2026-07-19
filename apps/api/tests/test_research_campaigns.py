@@ -59,6 +59,7 @@ class CampaignConn:
         self.batches = []
         self.elite = []
         self.workers = []
+        self.command_center_snapshots = []
         self.commits = 0
 
     def execute(self, query, params=None):
@@ -170,6 +171,8 @@ class CampaignConn:
             return Result([{"id": row["id"]}])
         if "SELECT * FROM research_campaigns WHERE id" in query:
             return Result([row for row in self.campaigns if row["id"] == params[0]])
+        if "FROM research_campaigns" in query and "WHERE simulation_only = TRUE" in query:
+            return Result(sorted(self.campaigns, key=lambda row: row["id"], reverse=True))
         if "SELECT symbol, asset_class, is_active FROM symbols" in query:
             return Result([{"symbol": params[0], "asset_class": "equity", "is_active": True}])
         if "COUNT(*) AS candle_count" in query:
@@ -275,6 +278,22 @@ class CampaignConn:
         if "FROM research_campaign_batches" in query:
             return Result([row for row in self.batches if row["campaign_id"] == params[0]])
         if "INSERT INTO research_campaign_analytics_snapshots" in query:
+            return Result([])
+        if "INSERT INTO research_command_center_snapshots" in query:
+            self.command_center_snapshots = [
+                row for row in self.command_center_snapshots if row["snapshot_key"] != params[0]
+            ]
+            self.command_center_snapshots.append(
+                {
+                    "snapshot_key": params[0],
+                    "payload": jsonb(params[1]),
+                    "campaign_count": params[2],
+                    "completed_campaign_count": params[3],
+                    "calculation_version": params[4],
+                    "created_at": self.now,
+                    "simulation_only": True,
+                }
+            )
             return Result([])
         if "INSERT INTO research_campaign_reports" in query:
             return Result([{"id": 1, "campaign_id": params[0], "report_key": params[1], "title": params[2], "summary": jsonb(params[3]), "recommendations": jsonb(params[4]), "markdown_report": params[5], "simulation_only": True}])

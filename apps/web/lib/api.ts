@@ -867,6 +867,22 @@ export type MissionControlSnapshot = {
   research_campaigns?: Record<string, any>;
   research_learning?: Record<string, any>;
   production_validation?: Record<string, any>;
+  external_broker_paper?: {
+    provider: string;
+    environment: string;
+    execution_enabled: boolean;
+    order_submission_implemented: boolean;
+    feature_flags: Record<string, boolean>;
+    account?: Record<string, any>;
+    latest_sync?: Record<string, any>;
+    latest_reconciliation?: Record<string, any>;
+    adapter?: Record<string, any>;
+    active_halts: Array<Record<string, any>>;
+    deployments: Array<Record<string, any>>;
+    epochs: Array<Record<string, any>>;
+    shadow_executions: Array<Record<string, any>>;
+    generated_at: string;
+  };
   recent_activity: MissionControlActivity[];
   daily_summary: Record<string, string | number | null>;
   subsystem_errors: Array<Record<string, any> & { subsystem: string; error: string }>;

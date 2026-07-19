@@ -86,6 +86,7 @@ def ensure_research_architecture_tables(conn: psycopg.Connection) -> None:
     safely instead of accepting an unversioned campaign.
     """
 
+    return None
     global _SCHEMA_READY
     is_real_connection = conn.__class__.__module__.startswith("psycopg")
     if is_real_connection and _SCHEMA_READY:

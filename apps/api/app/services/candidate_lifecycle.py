@@ -97,25 +97,7 @@ def build_research_portfolio(conn: psycopg.Connection, max_candidates: int = 24)
 
 
 def ensure_lifecycle_tables(conn: psycopg.Connection) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS candidate_lifecycle_events (
-            id BIGSERIAL PRIMARY KEY,
-            candidate_id TEXT NOT NULL,
-            from_state TEXT,
-            to_state TEXT NOT NULL,
-            reason TEXT NOT NULL,
-            metrics JSONB NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS candidate_lifecycle_events_candidate_idx
-        ON candidate_lifecycle_events(candidate_id, created_at DESC)
-        """
-    )
+    return None
 
 
 def infer_lifecycle_status(candidate: dict[str, Any]) -> str:
