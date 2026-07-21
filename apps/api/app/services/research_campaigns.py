@@ -4367,6 +4367,10 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
     summaries = candidate_consistency_summaries(jobs)
     promoted = 0
     rejected = 0
+    status_counts: dict[str, int] = {}
+    for job in jobs:
+        status = str(job.get("status") or "")
+        status_counts[status] = status_counts.get(status, 0) + 1
     for summary in summaries:
         if passes_cross_validation(summary):
             promoted += 1
@@ -4381,13 +4385,24 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
         UPDATE research_campaigns
         SET status = 'completed',
             completed_at = NOW(),
+            queued_jobs = %s,
+            completed_jobs = %s,
+            failed_jobs = %s,
             promoted_candidates = %s,
             rejected_candidates = %s,
             analytics = %s,
             updated_at = NOW()
         WHERE id = %s
         """,
-        (promoted, rejected, Jsonb(jsonable(analytics)), campaign_id),
+        (
+            len(jobs),
+            status_counts.get("completed", 0) + status_counts.get("rejected", 0) + status_counts.get("promoted", 0),
+            status_counts.get("failed", 0),
+            promoted,
+            rejected,
+            Jsonb(jsonable(analytics)),
+            campaign_id,
+        ),
     )
     update_job_consistency_scores(conn, campaign_id, summaries)
     try:

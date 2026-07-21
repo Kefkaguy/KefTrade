@@ -254,7 +254,7 @@ class CampaignConn:
                 if row["campaign_id"] == params[0]:
                     counts[row["status"]] = counts.get(row["status"], 0) + 1
             return Result([{"status": key, "count": value} for key, value in counts.items()])
-        if "UPDATE research_campaigns" in query and "queued_jobs" in query:
+        if "UPDATE research_campaigns" in query and "queued_jobs" in query and "status = 'completed'" not in query:
             campaign = self.campaign(params[3])
             campaign["queued_jobs"] = params[0]
             campaign["completed_jobs"] = params[1]
@@ -303,11 +303,14 @@ class CampaignConn:
         if "FROM paper_equity_curve" in query:
             return Result([])
         if "UPDATE research_campaigns" in query and "status = 'completed'" in query:
-            campaign = self.campaign(params[3])
+            campaign = self.campaign(params[6])
             campaign["status"] = "completed"
-            campaign["promoted_candidates"] = params[0]
-            campaign["rejected_candidates"] = params[1]
-            campaign["analytics"] = jsonb(params[2])
+            campaign["queued_jobs"] = params[0]
+            campaign["completed_jobs"] = params[1]
+            campaign["failed_jobs"] = params[2]
+            campaign["promoted_candidates"] = params[3]
+            campaign["rejected_candidates"] = params[4]
+            campaign["analytics"] = jsonb(params[5])
             return Result([])
         if "UPDATE research_campaign_jobs" in query and "consistency_score" in query:
             for row in self.jobs:
@@ -402,6 +405,9 @@ def test_campaign_lifecycle_promotes_only_cross_validated_candidates(monkeypatch
     assert created["jobs_created"] == 2
     assert result["processed"] == 2
     assert conn.campaigns[0]["status"] == "completed"
+    assert conn.campaigns[0]["queued_jobs"] == 2
+    assert conn.campaigns[0]["completed_jobs"] == 2
+    assert conn.campaigns[0]["failed_jobs"] == 0
     assert conn.campaigns[0]["promoted_candidates"] == 1
     assert conn.elite[0]["simulation_only"] is True
     assert conn.jobs[0]["consistency_score"] == 1.0
