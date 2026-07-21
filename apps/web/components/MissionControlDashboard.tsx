@@ -48,6 +48,7 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
   const databaseStatus: MissionControlStatus = databaseIssue ? "Error" : "Healthy";
   const readiness = snapshot.readiness;
   const broker = snapshot.external_broker_paper;
+  const deploymentChecks = broker ? deploymentCheckRows(broker.deployments ?? [], broker.shadow_executions ?? []) : [];
   const reveal = reduceMotion ? undefined : { hidden: { opacity: 0, y: 12 }, visible: { opacity: 1, y: 0 } };
 
   return (
@@ -116,6 +117,22 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
           <Metric label="Execution epochs" value={broker?.epochs?.length ?? 0} />
           <Metric label="Shadow decisions" value={broker?.shadow_executions?.length ?? 0} />
         </div>
+        <div className="deploymentCheckList">
+          <div className="deploymentCheckHeader"><span>Deployment check</span><span>{deploymentChecks.length ? `${deploymentChecks.length} tracked` : "No observe deployments"}</span></div>
+          {deploymentChecks.length ? deploymentChecks.map((row) => (
+            <article key={row.id} className={`deploymentCheckItem ${row.tone}`}>
+              <div>
+                <strong>{row.symbol} <small>{row.timeframe}</small></strong>
+                <span>{row.candidateId}</span>
+              </div>
+              <div>
+                <span className={`statusChip ${row.tone}`}>{row.label}</span>
+                <small>{row.detail}</small>
+              </div>
+              <time>{row.lastChecked}</time>
+            </article>
+          )) : <div className="inlineEmpty"><strong>No external paper checks yet</strong><span>Enabled observe-only deployments will appear here after the broker worker runs.</span></div>}
+        </div>
         <p className="surfaceNote">Broker state is read from persisted snapshots. Order submission and external execution remain disabled.</p>
       </motion.section>
 
@@ -143,6 +160,44 @@ function OverviewMetric({ icon: Icon, label, value, detail, tone = "neutral" }: 
 
 function Metric({ label, value }: { label: string; value: unknown }) {
   return <div><span>{label}</span><strong>{String(value ?? 0)}</strong></div>;
+}
+
+function deploymentCheckRows(deployments: Array<Record<string, any>>, shadows: Array<Record<string, any>>) {
+  const latestShadowByDeployment = new Map<number, Record<string, any>>();
+  for (const shadow of shadows) {
+    const deploymentId = Number(shadow.external_deployment_id);
+    if (!Number.isFinite(deploymentId)) continue;
+    const current = latestShadowByDeployment.get(deploymentId);
+    if (!current || new Date(String(shadow.created_at ?? 0)).getTime() > new Date(String(current.created_at ?? 0)).getTime()) {
+      latestShadowByDeployment.set(deploymentId, shadow);
+    }
+  }
+  return deployments.map((deployment) => {
+    const id = Number(deployment.id);
+    const shadow = latestShadowByDeployment.get(id);
+    const reasons = Array.isArray(shadow?.rejection_reasons) ? shadow.rejection_reasons.map(String) : [];
+    const decision = shadow?.decision && typeof shadow.decision === "object" ? shadow.decision as Record<string, any> : {};
+    const signal = decision.signal && typeof decision.signal === "object" ? decision.signal as Record<string, any> : {};
+    const worked = Boolean(shadow?.would_submit);
+    const checked = Boolean(shadow);
+    const label = worked ? "Worked" : checked ? "Avoided" : "Waiting";
+    const tone = worked ? "success" : checked ? "warning" : "neutral";
+    const detail = checked
+      ? reasons.length
+        ? reasons.join(", ")
+        : String(signal.signal ?? "Checked")
+      : title(String(deployment.state ?? "not checked"));
+    return {
+      id: `${deployment.id}-${shadow?.id ?? "pending"}`,
+      symbol: String(deployment.symbol ?? "Unknown"),
+      timeframe: String(deployment.timeframe ?? ""),
+      candidateId: String(deployment.candidate_id ?? "unlinked"),
+      label,
+      tone,
+      detail,
+      lastChecked: checked ? relativeTime(String(shadow?.created_at)) : "Not checked",
+    };
+  });
 }
 
 function collectIssues(snapshot: MissionControlSnapshot, deploymentManagement: DeploymentManagementSnapshot | null, deploymentError?: string | null): Issue[] {

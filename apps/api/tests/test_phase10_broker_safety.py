@@ -83,6 +83,48 @@ def test_external_broker_http_surface_is_read_only() -> None:
     assert all("router.get" in decorator for decorator in decorators)
 
 
+def test_shadow_elite_repair_generator_is_research_only() -> None:
+    from app.services.elite_repair_generator import repair_proposals_for_parent
+
+    proposals = repair_proposals_for_parent(
+        {
+            "external_deployment_id": 7,
+            "internal_deployment_id": 3,
+            "campaign_id": 28,
+            "elite_candidate_id": 5,
+            "candidate_id": "sd_parent",
+            "symbol": "AAXJ",
+            "timeframe": "1h",
+            "parameters": {"trend_method": "ema", "trend_fast": 20, "trend_slow": 50, "entry": "trend_continuation"},
+            "research_score": 6.1,
+            "forward_validation_state": "awaiting_paper_deployment",
+            "shadow_execution_id": 99,
+            "rejection_reasons": ["NO_ACTIONABLE_SETUP"],
+            "decision": {"signal": {"explanation": ["Trend block failed."]}},
+        }
+    )
+
+    assert len(proposals) == 3
+    assert {proposal["candidate"]["parent_candidate_id"] for proposal in proposals} == {"sd_parent"}
+    assert all(proposal["candidate"]["candidate_id"].startswith("sr_") for proposal in proposals)
+    assert all(proposal["candidate"]["parameters"]["generation_channel"] == "phase10_shadow_elite_repair" for proposal in proposals)
+    assert all("normal research campaign" in proposal["next_step"] for proposal in proposals)
+
+
+def test_trend_repair_modes_are_only_less_strict_for_generated_children() -> None:
+    from decimal import Decimal
+
+    from app.services.strategy_discovery import trend_passes
+
+    feature = {"ema_20": "99", "ema_50": "100", "returns_5": "0.01"}
+    candles = [{"close": Decimal("98")}, {"close": Decimal("99")}, {"close": Decimal("101")}]
+    base = {"trend_method": "ema", "trend_fast": 20, "trend_slow": 50}
+
+    assert not trend_passes(Decimal("101"), feature, candles, base)
+    assert trend_passes(Decimal("101"), feature, candles, {**base, "trend_repair_mode": "price_above_slow"})
+    assert trend_passes(Decimal("101"), feature, candles, {**base, "trend_repair_mode": "near_cross_with_momentum", "trend_fast_slow_ratio_min": 0.985})
+
+
 def test_phase10_modules_have_no_runtime_ddl() -> None:
     paths = [ROOT / "main.py", *(ROOT / name for name in ("routers", "services", "workers", "cli"))]
     files = [path for path in paths if path.is_file()]

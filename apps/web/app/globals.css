@@ -683,6 +683,18 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .overviewMetric.success > span { color: var(--accent); }
 .overviewMetric.error { border-color: var(--accent-2); }
 .activityBand { padding-bottom: 10px; }
+.deploymentCheckList { margin-top: 16px; border: 1px solid var(--line); border-radius: var(--radius-small); overflow: hidden; background: var(--panel-soft); }
+.deploymentCheckHeader, .deploymentCheckItem { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(150px, .8fr) minmax(82px, auto); gap: 12px; align-items: center; }
+.deploymentCheckHeader { padding: 10px 13px; border-bottom: 1px solid var(--line); color: var(--muted); font: 650 8px var(--font-mono); text-transform: uppercase; }
+.deploymentCheckHeader span:last-child { justify-self: end; }
+.deploymentCheckItem { min-height: 62px; padding: 12px 13px; border-bottom: 1px solid var(--line); }
+.deploymentCheckItem:last-child { border-bottom: 0; }
+.deploymentCheckItem strong, .deploymentCheckItem span, .deploymentCheckItem small { display: block; }
+.deploymentCheckItem strong { font-size: 11px; }
+.deploymentCheckItem strong small { display: inline; color: var(--muted); font-size: 9px; }
+.deploymentCheckItem span, .deploymentCheckItem small, .deploymentCheckItem time { color: var(--muted); font-size: 8px; }
+.deploymentCheckItem > div:nth-child(2) { display: grid; gap: 6px; justify-items: start; }
+.deploymentCheckItem time { justify-self: end; white-space: nowrap; }
 .operationList { display: grid; margin-top: 12px; }
 .operationList article { display: grid; min-height: 58px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; border-bottom: 1px solid var(--line); }
 .operationList article:last-child { border-bottom: 0; }
@@ -962,6 +974,9 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   .campaignDeleteConfirm span { margin-right: 0; }
   .serviceGrid { grid-template-columns: 1fr; }
   .compactMetrics { grid-template-columns: 1fr; }
+  .deploymentCheckHeader { display: none; }
+  .deploymentCheckItem { grid-template-columns: 1fr; gap: 9px; align-items: start; }
+  .deploymentCheckItem time { justify-self: start; }
   .surface, .panel { padding: 17px; }
   .serviceStatus { min-height: 96px; }
   .issueItem summary { grid-template-columns: 30px minmax(0, 1fr) auto; }

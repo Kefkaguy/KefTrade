@@ -5,6 +5,7 @@ import psycopg
 
 from app.db import get_connection
 from app.services.broker_read_models import broker_account, broker_clock, broker_orders, broker_positions, broker_reconciliation, broker_status, execution_readiness
+from app.services.elite_repair_generator import elite_repair_proposals
 
 router = APIRouter(prefix="/broker", tags=["external-paper-broker"])
 
@@ -42,3 +43,8 @@ def get_broker_reconciliation(conn: psycopg.Connection = Depends(get_connection)
 @router.get("/execution-readiness")
 def get_execution_readiness(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     return execution_readiness(conn)
+
+
+@router.get("/elite-repair-proposals")
+def get_elite_repair_proposals(limit: int = Query(50, ge=1, le=100), conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    return elite_repair_proposals(conn, limit)

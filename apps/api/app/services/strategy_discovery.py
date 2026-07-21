@@ -357,6 +357,11 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
         "generation_stage",
         "generator_version",
         "elite_repair_version",
+        "parent_elite_candidate_id",
+        "parent_external_deployment_id",
+        "phase10_shadow_repair_mutation",
+        "shadow_repair_evidence_ref",
+        "shadow_repair_reason",
         "hypothesis_key",
         "hypothesis_scope_ref",
         "hypothesis_scope_type",
@@ -553,6 +558,19 @@ def trend_passes(close: Decimal, feature: dict[str, Any], recent_candles: list[d
             return False
         if ((fast - slow) / slow) <= ((previous_fast - previous_slow) / previous_slow):
             return False
+    repair_mode = params.get("trend_repair_mode")
+    if repair_mode == "price_above_slow":
+        return close > slow
+    if repair_mode == "near_cross_with_momentum":
+        if slow == 0:
+            return False
+        ratio_min = Decimal(str(params.get("trend_fast_slow_ratio_min", 0.985)))
+        returns_min = float(params.get("returns_5_min", 0))
+        return close > slow and (fast / slow) >= ratio_min and finite_metric(feature.get("returns_5")) >= returns_min
+    if repair_mode == "fast_slope_or_price_above_slow":
+        previous_fast = moving_average(recent_candles[:-1], fast_period, method)
+        slope_ok = previous_fast is not None and previous_fast > 0 and fast > previous_fast
+        return close > slow and (fast > slow or slope_ok)
     return close > slow and fast > slow
 
 
