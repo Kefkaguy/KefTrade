@@ -350,6 +350,8 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
 
     non_execution_keys = {
         "controlled_mutation",
+        "candidate_id",
+        "campaign_id",
         "expected_behavior",
         "exit",  # exit behavior is represented by RR, stop, and holding parameters
         "frequency_hypothesis",
@@ -362,6 +364,7 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
         "phase10_shadow_repair_mutation",
         "shadow_repair_evidence_ref",
         "shadow_repair_reason",
+        "source_campaign_id",
         "hypothesis_key",
         "hypothesis_scope_ref",
         "hypothesis_scope_type",

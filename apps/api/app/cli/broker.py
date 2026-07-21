@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 from app.db import connect
 from app.services.broker_reconciliation import reconcile_broker_snapshot, upsert_halt
 from app.services.broker_sync import synchronize_broker
+from app.services.elite_repair_generator import ELITE_REPAIR_GENERATOR_VERSION, queue_elite_repair_campaign
 from app.services.external_execution import resume_observe_only, validate_adapter_compatibility
 from app.settings import settings
 
@@ -49,6 +50,10 @@ async def execute(args: argparse.Namespace) -> dict:
                 result = {"resumed": [resume_observe_only(conn, int(row["id"]), operator=operator()) for row in deployments]}
             elif args.command == "validate-adapter-compatibility":
                 result = validate_adapter_compatibility(conn, operator=operator())
+            elif args.command == "queue-elite-repair-campaign":
+                if args.confirm_repair_campaign != ELITE_REPAIR_GENERATOR_VERSION:
+                    raise ValueError(f"--confirm-repair-campaign must exactly match {ELITE_REPAIR_GENERATOR_VERSION}")
+                result = queue_elite_repair_campaign(conn, repair_filter=args.repair, operator=operator())
             else:
                 raise ValueError("unsupported broker command")
         except Exception as error:
@@ -69,6 +74,9 @@ def parser() -> argparse.ArgumentParser:
     resume = commands.add_parser("resume")
     resume.add_argument("--confirm-account", required=True)
     commands.add_parser("validate-adapter-compatibility")
+    repair = commands.add_parser("queue-elite-repair-campaign")
+    repair.add_argument("--repair", choices=("close_gt_slow_ema", "near_cross_with_momentum", "fast_slope_or_cross", "all"), default="close_gt_slow_ema")
+    repair.add_argument("--confirm-repair-campaign", required=True)
     return root
 
 

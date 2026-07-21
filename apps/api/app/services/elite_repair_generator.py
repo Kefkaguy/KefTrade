@@ -4,11 +4,13 @@ from hashlib import sha256
 from typing import Any
 
 import psycopg
+from psycopg.types.json import Jsonb
 
-from app.services.strategy_discovery import DiscoveryCandidate, canonical_candidate_key, candidate_payload, jsonable
+from app.services.strategy_discovery import DiscoveryCandidate, SAFETY_STATEMENT, canonical_candidate_key, candidate_payload, jsonable
 
 
 ELITE_REPAIR_GENERATOR_VERSION = "elite_shadow_repair_v1"
+DEFAULT_REPAIR_FILTER = "close_gt_slow_ema"
 
 
 def elite_repair_proposals(conn: psycopg.Connection, limit: int = 50) -> dict[str, Any]:
@@ -70,6 +72,112 @@ def elite_repair_proposals(conn: psycopg.Connection, limit: int = 50) -> dict[st
             "requires_normal_research_validation": True,
         },
     }
+
+
+def queue_elite_repair_campaign(conn: psycopg.Connection, *, repair_filter: str = DEFAULT_REPAIR_FILTER, operator: str = "system") -> dict[str, Any]:
+    from app.services.research_campaigns import DEFAULT_SCHEDULING_CONFIG, queue_campaign_jobs, update_campaign_counts
+
+    snapshot = elite_repair_proposals(conn)
+    selected = [
+        proposal
+        for proposal in snapshot["proposals"]
+        if repair_filter == "all" or proposal["mutation"]["id"] == repair_filter
+    ]
+    if not selected:
+        raise ValueError(f"no elite repair proposals matched repair filter '{repair_filter}'")
+    key = elite_repair_campaign_key(selected, repair_filter)
+    name = "Elite shadow repair research"
+    if repair_filter != "all":
+        name = f"{name}: {repair_filter}"
+    controls = {
+        "campaign_version": ELITE_REPAIR_GENERATOR_VERSION,
+        "candidate_generation": "phase10_shadow_elite_repair",
+        "repair_filter": repair_filter,
+        "operator": operator,
+        "parent_count": len({proposal["parent"]["candidate_id"] for proposal in selected}),
+        "proposal_count": len(selected),
+        "parent_deployments": [proposal["parent"] for proposal in selected],
+        "repair_mutations": [proposal["mutation"] for proposal in selected],
+        "constraints": snapshot["constraints"],
+        "validation_policy": "Existing research and elite validation gates remain unchanged.",
+    }
+    row = conn.execute(
+        """
+        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
+        VALUES (%s, %s, 'elite_shadow_repair', 'queued', %s, %s, %s, %s, TRUE)
+        ON CONFLICT(campaign_key) DO UPDATE SET updated_at = NOW()
+        RETURNING *
+        """,
+        (
+            key,
+            name,
+            len(selected),
+            Jsonb(jsonable(controls)),
+            Jsonb({**DEFAULT_SCHEDULING_CONFIG, "batch_size": 15, "daily_experiment_budget": len(selected), "max_generated_candidates": len(selected)}),
+            SAFETY_STATEMENT,
+        ),
+    ).fetchone()
+    campaign_id = int(row["id"])
+    jobs_created = 0
+    queued_children = []
+    for proposal in selected:
+        candidate = candidate_from_payload(proposal["candidate"])
+        parent = proposal["parent"]
+        created = queue_campaign_jobs(conn, campaign_id, [candidate], [str(parent["symbol"])], [str(parent["timeframe"])])
+        jobs_created += created
+        queued_children.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "parent_candidate_id": candidate.parent_candidate_id,
+                "symbol": parent["symbol"],
+                "timeframe": parent["timeframe"],
+                "repair": proposal["mutation"]["id"],
+                "jobs_created": created,
+            }
+        )
+    update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    return {
+        "campaign": jsonable(dict(row)),
+        "repair_filter": repair_filter,
+        "parents": len({proposal["parent"]["candidate_id"] for proposal in selected}),
+        "candidates_queued": len(selected),
+        "jobs_created": jobs_created,
+        "queued_children": queued_children,
+        "constraints": snapshot["constraints"],
+        "simulation_only": True,
+    }
+
+
+def elite_repair_campaign_key(proposals: list[dict[str, Any]], repair_filter: str) -> str:
+    material = {
+        "version": ELITE_REPAIR_GENERATOR_VERSION,
+        "repair_filter": repair_filter,
+        "routes": [
+            {
+                "child": proposal["candidate"]["candidate_id"],
+                "parent": proposal["parent"]["candidate_id"],
+                "symbol": proposal["parent"]["symbol"],
+                "timeframe": proposal["parent"]["timeframe"],
+                "repair": proposal["mutation"]["id"],
+            }
+            for proposal in proposals
+        ],
+    }
+    return f"elite_shadow_repair_{repair_filter}_{sha256(repr(material).encode()).hexdigest()[:16]}"
+
+
+def candidate_from_payload(payload: dict[str, Any]) -> DiscoveryCandidate:
+    return DiscoveryCandidate(
+        candidate_id=str(payload["candidate_id"]),
+        family_id=str(payload["family_id"]),
+        parent_candidate_id=str(payload["parent_candidate_id"]) if payload.get("parent_candidate_id") else None,
+        generation=int(payload["generation"]),
+        blocks=dict(payload["blocks"]),
+        parameters=dict(payload["parameters"]),
+        complexity=int(payload["complexity"]),
+        canonical_key=str(payload["canonical_key"]),
+    )
 
 
 def repair_proposals_for_parent(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -174,6 +282,9 @@ def candidate_from_external_deployment(row: dict[str, Any]) -> DiscoveryCandidat
 
 def child_candidate(parent: DiscoveryCandidate, row: dict[str, Any], mutation: dict[str, Any]) -> DiscoveryCandidate:
     params = {**parent.parameters, **mutation["changes"]}
+    params.pop("candidate_id", None)
+    params.pop("campaign_id", None)
+    params["source_campaign_id"] = row.get("campaign_id")
     params["parent_elite_candidate_id"] = row.get("elite_candidate_id")
     params["parent_external_deployment_id"] = row.get("external_deployment_id")
     params["generation_channel"] = "phase10_shadow_elite_repair"

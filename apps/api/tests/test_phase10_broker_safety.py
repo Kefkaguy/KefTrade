@@ -108,6 +108,8 @@ def test_shadow_elite_repair_generator_is_research_only() -> None:
     assert {proposal["candidate"]["parent_candidate_id"] for proposal in proposals} == {"sd_parent"}
     assert all(proposal["candidate"]["candidate_id"].startswith("sr_") for proposal in proposals)
     assert all(proposal["candidate"]["parameters"]["generation_channel"] == "phase10_shadow_elite_repair" for proposal in proposals)
+    assert all("candidate_id" not in proposal["candidate"]["parameters"] for proposal in proposals)
+    assert all("campaign_id" not in proposal["candidate"]["parameters"] for proposal in proposals)
     assert all("normal research campaign" in proposal["next_step"] for proposal in proposals)
 
 
