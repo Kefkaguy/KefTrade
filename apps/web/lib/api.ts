@@ -848,6 +848,7 @@ export type MissionControlSnapshot = {
   };
   invariants?: Array<Record<string, any>>;
   research_summary: Record<string, string | number | null>;
+  asset_count?: number;
   assets: MissionControlAsset[];
   review_queue: MissionControlQueueItem[];
   deployments: MissionControlDeployment[];

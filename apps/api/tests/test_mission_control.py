@@ -1,7 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from app.services.mission_control import classify_candle_freshness, get_mission_control
+from app.services.mission_control import classify_candle_freshness, compact_mission_control_snapshot, get_mission_control
 
 
 class Result:
@@ -511,6 +511,16 @@ def test_mission_control_authoritative_snapshot_is_consistent() -> None:
         assert snapshot["readiness"]["blocking_gates"]
     assert snapshot["diagnostics"]["active_count"] == len(snapshot["subsystem_errors"])
     assert all(error["active"] for error in snapshot["diagnostics"]["active"])
+
+
+def test_compact_mission_control_omits_large_detail_collections() -> None:
+    full = get_mission_control(MissionConn())
+    compact = compact_mission_control_snapshot(full)
+
+    assert compact["asset_count"] == len(full["assets"])
+    assert compact["assets"] == []
+    assert "campaigns" not in compact["research_campaigns"]
+    assert compact["research_campaigns"]["active_campaigns"] == full["research_campaigns"]["active_campaigns"]
 
 
 def test_latest_completed_campaign_summary_matches_phase_99_lifecycle_totals() -> None:

@@ -1,7 +1,9 @@
 import { BarList, Card, DataTable, EmptyState, MetricCard, PageTitle } from "@/components/ResearchUI";
 import { getEliteDeploymentAudit, getPortfolioReadiness, getStrategyDiagnosticsSummary } from "@/lib/api";
 
-export const revalidate = 30;
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
 
 export default async function DiagnosticsPage() {
   const [summaryResult, auditResult, portfolioResult] = await Promise.allSettled([

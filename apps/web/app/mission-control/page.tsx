@@ -3,7 +3,9 @@ import { Card, EmptyState, PageTitle } from "@/components/ResearchUI";
 import { MissionControlDashboard } from "@/components/MissionControlDashboard";
 import { getDeploymentManagement, getMissionControl, getResearchIntelligence } from "@/lib/api";
 
-export const revalidate = 15;
+export const dynamic = "force-dynamic";
+export const fetchCache = "force-no-store";
+export const revalidate = 0;
 
 export default async function MissionControlPage() {
   const startedAt = Date.now();

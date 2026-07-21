@@ -98,7 +98,7 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
       <motion.section variants={reveal}>
         <div className="sectionHeading sectionHeadingOutside"><div><span className="eyebrow">Operational overview</span><h2>Current workload</h2></div></div>
         <div className="metricCardGrid">
-          <OverviewMetric icon={HardDrive} label="Data freshness" value={snapshot.system_health.overall_data_freshness} detail={`${snapshot.assets.length} monitored assets`} tone={statusTone(snapshot.system_health.overall_data_freshness)} />
+          <OverviewMetric icon={HardDrive} label="Data freshness" value={snapshot.system_health.overall_data_freshness} detail={`${snapshot.asset_count ?? snapshot.assets.length} monitored assets`} tone={statusTone(snapshot.system_health.overall_data_freshness)} />
           <OverviewMetric icon={Activity} label="Active deployments" value={snapshot.system_health.active_deployment_count} detail={`${snapshot.paper_account.open_positions} open positions`} />
           <OverviewMetric icon={ShieldCheck} label="Safety" value={snapshot.safety.live_routing_enabled ? "Routing enabled" : "Simulation only"} detail={snapshot.safety.detail} tone={snapshot.safety.live_routing_enabled ? "error" : "success"} />
           <OverviewMetric icon={Server} label="Candidates" value={researchIntelligence?.rankings?.length ?? 0} detail="Ranked research records" />

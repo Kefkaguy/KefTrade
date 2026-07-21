@@ -132,6 +132,32 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
     }
 
 
+def compact_campaign_operations(campaigns: dict[str, Any]) -> dict[str, Any]:
+    """Keep operational counters while excluding multi-megabyte campaign payloads."""
+    keys = (
+        "active_worker_count", "healthy_worker_count", "stale_worker_count",
+        "active_campaigns", "queued_campaigns", "queue_depth", "queued_jobs",
+        "running_jobs", "completed_jobs", "rejected_jobs", "failed_jobs",
+        "blocked_data_jobs", "deferred_jobs", "retrying_jobs", "claimed_jobs",
+        "generated_candidates", "promoted_candidates", "scheduler_enabled",
+        "worker_utilization", "average_job_runtime_ms", "queue_throughput",
+        "oldest_queued_job_age_hours", "campaign_eta", "current_experiment",
+        "simulation_only",
+    )
+    return {key: campaigns.get(key) for key in keys if key in campaigns}
+
+
+def compact_mission_control_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Return the bounded dashboard contract without mutating the full snapshot."""
+    assets = list(snapshot.get("assets") or [])
+    return {
+        **snapshot,
+        "asset_count": len(assets),
+        "assets": [],
+        "research_campaigns": compact_campaign_operations(dict(snapshot.get("research_campaigns") or {})),
+    }
+
+
 def authoritative_readiness(validation: dict[str, Any], now: datetime) -> dict[str, Any]:
     gates = list(validation.get("readiness_gates") or [])
     blocking = [gate for gate in gates if gate.get("mandatory") and not gate.get("passed")]
