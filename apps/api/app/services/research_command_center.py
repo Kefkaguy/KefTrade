@@ -33,7 +33,7 @@ def research_command_center(
     cache_key = command_center_cache_key(campaign_id, filters or {})
     cached = cached_command_center_payload(cache_key)
     if cached is not None:
-        return cached
+        return complete_command_center_payload(cached, filters or {})
     try:
         campaigns = [dict(row) for row in conn.execute(
             """
@@ -46,9 +46,9 @@ def research_command_center(
         ).fetchall()]
     except psycopg.errors.UndefinedTable:
         conn.rollback()
-        return remember_command_center_payload(cache_key, empty_command_center(filters or {}))
+        return remember_command_center_payload(cache_key, complete_command_center_payload({}, filters or {}))
     if not campaigns:
-        return remember_command_center_payload(cache_key, empty_command_center(filters or {}))
+        return remember_command_center_payload(cache_key, complete_command_center_payload({}, filters or {}))
 
     if campaign_id is not None:
         campaign = next((row for row in campaigns if int(row["id"]) == campaign_id), None)
@@ -60,7 +60,7 @@ def research_command_center(
             (campaign_id,),
         ).fetchone()["count"])
         if job_count > 5000 or str(campaign.get("status") or "").lower() in {"queued", "running"}:
-            return remember_command_center_payload(cache_key, aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {}))
+            return remember_command_center_payload(cache_key, complete_command_center_payload(aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {}), filters or {}))
     else:
         scope_ids = [int(row["id"]) for row in campaigns]
         active_statuses = {"queued", "running"}
@@ -82,8 +82,8 @@ def research_command_center(
             if snapshot is not None:
                 snapshot["campaigns"] = campaigns
                 snapshot["live_evidence"] = any(str(row.get("status") or "").lower() in active_statuses for row in campaigns)
-                return remember_command_center_payload(cache_key, snapshot)
-        return remember_command_center_payload(cache_key, aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {}))
+                return remember_command_center_payload(cache_key, complete_command_center_payload(snapshot, filters or {}))
+        return remember_command_center_payload(cache_key, complete_command_center_payload(aggregate_command_center(conn, campaign, campaigns, scope_ids, filters or {}), filters or {}))
 
     jobs = [dict(row) for row in conn.execute(
         """
@@ -145,7 +145,7 @@ def research_command_center(
     }
     payload["live_evidence"] = any(str(row.get("status") or "").lower() in {"queued", "running"} for row in campaigns if campaign_id is None or int(row["id"]) == campaign_id)
     payload["simulation_only"] = True
-    return remember_command_center_payload(cache_key, payload)
+    return remember_command_center_payload(cache_key, complete_command_center_payload(payload, filters or {}))
 
 
 def command_center_cache_key(campaign_id: int | None, filters: dict[str, Any]) -> str:
@@ -1943,6 +1943,7 @@ def empty_command_center(filters: dict[str, Any]) -> dict[str, Any]:
         "campaign": None,
         "campaigns": [],
         "filters": normalized_filters(filters),
+        "filter_options": {"assets": [], "asset_classes": [], "timeframes": [], "strategy_families": [], "candidate_states": [], "validation_rules": [], "regimes": []},
         "overview": {},
         "candidate_funnel": [],
         "rejection_analysis": {},
@@ -1956,8 +1957,57 @@ def empty_command_center(filters: dict[str, Any]) -> dict[str, Any]:
         "recommendations": [],
         "next_campaign_proposal": None,
         "historical_research": {"separated_from_campaign_evidence": True, "alpha_validation_runs": [], "strategy_experiments": []},
+        "terminology": {},
+        "reconciliation": {},
+        "source": {},
         "simulation_only": True,
     }
+
+
+def complete_command_center_payload(payload: dict[str, Any], filters: dict[str, Any]) -> dict[str, Any]:
+    """Upgrade snapshots and cached payloads to the current render contract."""
+    result = {**empty_command_center(filters), **dict(payload or {})}
+    for key in ("campaigns", "candidate_funnel", "near_pass_candidates", "regime_analysis", "experiment_history", "recommendations"):
+        result[key] = list(result.get(key) or [])
+    for key in ("overview", "rejection_analysis", "duplicate_analysis", "terminology", "reconciliation", "source"):
+        result[key] = dict(result.get(key) or {})
+    result["filter_options"] = {
+        **empty_command_center(filters)["filter_options"],
+        **dict(result.get("filter_options") or {}),
+    }
+    for key in result["filter_options"]:
+        result["filter_options"][key] = list(result["filter_options"].get(key) or [])
+    for key in ("strategy_intelligence", "asset_intelligence", "timeframe_intelligence"):
+        section = dict(result.get(key) or {})
+        result[key] = {"rows": list(section.get("rows") or []), "highlights": dict(section.get("highlights") or {})}
+    result["near_pass_candidates"] = [
+        {**dict(row), "failed_gates": list(dict(row).get("failed_gates") or [])}
+        for row in result["near_pass_candidates"]
+        if isinstance(row, dict)
+    ]
+    result["experiment_history"] = [
+        {
+            **dict(row),
+            "assets": list(dict(row).get("assets") or []),
+            "timeframes": list(dict(row).get("timeframes") or []),
+            "failure_reasons": list(dict(row).get("failure_reasons") or []),
+        }
+        for row in result["experiment_history"]
+        if isinstance(row, dict)
+    ]
+    proposal = result.get("next_campaign_proposal")
+    if isinstance(proposal, dict):
+        result["next_campaign_proposal"] = {
+            **proposal,
+            **{key: list(proposal.get(key) or []) for key in (
+                "strategy_families_to_retain", "strategy_families_to_deprioritize",
+                "assets_to_retain", "assets_to_deprioritize", "timeframes_to_retain",
+                "timeframes_to_deprioritize", "new_hypothesis_tests",
+            )},
+        }
+    else:
+        result["next_campaign_proposal"] = None
+    return result
 
 
 def terminology() -> dict[str, str]:

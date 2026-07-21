@@ -1475,7 +1475,53 @@ export function fetchResearchCommandCenter(filters: ResearchCommandCenterFilters
   if (filters.dateFrom) params.set("date_from", filters.dateFrom);
   if (filters.dateTo) params.set("date_to", filters.dateTo);
   const suffix = params.size ? `?${params.toString()}` : "";
-  return request<ResearchCommandCenter>(`/research/command-center${suffix}`, { timeoutMs: 60000 });
+  return request<Partial<ResearchCommandCenter>>(`/research/command-center${suffix}`, { timeoutMs: 60000 })
+    .then(normalizeResearchCommandCenter);
+}
+
+function normalizeResearchCommandCenter(value: Partial<ResearchCommandCenter>): ResearchCommandCenter {
+  const array = <T>(candidate: T[] | undefined | null): T[] => Array.isArray(candidate) ? candidate : [];
+  const object = <T extends Record<string, any>>(candidate: T | undefined | null): T => candidate && typeof candidate === "object" && !Array.isArray(candidate) ? candidate : {} as T;
+  const intelligence = (candidate: ResearchCommandCenter["strategy_intelligence"] | undefined) => ({
+    rows: array(candidate?.rows),
+    highlights: object(candidate?.highlights)
+  });
+  const proposal = value.next_campaign_proposal && typeof value.next_campaign_proposal === "object"
+    ? {
+        ...value.next_campaign_proposal,
+        strategy_families_to_retain: array(value.next_campaign_proposal.strategy_families_to_retain),
+        strategy_families_to_deprioritize: array(value.next_campaign_proposal.strategy_families_to_deprioritize),
+        assets_to_retain: array(value.next_campaign_proposal.assets_to_retain),
+        assets_to_deprioritize: array(value.next_campaign_proposal.assets_to_deprioritize),
+        timeframes_to_retain: array(value.next_campaign_proposal.timeframes_to_retain),
+        timeframes_to_deprioritize: array(value.next_campaign_proposal.timeframes_to_deprioritize),
+        new_hypothesis_tests: array(value.next_campaign_proposal.new_hypothesis_tests)
+      }
+    : null;
+  return {
+    live_evidence: Boolean(value.live_evidence),
+    campaign: value.campaign ?? null,
+    campaigns: array(value.campaigns),
+    filters: object(value.filters),
+    filter_options: object(value.filter_options),
+    overview: object(value.overview),
+    candidate_funnel: array(value.candidate_funnel),
+    rejection_analysis: object(value.rejection_analysis),
+    near_pass_candidates: array(value.near_pass_candidates).map((row) => ({ ...row, failed_gates: array(row.failed_gates) })),
+    strategy_intelligence: intelligence(value.strategy_intelligence),
+    asset_intelligence: intelligence(value.asset_intelligence),
+    timeframe_intelligence: intelligence(value.timeframe_intelligence),
+    regime_analysis: array(value.regime_analysis),
+    duplicate_analysis: object(value.duplicate_analysis),
+    experiment_history: array(value.experiment_history).map((row) => ({ ...row, assets: array(row.assets), timeframes: array(row.timeframes), failure_reasons: array(row.failure_reasons) })),
+    recommendations: array(value.recommendations),
+    next_campaign_proposal: proposal,
+    historical_research: object(value.historical_research),
+    terminology: object(value.terminology),
+    reconciliation: object(value.reconciliation),
+    source: object(value.source),
+    simulation_only: value.simulation_only !== false
+  };
 }
 
 export function getPersistedCandidateProfile(candidateId: string, options?: { campaignId?: number }) {

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import json
 
-from app.services.research_command_center import analyze_campaign, deterministic_evidence_plan, prepare_job, research_command_center
+from app.services.research_command_center import analyze_campaign, complete_command_center_payload, deterministic_evidence_plan, prepare_job, research_command_center
 
 
 CAMPAIGN = {
@@ -307,3 +307,16 @@ def test_all_scope_combines_campaigns_and_keeps_running_evidence_visible() -> No
     assert payload["overview"]["candidates_generated"] == 2
     assert payload["overview"]["candidates_tested"] == 2
     assert len(payload["experiment_history"]) == 2
+
+
+def test_legacy_snapshot_is_upgraded_to_safe_render_contract() -> None:
+    payload = complete_command_center_payload(
+        {"overview": {"campaign_jobs": 1}, "strategy_intelligence": {}, "next_campaign_proposal": {"candidate_count": 5}},
+        {},
+    )
+
+    assert payload["campaigns"] == []
+    assert payload["candidate_funnel"] == []
+    assert payload["strategy_intelligence"] == {"rows": [], "highlights": {}}
+    assert payload["next_campaign_proposal"]["new_hypothesis_tests"] == []
+    assert payload["filter_options"]["assets"] == []
