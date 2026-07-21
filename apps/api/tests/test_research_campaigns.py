@@ -15,6 +15,7 @@ from app.services.research_campaigns import (
     data_readiness_for_job,
     forward_validation_state,
     generate_discovery_candidates,
+    campaign_status,
     campaign_list_row_with_eta,
     candidate_parameter_distance,
     diverse_candidate_selection,
@@ -344,6 +345,22 @@ def test_worker_error_classifier_does_not_mistake_invalid_json_for_missing_data(
     error = ValueError('invalid input syntax for type json: Token "NaN" is invalid')
 
     assert classify_worker_error(error) == "database_error"
+
+
+def test_campaign_status_keeps_campaign_summary_nested() -> None:
+    conn = CampaignConn()
+    created = create_research_campaign(conn, universe_key="sp500_leaders", max_candidates=1, asset_limit=2, timeframes=["1h"])
+
+    status = campaign_status(conn, created["campaign"]["id"])
+
+    assert set(status) >= {"campaign", "analytics", "recent_jobs", "forward_validation_candidates", "elite_candidates"}
+    assert status["campaign"]["id"] == created["campaign"]["id"]
+    assert status["campaign"]["status"] == "queued"
+    assert status["campaign"]["queued_jobs"] == 2
+    assert status["campaign"]["completed_jobs"] == 0
+    assert status["campaign"]["failed_jobs"] == 0
+    assert status["campaign"]["promoted_candidates"] == 0
+    assert status["campaign"]["rejected_candidates"] == 0
 
 
 def test_large_strategy_generation_supports_thousands_without_duplicates() -> None:
