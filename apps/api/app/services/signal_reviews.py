@@ -18,6 +18,7 @@ from app.services.evidence_alerts import (
 )
 from app.services.features import load_candles
 from app.services.strategy import StrategyDecision, get_strategy_definition
+from app.services.strategy_diagnostics import enrich_decision
 from app.services.strategy_research import PAPER_READY_THRESHOLDS, finite_metric
 
 SIGNAL_REVIEW_DISCLAIMER = "Research-only setup review. Not financial advice. No trade is executed."
@@ -83,7 +84,7 @@ def generate_signal_review(conn: psycopg.Connection, deployment: dict[str, Any])
             },
         )
 
-    decision = strategy.decide(candle, feature, candles, params)
+    decision = enrich_decision(strategy.decide(candle, feature, candles, params), candle, feature, candles, params)
     metrics = safe_research_metrics(conn, deployment)
     rule_result = tsla_momentum_bull_rules(candle, feature, decision, params)
     regime = rule_result["regime"] or current_regime(candle, feature)

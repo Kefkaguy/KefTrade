@@ -290,12 +290,26 @@ def create_daily_research_report(report_date: date | None = Query(None), conn: p
 
 @router.get("/daily-reports")
 def get_daily_research_reports(limit: int = Query(30, ge=1, le=365), conn: psycopg.Connection = Depends(get_connection)) -> list[dict[str, Any]]:
-    return list_daily_research_reports(conn, limit=limit)
+    from app.services.shared_cache import get_json, set_json
+    key = f"summary:daily-reports:{limit}"
+    cached = get_json(key)
+    if cached is not None:
+        return cached
+    result = list_daily_research_reports(conn, limit=limit)
+    set_json(key, result, 300)
+    return result
 
 
 @router.get("/daily-reports/analytics")
 def get_daily_research_report_analytics(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
-    return build_daily_report_analytics(conn)
+    from app.services.shared_cache import get_json, set_json
+    key = "summary:daily-report-analytics"
+    cached = get_json(key)
+    if cached is not None:
+        return cached
+    result = build_daily_report_analytics(conn)
+    set_json(key, result, 300)
+    return result
 
 
 @router.get("/daily-reports/{report_date}")

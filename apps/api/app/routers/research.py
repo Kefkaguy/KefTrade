@@ -550,7 +550,14 @@ def get_research_campaigns(
     limit: int = Query(50, ge=1, le=200),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
-    return list_research_campaigns(conn, limit=limit)
+    from app.services.shared_cache import get_json, set_json
+    key = f"summary:research-campaigns:{limit}"
+    cached = get_json(key)
+    if cached is not None:
+        return cached
+    result = list_research_campaigns(conn, limit=limit)
+    set_json(key, result, 60)
+    return result
 
 
 @router.post("/research/campaigns/preflight")
@@ -766,7 +773,14 @@ def get_large_scale_research_campaign_report(
     campaign_id: int,
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
-    return get_campaign_report(conn, campaign_id)
+    from app.services.shared_cache import get_json, set_json
+    key = f"summary:campaign-report:{campaign_id}"
+    cached = get_json(key)
+    if cached is not None:
+        return cached
+    result = get_campaign_report(conn, campaign_id)
+    set_json(key, result, 300)
+    return result
 
 
 @router.post("/research/campaigns/{campaign_id}/reports")

@@ -3,16 +3,18 @@ import { Card, EmptyState, PageTitle } from "@/components/ResearchUI";
 import { MissionControlDashboard } from "@/components/MissionControlDashboard";
 import { getDeploymentManagement, getMissionControl, getResearchIntelligence } from "@/lib/api";
 
-export const dynamic = "force-dynamic";
-export const fetchCache = "force-no-store";
-export const revalidate = 0;
+export const revalidate = 15;
 
 export default async function MissionControlPage() {
   const startedAt = Date.now();
   console.info("[mission-control] page load started");
-  const [snapshot, deploymentManagement] = await Promise.all([
+  const [snapshot, deploymentManagement, researchIntelligence] = await Promise.all([
     timed("mission-control snapshot", () => getMissionControl()).catch((error) => ({ error: error instanceof Error ? error.message : "Mission Control unavailable" })),
-    timed("deployment management", () => getDeploymentManagement()).catch((error) => ({ error: error instanceof Error ? error.message : "Deployment management unavailable" }))
+    timed("deployment management", () => getDeploymentManagement()).catch((error) => ({ error: error instanceof Error ? error.message : "Deployment management unavailable" })),
+    timed("research intelligence", () => getResearchIntelligence()).catch((error) => {
+      console.warn("[mission-control] research intelligence unavailable", error instanceof Error ? error.message : error);
+      return null;
+    })
   ]);
 
   if ("error" in snapshot) {
@@ -27,10 +29,6 @@ export default async function MissionControlPage() {
     );
   }
 
-  const researchIntelligence = await timed("research intelligence", () => getResearchIntelligence()).catch((error) => {
-    console.warn("[mission-control] research intelligence unavailable", error instanceof Error ? error.message : error);
-    return null;
-  });
   const deploymentError = "error" in deploymentManagement ? deploymentManagement.error : null;
   console.info(`[mission-control] page load finished in ${Date.now() - startedAt}ms`, {
     snapshot: "loaded",

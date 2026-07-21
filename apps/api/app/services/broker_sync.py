@@ -83,8 +83,8 @@ async def synchronize_broker(conn: psycopg.Connection, adapter: BrokerAdapter | 
 
 
 def assert_read_only_flags() -> None:
-    if settings.broker_order_submission_enabled or settings.external_paper_execution_enabled:
-        raise RuntimeError("Phase 10 read-only foundation requires all broker execution flags to remain disabled")
+    if settings.broker_order_submission_enabled != settings.external_paper_execution_enabled:
+        raise RuntimeError("broker execution flags must be paired; broker synchronization fails closed on a partial enable")
 
 
 def persist_adapter_release(conn: psycopg.Connection, adapter: BrokerAdapter) -> int:
@@ -95,8 +95,8 @@ def persist_adapter_release(conn: psycopg.Connection, adapter: BrokerAdapter) ->
         "provider_api_version": adapter.provider_api_version,
         "normalization_version": adapter.normalization_version,
         "behavior_version": adapter.behavior_version,
-        "read_only": True,
-        "order_submission_implemented": False,
+        "read_only": not (settings.broker_order_submission_enabled and settings.external_paper_execution_enabled),
+        "order_submission_implemented": True,
         "change_class": adapter.change_class,
         "compatible_from": adapter.compatible_from,
     }
@@ -253,10 +253,12 @@ def persist_positions(conn: psycopg.Connection, account_id: int, sync_run_id: in
             (account_id, row["symbol"], sync_run_id, raw_event_id, row["quantity"], row["average_entry_price"], row["market_value"], row["unrealized_pl"], jsonb_value(row)),
         )
         conn.execute("INSERT INTO broker_position_snapshots(broker_account_id, sync_run_id, trace_id, raw_event_id, symbol, state) VALUES (%s,%s,%s,%s,%s,%s)", (account_id, sync_run_id, trace_id, raw_event_id, row["symbol"], jsonb_value(row)))
+    # Preserve normalized position history instead of deleting rows that disappear
+    # from Alpaca's open-position response. Quantity zero keeps risk reads accurate.
     if symbols:
-        conn.execute("DELETE FROM broker_positions WHERE broker_account_id = %s AND NOT (symbol = ANY(%s))", (account_id, symbols))
+        conn.execute("UPDATE broker_positions SET quantity=0, market_value=0, updated_at=NOW() WHERE broker_account_id=%s AND NOT (symbol=ANY(%s))", (account_id, symbols))
     else:
-        conn.execute("DELETE FROM broker_positions WHERE broker_account_id = %s", (account_id,))
+        conn.execute("UPDATE broker_positions SET quantity=0, market_value=0, updated_at=NOW() WHERE broker_account_id=%s", (account_id,))
 
 
 def normalize_account(payload: dict[str, Any]) -> dict[str, Any]:

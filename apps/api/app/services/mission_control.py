@@ -99,10 +99,10 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
         "simulation_only": True,
         "safety": {
             "status": "Simulation protected",
-            "detail": "Live routing is physically disabled",
+            "detail": "Live-money routing is disabled; Alpaca Paper execution is explicitly gated" if external_broker_paper.get("execution_enabled") else "Live-money routing is disabled; Alpaca Paper is in observation mode",
             "simulation_only": True,
             "live_routing_enabled": False,
-            "broker_order_routing": "disabled",
+            "broker_order_routing": "alpaca_paper_enabled" if external_broker_paper.get("execution_enabled") else "disabled",
         },
         "system_health": health,
         "health": {

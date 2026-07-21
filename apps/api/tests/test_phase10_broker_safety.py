@@ -50,8 +50,11 @@ def test_adapter_only_uses_read_only_alpaca_endpoints(monkeypatch: pytest.Monkey
     assert all(request.url.host == "paper-api.alpaca.markets" for request in requests)
 
 
-def test_broker_mutations_are_unimplemented(monkeypatch: pytest.MonkeyPatch) -> None:
-    adapter = configured_adapter(monkeypatch, lambda _: httpx.Response(500))
+def test_broker_mutations_fail_closed_without_both_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+    adapter = configured_adapter(monkeypatch, lambda request: requests.append(request) or httpx.Response(500))
+    monkeypatch.setattr(settings, "broker_order_submission_enabled", False)
+    monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
 
     async def run() -> None:
         with pytest.raises(BrokerMutationDisabled):
@@ -61,6 +64,27 @@ def test_broker_mutations_are_unimplemented(monkeypatch: pytest.MonkeyPatch) -> 
         await adapter._provided_client.aclose()  # type: ignore[union-attr]
 
     asyncio.run(run())
+    assert requests == []
+
+
+def test_paper_order_submission_requires_and_uses_both_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "paper-order-1", "client_order_id": "kef-1"}, headers={"X-Request-ID": "req-1"})
+
+    adapter = configured_adapter(monkeypatch, handler)
+    monkeypatch.setattr(settings, "broker_order_submission_enabled", True)
+    monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
+
+    async def run() -> None:
+        result = await adapter.submit_order({"symbol": "AAPL", "qty": "1", "side": "buy", "type": "market", "time_in_force": "day"})
+        assert result.payload["id"] == "paper-order-1"
+        await adapter._provided_client.aclose()  # type: ignore[union-attr]
+
+    asyncio.run(run())
+    assert [(request.method, request.url.path) for request in requests] == [("POST", "/v2/orders")]
 
 
 def test_execution_flags_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -150,12 +174,8 @@ def test_phase10_modules_have_no_runtime_ddl() -> None:
     assert violations == []
 
 
-def test_adapter_source_has_no_network_mutation_implementation() -> None:
+def test_adapter_has_explicit_guards_for_both_mutation_methods() -> None:
     source = (ROOT / "brokers" / "alpaca_paper.py").read_text(encoding="utf-8")
-    assert ".post(" not in source
-    assert ".put(" not in source
-    assert ".patch(" not in source
-    assert ".delete(" not in source
     assert source.count("raise BrokerMutationDisabled") == 2
 
 

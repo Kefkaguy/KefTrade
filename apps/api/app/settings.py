@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
     diagnostic_logging: bool = True
+    redis_url: str | None = Field(default=None, validation_alias="REDIS_URL")
+    cache_key_prefix: str = Field(default="keftrade", validation_alias="KEFTRADE_CACHE_KEY_PREFIX")
     database_url: str = "postgresql://keftrade:keftrade@127.0.0.1:5432/keftrade"
     cors_origins: str = "http://127.0.0.1:3000,http://localhost:3000,http://127.0.0.1:3001,http://localhost:3001"
     binance_base_url: str = "https://api.binance.us"
@@ -33,6 +35,11 @@ class Settings(BaseSettings):
     broker_shadow_execution_enabled: bool = Field(default=True, validation_alias="BROKER_SHADOW_EXECUTION_ENABLED")
     broker_order_submission_enabled: bool = Field(default=False, validation_alias="BROKER_ORDER_SUBMISSION_ENABLED")
     external_paper_execution_enabled: bool = Field(default=False, validation_alias="EXTERNAL_PAPER_EXECUTION_ENABLED")
+    model_risk_enabled: bool = Field(default=True, validation_alias="MODEL_RISK_ENABLED")
+    model_risk_authority: str = Field(default="shadow", validation_alias="MODEL_RISK_AUTHORITY")
+    model_risk_max_risk_pct: float = Field(default=0.005, validation_alias="MODEL_RISK_MAX_RISK_PCT")
+    model_risk_min_confidence: float = Field(default=0.65, validation_alias="MODEL_RISK_MIN_CONFIDENCE")
+    portfolio_correlation_limit: float = Field(default=0.80, validation_alias="KEFTRADE_PORTFOLIO_CORRELATION_LIMIT")
     broker_allocated_capital: float = Field(default=10000, validation_alias="KEFTRADE_BROKER_ALLOCATED_CAPITAL")
     max_broker_risk_per_trade_pct: float = Field(default=0.01, validation_alias="KEFTRADE_MAX_RISK_PER_TRADE_PCT")
     max_broker_total_exposure_pct: float = Field(default=0.03, validation_alias="KEFTRADE_MAX_TOTAL_EXPOSURE_PCT")

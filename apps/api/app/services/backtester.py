@@ -6,6 +6,7 @@ from typing import Any
 import numpy as np
 
 from app.services.strategy import StrategyFn, trend_pullback_decision
+from app.services.strategy_diagnostics import enrich_decision
 
 SAME_CANDLE_EXIT_POLICY = "stop_first"
 
@@ -61,7 +62,7 @@ def run_backtest(
         recent_window_bars = max(0, int(params.get("recent_candle_window_bars") or 0))
         recent_start = max(0, i + 1 - recent_window_bars) if recent_window_bars else 0
         recent_candles = candle_rows[recent_start : i + 1]
-        decision = strategy_decide(candle, feature, recent_candles, params)
+        decision = enrich_decision(strategy_decide(candle, feature, recent_candles, params), candle, feature, recent_candles, params)
 
         if decision.signal != "setup" or decision.stop_loss is None or decision.take_profit is None:
             i += 1
@@ -169,7 +170,7 @@ def count_setup_opportunities(
         recent_window_bars = max(0, int(params.get("recent_candle_window_bars") or 0))
         recent_start = max(0, index + 1 - recent_window_bars) if recent_window_bars else 0
         recent_candles = candle_rows[recent_start : index + 1]
-        decision = strategy_decide(current["candle"], current["feature"], recent_candles, params)
+        decision = enrich_decision(strategy_decide(current["candle"], current["feature"], recent_candles, params), current["candle"], current["feature"], recent_candles, params)
         if decision.signal == "setup" and decision.stop_loss is not None and decision.take_profit is not None:
             count += 1
     return {

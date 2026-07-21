@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
+from uuid import uuid4
 
 import psycopg
 from fastapi.encoders import jsonable_encoder
@@ -10,6 +11,7 @@ from app.providers.alpaca import sync_alpaca_candles
 from app.services.evidence_alerts import candle_is_stale, detect_paper_scan_alert
 from app.services.features import load_candles, sync_features
 from app.services.strategy import StrategyDecision, StrategyDefinition, get_strategy_definition
+from app.services.strategy_diagnostics import enrich_decision, persist_strategy_evaluation
 from app.settings import settings
 
 FEE_RATE = Decimal("0.001")
@@ -605,6 +607,14 @@ async def run_deployment_scan(
             "simulation_only": True,
         }
     decision = evaluate_deployment_decision(conn, deployment)
+    strategy_evaluation = persist_strategy_evaluation(
+        conn,
+        internal_deployment_id=int(deployment["id"]),
+        decision=decision,
+        candle=candle,
+        trace_id=uuid4(),
+        configuration_fingerprint=str(deployment.get("candidate_fingerprint") or "") or None,
+    )
     open_position = get_position(conn, account_id, symbol)
     pending_orders = pending_deployment_orders(conn, deployment_id)
     order = None
@@ -626,6 +636,7 @@ async def run_deployment_scan(
     payload = {
         "action": action,
         "decision": decision_payload(decision),
+        "strategy_evaluation_id": strategy_evaluation["id"],
         "sync": sync_payload,
         "features": feature_result,
         "processed_pending": processed,
@@ -758,7 +769,7 @@ def evaluate_deployment_decision(conn: psycopg.Connection, deployment: dict[str,
     if feature is None:
         raise PaperTradingError("No feature row matches the latest deployment candle.")
     params = {**strategy.parameters, **dict(deployment.get("parameters") or {})}
-    return strategy.decide(latest_candle, feature, candles, params)
+    return enrich_decision(strategy.decide(latest_candle, feature, candles, params), latest_candle, feature, candles, params)
 
 
 def is_candidate_linked_deployment(deployment: dict[str, Any]) -> bool:
@@ -857,6 +868,9 @@ def decision_payload(decision: StrategyDecision) -> dict[str, Any]:
         "take_profit": str(decision.take_profit) if decision.take_profit is not None else None,
         "risk_reward": str(decision.risk_reward) if decision.risk_reward is not None else None,
         "explanation": decision.explanation,
+        "decision_version": decision.decision_version,
+        "gates": decision.gates,
+        "regime": decision.regime,
     }
 
 

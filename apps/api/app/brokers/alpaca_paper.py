@@ -51,6 +51,18 @@ class AlpacaPaperBrokerAdapter:
             if owns_client:
                 await client.aclose()
 
+    async def _mutate(self, method: str, path: str, endpoint_class: str, payload: dict[str, Any] | None = None) -> BrokerResponse:
+        client = self._client()
+        owns_client = self._provided_client is None
+        try:
+            response = await client.request(method, path, json=payload)
+            response.raise_for_status()
+            body = response.json() if response.content else {}
+            return BrokerResponse(endpoint_class=endpoint_class, status_code=response.status_code, payload=body, request_id=response.headers.get("X-Request-ID"))
+        finally:
+            if owns_client:
+                await client.aclose()
+
     async def get_account(self) -> BrokerResponse:
         return await self._get("/v2/account", "account")
 
@@ -66,11 +78,18 @@ class AlpacaPaperBrokerAdapter:
     async def list_fill_activities(self) -> BrokerResponse:
         return await self._get("/v2/account/activities/FILL", "fill_activities", {"direction": "asc", "page_size": 100})
 
+    async def get_order_by_client_id(self, client_order_id: str) -> BrokerResponse:
+        return await self._get("/v2/orders:by_client_order_id", "order_by_client_id", {"client_order_id": client_order_id})
+
     async def submit_order(self, payload: dict[str, Any]) -> BrokerResponse:
-        raise BrokerMutationDisabled("broker order submission is not implemented in the Phase 10 read-only foundation")
+        if not settings.broker_order_submission_enabled or not settings.external_paper_execution_enabled:
+            raise BrokerMutationDisabled("both broker execution flags must be enabled for Alpaca Paper mutation")
+        return await self._mutate("POST", "/v2/orders", "submit_order", payload)
 
     async def cancel_order(self, broker_order_id: str) -> BrokerResponse:
-        raise BrokerMutationDisabled("broker order cancellation is not implemented in the Phase 10 read-only foundation")
+        if not settings.broker_order_submission_enabled or not settings.external_paper_execution_enabled:
+            raise BrokerMutationDisabled("both broker execution flags must be enabled for Alpaca Paper mutation")
+        return await self._mutate("DELETE", f"/v2/orders/{broker_order_id}", "cancel_order")
 
 
 def validate_paper_configuration() -> None:

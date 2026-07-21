@@ -200,6 +200,8 @@ def build_deployment_management(conn: psycopg.Connection) -> dict[str, Any]:
     positions = list_positions(conn)
     orders = list_orders(conn)
     fills = list_fills(conn)
+    order_counts = count_by_deployment(conn, "paper_orders")
+    fill_counts = count_fills_by_deployment(conn)
     logs = list_logs(conn)
     alerts = list_alerts(conn)
     positions_by_key = {(row.get("account_id"), row.get("symbol")): row for row in positions}
@@ -250,8 +252,8 @@ def build_deployment_management(conn: psycopg.Connection) -> dict[str, Any]:
                 "health_detail": health["detail"],
                 "position": position,
                 "exposure_pct": exposure_pct,
-                "orders_count": len(orders_by_deployment.get(deployment.get("id"), [])),
-                "fills_count": len(fills_by_deployment.get(deployment.get("id"), [])),
+                "orders_count": order_counts.get(deployment.get("id"), 0),
+                "fills_count": fill_counts.get(deployment.get("id"), 0),
                 "latest_alert": deployment_alerts[0] if deployment_alerts else None,
                 "audit_events": logs_by_deployment.get(deployment.get("id"), [])[:6],
                 "conflicts": conflicts,
@@ -260,8 +262,8 @@ def build_deployment_management(conn: psycopg.Connection) -> dict[str, Any]:
                     "unrealized_pnl": position.get("unrealized_pnl", Decimal("0")) if position else Decimal("0"),
                     "market_value": market_value,
                     "exposure_pct": exposure_pct,
-                    "orders": len(orders_by_deployment.get(deployment.get("id"), [])),
-                    "fills": len(fills_by_deployment.get(deployment.get("id"), [])),
+                    "orders": order_counts.get(deployment.get("id"), 0),
+                    "fills": fill_counts.get(deployment.get("id"), 0),
                     "last_signal": deployment.get("last_signal"),
                     "last_scan_at": deployment.get("last_scan_at"),
                 },
@@ -327,7 +329,7 @@ def list_positions(conn: psycopg.Connection) -> list[dict[str, Any]]:
 
 
 def list_orders(conn: psycopg.Connection) -> list[dict[str, Any]]:
-    return list(conn.execute("SELECT * FROM paper_orders WHERE simulation_only = TRUE ORDER BY submitted_at DESC, id DESC").fetchall())
+    return list(conn.execute("SELECT * FROM paper_orders WHERE simulation_only = TRUE ORDER BY submitted_at DESC, id DESC LIMIT 100").fetchall())
 
 
 def list_fills(conn: psycopg.Connection) -> list[dict[str, Any]]:
@@ -339,12 +341,38 @@ def list_fills(conn: psycopg.Connection) -> list[dict[str, Any]]:
                 FROM paper_fills f
                 LEFT JOIN paper_orders o ON o.id = f.order_id
                 WHERE f.simulation_only = TRUE
-                ORDER BY f.filled_at DESC, f.id DESC
+                ORDER BY f.filled_at DESC, f.id DESC LIMIT 100
                 """
             ).fetchall()
         )
     except Exception:
-        return list(conn.execute("SELECT * FROM paper_fills WHERE simulation_only = TRUE ORDER BY filled_at DESC, id DESC").fetchall())
+        return list(conn.execute("SELECT * FROM paper_fills WHERE simulation_only = TRUE ORDER BY filled_at DESC, id DESC LIMIT 100").fetchall())
+
+
+def count_by_deployment(conn: psycopg.Connection, table: str) -> dict[int, int]:
+    if table != "paper_orders":
+        raise ValueError("unsupported deployment count table")
+    rows = conn.execute(f"SELECT deployment_id, COUNT(*) AS count FROM {table} WHERE simulation_only=TRUE AND deployment_id IS NOT NULL GROUP BY deployment_id").fetchall()
+    if rows and "count" not in rows[0]:
+        rows = list_orders(conn)
+        return {deployment_id: sum(1 for row in rows if row.get("deployment_id") == deployment_id) for deployment_id in {row.get("deployment_id") for row in rows if row.get("deployment_id") is not None}}
+    return {int(row["deployment_id"]): int(row["count"]) for row in rows}
+
+
+def count_fills_by_deployment(conn: psycopg.Connection) -> dict[int, int]:
+    rows = conn.execute(
+        """
+        SELECT o.deployment_id, COUNT(*) AS count
+        FROM paper_fills f
+        JOIN paper_orders o ON o.id = f.order_id
+        WHERE f.simulation_only=TRUE AND o.deployment_id IS NOT NULL
+        GROUP BY o.deployment_id
+        """
+    ).fetchall()
+    if rows and "count" not in rows[0]:
+        rows = list_fills(conn)
+        return {deployment_id: sum(1 for row in rows if row.get("deployment_id") == deployment_id) for deployment_id in {row.get("deployment_id") for row in rows if row.get("deployment_id") is not None}}
+    return {int(row["deployment_id"]): int(row["count"]) for row in rows}
 
 
 def list_logs(conn: psycopg.Connection) -> list[dict[str, Any]]:

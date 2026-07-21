@@ -12,6 +12,7 @@ from app.services.research_intelligence import (
     filter_archive,
     persist_research_ranking_snapshots,
 )
+from app.services.shared_cache import get_json, set_json
 
 router = APIRouter(tags=["research-intelligence"])
 
@@ -21,10 +22,16 @@ def get_research_intelligence(
     persist_snapshot: bool = Query(False),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
+    if not persist_snapshot:
+        cached = get_json("summary:research-intelligence")
+        if cached is not None:
+            return cached
     report = build_research_intelligence(*load_research_history(conn), **load_research_context(conn))
     if persist_snapshot and report.get("rankings"):
         persist_research_ranking_snapshots(conn, report["rankings"])
         conn.commit()
+    if not persist_snapshot:
+        set_json("summary:research-intelligence", report, 60)
     return report
 
 

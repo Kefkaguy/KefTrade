@@ -1062,6 +1062,7 @@ export type AlphaValidationInput = {
 
 type ApiRequestInit = RequestInit & {
   timeoutMs?: number;
+  revalidateSeconds?: number;
 };
 
 export type ResearchUniverseInput = {
@@ -1301,11 +1302,47 @@ export type ResearchCampaignProfile = {
   simulation_only: boolean;
 };
 
+export type StrategyDiagnosticsSummary = {
+  evaluated: number;
+  signals: Record<string, number>;
+  setup_frequency: number;
+  failed_gates: Array<{ code: string; count: number; rate: number }>;
+  most_common_rejection: string | null;
+  health: { label: string; score: number };
+  sample_limited_to: number;
+};
+
+export type EliteDeploymentAudit = {
+  items: Array<{
+    elite_id: number;
+    strategy_name: string;
+    strategy_version: string;
+    symbol?: string | null;
+    timeframe?: string | null;
+    internal_deployment_id?: number | null;
+    internal_status?: string | null;
+    external_deployment_id?: number | null;
+    external_state?: string | null;
+    blockers: string[];
+  }>;
+  counts: { elites: number; internal_deployments: number; external_deployments: number };
+};
+
+export type PortfolioReadiness = {
+  positions: Array<Record<string, unknown>>;
+  open_orders: Array<Record<string, unknown>>;
+  recent_decisions: Array<Record<string, unknown>>;
+  portfolio_heat_pct: string | number;
+  heat_limit_pct: string | number;
+  same_symbol_limit: number;
+  correlation_limit: string | number;
+};
+
 const API_TIMING_ENABLED = process.env.NODE_ENV !== "production" || process.env.NEXT_PUBLIC_DIAGNOSTIC_LOGGING === "true";
 
 async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
   const controller = new AbortController();
-  const { timeoutMs = 3500, ...fetchOptions } = options ?? {};
+  const { timeoutMs = 3500, revalidateSeconds, ...fetchOptions } = options ?? {};
   const startedAt = now();
   const method = fetchOptions.method ?? "GET";
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -1314,7 +1351,8 @@ async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
     logFrontendDiagnostic("Fetch request sent", { method, path, timeoutMs });
     const response = await fetch(`${API_URL}${path}`, {
       ...fetchOptions,
-      cache: "no-store",
+      cache: fetchOptions.cache ?? cacheMode(path, method),
+      ...(method === "GET" && cacheMode(path, method) === "force-cache" ? { next: { revalidate: revalidateSeconds ?? 60 } } : {}),
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
@@ -1349,6 +1387,12 @@ async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function cacheMode(path: string, method: string): RequestCache {
+  if (method !== "GET") return "no-store";
+  const critical = ["/broker/", "/portfolio/readiness", "/execution-attempts", "/reconciliation", "/approvals", "/halts"];
+  return critical.some((token) => path.includes(token)) ? "no-store" : "force-cache";
 }
 
 function now() {
@@ -1848,11 +1892,23 @@ export function bulkScanDeployments(deploymentIds?: number[]) {
 }
 
 export function getMissionControl() {
-  return request<MissionControlSnapshot>("/paper/mission-control", { timeoutMs: 60000 });
+  return request<MissionControlSnapshot>("/paper/mission-control", { timeoutMs: 60000, revalidateSeconds: 15 });
+}
+
+export function getStrategyDiagnosticsSummary() {
+  return request<StrategyDiagnosticsSummary>("/strategy-diagnostics/summary", { timeoutMs: 15000, revalidateSeconds: 60 });
+}
+
+export function getEliteDeploymentAudit() {
+  return request<EliteDeploymentAudit>("/elite-deployments/audit", { timeoutMs: 15000, revalidateSeconds: 60 });
+}
+
+export function getPortfolioReadiness() {
+  return request<PortfolioReadiness>("/portfolio/readiness", { timeoutMs: 15000 });
 }
 
 export function getDeploymentManagement() {
-  return request<DeploymentManagementSnapshot>("/paper/deployment-management", { timeoutMs: 60000 });
+  return request<DeploymentManagementSnapshot>("/paper/deployment-management", { timeoutMs: 60000, revalidateSeconds: 15 });
 }
 
 export function getDailyResearchReports(limit = 30) {

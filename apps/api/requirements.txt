@@ -8,3 +8,4 @@ pandas>=2.2.0
 numpy>=2.0.0
 pytest>=8.0.0
 yfinance>=0.2.50
+redis>=5.2.0

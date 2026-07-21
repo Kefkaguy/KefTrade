@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -10,7 +9,7 @@ from psycopg.types.json import Jsonb
 from app.db import connect
 from app.services.broker_reconciliation import reconcile_broker_snapshot
 from app.services.broker_sync import synchronize_broker
-from app.services.external_execution import run_shadow_cycle
+from app.services.external_execution import ensure_disabled_external_candidates, run_shadow_cycle
 from app.settings import settings
 
 BROKER_WORKER_LOCK = 918273645
@@ -26,17 +25,23 @@ async def run_broker_cycle() -> dict[str, Any]:
             if sync.get("status") != "complete":
                 return {"status": "sync_not_complete", "sync": sync}
             reconciliation = reconcile_broker_snapshot(conn, int(sync["sync_run"]["id"])) if settings.broker_reconciliation_enabled else {"status": "disabled"}
+            ensure_disabled_external_candidates(conn)
             shadows = []
             if reconciliation.get("status") == "clean" and settings.broker_shadow_execution_enabled:
-                deployments = conn.execute("SELECT id FROM external_paper_deployments WHERE state='enabled_observe_only' ORDER BY id").fetchall()
+                deployments = conn.execute("""
+                    SELECT x.id FROM external_paper_deployments x
+                    JOIN elite_research_candidates e ON e.id=x.elite_candidate_id
+                    WHERE x.state IN ('enabled_observe_only','enabled_execution')
+                    ORDER BY e.research_score DESC, x.id
+                """).fetchall()
                 for deployment in deployments:
                     try:
-                        shadows.append(run_shadow_cycle(conn, int(deployment["id"]), int(sync["sync_run"]["id"])))
+                        shadows.append(await run_shadow_cycle(conn, int(deployment["id"]), int(sync["sync_run"]["id"])))
                     except Exception as error:  # worker records each isolated failure without weakening controls
                         conn.rollback()
                         shadows.append({"deployment_id": deployment["id"], "status": "failed", "error_class": error.__class__.__name__, "error": str(error)})
             persist_daily_summary(conn, sync, reconciliation, shadows)
-            prune_derived_snapshots(conn)
+            # Historical evidence is retained indefinitely. No runtime pruning occurs.
             return {"status": "complete", "sync": sync, "reconciliation": reconciliation, "shadow_executions": shadows, "broker_mutation": False}
         finally:
             conn.execute("SELECT pg_advisory_unlock(%s)", (BROKER_WORKER_LOCK,))
@@ -44,14 +49,8 @@ async def run_broker_cycle() -> dict[str, Any]:
 
 
 def prune_derived_snapshots(conn) -> None:
-    raw_cutoff = datetime.now(UTC) - timedelta(days=settings.broker_raw_snapshot_retention_days)
-    clean_reconciliation_cutoff = datetime.now(UTC) - timedelta(days=90)
-    conn.execute("DELETE FROM broker_account_snapshots WHERE captured_at < %s", (raw_cutoff,))
-    conn.execute("DELETE FROM broker_clock_snapshots WHERE captured_at < %s", (raw_cutoff,))
-    conn.execute("DELETE FROM broker_position_snapshots WHERE captured_at < %s", (raw_cutoff,))
-    conn.execute("DELETE FROM broker_reconciliation_runs r WHERE r.status='clean' AND r.completed_at < %s AND NOT EXISTS (SELECT 1 FROM broker_reconciliation_findings f WHERE f.reconciliation_run_id=r.id)", (clean_reconciliation_cutoff,))
-    conn.execute("DELETE FROM broker_daily_summaries WHERE summary_date < CURRENT_DATE - INTERVAL '2 years'")
-    conn.commit()
+    """Compatibility no-op: historical evidence retention is now indefinite."""
+    return None
 
 
 def persist_daily_summary(conn, sync: dict[str, Any], reconciliation: dict[str, Any], shadows: list[dict[str, Any]]) -> None:

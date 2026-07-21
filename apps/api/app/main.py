@@ -21,9 +21,10 @@ from app.observability import (
     reset_request_context,
     set_request_context,
 )
-from app.routers import alpha, backtests, broker, data, features, paper, regimes, research, research_copilot, research_intelligence, research_lab, risk, signals, symbols, validation
+from app.routers import alpha, backtests, broker, data, diagnostics, features, paper, regimes, research, research_copilot, research_intelligence, research_lab, risk, signals, symbols, validation
 from app.settings import cors_origin_list, settings
 from app.services.paper_scheduler import start_scheduler, stop_scheduler
+from app.services.shared_cache import invalidate_summary_cache
 
 configure_logging()
 
@@ -32,8 +33,10 @@ configure_logging()
 async def lifespan(app: FastAPI):
     started = time.perf_counter()
     log_event("Startup started", environment=settings.environment, git_commit=git_commit(), log_level=settings.log_level)
-    if settings.broker_order_submission_enabled or settings.external_paper_execution_enabled:
-        raise RuntimeError("Phase 10 read-only foundation forbids external paper execution and broker order submission")
+    if settings.broker_order_submission_enabled != settings.external_paper_execution_enabled:
+        raise RuntimeError("broker order submission and external paper execution flags must be enabled or disabled together")
+    if settings.model_risk_authority == "bounded_paper" and not (settings.broker_order_submission_enabled and settings.external_paper_execution_enabled):
+        raise RuntimeError("bounded model paper authority requires both broker execution flags")
     try:
         conn = connect()
         try:
@@ -93,6 +96,8 @@ async def request_logging_middleware(request: Request, call_next: Callable[[Requ
     log_event("Incoming request", headers=sanitized_headers, body_size=body_size)
     try:
         response = await call_next(request)
+        if request.method not in {"GET", "HEAD", "OPTIONS"} and response.status_code < 400:
+            invalidate_summary_cache()
         response.headers["X-Request-ID"] = request_id
         log_event("Request finished", status_code=response.status_code, elapsed_ms=elapsed_ms(started), success=response.status_code < 500)
         return response
@@ -121,6 +126,7 @@ app.include_router(validation.router)
 app.include_router(risk.router)
 app.include_router(paper.router)
 app.include_router(broker.router)
+app.include_router(diagnostics.router)
 
 
 @app.get("/health")

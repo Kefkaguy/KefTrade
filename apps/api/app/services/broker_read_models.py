@@ -22,8 +22,8 @@ def broker_status(conn: psycopg.Connection) -> dict[str, Any]:
         "provider": "alpaca",
         "environment": "paper",
         "feature_flags": feature_flags(),
-        "execution_enabled": False,
-        "order_submission_implemented": False,
+        "execution_enabled": bool(settings.broker_order_submission_enabled and settings.external_paper_execution_enabled and any(row.get("state") == "enabled_execution" for row in deployments)),
+        "order_submission_implemented": True,
         "account": account,
         "latest_sync": sync,
         "latest_reconciliation": reconciliation,
@@ -64,14 +64,18 @@ def execution_readiness(conn: psycopg.Connection) -> dict[str, Any]:
     status = broker_status(conn)
     deployments = status["deployments"]
     return {
-        "execution_enabled": False,
-        "highest_reachable_state": "enabled_observe_only",
-        "eligible_deployments": [row for row in deployments if row.get("state") == "enabled_observe_only"],
+        "execution_enabled": bool(status["execution_enabled"]),
+        "highest_reachable_state": "enabled_execution" if settings.broker_order_submission_enabled and settings.external_paper_execution_enabled else "enabled_observe_only",
+        "eligible_deployments": [row for row in deployments if row.get("state") in {"enabled_observe_only", "enabled_execution"}],
         "blocked_deployments": [row for row in deployments if row.get("state") in {"readiness_blocked", "risk_halted", "reconciliation_halted", "manually_halted", "invalidated"}],
         "active_halts": status["active_halts"],
         "feature_flags": status["feature_flags"],
-        "submission_proof": {"broker_order_submission_enabled": False, "external_paper_execution_enabled": False, "adapter_submit_order": "raises BrokerMutationDisabled", "enabled_execution_database_state": "prohibited by constraint"},
+        "submission_proof": {"broker_order_submission_enabled": settings.broker_order_submission_enabled, "external_paper_execution_enabled": settings.external_paper_execution_enabled, "paper_domain_required": True, "explicit_cli_approval_required": True, "live_money_supported": False},
     }
+
+
+def execution_attempts(conn: psycopg.Connection, limit: int = 100) -> list[dict[str, Any]]:
+    return [dict(row) for row in conn.execute("SELECT * FROM broker_execution_attempts ORDER BY created_at DESC, id DESC LIMIT %s", (limit,)).fetchall()]
 
 
 def latest_account(conn: psycopg.Connection) -> dict[str, Any]:

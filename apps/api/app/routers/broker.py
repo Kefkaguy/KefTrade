@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query
 import psycopg
 
 from app.db import get_connection
-from app.services.broker_read_models import broker_account, broker_clock, broker_orders, broker_positions, broker_reconciliation, broker_status, execution_readiness
+from app.services.broker_read_models import broker_account, broker_clock, broker_orders, broker_positions, broker_reconciliation, broker_status, execution_attempts, execution_readiness
 from app.services.elite_repair_generator import elite_repair_proposals
 
 router = APIRouter(prefix="/broker", tags=["external-paper-broker"])
@@ -26,7 +26,7 @@ def get_broker_clock(conn: psycopg.Connection = Depends(get_connection)) -> dict
 
 
 @router.get("/orders")
-def get_broker_orders(limit: int = Query(100, ge=1, le=500), conn: psycopg.Connection = Depends(get_connection)) -> list[dict[str, Any]]:
+def get_broker_orders(limit: int = Query(25, ge=1, le=500), conn: psycopg.Connection = Depends(get_connection)) -> list[dict[str, Any]]:
     return broker_orders(conn, limit)
 
 
@@ -43,6 +43,11 @@ def get_broker_reconciliation(conn: psycopg.Connection = Depends(get_connection)
 @router.get("/execution-readiness")
 def get_execution_readiness(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     return execution_readiness(conn)
+
+
+@router.get("/execution-attempts")
+def get_execution_attempts(limit: int = Query(25, ge=1, le=500), conn: psycopg.Connection = Depends(get_connection)) -> list[dict[str, Any]]:
+    return execution_attempts(conn, limit)
 
 
 @router.get("/elite-repair-proposals")

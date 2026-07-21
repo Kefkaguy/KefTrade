@@ -16,6 +16,7 @@ import {
   Grid2X2,
   Menu,
   Radar,
+  ScanSearch,
   Search,
   Settings,
   ShieldCheck,
@@ -40,7 +41,8 @@ const primaryNavigation: NavigationItem[] = [
   { href: "/research-intelligence", label: "Candidates", icon: Trophy },
   { href: "/paper", label: "Forward validation", icon: CandlestickChart },
   { href: "/reports", label: "Reports", icon: FileText },
-  { href: "/mission-control", label: "Mission Control", icon: Radar }
+  { href: "/mission-control", label: "Mission Control", icon: Radar },
+  { href: "/diagnostics", label: "Diagnostics", icon: ScanSearch }
 ];
 
 const workspaceGroups: Array<{ label: string; items: NavigationItem[] }> = [

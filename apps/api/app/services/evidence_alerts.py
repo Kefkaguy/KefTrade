@@ -9,6 +9,7 @@ from psycopg.types.json import Jsonb
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.strategy import StrategyDecision, get_strategy_definition
+from app.services.strategy_diagnostics import enrich_decision
 from app.services.strategy_research import PAPER_READY_THRESHOLDS, finite_metric, run_strategy_research
 from app.settings import settings
 
@@ -276,7 +277,8 @@ def detect_research_report_alert(conn: psycopg.Connection, symbol: str, timefram
             candle_timestamp=candle["timestamp"],
         )
     strategy = get_strategy_definition(top["strategy_name"], top["strategy_version"])
-    decision = strategy.decide(candle, feature, candles, top.get("parameters") or strategy.parameters)
+    params = top.get("parameters") or strategy.parameters
+    decision = enrich_decision(strategy.decide(candle, feature, candles, params), candle, feature, candles, params)
     metrics = top.get("metrics") or {}
     regime = current_regime(candle, feature)
     if top.get("recommendation") == "Candidate for Paper Trading" and decision.signal == "setup" and evidence_conditions_pass(metrics, regime):

@@ -11,10 +11,14 @@ from uuid import UUID, uuid4
 import psycopg
 from psycopg.types.json import Jsonb
 
+from app.brokers.alpaca_paper import AlpacaPaperBrokerAdapter
 from app.services.broker_reconciliation import upsert_halt
 from app.services.broker_sync import canonical_json
 from app.services.evidence_alerts import candle_is_stale
+from app.services.model_risk import evaluate_model_risk
 from app.services.paper_trading import decision_payload, evaluate_deployment_decision, latest_candle
+from app.services.portfolio_risk import evaluate_portfolio_risk
+from app.services.strategy_diagnostics import persist_strategy_evaluation
 from app.settings import settings
 
 STARTABLE_FORWARD_STATES = {"awaiting_paper_deployment", "insufficient_forward_sample", "forward_validation_passed"}
@@ -27,6 +31,7 @@ def feature_flags() -> dict[str, bool]:
         "broker_shadow_execution_enabled": settings.broker_shadow_execution_enabled,
         "broker_order_submission_enabled": settings.broker_order_submission_enabled,
         "external_paper_execution_enabled": settings.external_paper_execution_enabled,
+        "model_risk_enabled": settings.model_risk_enabled,
     }
 
 
@@ -169,6 +174,56 @@ def manual_halt(conn: psycopg.Connection, external_deployment_id: int, *, operat
     return {"halt": halt, "trace_id": str(trace_id), "state": "manually_halted"}
 
 
+def enable_paper_execution(conn: psycopg.Connection, external_deployment_id: int, *, operator: str) -> dict[str, Any]:
+    if not settings.broker_order_submission_enabled or not settings.external_paper_execution_enabled:
+        raise ValueError("both broker execution flags must be enabled before approving paper execution")
+    row = conn.execute("SELECT * FROM external_paper_deployments WHERE id=%s FOR UPDATE", (external_deployment_id,)).fetchone()
+    if not row or row["state"] != "enabled_observe_only":
+        raise ValueError("paper execution can only be enabled from observe-only state")
+    epoch = conn.execute("SELECT * FROM external_execution_epochs WHERE external_deployment_id=%s AND closed_at IS NULL FOR UPDATE", (external_deployment_id,)).fetchone()
+    if not epoch:
+        raise ValueError("paper execution requires an open approved execution epoch")
+    latest_shadow = conn.execute("SELECT * FROM shadow_executions WHERE external_deployment_id=%s AND would_submit=TRUE ORDER BY created_at DESC LIMIT 1", (external_deployment_id,)).fetchone()
+    if not latest_shadow:
+        raise ValueError("paper execution requires at least one would_submit shadow decision")
+    latest_portfolio = conn.execute("SELECT * FROM portfolio_risk_decisions WHERE external_deployment_id=%s AND approved=TRUE ORDER BY created_at DESC LIMIT 1", (external_deployment_id,)).fetchone()
+    if not latest_portfolio:
+        raise ValueError("paper execution requires a passed portfolio shadow decision")
+    trace_id = uuid4()
+    audit(conn, trace_id, "enable_paper_execution", operator, "before", broker_account_id=row["broker_account_id"], external_deployment_id=row["id"], execution_epoch_id=epoch["id"])
+    updated = conn.execute("UPDATE external_paper_deployments SET state='enabled_execution', updated_at=NOW() WHERE id=%s RETURNING *", (external_deployment_id,)).fetchone()
+    conn.execute("INSERT INTO external_deployment_transitions(external_deployment_id,execution_epoch_id,trace_id,from_state,to_state,reason_code,details,operator) VALUES (%s,%s,%s,'enabled_observe_only','enabled_execution','explicit_paper_execution_approval',%s,%s)", (external_deployment_id, epoch["id"], trace_id, Jsonb({"shadow_execution_id": latest_shadow["id"], "portfolio_risk_decision_id": latest_portfolio["id"]}), operator))
+    audit(conn, trace_id, "enable_paper_execution", operator, "after", broker_account_id=row["broker_account_id"], external_deployment_id=row["id"], execution_epoch_id=epoch["id"], details={"state": "enabled_execution"})
+    conn.commit()
+    return {"deployment": dict(updated), "trace_id": str(trace_id), "execution_enabled": True}
+
+
+def ensure_disabled_external_candidates(conn: psycopg.Connection) -> int:
+    """Materialize visible broker-readiness records without granting authority."""
+    account = conn.execute("SELECT * FROM broker_accounts ORDER BY last_successful_sync_at DESC NULLS LAST LIMIT 1").fetchone()
+    if not account:
+        return 0
+    rows = conn.execute(
+        """
+        SELECT d.*, e.id AS elite_id
+        FROM strategy_deployments d
+        JOIN elite_research_candidates e ON e.campaign_id=d.campaign_id AND e.candidate_id=d.candidate_id AND e.simulation_only=TRUE
+        WHERE d.simulation_only=TRUE AND d.status='active'
+          AND NOT EXISTS (SELECT 1 FROM external_paper_deployments x WHERE x.internal_deployment_id=d.id AND x.broker_account_id=%s)
+        ORDER BY e.research_score DESC, d.id
+        """,
+        (account["id"],),
+    ).fetchall()
+    for row in rows:
+        conn.execute(
+            """INSERT INTO external_paper_deployments(internal_deployment_id,broker_account_id,campaign_id,elite_candidate_id,candidate_id,strategy_version,symbol,timeframe,state,latest_blockers)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'disabled',%s) ON CONFLICT(internal_deployment_id,broker_account_id) DO NOTHING""",
+            (row["id"], account["id"], row["campaign_id"], row["elite_id"], row["candidate_id"], row["strategy_version"], row["symbol"], row["timeframe"], Jsonb(["EXPLICIT_OBSERVE_APPROVAL_REQUIRED"])),
+        )
+    conn.commit()
+    return len(rows)
+
+
 def validate_adapter_compatibility(conn: psycopg.Connection, *, operator: str) -> dict[str, Any]:
     releases = conn.execute("SELECT * FROM broker_adapter_releases WHERE provider='alpaca' ORDER BY created_at DESC LIMIT 2").fetchall()
     if not releases:
@@ -197,7 +252,7 @@ def evaluate_eligibility(conn: psycopg.Connection, external: dict[str, Any], epo
     reconciliation = conn.execute("SELECT * FROM broker_reconciliation_runs WHERE sync_run_id=%s", (sync_run_id,)).fetchone()
     halts = conn.execute("SELECT COUNT(*) AS count FROM execution_halts WHERE cleared_at IS NULL AND ((scope_type='deployment' AND scope_key=%s) OR (scope_type='asset' AND scope_key=%s) OR (scope_type='account' AND scope_key=%s) OR scope_type='global')", (str(external["id"]), external["symbol"], str(external["broker_account_id"]))).fetchone()
     checks = [
-        check("DEPLOYMENT_OBSERVE_ONLY", external["state"] == "enabled_observe_only"),
+        check("DEPLOYMENT_ACTIVE", external["state"] in {"enabled_observe_only", "enabled_execution"}),
         check("EPOCH_OPEN", epoch.get("closed_at") is None),
         check("CANDIDATE_FINGERPRINT_MATCH", current_fingerprint == config["candidate_fingerprint"]),
         check("FORWARD_START_STATE", str(elite["forward_validation_state"]) in STARTABLE_FORWARD_STATES),
@@ -208,7 +263,7 @@ def evaluate_eligibility(conn: psycopg.Connection, external: dict[str, Any], epo
         check("BAR_FRESH_COMPLETE", bar_fresh),
         check("NO_ACTIVE_HALTS", int((halts or {}).get("count") or 0) == 0),
         check("SHADOW_FEATURE_ENABLED", settings.broker_shadow_execution_enabled),
-        check("ORDER_SUBMISSION_DISABLED", not settings.broker_order_submission_enabled and not settings.external_paper_execution_enabled),
+        check("EXECUTION_MODE_COHERENT", execution_mode_coherent(str(external["state"]))),
     ]
     eligible = all(item["passed"] for item in checks)
     phase = "forward_validated" if elite["forward_validation_state"] == "forward_validation_passed" else ("forward_validation_in_progress" if eligible else "blocked")
@@ -262,7 +317,7 @@ def risk_decision(conn: psycopg.Connection, external: dict[str, Any], epoch: dic
         check("WEEKLY_LOSS_LIMIT", weekly_pnl > -weekly_limit),
         check("TOTAL_EXPOSURE", remaining_exposure >= reference_price),
         check("BROKER_BUYING_POWER_IGNORED", policy.get("use_broker_buying_power") is False),
-        check("ORDER_SUBMISSION_DISABLED", not settings.broker_order_submission_enabled and not settings.external_paper_execution_enabled),
+        check("EXECUTION_MODE_COHERENT", execution_mode_coherent(str(external["state"]))),
     ]
     approved = all(item["passed"] for item in checks)
     approved_qty = requested if approved else 0
@@ -282,14 +337,15 @@ def risk_decision(conn: psycopg.Connection, external: dict[str, Any], epoch: dic
     return dict(row)
 
 
-def run_shadow_cycle(conn: psycopg.Connection, external_deployment_id: int, sync_run_id: int) -> dict[str, Any]:
-    assert_execution_disabled()
+async def run_shadow_cycle(conn: psycopg.Connection, external_deployment_id: int, sync_run_id: int) -> dict[str, Any]:
     if not settings.broker_shadow_execution_enabled:
         return {"status": "disabled", "feature": "BROKER_SHADOW_EXECUTION_ENABLED"}
     trace_id = uuid4()
     external = conn.execute("SELECT * FROM external_paper_deployments WHERE id=%s FOR UPDATE", (external_deployment_id,)).fetchone()
-    if not external or external["state"] != "enabled_observe_only":
-        raise ValueError("shadow execution requires an observe-only deployment")
+    if not external or external["state"] not in {"enabled_observe_only", "enabled_execution"}:
+        raise ValueError("execution cycle requires an active observe or paper-execution deployment")
+    if not execution_mode_coherent(str(external["state"])):
+        raise RuntimeError("deployment state and broker execution flags are incoherent")
     epoch = conn.execute("SELECT * FROM external_execution_epochs WHERE external_deployment_id=%s AND closed_at IS NULL FOR UPDATE", (external_deployment_id,)).fetchone()
     if not epoch:
         raise ValueError("observe-only deployment has no open execution epoch")
@@ -297,13 +353,27 @@ def run_shadow_cycle(conn: psycopg.Connection, external_deployment_id: int, sync
     candle = latest_candle(conn, internal["symbol"], internal["timeframe"])
     decision = evaluate_deployment_decision(conn, dict(internal))
     execution_key = f"{external_deployment_id}:{epoch['id']}:{internal['symbol']}:{internal['timeframe']}:{candle['timestamp'].isoformat()}:{decision.signal}"
+    strategy_evaluation = persist_strategy_evaluation(
+        conn,
+        internal_deployment_id=int(internal["id"]),
+        external_deployment_id=int(external["id"]),
+        execution_epoch_id=int(epoch["id"]),
+        configuration_fingerprint=str(epoch["candidate_fingerprint"]),
+        decision=decision,
+        candle=candle,
+        trace_id=trace_id,
+    )
     existing = conn.execute("SELECT * FROM external_execution_signals WHERE execution_key=%s", (execution_key,)).fetchone()
     if existing:
-        return {"status": "duplicate_skipped", "signal": dict(existing), "trace_id": str(trace_id)}
+        conn.commit()
+        return {"status": "duplicate_skipped", "signal": dict(existing), "strategy_evaluation": strategy_evaluation, "trace_id": str(trace_id)}
     signal = conn.execute("INSERT INTO external_execution_signals(external_deployment_id, execution_epoch_id, trace_id, execution_key, symbol, timeframe, completed_bar_timestamp, signal_type, signal) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *", (external["id"], epoch["id"], trace_id, execution_key, internal["symbol"], internal["timeframe"], candle["timestamp"], decision.signal, Jsonb(decision_payload(decision)))).fetchone()
+    model = await evaluate_model_risk(conn, strategy_evaluation=strategy_evaluation, external_deployment_id=int(external["id"]), trace_id=trace_id)
     eligibility = evaluate_eligibility(conn, dict(external), dict(epoch), sync_run_id, trace_id, bar_fresh=not candle_is_stale(candle) and bar_is_complete(candle["timestamp"], internal["timeframe"]))
     proposed = None
     risk = None
+    portfolio = None
+    execution_attempt = None
     would_submit = False
     reasons: list[str] = []
     if decision.signal == "setup" and decision.stop_loss is not None:
@@ -318,14 +388,81 @@ def run_shadow_cycle(conn: psycopg.Connection, external_deployment_id: int, sync
                 """,
                 (external["id"], epoch["id"], signal["id"], eligibility["id"], risk["id"], trace_id, client_order_id, internal["symbol"], risk["requested_quantity"], reference_price, decision.stop_loss, decision.take_profit, risk["expected_risk"]),
             ).fetchone()
-        would_submit = bool(risk["approved"])
-        reasons = [item["code"] for item in risk["checks"] if not item["passed"]]
+        requested_risk_pct = Decimal(str(model.get("bounded_risk_pct") or settings.max_broker_risk_per_trade_pct)) if settings.model_risk_authority == "bounded_paper" else Decimal(str(settings.max_broker_risk_per_trade_pct))
+        portfolio = evaluate_portfolio_risk(conn, external=dict(external), strategy_evaluation=strategy_evaluation, model_decision=model, trace_id=trace_id, requested_risk_pct=requested_risk_pct)
+        model_allows = settings.model_risk_authority != "bounded_paper" or bool(model.get("approved"))
+        would_submit = bool(risk["approved"] and portfolio["approved"] and model_allows)
+        reasons = [item["code"] for item in risk["checks"] if not item["passed"]] + [item["code"] for item in portfolio["checks"] if not item["passed"]]
+        if not model_allows:
+            reasons.append("MODEL_RISK_NOT_APPROVED")
     else:
-        reasons = ["NO_ACTIONABLE_SETUP"]
-    shadow = conn.execute("INSERT INTO shadow_executions(external_deployment_id, execution_epoch_id, proposed_order_id, trace_id, would_submit, rejection_reasons, decision) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *", (external["id"], epoch["id"], proposed["id"] if proposed else None, trace_id, would_submit, Jsonb(reasons), Jsonb({"signal": decision_payload(decision), "eligibility_decision_id": eligibility["id"], "risk_decision_id": risk["id"] if risk else None, "broker_mutation": False}))).fetchone()
-    audit(conn, trace_id, "shadow_execution", "broker_worker", "automatic", broker_account_id=external["broker_account_id"], external_deployment_id=external["id"], execution_epoch_id=epoch["id"], details={"shadow_execution_id": shadow["id"], "would_submit": would_submit, "broker_mutation": False})
+        reasons = [str(gate.get("code")) for gate in decision.gates if gate.get("status") == "failed"] or ["NO_ACTIONABLE_SETUP"]
+    mutation_planned = bool(would_submit and external["state"] == "enabled_execution")
+    shadow = conn.execute("INSERT INTO shadow_executions(external_deployment_id, execution_epoch_id, proposed_order_id, trace_id, would_submit, rejection_reasons, decision) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *", (external["id"], epoch["id"], proposed["id"] if proposed else None, trace_id, would_submit, Jsonb(sorted(set(reasons))), Jsonb({"signal": decision_payload(decision), "strategy_evaluation_id": strategy_evaluation["id"], "model_risk_decision_id": model["id"], "eligibility_decision_id": eligibility["id"], "risk_decision_id": risk["id"] if risk else None, "portfolio_risk_decision_id": portfolio["id"] if portfolio else None, "broker_mutation": mutation_planned}))).fetchone()
+    audit(conn, trace_id, "execution_decision", "broker_worker", "automatic", broker_account_id=external["broker_account_id"], external_deployment_id=external["id"], execution_epoch_id=epoch["id"], details={"shadow_execution_id": shadow["id"], "would_submit": would_submit, "broker_mutation": mutation_planned})
     conn.commit()
-    return {"status": "shadow_complete", "signal": dict(signal), "eligibility": eligibility, "risk": risk, "proposed_order": dict(proposed) if proposed else None, "shadow": dict(shadow), "trace_id": str(trace_id), "broker_mutation": False}
+    if mutation_planned and proposed and portfolio:
+        execution_attempt = await submit_approved_paper_order(conn, dict(external), dict(epoch), dict(proposed), portfolio, model, trace_id)
+    return {"status": "paper_submitted" if execution_attempt and execution_attempt.get("status") in {"submitted", "accepted"} else "shadow_complete", "signal": dict(signal), "strategy_evaluation": strategy_evaluation, "model_risk": model, "eligibility": eligibility, "risk": risk, "portfolio": portfolio, "proposed_order": dict(proposed) if proposed else None, "shadow": dict(shadow), "execution_attempt": execution_attempt, "trace_id": str(trace_id), "broker_mutation": bool(execution_attempt)}
+
+
+async def submit_approved_paper_order(conn: psycopg.Connection, external: dict[str, Any], epoch: dict[str, Any], proposed: dict[str, Any], portfolio: dict[str, Any], model: dict[str, Any], trace_id: UUID) -> dict[str, Any]:
+    if not execution_mode_coherent("enabled_execution"):
+        raise RuntimeError("paper order submission requires both execution flags")
+    payload: dict[str, Any] = {
+        "symbol": proposed["symbol"], "qty": str(proposed["quantity"]), "side": "buy",
+        "type": "market", "time_in_force": "day", "client_order_id": proposed["client_order_id"],
+    }
+    if proposed.get("stop_price") and proposed.get("target_price"):
+        payload.update({"order_class": "bracket", "take_profit": {"limit_price": str(proposed["target_price"])}, "stop_loss": {"stop_price": str(proposed["stop_price"])}})
+    attempt = conn.execute(
+        """INSERT INTO broker_execution_attempts(external_deployment_id,execution_epoch_id,proposed_order_id,portfolio_risk_decision_id,model_risk_decision_id,trace_id,client_order_id,status,request_payload)
+           VALUES (%s,%s,%s,%s,%s,%s,%s,'intent_recorded',%s) ON CONFLICT(client_order_id) DO UPDATE SET client_order_id=EXCLUDED.client_order_id RETURNING *""",
+        (external["id"], epoch["id"], proposed["id"], portfolio["id"], model.get("id"), trace_id, proposed["client_order_id"], Jsonb(payload)),
+    ).fetchone()
+    conn.commit()  # durable intent before broker mutation
+    if attempt["status"] not in {"intent_recorded", "ambiguous"}:
+        return dict(attempt)
+    adapter = AlpacaPaperBrokerAdapter()
+    try:
+        response = await adapter.submit_order(payload)
+        broker_order_id = str((response.payload or {}).get("id") or "")
+        row = conn.execute("UPDATE broker_execution_attempts SET status='submitted', broker_order_id=%s, provider_request_id=%s, response_payload=%s, submitted_at=NOW() WHERE id=%s RETURNING *", (broker_order_id or None, response.request_id, Jsonb(response.payload or {}), attempt["id"])).fetchone()
+    except Exception as error:
+        try:
+            existing = await adapter.get_order_by_client_id(str(proposed["client_order_id"]))
+            broker_order_id = str((existing.payload or {}).get("id") or "")
+            row = conn.execute("UPDATE broker_execution_attempts SET status='accepted', broker_order_id=%s, provider_request_id=%s, response_payload=%s, submitted_at=COALESCE(submitted_at,NOW()), resolved_at=NOW() WHERE id=%s RETURNING *", (broker_order_id or None, existing.request_id, Jsonb(existing.payload or {}), attempt["id"])).fetchone()
+        except Exception as lookup_error:
+            row = conn.execute("UPDATE broker_execution_attempts SET status='ambiguous', error=%s WHERE id=%s RETURNING *", (Jsonb({"submit_error": error.__class__.__name__, "lookup_error": lookup_error.__class__.__name__}), attempt["id"])).fetchone()
+    conn.commit()
+    result = dict(row)
+    if result.get("status") in {"submitted", "accepted"}:
+        try:
+            # Re-read Alpaca after every mutation so the local lifecycle is based on
+            # broker truth, not merely the submission response.
+            from app.services.broker_reconciliation import reconcile_broker_snapshot
+            from app.services.broker_sync import synchronize_broker
+
+            sync = await synchronize_broker(conn)
+            reconciliation = reconcile_broker_snapshot(conn, int(sync["sync_run"]["id"])) if sync.get("status") == "complete" else {"status": "sync_incomplete"}
+            broker_order = conn.execute("SELECT * FROM broker_orders WHERE broker_account_id=%s AND client_order_id=%s ORDER BY updated_at DESC LIMIT 1", (external["broker_account_id"], proposed["client_order_id"])).fetchone()
+            lifecycle = {
+                "post_submit_sync_run_id": sync.get("sync_run", {}).get("id") if isinstance(sync.get("sync_run"), dict) else None,
+                "post_submit_reconciliation_status": reconciliation.get("status"),
+                "broker_status": broker_order.get("status") if broker_order else None,
+            }
+            if broker_order and reconciliation.get("status") == "clean":
+                refreshed = conn.execute("UPDATE broker_execution_attempts SET status='reconciled', response_payload=COALESCE(response_payload,'{}'::jsonb) || %s, resolved_at=NOW() WHERE id=%s RETURNING *", (Jsonb(lifecycle), result["id"])).fetchone()
+                result = dict(refreshed)
+            else:
+                conn.execute("UPDATE broker_execution_attempts SET response_payload=COALESCE(response_payload,'{}'::jsonb) || %s WHERE id=%s", (Jsonb(lifecycle), result["id"]))
+            conn.commit()
+        except Exception as reconciliation_error:
+            conn.rollback()
+            conn.execute("UPDATE broker_execution_attempts SET error=COALESCE(error,'{}'::jsonb) || %s WHERE id=%s", (Jsonb({"post_submit_reconciliation_error": reconciliation_error.__class__.__name__}), result["id"]))
+            conn.commit()
+    return result
 
 
 def candidate_object_for(conn: psycopg.Connection, campaign_id: int, candidate_id: str) -> dict[str, Any]:
@@ -401,6 +538,12 @@ def check(code: str, passed: bool) -> dict[str, Any]:
 def assert_execution_disabled() -> None:
     if settings.broker_order_submission_enabled or settings.external_paper_execution_enabled:
         raise RuntimeError("broker execution flags must remain disabled during Phase 10 first pass")
+
+
+def execution_mode_coherent(state: str) -> bool:
+    both_enabled = settings.broker_order_submission_enabled and settings.external_paper_execution_enabled
+    flags_paired = settings.broker_order_submission_enabled == settings.external_paper_execution_enabled
+    return both_enabled if state == "enabled_execution" else flags_paired
 
 
 def bar_is_complete(opened_at: datetime, timeframe: str, now: datetime | None = None) -> bool:

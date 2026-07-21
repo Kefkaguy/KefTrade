@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -16,6 +16,9 @@ class StrategyDecision:
     take_profit: Decimal | None
     risk_reward: Decimal | None
     explanation: list[str]
+    decision_version: str = "structured-gates-v1"
+    gates: list[dict[str, Any]] = field(default_factory=list)
+    regime: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
