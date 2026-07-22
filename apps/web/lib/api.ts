@@ -1523,6 +1523,21 @@ export function previewElitePortfolio(configuration: ElitePortfolioConfiguration
   return request<ElitePortfolioResult>("/research/elite-portfolios/preview", { method: "POST", body: JSON.stringify(configuration), timeoutMs: 60000 });
 }
 
+export type EliteCorrelationEvidenceBackfill = {
+  evidence_version: string;
+  examined: number;
+  generated: number;
+  insufficient: number;
+  failures: Array<{ research_job_id: number; error: string }>;
+  remaining: boolean;
+  historical_results_rewritten: false;
+  constraints_relaxed: 0;
+};
+
+export function backfillElitePortfolioEvidence(limit = 20) {
+  return request<EliteCorrelationEvidenceBackfill>(`/research/elite-portfolios/evidence/backfill?limit=${limit}`, { method: "POST", timeoutMs: 120000 });
+}
+
 export function createElitePortfolio(configuration: ElitePortfolioConfiguration) {
   return request<ElitePortfolioResult>("/research/elite-portfolios", { method: "POST", body: JSON.stringify(configuration), timeoutMs: 60000 });
 }

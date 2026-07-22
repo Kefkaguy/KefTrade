@@ -20,6 +20,7 @@ import {
 import {
   activateElitePortfolio,
   approveElitePortfolio,
+  backfillElitePortfolioEvidence,
   createElitePortfolio,
   getElitePortfolioOptions,
   previewElitePortfolio,
@@ -81,6 +82,24 @@ export function ElitePortfolioBuilder() {
       const next = await operation();
       setResult(next);
       setPhase(nextPhase);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function buildMissingEvidence() {
+    setBusy("evidence");
+    setError(null);
+    try {
+      const evidence = await backfillElitePortfolioEvidence(20);
+      if (evidence.failures.length) {
+        throw new Error(`Correlation evidence failed for ${evidence.failures.length} research job(s).`);
+      }
+      const next = await previewElitePortfolio(configuration!);
+      setResult(next);
+      setPhase("preview");
     } catch (reason) {
       setError(message(reason));
     } finally {
@@ -185,6 +204,7 @@ export function ElitePortfolioBuilder() {
           </section>
           {snapshotHash ? <section><span className="sectionLabel">Immutable decision</span><code>{snapshotHash}</code><small>{result?.solver_version ?? options.solver_version}</small></section> : null}
           <section className="eliteRailActions">
+            {hasInsufficientCorrelation(result) ? <button className="button secondary" disabled={Boolean(busy)} onClick={buildMissingEvidence}><RefreshCw className={busy === "evidence" ? "spin" : ""} size={16} />{busy === "evidence" ? "Building evidence..." : "Build missing correlation evidence"}</button> : null}
             <button className="button" disabled={Boolean(busy)} onClick={() => run("preview", () => previewElitePortfolio(configuration), "preview")}><Sparkles size={16} />{busy === "preview" ? "Constructing…" : "Preview portfolio"}</button>
             {phase === "preview" && result?.status === "review_ready" ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("save", () => createElitePortfolio(configuration), "saved")}><ArrowRight size={16} />Save immutable run</button> : null}
             {phase === "saved" && result?.id && snapshotHash ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("approve", () => approveElitePortfolio(result.id!, snapshotHash), "approved")}><Check size={16} />Approve snapshot</button> : null}
@@ -251,6 +271,9 @@ function title(value: string) { return String(value).replaceAll("_", " ").replac
 function number(value: unknown) { return value == null ? "—" : Number(value).toFixed(3); }
 function message(reason: unknown) { return reason instanceof Error ? reason.message : "The portfolio operation failed."; }
 function snapshotFor(result: ElitePortfolioResult | null) { return result?.snapshot?.decision_hash ?? result?.snapshot?.snapshot_hash ?? result?.snapshot_hash ?? null; }
+function hasInsufficientCorrelation(result: ElitePortfolioResult | null) {
+  return Boolean(result?.binding_constraints?.some((row) => row.constraint === "SIGNAL_CORRELATION_INSUFFICIENT" || row.constraint === "STRATEGY_RETURN_CORRELATION_INSUFFICIENT"));
+}
 function objectiveDetail(value: string) {
   if (value === "profit_factor") return "Prioritize payoff quality";
   if (value === "expectancy") return "Prioritize expected return";
