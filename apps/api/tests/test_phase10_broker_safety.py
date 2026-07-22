@@ -9,7 +9,7 @@ import pytest
 
 from app.brokers.alpaca_paper import AlpacaPaperBrokerAdapter
 from app.brokers.base import BrokerMutationDisabled
-from app.services.external_execution import assert_execution_disabled, bar_is_complete, feature_flags
+from app.services.external_execution import assert_execution_disabled, bar_is_complete, candidate_fingerprint, feature_flags
 from app.services.broker_sync import canonical_json, normalize_account, normalize_order, sanitize_value
 from app.settings import settings
 
@@ -185,6 +185,75 @@ def test_completed_bar_gate_is_strict() -> None:
     now = datetime.now(UTC)
     assert bar_is_complete(now - timedelta(hours=2), "1h", now=now)
     assert not bar_is_complete(now - timedelta(minutes=30), "1h", now=now)
+
+
+def test_forward_observation_updates_do_not_change_execution_fingerprint() -> None:
+    deployment = {
+        "campaign_id": 10,
+        "candidate_id": "sd_test",
+        "strategy_name": "momentum",
+        "strategy_version": "v1",
+        "symbol": "AAXJ",
+        "timeframe": "4h",
+        "parameters": {"trend_fast": 20, "trend_slow": 50},
+    }
+    elite = {
+        "id": 7,
+        "forward_validation_state": "awaiting_paper_deployment",
+        "forward_validation_thresholds": {},
+        "validation_history": [],
+        "paper_performance": {},
+    }
+    candidate = {
+        "candidate_id": "sd_test",
+        "state": "elite",
+        "lineage": {"generation": 1},
+        "validation_history": [],
+        "calculation_version": "v1",
+    }
+    original = candidate_fingerprint(deployment, elite, candidate)
+
+    refreshed_elite = {
+        **elite,
+        "forward_validation_state": "insufficient_forward_sample",
+        "forward_validation_thresholds": {"minimum_closed_trades": 20},
+        "validation_history": [{"metrics": {"profit_factor": 1.2}}],
+        "paper_performance": {"closed_trade_count": 0},
+    }
+    refreshed_candidate = {
+        **candidate,
+        "state": "collecting_forward_evidence",
+        "lineage": {"generation": 1, "refresh": 2},
+        "validation_history": [{"status": "observed"}],
+        "calculation_version": "v2",
+    }
+
+    assert candidate_fingerprint(deployment, refreshed_elite, refreshed_candidate) == original
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("strategy_version", "v2"),
+        ("symbol", "AAAU"),
+        ("timeframe", "1h"),
+        ("parameters", {"trend_fast": 10, "trend_slow": 50}),
+    ],
+)
+def test_execution_configuration_changes_do_change_fingerprint(field: str, replacement) -> None:
+    deployment = {
+        "campaign_id": 10,
+        "candidate_id": "sd_test",
+        "strategy_name": "momentum",
+        "strategy_version": "v1",
+        "symbol": "AAXJ",
+        "timeframe": "4h",
+        "parameters": {"trend_fast": 20, "trend_slow": 50},
+    }
+    elite = {"id": 7}
+    candidate = {"candidate_id": "sd_test"}
+
+    assert candidate_fingerprint({**deployment, field: replacement}, elite, candidate) != candidate_fingerprint(deployment, elite, candidate)
 
 
 def test_raw_evidence_sanitization_rejects_nested_credentials() -> None:

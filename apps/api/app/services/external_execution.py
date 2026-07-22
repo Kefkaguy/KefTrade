@@ -22,6 +22,7 @@ from app.services.strategy_diagnostics import persist_strategy_evaluation
 from app.settings import settings
 
 STARTABLE_FORWARD_STATES = {"awaiting_paper_deployment", "insufficient_forward_sample", "forward_validation_passed"}
+CANDIDATE_FINGERPRINT_VERSION = "execution_candidate_v2"
 
 
 def feature_flags() -> dict[str, bool]:
@@ -368,15 +369,25 @@ async def run_shadow_cycle(conn: psycopg.Connection, external_deployment_id: int
         conn.commit()
         return {"status": "duplicate_skipped", "signal": dict(existing), "strategy_evaluation": strategy_evaluation, "trace_id": str(trace_id)}
     signal = conn.execute("INSERT INTO external_execution_signals(external_deployment_id, execution_epoch_id, trace_id, execution_key, symbol, timeframe, completed_bar_timestamp, signal_type, signal) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *", (external["id"], epoch["id"], trace_id, execution_key, internal["symbol"], internal["timeframe"], candle["timestamp"], decision.signal, Jsonb(decision_payload(decision)))).fetchone()
-    model = await evaluate_model_risk(conn, strategy_evaluation=strategy_evaluation, external_deployment_id=int(external["id"]), trace_id=trace_id)
     eligibility = evaluate_eligibility(conn, dict(external), dict(epoch), sync_run_id, trace_id, bar_fresh=not candle_is_stale(candle) and bar_is_complete(candle["timestamp"], internal["timeframe"]))
+    actionable_setup = decision.signal == "setup" and decision.stop_loss is not None
+    model = (
+        await evaluate_model_risk(
+            conn,
+            strategy_evaluation=strategy_evaluation,
+            external_deployment_id=int(external["id"]),
+            trace_id=trace_id,
+        )
+        if actionable_setup
+        else None
+    )
     proposed = None
     risk = None
     portfolio = None
     execution_attempt = None
     would_submit = False
     reasons: list[str] = []
-    if decision.signal == "setup" and decision.stop_loss is not None:
+    if actionable_setup:
         reference_price = Decimal(str(candle["close"]))
         risk = risk_decision(conn, dict(external), dict(epoch), eligibility, trace_id, reference_price=reference_price, stop_price=Decimal(decision.stop_loss))
         if Decimal(risk["requested_quantity"]) > 0:
@@ -398,7 +409,7 @@ async def run_shadow_cycle(conn: psycopg.Connection, external_deployment_id: int
     else:
         reasons = [str(gate.get("code")) for gate in decision.gates if gate.get("status") == "failed"] or ["NO_ACTIONABLE_SETUP"]
     mutation_planned = bool(would_submit and external["state"] == "enabled_execution")
-    shadow = conn.execute("INSERT INTO shadow_executions(external_deployment_id, execution_epoch_id, proposed_order_id, trace_id, would_submit, rejection_reasons, decision) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *", (external["id"], epoch["id"], proposed["id"] if proposed else None, trace_id, would_submit, Jsonb(sorted(set(reasons))), Jsonb({"signal": decision_payload(decision), "strategy_evaluation_id": strategy_evaluation["id"], "model_risk_decision_id": model["id"], "eligibility_decision_id": eligibility["id"], "risk_decision_id": risk["id"] if risk else None, "portfolio_risk_decision_id": portfolio["id"] if portfolio else None, "broker_mutation": mutation_planned}))).fetchone()
+    shadow = conn.execute("INSERT INTO shadow_executions(external_deployment_id, execution_epoch_id, proposed_order_id, trace_id, would_submit, rejection_reasons, decision) VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING *", (external["id"], epoch["id"], proposed["id"] if proposed else None, trace_id, would_submit, Jsonb(sorted(set(reasons))), Jsonb({"signal": decision_payload(decision), "strategy_evaluation_id": strategy_evaluation["id"], "model_risk_decision_id": model["id"] if model else None, "eligibility_decision_id": eligibility["id"], "risk_decision_id": risk["id"] if risk else None, "portfolio_risk_decision_id": portfolio["id"] if portfolio else None, "broker_mutation": mutation_planned}))).fetchone()
     audit(conn, trace_id, "execution_decision", "broker_worker", "automatic", broker_account_id=external["broker_account_id"], external_deployment_id=external["id"], execution_epoch_id=epoch["id"], details={"shadow_execution_id": shadow["id"], "would_submit": would_submit, "broker_mutation": mutation_planned})
     conn.commit()
     if mutation_planned and proposed and portfolio:
@@ -473,23 +484,19 @@ def candidate_object_for(conn: psycopg.Connection, campaign_id: int, candidate_i
 
 
 def candidate_fingerprint(deployment: dict[str, Any], elite: dict[str, Any], candidate_object: dict[str, Any]) -> str:
-    evidence = {
+    configuration = {
+        "fingerprint_version": CANDIDATE_FINGERPRINT_VERSION,
         "campaign_id": deployment.get("campaign_id"),
         "candidate_id": deployment.get("candidate_id"),
+        "elite_candidate_id": elite.get("id"),
+        "candidate_object_id": candidate_object.get("candidate_id"),
         "strategy_name": deployment.get("strategy_name"),
         "strategy_version": deployment.get("strategy_version"),
         "symbol": deployment.get("symbol"),
         "timeframe": deployment.get("timeframe"),
         "parameters": deployment.get("parameters") or {},
-        "elite_state": elite.get("forward_validation_state"),
-        "elite_validation_history": elite.get("validation_history") or {},
-        "elite_thresholds": elite.get("forward_validation_thresholds") or {},
-        "candidate_lineage": candidate_object.get("lineage") or {},
-        "candidate_validation_history": candidate_object.get("validation_history") or [],
-        "candidate_state": candidate_object.get("state"),
-        "candidate_calculation_version": candidate_object.get("calculation_version"),
     }
-    return hashlib.sha256(canonical_json(evidence).encode("utf-8")).hexdigest()
+    return hashlib.sha256(canonical_json(configuration).encode("utf-8")).hexdigest()
 
 
 def frozen_configuration(deployment: dict[str, Any], elite: dict[str, Any], candidate_object: dict[str, Any], fingerprint: str, risk_policy: dict[str, Any], eligibility_policy: dict[str, Any], adapter: dict[str, Any]) -> dict[str, Any]:
