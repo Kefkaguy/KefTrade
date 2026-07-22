@@ -87,6 +87,31 @@ def test_paper_order_submission_requires_and_uses_both_flags(monkeypatch: pytest
     assert [(request.method, request.url.path) for request in requests] == [("POST", "/v2/orders")]
 
 
+def test_external_adapter_rejects_short_even_when_both_flags_are_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+    adapter = configured_adapter(monkeypatch, lambda request: requests.append(request) or httpx.Response(500))
+    monkeypatch.setattr(settings, "broker_order_submission_enabled", True)
+    monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
+
+    async def run() -> None:
+        with pytest.raises(BrokerMutationDisabled, match="buy orders only"):
+            await adapter.submit_order({"symbol": "AAPL", "qty": "1", "side": "sell", "type": "market"})
+        await adapter._provided_client.aclose()  # type: ignore[union-attr]
+
+    asyncio.run(run())
+    assert requests == []
+
+
+def test_external_short_prohibition_is_enforced_by_service_and_database() -> None:
+    external_source = (ROOT / "services" / "external_execution.py").read_text(encoding="utf-8")
+    migration = (ROOT.parents[2] / "database" / "migrations" / "038_elite_portfolio_builder.sql").read_text(encoding="utf-8")
+
+    assert "external paper rejects short and internal-only deployments" in external_source
+    assert "COALESCE(d.strategy_direction, 'long') = 'long'" in external_source
+    assert "external_paper_deployments_long_only_guard" in migration
+    assert "deployment_direction <> 'long'" in migration
+
+
 def test_execution_flags_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "broker_order_submission_enabled", False)
     monkeypatch.setattr(settings, "external_paper_execution_enabled", False)
@@ -176,7 +201,8 @@ def test_phase10_modules_have_no_runtime_ddl() -> None:
 
 def test_adapter_has_explicit_guards_for_both_mutation_methods() -> None:
     source = (ROOT / "brokers" / "alpaca_paper.py").read_text(encoding="utf-8")
-    assert source.count("raise BrokerMutationDisabled") == 2
+    assert source.count("raise BrokerMutationDisabled") == 3
+    assert "external paper supports buy orders only" in source
 
 
 def test_completed_bar_gate_is_strict() -> None:

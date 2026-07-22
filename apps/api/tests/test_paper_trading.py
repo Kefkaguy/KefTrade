@@ -117,8 +117,8 @@ class FakeConn:
             if "parent_order_id" in query:
                 row = {
                     "id": len(self.orders) + 1, "account_id": params[0], "deployment_id": params[1],
-                    "symbol": params[2], "timeframe": params[3], "side": "sell", "order_type": params[4],
-                    "quantity": params[5], "trigger_price": params[6], "parent_order_id": params[7],
+                    "symbol": params[2], "timeframe": params[3], "side": params[4], "order_type": params[5],
+                    "quantity": params[6], "trigger_price": params[7], "parent_order_id": params[8],
                     "status": "pending", "simulation_only": True,
                 }
                 self.orders[row["id"]] = row
@@ -214,6 +214,8 @@ class FakeConn:
                 "parameters": {},
                 "status": "active",
                 "simulation_only": True,
+                "strategy_direction": params[13],
+                "execution_capability": params[14],
                 "last_scanned_candle_timestamp": None,
             }
             self.deployments[row["id"]] = row
@@ -297,6 +299,42 @@ def test_sell_fill_updates_realized_pnl_without_shorting() -> None:
     assert position["quantity"] == Decimal("5")
     assert position["realized_pnl"] > Decimal("0")
     assert conn.accounts[account["id"]]["realized_pnl"] > Decimal("0")
+
+
+def test_internal_short_position_is_signed_and_protective_buy_covers_it() -> None:
+    conn = FakeConn()
+    account = create_paper_account(conn, "Internal Short Research", Decimal("10000"))
+    deployment = create_deployment(
+        conn,
+        account["id"],
+        "bearish_breakdown",
+        "AAPL",
+        "1d",
+        strategy_direction="short",
+        execution_capability="internal_only",
+    )
+
+    entry = create_order(
+        conn,
+        account["id"],
+        "AAPL",
+        Decimal("10"),
+        side="sell",
+        deployment_id=deployment["id"],
+        stop_loss_price=Decimal("105"),
+        take_profit_price=Decimal("90"),
+    )
+
+    assert entry["status"] == "filled"
+    assert conn.positions[(account["id"], "AAPL")]["quantity"] == Decimal("-10")
+    protective = [row for row in conn.orders.values() if row.get("parent_order_id")]
+    assert {row["side"] for row in protective} == {"buy"}
+
+    conn.candle = {**conn.candle, "high": Decimal("106"), "low": Decimal("95"), "close": Decimal("105")}
+    process_pending_orders(conn, account["id"])
+
+    assert conn.positions[(account["id"], "AAPL")]["quantity"] == Decimal("0")
+    assert {row["status"] for row in protective} == {"filled", "canceled"}
 
 
 def test_deployment_lifecycle_is_simulation_only() -> None:

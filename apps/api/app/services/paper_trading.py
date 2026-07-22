@@ -87,14 +87,15 @@ def create_order(
         raise PaperTradingError("paper trading supports market and limit simulation only")
     if quantity <= 0:
         raise PaperTradingError("quantity must be positive")
-    if side != "buy" and (stop_loss_price is not None or take_profit_price is not None):
-        raise PaperTradingError("protective exits can only be attached to simulated buy orders")
+    direction = str((deployment or {}).get("strategy_direction") or "long")
+    if side == "sell" and (stop_loss_price is not None or take_profit_price is not None) and direction != "short":
+        raise PaperTradingError("protective exits on simulated sell entries require a short deployment")
     if stop_loss_price is not None and stop_loss_price <= 0:
         raise PaperTradingError("stop_loss_price must be positive")
     if take_profit_price is not None and take_profit_price <= 0:
         raise PaperTradingError("take_profit_price must be positive")
     latest = latest_candle(conn, symbol, timeframe)
-    blocked = deployment_block or risk_block_reason(conn, account, symbol, side, quantity, latest["close"], limit_price)
+    blocked = deployment_block or risk_block_reason(conn, account, symbol, side, quantity, latest["close"], limit_price, deployment_id=deployment_id)
     status = "rejected" if blocked else "pending"
     row = conn.execute(
         """
@@ -175,21 +176,33 @@ def risk_block_reason(
     quantity: Decimal,
     reference_price: Decimal,
     limit_price: Decimal | None,
+    deployment_id: int | None = None,
 ) -> str | None:
     if account["status"] != "active":
         return "Paper account is not active."
     price = limit_price or reference_price
     notional = quantity * Decimal(price)
     cash = Decimal(account["cash_balance"])
+    position = get_position(conn, int(account["id"]), symbol)
+    current_qty = Decimal(position.get("quantity") or 0)
+    deployment = get_deployment(conn, deployment_id) if deployment_id is not None else None
+    direction = str((deployment or {}).get("strategy_direction") or "long")
     if side == "buy":
-        if notional * (Decimal("1") + FEE_RATE + SLIPPAGE_RATE) > cash:
+        is_short_cover = current_qty < 0
+        if is_short_cover and quantity > abs(current_qty):
+            return "Cannot cover more than the simulated short position."
+        if not is_short_cover and notional * (Decimal("1") + FEE_RATE + SLIPPAGE_RATE) > cash:
             return "Insufficient paper cash; leverage is disabled."
-        if notional > cash * MAX_ORDER_NOTIONAL_FRACTION:
+        if not is_short_cover and notional > cash * MAX_ORDER_NOTIONAL_FRACTION:
             return "Order exceeds max simulation risk allocation."
     if side == "sell":
-        position = get_position(conn, int(account["id"]), symbol)
-        if quantity > Decimal(position.get("quantity") or 0):
+        is_short_entry = current_qty <= 0 and direction == "short"
+        if current_qty > 0 and quantity > current_qty:
             return "Cannot sell more than simulated long position; shorting is disabled."
+        if current_qty <= 0 and not is_short_entry:
+            return "Opening a simulated short requires an internal-only short deployment."
+        if is_short_entry and notional > cash * MAX_ORDER_NOTIONAL_FRACTION:
+            return "Short order exceeds max simulation risk allocation."
     return None
 
 
@@ -204,7 +217,7 @@ def simulate_order_fill(conn: psycopg.Connection, order_id: int) -> dict[str, An
     if fill_price is None:
         return dict(order)
     account = get_account(conn, order["account_id"])
-    blocked = risk_block_reason(conn, account, order["symbol"], order["side"], Decimal(order["quantity"]), fill_price, fill_price)
+    blocked = risk_block_reason(conn, account, order["symbol"], order["side"], Decimal(order["quantity"]), fill_price, fill_price, deployment_id=order.get("deployment_id"))
     if blocked:
         rejected = conn.execute(
             "UPDATE paper_orders SET status = 'rejected', rejected_reason = %s WHERE id = %s RETURNING *",
@@ -215,7 +228,7 @@ def simulate_order_fill(conn: psycopg.Connection, order_id: int) -> dict[str, An
     fill = apply_fill(conn, dict(order), candle, fill_price)
     conn.execute("UPDATE paper_orders SET status = 'filled', filled_at = %s WHERE id = %s", (fill["filled_at"], order_id))
     log_event(conn, order["account_id"], order["deployment_id"], order_id, "paper_order_filled", "Paper order filled from historical candle data.", fill)
-    if order["side"] == "buy" and (order.get("stop_loss_price") or order.get("take_profit_price")):
+    if order.get("stop_loss_price") or order.get("take_profit_price"):
         create_protective_orders(conn, dict(order))
     if order.get("parent_order_id"):
         cancel_protective_sibling(conn, dict(order))
@@ -229,10 +242,12 @@ def simulated_fill_price(order: dict[str, Any], candle: dict[str, Any]) -> Decim
         return close * (Decimal("1") + SLIPPAGE_RATE if order["side"] == "buy" else Decimal("1") - SLIPPAGE_RATE)
     if order["order_type"] == "stop_loss":
         trigger = Decimal(order["trigger_price"])
-        return trigger if Decimal(candle["low"]) <= trigger else None
+        touched = Decimal(candle["low"]) <= trigger if order["side"] == "sell" else Decimal(candle["high"]) >= trigger
+        return trigger if touched else None
     if order["order_type"] == "take_profit":
         trigger = Decimal(order["trigger_price"])
-        return trigger if Decimal(candle["high"]) >= trigger else None
+        touched = Decimal(candle["high"]) >= trigger if order["side"] == "sell" else Decimal(candle["low"]) <= trigger
+        return trigger if touched else None
     limit = Decimal(order["limit_price"])
     if order["side"] == "buy" and Decimal(candle["low"]) <= limit:
         return limit
@@ -243,6 +258,7 @@ def simulated_fill_price(order: dict[str, Any], candle: dict[str, Any]) -> Decim
 
 def create_protective_orders(conn: psycopg.Connection, parent: dict[str, Any]) -> list[dict[str, Any]]:
     created = []
+    exit_side = "sell" if parent["side"] == "buy" else "buy"
     for order_type, price_key in (("stop_loss", "stop_loss_price"), ("take_profit", "take_profit_price")):
         trigger = parent.get(price_key)
         if trigger is None:
@@ -250,7 +266,7 @@ def create_protective_orders(conn: psycopg.Connection, parent: dict[str, Any]) -
         row = conn.execute(
             """
             INSERT INTO paper_orders(account_id, deployment_id, symbol, timeframe, side, order_type, quantity, trigger_price, parent_order_id, status, simulation_only, campaign_id, candidate_id, strategy_id, strategy_version, decision_id, signal_timestamp, evidence_origin)
-            VALUES (%s, %s, %s, %s, 'sell', %s, %s, %s, %s, 'pending', TRUE, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending', TRUE, %s, %s, %s, %s, %s, %s, %s)
             RETURNING *
             """,
             (
@@ -258,6 +274,7 @@ def create_protective_orders(conn: psycopg.Connection, parent: dict[str, Any]) -
                 parent.get("deployment_id"),
                 parent["symbol"],
                 parent["timeframe"],
+                exit_side,
                 order_type,
                 parent["quantity"],
                 trigger,
@@ -326,12 +343,20 @@ def apply_fill(conn: psycopg.Connection, order: dict[str, Any], candle: dict[str
     current_qty = Decimal(position.get("quantity") or 0)
     avg_price = Decimal(position.get("average_price") or 0)
     realized = Decimal(position.get("realized_pnl") or 0)
-    if side == "buy":
+    if side == "buy" and current_qty >= 0:
         new_qty = current_qty + quantity
         new_avg = ((current_qty * avg_price) + gross) / new_qty
         cash_delta = -(gross + fee)
         realized_delta = Decimal("0")
-    else:
+    elif side == "buy":
+        if quantity > abs(current_qty):
+            raise PaperTradingError("Cannot cover more than simulated short position.")
+        new_qty = current_qty + quantity
+        realized_delta = (avg_price - fill_price) * quantity - fee
+        realized += realized_delta
+        new_avg = Decimal("0") if new_qty == 0 else avg_price
+        cash_delta = -(gross + fee)
+    elif current_qty > 0:
         if quantity > current_qty:
             raise PaperTradingError("Cannot sell more than simulated long position.")
         new_qty = current_qty - quantity
@@ -339,6 +364,12 @@ def apply_fill(conn: psycopg.Connection, order: dict[str, Any], candle: dict[str
         realized += realized_delta
         new_avg = Decimal("0") if new_qty == 0 else avg_price
         cash_delta = gross - fee
+    else:
+        new_qty = current_qty - quantity
+        prior_abs = abs(current_qty)
+        new_avg = ((prior_abs * avg_price) + gross) / abs(new_qty)
+        cash_delta = gross - fee
+        realized_delta = Decimal("0")
     fill = conn.execute(
         """
         INSERT INTO paper_fills(order_id, account_id, symbol, side, quantity, fill_price, gross_amount, fee, slippage, candle_timestamp, simulation_only, campaign_id, candidate_id, deployment_id, strategy_id, strategy_version, decision_id, signal_timestamp, evidence_origin)
@@ -406,13 +437,15 @@ def create_deployment(
     evidence_version: str | None = None,
     lifecycle_state: str = "manual_simulation",
     deployment_origin: str = "manual_simulation",
+    strategy_direction: str = "long",
+    execution_capability: str | None = None,
 ) -> dict[str, Any]:
     ensure_forward_lineage_columns(conn)
     get_account(conn, account_id)
     row = conn.execute(
         """
-        INSERT INTO strategy_deployments(account_id, strategy_name, strategy_version, symbol, timeframe, parameters, status, simulation_only, campaign_id, candidate_id, strategy_id, forward_validation_started_at, evidence_version, lifecycle_state, deployment_origin)
-        VALUES (%s, %s, %s, %s, %s, %s, 'active', TRUE, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO strategy_deployments(account_id, strategy_name, strategy_version, symbol, timeframe, parameters, status, simulation_only, campaign_id, candidate_id, strategy_id, forward_validation_started_at, evidence_version, lifecycle_state, deployment_origin, strategy_direction, execution_capability)
+        VALUES (%s, %s, %s, %s, %s, %s, 'active', TRUE, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
         (
@@ -429,6 +462,8 @@ def create_deployment(
             evidence_version,
             lifecycle_state,
             deployment_origin,
+            strategy_direction,
+            execution_capability or ("internal_only" if strategy_direction == "short" else "external_observe"),
         ),
     ).fetchone()
     log_event(conn, account_id, row["id"], None, "paper_deployment_created", "Created simulation-only strategy deployment.", dict(row))
@@ -852,7 +887,7 @@ def create_deployment_order_from_decision(conn: psycopg.Connection, deployment: 
         deployment_id=int(deployment["id"]),
         symbol=deployment["symbol"],
         timeframe=deployment["timeframe"],
-        side="buy",
+        side="sell" if decision.direction == "short" else "buy",
         order_type="market",
         quantity=quantity,
         stop_loss_price=decision.stop_loss,

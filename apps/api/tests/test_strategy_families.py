@@ -64,6 +64,8 @@ def test_family_registry_is_complete_falsifiable_and_executable() -> None:
         "Range Breakout",
         "Continuation",
         "Gap",
+        "Bearish Breakdown",
+        "Bearish Momentum",
     )
     payload = family_specification_payload()
     assert payload["shared_controls"]["allocation"] == {
@@ -153,6 +155,16 @@ def test_each_family_has_a_distinct_executable_signal_path() -> None:
     continuation.append(candle(60, price, price + 0.5, price - 0.05, price + 0.45, 1200))
 
     gap = list(flat[:60]) + [candle(60, 101, 101.8, 100.9, 101.7, 1300)]
+    bearish_breakdown = [candle(i, 100, 100.6, 99.4, 100, 1000) for i in range(54)]
+    bearish_breakdown.extend(candle(i, 100, 100.2, 99.8, 100, 1000) for i in range(54, 60))
+    bearish_breakdown.append(candle(60, 99.9, 100.0, 98.8, 98.9, 1500))
+
+    bearish_momentum = []
+    price = 120.0
+    for i in range(61):
+        next_price = price * (0.9985 if i < 56 else 0.994)
+        bearish_momentum.append(candle(i, price, price + 0.08, next_price - 0.08, next_price, 1100))
+        price = next_price
     cases = {
         "Breakout": (breakout, standard_feature()),
         "Momentum": (momentum, standard_feature()),
@@ -162,12 +174,19 @@ def test_each_family_has_a_distinct_executable_signal_path() -> None:
         "Range Breakout": (range_breakout, standard_feature()),
         "Continuation": (continuation, standard_feature()),
         "Gap": (gap, standard_feature()),
+        "Bearish Breakdown": (bearish_breakdown, standard_feature(rsi_14=Decimal("40"), macd=Decimal("-1"), macd_signal=Decimal("-0.5"))),
+        "Bearish Momentum": (bearish_momentum, standard_feature(rsi_14=Decimal("40"), macd=Decimal("-1"), macd_signal=Decimal("-0.5"))),
     }
     explanations = set()
     for family, (rows, feature) in cases.items():
         decision = strategy_family_decision(rows[-1], feature, rows, default_params(family))
         assert decision.signal == "setup", (family, decision.explanation)
-        assert decision.stop_loss is not None and decision.stop_loss < rows[-1]["close"]
+        assert decision.stop_loss is not None
+        if decision.direction == "long":
+            assert decision.stop_loss < rows[-1]["close"]
+        else:
+            assert decision.stop_loss > rows[-1]["close"]
+            assert decision.take_profit is not None and decision.take_profit < rows[-1]["close"]
         explanations.add(decision.explanation[0])
     assert len(explanations) == len(PHASE_2_FAMILY_NAMES)
 

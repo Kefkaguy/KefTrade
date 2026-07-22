@@ -30,6 +30,7 @@ class StrategyFamilySpec:
     frequency_sensitive_parameters: tuple[str, ...]
     parameter_ranges: dict[str, tuple[Any, ...]]
     exploration_ranges: dict[str, tuple[Any, ...]]
+    direction: str = "long"
 
 
 _COMMON_RISK_RANGES = {
@@ -336,6 +337,71 @@ STRATEGY_FAMILY_SPECS: dict[str, StrategyFamilySpec] = {
             "max_holding_bars": (3, 24),
         },
     ),
+    "Bearish Breakdown": StrategyFamilySpec(
+        name="Bearish Breakdown",
+        slug="bearish_breakdown",
+        observation_set=("range_compression", "breakdown_distance", "volume_expansion", "close_location"),
+        observation="A close breaks below a prior rolling low after compression with expanding participation.",
+        hypothesis_template=(
+            "On {scope}, closes at least {breakdown_buffer:.4f} below the {breakdown_lookback}-bar low after "
+            "compression at or below {compression_ratio_max:.2f} with volume at or above {volume_ratio_min:.2f}x "
+            "will produce positive short-side walk-forward expectancy."
+        ),
+        expected_behavior="Price follows through lower after escaping a compressed range.",
+        success_criteria="At least one short candidate passes every unchanged research gate.",
+        falsification_criteria="No candidate passes the unchanged gates or the edge disappears out of sample.",
+        relevant_conditions=("range_compression", "negative_breakdown_distance", "volume_expansion"),
+        entry_logic="Close below the prior rolling low by a controlled buffer.",
+        confirmation_logic="Compression, rolling-median volume expansion, and weak close location.",
+        exit_logic="ATR/swing stop above price, fixed reward/risk target below price, and bounded holding period.",
+        frequency_sensitive_parameters=("breakdown_lookback", "breakdown_buffer", "compression_lookback", "compression_ratio_max"),
+        parameter_ranges={
+            "breakdown_lookback": (12, 20, 30),
+            "breakdown_buffer": (0.0, 0.001, 0.0025),
+            "compression_lookback": (4, 6, 8),
+            "compression_ratio_max": (0.75, 0.9, 1.05),
+            "volume_ratio_min": (0.9, 1.1, 1.3),
+            **_COMMON_RISK_RANGES,
+        },
+        exploration_ranges={
+            "breakdown_lookback": (8, 40), "breakdown_buffer": (0.0, 0.004),
+            "compression_lookback": (3, 10), "compression_ratio_max": (0.65, 1.2),
+            "volume_ratio_min": (0.75, 1.5), "risk_reward": (1.2, 2.6),
+            "atr_multiplier": (1.0, 2.4), "max_holding_bars": (4, 24),
+        },
+        direction="short",
+    ),
+    "Bearish Momentum": StrategyFamilySpec(
+        name="Bearish Momentum",
+        slug="bearish_momentum",
+        observation_set=("short_return", "long_return", "negative_acceleration", "momentum_persistence"),
+        observation="Negative multi-horizon returns accelerate while momentum and price confirmation remain bearish.",
+        hypothesis_template=(
+            "On {scope}, {momentum_short_bars}-bar losses above {bearish_short_min:.4f}, long-horizon losses above "
+            "{bearish_long_min:.4f}, and negative acceleration above {bearish_acceleration_min:.4f} will produce "
+            "positive short-side walk-forward expectancy."
+        ),
+        expected_behavior="An accelerating decline persists beyond the signal bar.",
+        success_criteria="At least one short candidate passes every unchanged research gate.",
+        falsification_criteria="Bearish momentum candidates fail economic gates or lose the edge out of sample.",
+        relevant_conditions=("negative_return_persistence", "negative_acceleration", "bearish_rsi"),
+        entry_logic="A new short-horizon low during negative multi-horizon momentum.",
+        confirmation_logic="Negative acceleration, bearish RSI/MACD, and price confirmation.",
+        exit_logic="ATR/swing stop above price, fixed reward/risk target below price, and bounded holding period.",
+        frequency_sensitive_parameters=("momentum_short_bars", "bearish_short_min", "momentum_long_bars", "bearish_acceleration_min"),
+        parameter_ranges={
+            "momentum_short_bars": (3, 5, 8), "momentum_long_bars": (10, 15, 20),
+            "bearish_short_min": (0.0025, 0.005, 0.008), "bearish_long_min": (0.004, 0.008, 0.014),
+            "bearish_acceleration_min": (0.0, 0.002, 0.004), **_COMMON_RISK_RANGES,
+        },
+        exploration_ranges={
+            "momentum_short_bars": (2, 10), "momentum_long_bars": (8, 30),
+            "bearish_short_min": (0.0, 0.012), "bearish_long_min": (0.0, 0.02),
+            "bearish_acceleration_min": (0.0, 0.008), "risk_reward": (1.2, 2.6),
+            "atr_multiplier": (1.0, 2.4), "max_holding_bars": (4, 24),
+        },
+        direction="short",
+    ),
 }
 
 
@@ -424,15 +490,25 @@ def family_observation_evidence(strategy_family: str, metrics: dict[str, Any]) -
             "breakout_follow_through": values.get("breakout_follow_through", 0.0),
             "volume_expansion_ratio": values.get("volume_expansion_ratio", 0.0),
         },
+        "Bearish Breakdown": {
+            "breakout_follow_through": values.get("breakout_follow_through", 0.0),
+            "volume_expansion_ratio": values.get("volume_expansion_ratio", 0.0),
+            "momentum_persistence": values.get("momentum_persistence", 0.0),
+        },
+        "Bearish Momentum": {
+            "momentum_persistence": values.get("momentum_persistence", 0.0),
+            "return_autocorrelation_lag1": values.get("return_autocorrelation_lag1", 0.0),
+            "trend_strength": values.get("trend_strength", 0.0),
+        },
     }
     return evidence[strategy_family]
 
 
 def family_observation_score(strategy_family: str, metrics: dict[str, Any]) -> float:
     evidence = family_observation_evidence(strategy_family, metrics)
-    if strategy_family == "Breakout":
+    if strategy_family in {"Breakout", "Bearish Breakdown"}:
         score = evidence["breakout_follow_through"] * 0.50 + min(2.0, evidence["volume_expansion_ratio"]) / 2 * 0.30 + evidence["momentum_persistence"] * 0.20
-    elif strategy_family == "Momentum":
+    elif strategy_family in {"Momentum", "Bearish Momentum"}:
         score = evidence["momentum_persistence"] * 0.55 + max(0.0, evidence["return_autocorrelation_lag1"]) * 0.25 + min(1.0, evidence["trend_strength"] * 8) * 0.20
     elif strategy_family == "Pullback":
         score = min(1.0, evidence["trend_persistence"] / 6) * 0.50 + min(1.0, evidence["median_pullback_depth"] / 0.04) * 0.20 + evidence["momentum_persistence"] * 0.30
@@ -456,7 +532,7 @@ def strategy_family_decision(
     params: dict[str, Any],
 ) -> StrategyDecision:
     family = str(params.get("phase2_strategy_family") or "")
-    strategy_family_spec(family)
+    spec = strategy_family_spec(family)
     candles = recent_candles
     if not candles or candles[-1].get("timestamp") != candle.get("timestamp"):
         candles = [*candles, candle]
@@ -469,15 +545,18 @@ def strategy_family_decision(
         "Range Breakout": _range_breakout_signal,
         "Continuation": _continuation_signal,
         "Gap": _gap_signal,
+        "Bearish Breakdown": _bearish_breakdown_signal,
+        "Bearish Momentum": _bearish_momentum_signal,
     }[family](candle, feature, candles, params)
     if not decision[0]:
-        return _avoid(str(decision[1]))
-    stop = _family_stop(family, candle, candles, params, dict(decision[2]))
+        return _avoid(str(decision[1]), direction=spec.direction)
+    stop = _family_stop(family, candle, candles, params, dict(decision[2])) if spec.direction == "long" else _family_short_stop(candle, candles, params)
     close = _decimal(candle.get("close"))
-    if stop is None or close is None or stop <= 0 or stop >= close:
-        return _avoid("Family risk rule did not produce a valid long-only stop.")
+    valid_stop = stop is not None and close is not None and stop > 0 and (stop < close if spec.direction == "long" else stop > close)
+    if not valid_stop:
+        return _avoid(f"Family risk rule did not produce a valid {spec.direction} stop.", direction=spec.direction)
     rr = Decimal(str(params.get("risk_reward", 1.8)))
-    take_profit = close + ((close - stop) * rr)
+    take_profit = close + ((close - stop) * rr) if spec.direction == "long" else close - ((stop - close) * rr)
     measurements = ", ".join(f"{key}={value:.6f}" for key, value in sorted(dict(decision[2]).items()))
     return StrategyDecision(
         "setup",
@@ -486,7 +565,46 @@ def strategy_family_decision(
         take_profit,
         rr,
         [f"{family} {PHASE_2_FAMILY_VERSION} conditions passed.", measurements],
+        direction=spec.direction,
     )
+
+
+def _bearish_breakdown_signal(candle: dict[str, Any], feature: dict[str, Any], candles: list[dict[str, Any]], params: dict[str, Any]) -> tuple[bool, str, dict[str, float]]:
+    lookback = int(params["breakdown_lookback"])
+    compression_lookback = int(params["compression_lookback"])
+    if len(candles) < max(lookback + 2, 22):
+        return False, "Bearish breakdown requires more rolling history.", {}
+    prior = candles[-lookback - 1 : -1]
+    prior_low = min(_float(row["low"]) for row in prior)
+    close = _float(candle["close"])
+    breakdown_distance = prior_low / close - 1 if close else 0.0
+    prior_ranges = _true_ranges(candles[-22:-1])[-20:]
+    recent_ranges = prior_ranges[-compression_lookback:]
+    compression = median(recent_ranges) / median(prior_ranges) if prior_ranges and median(prior_ranges) else 99.0
+    volume_ratio = _volume_ratio(candles, 20)
+    close_location = _close_location(candle)
+    passed = breakdown_distance >= float(params["breakdown_buffer"]) and compression <= float(params["compression_ratio_max"]) and volume_ratio >= float(params["volume_ratio_min"]) and close_location <= 0.45
+    return passed, "Breakdown distance, compression, volume, or close-location confirmation failed.", {"breakdown_distance": breakdown_distance, "compression_ratio": compression, "volume_ratio": volume_ratio, "close_location": close_location}
+
+
+def _bearish_momentum_signal(candle: dict[str, Any], feature: dict[str, Any], candles: list[dict[str, Any]], params: dict[str, Any]) -> tuple[bool, str, dict[str, float]]:
+    short = int(params["momentum_short_bars"])
+    long = int(params["momentum_long_bars"])
+    if len(candles) < max(long + 2, short * 2 + 2):
+        return False, "Bearish momentum requires more multi-horizon history.", {}
+    close = _float(candle["close"])
+    short_loss = 1 - close / _float(candles[-short - 1]["close"])
+    long_loss = 1 - close / _float(candles[-long - 1]["close"])
+    prior_end = _float(candles[-short - 1]["close"])
+    prior_start = _float(candles[-short * 2 - 1]["close"])
+    prior_loss = 1 - prior_end / prior_start
+    acceleration = short_loss - prior_loss
+    rsi = _number(feature.get("rsi_14"))
+    macd = _number(feature.get("macd"))
+    macd_signal = _number(feature.get("macd_signal"))
+    confirmation = close <= min(_float(row["low"]) for row in candles[-short:-1])
+    passed = short_loss >= float(params["bearish_short_min"]) and long_loss >= float(params["bearish_long_min"]) and acceleration >= float(params["bearish_acceleration_min"]) and rsi <= 48 and macd <= macd_signal and confirmation
+    return passed, "Negative returns, acceleration, RSI/MACD, or price confirmation failed.", {"short_loss": short_loss, "long_loss": long_loss, "negative_acceleration": acceleration, "rsi": rsi}
 
 
 def _breakout_signal(candle: dict[str, Any], feature: dict[str, Any], candles: list[dict[str, Any]], params: dict[str, Any]) -> tuple[bool, str, dict[str, float]]:
@@ -692,6 +810,18 @@ def _family_stop(strategy_family: str, candle: dict[str, Any], candles: list[dic
     return atr_stop
 
 
+def _family_short_stop(candle: dict[str, Any], candles: list[dict[str, Any]], params: dict[str, Any]) -> Decimal | None:
+    close = _decimal(candle.get("close"))
+    if close is None:
+        return None
+    ranges = _true_ranges(candles[-15:])
+    atr = Decimal(str(median(ranges[-14:]))) if ranges else close * Decimal("0.01")
+    atr_stop = close + atr * Decimal(str(params.get("atr_multiplier", 1.6)))
+    lookback = min(len(candles), max(2, int(params.get("swing_lookback", 5))))
+    swing_stop = max(_decimal(row.get("high")) or close for row in candles[-lookback:])
+    return max(atr_stop, swing_stop)
+
+
 def _ema(candles: list[dict[str, Any]], period: int) -> float | None:
     if len(candles) < period:
         return None
@@ -727,8 +857,8 @@ def _close_location(candle: dict[str, Any]) -> float:
     return (_float(candle.get("close")) - low) / (high - low) if high > low else 0.5
 
 
-def _avoid(reason: str) -> StrategyDecision:
-    return StrategyDecision("avoid", None, None, None, None, [reason])
+def _avoid(reason: str, *, direction: str = "long") -> StrategyDecision:
+    return StrategyDecision("avoid", None, None, None, None, [reason], direction=direction)
 
 
 def _number(value: Any) -> float:

@@ -2386,6 +2386,8 @@ def preferred_entry_families(strategy_family: str) -> tuple[str, ...]:
         "Range Breakout": ("range_breakout",),
         "Continuation": ("continuation",),
         "Gap": ("gap",),
+        "Bearish Breakdown": ("bearish_breakdown",),
+        "Bearish Momentum": ("bearish_momentum",),
         "Gap Continuation": ("gap_proxy", "opening_range_proxy"),
         "Trend Following": ("trend_continuation", "pullback"),
     }[strategy_family]

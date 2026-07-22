@@ -89,6 +89,8 @@ def enable_observe_only(conn: psycopg.Connection, internal_deployment_id: int, *
     deployment = conn.execute("SELECT * FROM strategy_deployments WHERE id=%s AND simulation_only=TRUE FOR UPDATE", (internal_deployment_id,)).fetchone()
     if not deployment or not deployment.get("campaign_id") or not deployment.get("candidate_id"):
         raise ValueError("external paper requires a candidate-linked internal simulation deployment")
+    if str(deployment.get("strategy_direction") or "long") != "long" or str(deployment.get("execution_capability") or "external_observe") == "internal_only":
+        raise ValueError("external paper rejects short and internal-only deployments")
     elite = conn.execute("SELECT * FROM elite_research_candidates WHERE campaign_id=%s AND candidate_id=%s AND simulation_only=TRUE FOR UPDATE", (deployment["campaign_id"], deployment["candidate_id"])).fetchone()
     if not elite:
         raise ValueError("external paper requires an authoritative elite candidate")
@@ -210,6 +212,8 @@ def ensure_disabled_external_candidates(conn: psycopg.Connection) -> int:
         FROM strategy_deployments d
         JOIN elite_research_candidates e ON e.campaign_id=d.campaign_id AND e.candidate_id=d.candidate_id AND e.simulation_only=TRUE
         WHERE d.simulation_only=TRUE AND d.status='active'
+          AND COALESCE(d.strategy_direction, 'long') = 'long'
+          AND COALESCE(d.execution_capability, 'external_observe') <> 'internal_only'
           AND NOT EXISTS (SELECT 1 FROM external_paper_deployments x WHERE x.internal_deployment_id=d.id AND x.broker_account_id=%s)
         ORDER BY e.research_score DESC, d.id
         """,
@@ -244,6 +248,8 @@ def validate_adapter_compatibility(conn: psycopg.Connection, *, operator: str) -
 def evaluate_eligibility(conn: psycopg.Connection, external: dict[str, Any], epoch: dict[str, Any], sync_run_id: int, trace_id: UUID, *, bar_fresh: bool) -> dict[str, Any]:
     config = conn.execute("SELECT * FROM deployment_configuration_versions WHERE id=%s", (epoch["deployment_configuration_version_id"],)).fetchone()
     internal = conn.execute("SELECT * FROM strategy_deployments WHERE id=%s", (external["internal_deployment_id"],)).fetchone()
+    if not internal or str(internal.get("strategy_direction") or "long") != "long":
+        raise RuntimeError("external shadow execution rejects short deployments")
     elite = conn.execute("SELECT * FROM elite_research_candidates WHERE id=%s", (external["elite_candidate_id"],)).fetchone()
     candidate_object = candidate_object_for(conn, int(external["campaign_id"]), str(external["candidate_id"]))
     current_fingerprint = candidate_fingerprint(dict(internal), dict(elite), candidate_object)

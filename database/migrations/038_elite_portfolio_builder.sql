@@ -33,6 +33,28 @@ ALTER TABLE strategy_deployments ADD CONSTRAINT strategy_deployments_capability_
     CHECK (execution_capability IN ('internal_only', 'external_observe', 'paper_eligible')) NOT VALID;
 ALTER TABLE strategy_deployments VALIDATE CONSTRAINT strategy_deployments_capability_check;
 
+CREATE OR REPLACE FUNCTION reject_external_short_deployment() RETURNS trigger
+LANGUAGE plpgsql AS $$
+DECLARE
+    deployment_direction TEXT;
+    deployment_capability TEXT;
+BEGIN
+    SELECT strategy_direction, execution_capability
+      INTO deployment_direction, deployment_capability
+      FROM strategy_deployments
+     WHERE id = NEW.internal_deployment_id;
+    IF deployment_direction <> 'long' OR deployment_capability = 'internal_only' THEN
+        RAISE EXCEPTION 'external deployments require a long strategy with external capability';
+    END IF;
+    RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS external_paper_deployments_long_only_guard ON external_paper_deployments;
+CREATE TRIGGER external_paper_deployments_long_only_guard
+    BEFORE INSERT OR UPDATE OF internal_deployment_id ON external_paper_deployments
+    FOR EACH ROW EXECUTE FUNCTION reject_external_short_deployment();
+
 ALTER TABLE elite_shadow_replay_outcomes
     ADD COLUMN IF NOT EXISTS strategy_direction TEXT NOT NULL DEFAULT 'long';
 ALTER TABLE elite_shadow_replay_outcomes DROP CONSTRAINT IF EXISTS elite_shadow_replay_outcomes_direction_check;
@@ -192,4 +214,3 @@ CREATE INDEX IF NOT EXISTS elite_portfolio_conflicts_run_type_idx
     ON elite_portfolio_conflicts(portfolio_run_id, conflict_type);
 CREATE INDEX IF NOT EXISTS elite_portfolio_eligibility_run_eligible_idx
     ON elite_portfolio_eligibility(portfolio_run_id, eligible);
-

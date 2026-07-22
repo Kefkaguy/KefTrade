@@ -82,6 +82,8 @@ class AlpacaPaperBrokerAdapter:
         return await self._get("/v2/orders:by_client_order_id", "order_by_client_id", {"client_order_id": client_order_id})
 
     async def submit_order(self, payload: dict[str, Any]) -> BrokerResponse:
+        if str(payload.get("side") or "").lower() != "buy":
+            raise BrokerMutationDisabled("KefTrade external paper supports buy orders only")
         if not settings.broker_order_submission_enabled or not settings.external_paper_execution_enabled:
             raise BrokerMutationDisabled("both broker execution flags must be enabled for Alpaca Paper mutation")
         return await self._mutate("POST", "/v2/orders", "submit_order", payload)
