@@ -515,9 +515,9 @@ def test_mission_control_authoritative_snapshot_is_consistent() -> None:
 
 def test_compact_mission_control_omits_large_detail_collections() -> None:
     full = get_mission_control(MissionConn())
-    compact = compact_mission_control_snapshot(full)
+    compact = get_mission_control(MissionConn(), compact=True)
 
-    assert compact["asset_count"] == len(full["assets"])
+    assert compact["asset_count"] == len(MissionConn().symbols)
     assert compact["assets"] == []
     assert "campaigns" not in compact["research_campaigns"]
     assert compact["research_campaigns"]["active_campaigns"] == full["research_campaigns"]["active_campaigns"]

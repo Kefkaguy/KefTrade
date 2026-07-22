@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 import psycopg
 
-from app.services.research_campaigns import campaign_mission_control_summary
+from app.services.research_campaigns import campaign_mission_control_operations, campaign_mission_control_summary
 from app.services.production_validation import validation_mission_control_summary
 from app.services.research_learning import research_learning_summary
 from app.services.broker_read_models import broker_status
@@ -38,7 +38,7 @@ ORDER_EVENT_TYPES = {"paper_order_submitted", "paper_order_rejected", "paper_ord
 FILL_EVENT_TYPES = {"paper_order_filled"}
 
 
-def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
+def get_mission_control(conn: psycopg.Connection, *, compact: bool = False) -> dict[str, Any]:
     errors: list[dict[str, Any]] = []
 
     def section(name: str, fn: Callable[[], Any], fallback: Any) -> Any:
@@ -60,8 +60,13 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
     alerts = section("evidence_alerts", lambda: evidence_alerts(conn), [])
     reviews = section("signal_reviews", lambda: signal_reviews(conn), [])
     logs = section("execution_logs", lambda: execution_logs(conn), [])
-    symbols = section("symbols", lambda: active_symbols(conn), [])
-    campaigns = section("research_campaigns", lambda: campaign_mission_control_summary(conn), {})
+    symbols = [] if compact else section("symbols", lambda: active_symbols(conn), [])
+    asset_count = section("symbol_count", lambda: active_symbol_count(conn), 0) if compact else len(symbols)
+    campaigns = section(
+        "research_campaigns",
+        lambda: campaign_mission_control_operations(conn) if compact else campaign_mission_control_summary(conn),
+        {},
+    )
     learning = section("research_learning", lambda: research_learning_summary(conn), {})
     validation = section("production_validation", lambda: validation_mission_control_summary(conn), {})
     external_broker_paper = section("external_broker_paper", lambda: broker_status(conn), {})
@@ -90,10 +95,13 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
     campaign = authoritative_campaign(campaigns, validation)
     workers = authoritative_workers(campaigns, validation)
     market_data = authoritative_market_data(assets, logs)
+    if compact:
+        summary["assets_monitored"] = asset_count
+        market_data["monitored_assets"] = asset_count
     forward_evidence = authoritative_forward_evidence(validation)
     invariants = consistency_invariants(readiness, campaign, workers, forward_evidence, diagnostics)
 
-    return {
+    snapshot = {
         "generated_at": now,
         "snapshot_version": "mission_control_v2",
         "simulation_only": True,
@@ -118,7 +126,7 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
         "diagnostics": diagnostics,
         "invariants": invariants,
         "research_summary": summary,
-        "assets": assets,
+        "assets": [] if compact else assets,
         "review_queue": review_queue,
         "deployments": active_deployments,
         "paper_account": paper,
@@ -130,6 +138,9 @@ def get_mission_control(conn: psycopg.Connection) -> dict[str, Any]:
         "daily_summary": daily,
         "subsystem_errors": diagnostics["active"],
     }
+    if compact:
+        snapshot["asset_count"] = asset_count
+    return snapshot
 
 
 def compact_campaign_operations(campaigns: dict[str, Any]) -> dict[str, Any]:
@@ -403,6 +414,14 @@ def execution_logs(conn: psycopg.Connection) -> list[dict[str, Any]]:
 
 def active_symbols(conn: psycopg.Connection) -> list[dict[str, Any]]:
     return list(conn.execute("SELECT * FROM symbols WHERE is_active = TRUE ORDER BY symbol").fetchall())
+
+
+def active_symbol_count(conn: psycopg.Connection) -> int:
+    row = conn.execute("SELECT COUNT(*) AS count FROM symbols WHERE is_active = TRUE").fetchone() or {}
+    if "count" in row:
+        return int(row.get("count") or 0)
+    # Compatibility with lightweight test doubles that return symbol rows.
+    return len(active_symbols(conn))
 
 
 def monitored_asset_keys(

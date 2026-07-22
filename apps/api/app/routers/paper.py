@@ -10,7 +10,7 @@ from app.db import get_connection
 from app.services.deployment_management import build_deployment_management, bulk_pause_deployments, bulk_scan_deployments, resume_deployment, update_deployment_controls
 from app.services.daily_research_reports import build_daily_report_analytics, generate_daily_research_report, get_daily_research_report, list_daily_research_reports
 from app.services.evidence_alerts import acknowledge_evidence_alert, list_evidence_alerts
-from app.services.mission_control import compact_mission_control_snapshot, get_mission_control
+from app.services.mission_control import get_mission_control
 from app.services.paper_trading import (
     PaperTradingError,
     account_balances,
@@ -275,7 +275,7 @@ def get_evidence_alerts(
 
 @router.get("/mission-control")
 def get_research_mission_control(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
-    return compact_mission_control_snapshot(get_mission_control(conn))
+    return get_mission_control(conn, compact=True)
 
 
 @router.get("/deployment-management")

@@ -6693,6 +6693,91 @@ def campaign_mission_control_summary(conn: psycopg.Connection) -> dict[str, Any]
     }
 
 
+def campaign_mission_control_operations(conn: psycopg.Connection) -> dict[str, Any]:
+    """Return bounded operational counters without loading campaign analytics JSON."""
+    scheduler = dict(conn.execute("SELECT * FROM research_campaign_scheduler WHERE id = TRUE").fetchone() or {})
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT id, name, status, queued_jobs, completed_jobs, failed_jobs,
+                   promoted_candidates, rejected_candidates, started_at, completed_at, updated_at
+            FROM research_campaigns
+            WHERE simulation_only = TRUE
+            ORDER BY created_at DESC
+            LIMIT 12
+            """
+        ).fetchall()
+    ]
+    active = [row for row in rows if row.get("status") in {"queued", "running", "paused"}]
+    completed = [row for row in rows if row.get("status") == "completed"]
+    queued_jobs = sum(
+        int(row.get("queued_jobs") or 0)
+        - int(row.get("completed_jobs") or 0)
+        - int(row.get("failed_jobs") or 0)
+        for row in active
+    )
+    ops = campaign_worker_observability(conn)
+    worker_rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT worker_id, status, heartbeat_at, last_heartbeat_at
+            FROM research_campaign_workers
+            WHERE simulation_only = TRUE
+            ORDER BY heartbeat_at DESC
+            """
+        ).fetchall()
+    ]
+    now = datetime.now(UTC)
+    stale_after = timedelta(seconds=worker_stale_seconds())
+    healthy_count = sum(
+        1
+        for row in worker_rows
+        if row.get("status") not in {"stopped", "error"}
+        and (heartbeat := parse_timestamp(row.get("last_heartbeat_at") or row.get("heartbeat_at"))) is not None
+        and now - heartbeat <= stale_after
+    )
+    promoted = sum(int(row.get("promoted_candidates") or 0) for row in rows)
+    rejected = sum(int(row.get("rejected_candidates") or 0) for row in rows)
+    candidate_outcomes = promoted + rejected
+    return {
+        "scheduler_enabled": bool(scheduler.get("enabled")),
+        "last_scheduler_cycle": scheduler.get("last_cycle_at"),
+        "next_eligible_cycle": scheduler.get("next_cycle_at"),
+        "active_campaigns": len(active),
+        "completed_campaigns": len(completed),
+        "queued_campaigns": sum(1 for row in rows if row.get("status") == "queued"),
+        "queued_jobs": max(queued_jobs, 0),
+        "active_worker_count": healthy_count,
+        "healthy_worker_count": healthy_count,
+        "stale_worker_count": len(worker_rows) - healthy_count,
+        "worker_utilization": round(healthy_count / max(1, len(worker_rows)), 4),
+        "claimed_jobs": ops["claimed_jobs"],
+        "running_jobs": ops["running_jobs"],
+        "completed_jobs": ops["completed_jobs"],
+        "rejected_jobs": ops["rejected_jobs"],
+        "completed_or_rejected_jobs": ops["completed_or_rejected_jobs"],
+        "retrying_jobs": ops["retrying_jobs"],
+        "deferred_jobs": ops["deferred_jobs"],
+        "blocked_data_jobs": ops["blocked_data_jobs"],
+        "failed_jobs": ops["failed_jobs"],
+        "genuine_failed_jobs": ops["genuine_failed_jobs"],
+        "recovered_stale_leases": ops["recovered_stale_leases"],
+        "queue_depth": ops["queue_depth"],
+        "count_reconciliation": ops["count_reconciliation"],
+        "oldest_queued_job_age_hours": ops["oldest_queued_job_age_hours"],
+        "average_job_runtime_ms": ops["average_job_runtime_ms"],
+        "jobs_completed_last_24h": ops["jobs_completed_last_24h"],
+        "queue_throughput": ops["jobs_completed_last_24h"],
+        "campaign_eta": campaign_eta(rows, ops),
+        "current_experiment": current_campaign_label(active),
+        "promoted_candidates": promoted,
+        "rejection_rate": round(rejected / candidate_outcomes, 4) if candidate_outcomes else 0.0,
+        "simulation_only": True,
+    }
+
+
 def latest_completed_campaign_summary(conn: psycopg.Connection, rows: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
     completed = [row for row in (rows or []) if row.get("status") == "completed"]
     if completed:
