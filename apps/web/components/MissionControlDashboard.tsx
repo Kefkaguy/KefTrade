@@ -49,7 +49,6 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
   const readiness = snapshot.readiness;
   const broker = snapshot.external_broker_paper;
   const eliteActivity = broker?.elite_activity ?? [];
-  const deploymentChecks = broker ? deploymentCheckRows(broker.deployments ?? [], broker.shadow_executions ?? []) : [];
   const reveal = reduceMotion ? undefined : { hidden: { opacity: 0, y: 12 }, visible: { opacity: 1, y: 0 } };
 
   return (
@@ -118,53 +117,41 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
           <Metric label="Execution epochs" value={broker?.epochs?.length ?? 0} />
           <Metric label="Shadow decisions" value={broker?.shadow_executions?.length ?? 0} />
         </div>
-        <div className="deploymentCheckList">
-          <div className="deploymentCheckHeader"><span>Deployment check</span><span>{deploymentChecks.length ? `${deploymentChecks.length} tracked` : "No observe deployments"}</span></div>
-          {deploymentChecks.length ? deploymentChecks.map((row) => (
-            <article key={row.id} className={`deploymentCheckItem ${row.tone}`}>
-              <div>
-                <strong>{row.symbol} <small>{row.timeframe}</small></strong>
-                <span>{row.candidateId}</span>
-              </div>
-              <div>
-                <span className={`statusChip ${row.tone}`}>{row.label}</span>
-                <small>{row.detail}</small>
-              </div>
-              <time>{row.lastChecked}</time>
-            </article>
-          )) : <div className="inlineEmpty"><strong>No external paper checks yet</strong><span>Enabled observe-only deployments will appear here after the broker worker runs.</span></div>}
-        </div>
         <p className="surfaceNote">Broker state is read from persisted snapshots. Order submission and external execution remain disabled.</p>
       </motion.section>
 
-      <motion.section className="surface activityBand" variants={reveal}>
+      <motion.section className="surface activityBand elitePerformanceSurface" variants={reveal}>
         <div className="sectionHeading">
-          <div><span className="eyebrow">Elite ledger</span><h2>Today&apos;s checks and historical earnings</h2></div>
+          <div><span className="eyebrow">Elite performance</span><h2>Today&apos;s observation and historical replay</h2></div>
           <span className="statusChip neutral">{eliteActivity.length} tracked</span>
         </div>
         <p className="surfaceNote">Today&apos;s P&amp;L includes executed Alpaca Paper trades only. Observe-only decisions never count as earnings; replay results are shown separately.</p>
         {eliteActivity.length ? (
-          <div className="tablePanel eliteLedgerTable">
-            <table>
-              <thead><tr><th>Elite</th><th>Latest decision</th><th>Today</th><th>Paper P&amp;L today</th><th>Historical replay</th><th>Last checked</th></tr></thead>
-              <tbody>
-                {eliteActivity.map((elite) => {
-                  const replay = elite.historical_replay ?? {};
-                  const today = elite.today_performance ?? {};
-                  const decision = eliteDecision(elite);
-                  return (
-                    <tr key={elite.id}>
-                      <td><strong>{elite.symbol} <small>{elite.timeframe}</small></strong><small>Elite #{elite.id} · {elite.candidate_id}</small></td>
-                      <td><span className={`statusChip ${decision.tone}`}>{decision.label}</span><small>{decision.reason}</small></td>
-                      <td><strong>{numberValue(elite.evaluations_today)} checks</strong><small>{numberValue(elite.setups_today)} setups · {numberValue(elite.would_submit_today)} would trade</small></td>
-                      <td><strong>{today.realized_pnl == null ? "Pending attribution" : money(numberValue(today.realized_pnl))}</strong><small>{numberValue(today.submitted_orders)} submitted orders · {title(String(today.attribution_status ?? "unknown"))}</small></td>
-                      <td><strong>{replay.net_pnl == null ? "No completed trades" : money(numberValue(replay.net_pnl))}</strong><small>{replay.profit_factor == null ? "PF —" : `PF ${numberValue(replay.profit_factor).toFixed(3)}`} · {numberValue(replay.completed_trades)} trades · {outcomeHealth(replay)}</small></td>
-                      <td><strong>{relativeTime(elite.latest_evaluation_at ?? elite.latest_shadow_at)}</strong><small>{elite.latest_bar ? `Bar ${new Date(elite.latest_bar).toLocaleString()}` : "No evaluated bar"}</small></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+          <div className="elitePerformanceBody">
+            <ElitePerformanceVisuals elites={eliteActivity} />
+            <div className="eliteLedgerHeading"><div><span className="eyebrow">Exact evidence</span><h3>Elite decision ledger</h3></div><span>New York trading day</span></div>
+            <div className="tablePanel eliteLedgerTable">
+              <table>
+                <thead><tr><th>Elite</th><th>Latest decision</th><th>Today</th><th>Paper P&amp;L today</th><th>Historical replay</th><th>Last checked</th></tr></thead>
+                <tbody>
+                  {eliteActivity.map((elite) => {
+                    const replay = elite.historical_replay ?? {};
+                    const today = elite.today_performance ?? {};
+                    const decision = eliteDecision(elite);
+                    return (
+                      <tr key={elite.id}>
+                        <td><strong>{elite.symbol} <small>{elite.timeframe}</small></strong><small>Elite #{elite.id} · {elite.candidate_id}</small></td>
+                        <td><span className={`statusChip ${decision.tone}`}>{decision.label}</span><small>{decision.reason}</small></td>
+                        <td><strong>{numberValue(elite.evaluations_today)} checks</strong><small>{numberValue(elite.setups_today)} setups · {numberValue(elite.would_submit_today)} would trade</small></td>
+                        <td><strong>{today.realized_pnl == null ? "Pending attribution" : money(numberValue(today.realized_pnl))}</strong><small>{numberValue(today.submitted_orders)} submitted orders · {title(String(today.attribution_status ?? "unknown"))}</small></td>
+                        <td><strong>{replay.net_pnl == null ? "No completed trades" : money(numberValue(replay.net_pnl))}</strong><small>{replay.profit_factor == null ? "PF —" : `PF ${numberValue(replay.profit_factor).toFixed(3)}`} · {numberValue(replay.completed_trades)} trades · {outcomeHealth(replay)}</small></td>
+                        <td><strong>{relativeTime(elite.latest_evaluation_at ?? elite.latest_shadow_at)}</strong><small>{elite.latest_bar ? `Bar ${new Date(elite.latest_bar).toLocaleString()}` : "No evaluated bar"}</small></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
           </div>
         ) : <div className="inlineEmpty"><strong>No elite activity available</strong><span>The broker worker will populate this ledger after the next completed cycle.</span></div>}
       </motion.section>
@@ -195,42 +182,82 @@ function Metric({ label, value }: { label: string; value: unknown }) {
   return <div><span>{label}</span><strong>{String(value ?? 0)}</strong></div>;
 }
 
-function deploymentCheckRows(deployments: Array<Record<string, any>>, shadows: Array<Record<string, any>>) {
-  const latestShadowByDeployment = new Map<number, Record<string, any>>();
-  for (const shadow of shadows) {
-    const deploymentId = Number(shadow.external_deployment_id);
-    if (!Number.isFinite(deploymentId)) continue;
-    const current = latestShadowByDeployment.get(deploymentId);
-    if (!current || new Date(String(shadow.created_at ?? 0)).getTime() > new Date(String(current.created_at ?? 0)).getTime()) {
-      latestShadowByDeployment.set(deploymentId, shadow);
-    }
-  }
-  return deployments.map((deployment) => {
-    const id = Number(deployment.id);
-    const shadow = latestShadowByDeployment.get(id);
-    const reasons = Array.isArray(shadow?.rejection_reasons) ? shadow.rejection_reasons.map(String) : [];
-    const decision = shadow?.decision && typeof shadow.decision === "object" ? shadow.decision as Record<string, any> : {};
-    const signal = decision.signal && typeof decision.signal === "object" ? decision.signal as Record<string, any> : {};
-    const worked = Boolean(shadow?.would_submit);
-    const checked = Boolean(shadow);
-    const label = worked ? "Worked" : checked ? "Avoided" : "Waiting";
-    const tone = worked ? "success" : checked ? "warning" : "neutral";
-    const detail = checked
-      ? reasons.length
-        ? reasons.join(", ")
-        : String(signal.signal ?? "Checked")
-      : title(String(deployment.state ?? "not checked"));
-    return {
-      id: `${deployment.id}-${shadow?.id ?? "pending"}`,
-      symbol: String(deployment.symbol ?? "Unknown"),
-      timeframe: String(deployment.timeframe ?? ""),
-      candidateId: String(deployment.candidate_id ?? "unlinked"),
-      label,
-      tone,
-      detail,
-      lastChecked: checked ? relativeTime(String(shadow?.created_at)) : "Not checked",
-    };
-  });
+function ElitePerformanceVisuals({ elites }: { elites: Array<Record<string, any>> }) {
+  const chartRows = elites
+    .map((elite) => ({
+      id: numberValue(elite.id),
+      label: `${String(elite.symbol)} ${String(elite.timeframe)}`,
+      pnl: elite.historical_replay?.net_pnl == null ? null : numberValue(elite.historical_replay.net_pnl),
+      profitFactor: elite.historical_replay?.profit_factor == null ? null : numberValue(elite.historical_replay.profit_factor),
+      trades: numberValue(elite.historical_replay?.completed_trades),
+    }))
+    .sort((left, right) => (right.pnl ?? Number.NEGATIVE_INFINITY) - (left.pnl ?? Number.NEGATIVE_INFINITY));
+  const replayPnl = chartRows.reduce((total, row) => total + (row.pnl ?? 0), 0);
+  const completedTrades = chartRows.reduce((total, row) => total + row.trades, 0);
+  const checksToday = elites.reduce((total, elite) => total + numberValue(elite.evaluations_today), 0);
+  const wouldTradeToday = elites.reduce((total, elite) => total + numberValue(elite.would_submit_today), 0);
+  const maxAbsolutePnl = Math.max(1, ...chartRows.map((row) => Math.abs(row.pnl ?? 0)));
+  const maxProfitFactor = Math.max(1.5, ...chartRows.map((row) => row.profitFactor ?? 0));
+  const thresholdPosition = (1.2 / maxProfitFactor) * 100;
+
+  return (
+    <>
+      <div className="eliteKpiGrid" aria-label="Elite performance summary">
+        <EliteKpi label="Replay net P&L" value={money(replayPnl)} detail={`${completedTrades} completed portfolio trades`} tone={replayPnl >= 0 ? "positive" : "negative"} />
+        <EliteKpi label="Elites above PF gate" value={`${chartRows.filter((row) => (row.profitFactor ?? 0) >= 1.2).length} / ${chartRows.length}`} detail="Profit factor at or above 1.20" />
+        <EliteKpi label="Checks today" value={String(checksToday)} detail="Completed strategy evaluations" />
+        <EliteKpi label="Would trade today" value={String(wouldTradeToday)} detail="Shadow decisions passing every gate" tone={wouldTradeToday ? "positive" : "neutral"} />
+      </div>
+
+      <div className="eliteChartGrid">
+        <section className="eliteChartCard" aria-labelledby="elite-pnl-chart-title">
+          <div className="eliteChartHeader"><div><h3 id="elite-pnl-chart-title">Historical replay P&amp;L</h3><p>Net simulated USD after modeled slippage and fees · latest replay</p></div><span className="chartLegend"><i /> Profit <i /> Loss</span></div>
+          <div className="signedBarChart">
+            {chartRows.map((row) => {
+              const value = row.pnl ?? 0;
+              const width = (Math.abs(value) / maxAbsolutePnl) * 50;
+              return (
+                <div className="signedBarRow" key={row.id}>
+                  <span>{row.label}<small>Elite #{row.id}</small></span>
+                  <div className="signedBarPlot" aria-label={`${row.label}: ${row.pnl == null ? "no completed trades" : money(value)}`}>
+                    <i className="zeroLine" />
+                    {row.pnl != null ? <b className={value >= 0 ? "positive" : "negative"} style={{ width: `${width}%` }} /> : <em>no trades</em>}
+                  </div>
+                  <strong className={value >= 0 ? "positive" : "negative"}>{row.pnl == null ? "—" : signedMoney(value)}</strong>
+                </div>
+              );
+            })}
+          </div>
+          <p className="chartFootnote">Zero is centered. Filled bars extend right for profit; outlined bars extend left for loss.</p>
+        </section>
+
+        <section className="eliteChartCard" aria-labelledby="elite-pf-chart-title">
+          <div className="eliteChartHeader"><div><h3 id="elite-pf-chart-title">Profit factor vs promotion gate</h3><p>Gross winning P&amp;L divided by gross losing P&amp;L · 1.20 required</p></div><span className="benchmarkLabel">Gate 1.20</span></div>
+          <div className="benchmarkChart">
+            {chartRows.map((row) => {
+              const factor = row.profitFactor ?? 0;
+              const passes = row.profitFactor != null && factor >= 1.2;
+              return (
+                <div className="benchmarkRow" key={row.id}>
+                  <span>{row.label}<small>{row.trades} trades</small></span>
+                  <div className="benchmarkTrack" aria-label={`${row.label}: ${row.profitFactor == null ? "no profit factor" : factor.toFixed(3)}`}>
+                    <i style={{ left: `${thresholdPosition}%` }} />
+                    {row.profitFactor != null ? <b className={passes ? "passes" : "below"} style={{ width: `${Math.min(100, (factor / maxProfitFactor) * 100)}%` }} /> : null}
+                  </div>
+                  <strong className={passes ? "passes" : "below"}>{row.profitFactor == null ? "—" : factor.toFixed(3)}</strong>
+                </div>
+              );
+            })}
+          </div>
+          <p className="chartFootnote">The vertical marker is the deterministic 1.20 health threshold. Trade counts show the available sample.</p>
+        </section>
+      </div>
+    </>
+  );
+}
+
+function EliteKpi({ label, value, detail, tone = "neutral" }: { label: string; value: string; detail: string; tone?: string }) {
+  return <article className={`eliteKpi ${tone}`}><span>{label}</span><strong>{value}</strong><small>{detail}</small></article>;
 }
 
 function eliteDecision(elite: Record<string, any>) {
@@ -253,6 +280,10 @@ function outcomeHealth(replay: Record<string, any>) {
 
 function money(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
+}
+
+function signedMoney(value: number) {
+  return `${value > 0 ? "+" : ""}${money(value)}`;
 }
 
 function collectIssues(snapshot: MissionControlSnapshot, deploymentManagement: DeploymentManagementSnapshot | null, deploymentError?: string | null): Issue[] {
