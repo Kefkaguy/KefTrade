@@ -12,6 +12,7 @@ from app.services.elite_portfolio_repository import (
     PortfolioStale,
     PortfolioStateError,
     approve_run,
+    backfill_correlation_evidence,
     create_run,
     get_run,
     options,
@@ -61,6 +62,14 @@ def preview_portfolio(payload: PortfolioConfiguration, conn: psycopg.Connection 
 def persist_portfolio(payload: PortfolioConfiguration, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     _require_builder()
     return create_run(conn, payload.model_dump())
+
+
+@router.post("/evidence/backfill")
+def backfill_portfolio_evidence(limit: int = 20, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    _require_builder()
+    if limit < 1 or limit > 100:
+        raise HTTPException(status_code=422, detail="limit must be between 1 and 100")
+    return backfill_correlation_evidence(conn, limit=limit)
 
 
 @router.get("/{portfolio_id}")

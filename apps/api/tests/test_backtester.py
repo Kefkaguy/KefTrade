@@ -121,6 +121,17 @@ def test_frozen_long_backtest_baseline_v1() -> None:
     assert trades == fixture["trades"]
 
 
+def test_backtest_emits_regular_marked_returns_and_signal_exposure() -> None:
+    candles, features = make_rows()
+
+    result = run_backtest(candles, features, PARAMS)
+
+    assert len(result["strategy_returns"]) == 30
+    assert set(result["strategy_returns"]) == set(result["signal_exposure"])
+    assert any(value != 0 for value in result["strategy_returns"].values())
+    assert set(result["signal_exposure"].values()) <= {-1, 0, 1}
+
+
 def test_backtest_can_delay_entry_by_additional_bars() -> None:
     candles, features = make_rows()
     candles[72]["open"] = Decimal("104")

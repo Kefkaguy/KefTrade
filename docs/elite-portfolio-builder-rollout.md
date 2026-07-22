@@ -110,6 +110,26 @@ SQL
 Expected: all four tables and the trigger exist, all historical rows remain,
 and `external_non_long` is zero.
 
+## Migration 039 correlation-evidence repair
+
+Migration 039 is additive and append-only. It stores compact correlation
+evidence for historical elite jobs whose original result predates marked-return
+persistence. It does not rewrite campaign results, trades, elites, or broker
+records.
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T postgres \
+  psql -U keftrade -d keftrade -c \
+  "SELECT to_regclass('public.elite_candidate_correlation_evidence');"
+
+curl -sS -X POST \
+  'https://keftrade.duckdns.org/research/elite-portfolios/evidence/backfill?limit=20' | jq
+```
+
+Repeat the backfill only while `remaining` is `true`. Each pass is idempotent.
+`historical_results_rewritten` must remain `false`, `constraints_relaxed` must
+remain `0`, and every failure must be investigated before portfolio approval.
+
 ## API and determinism checks
 
 ```bash

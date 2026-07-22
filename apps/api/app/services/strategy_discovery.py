@@ -785,6 +785,8 @@ def evaluate_candidate(
     research_score = round(score_metrics(metrics), 4)
     status = status_for_candidate(metrics, readiness, research_score)
     failure_reasons = failure_reasons_for(metrics, readiness, by_market, by_volatility)
+    strategy_returns = dict(list(dict(result.get("strategy_returns") or {}).items())[-500:])
+    signal_exposure = dict(list(dict(result.get("signal_exposure") or {}).items())[-500:])
     return {
         "candidate_id": candidate.candidate_id,
         "family_id": candidate.family_id,
@@ -799,6 +801,14 @@ def evaluate_candidate(
         "out_of_sample_metrics": metrics.get("walk_forward", {}),
         "regime_analysis": {"by_year": by_year, "by_market_regime": by_market, "by_volatility_regime": by_volatility},
         "feature_correlations": calculate_feature_correlations(trades),
+        "strategy_returns": strategy_returns,
+        "signal_exposure": signal_exposure,
+        "correlation_evidence": {
+            "version": "aligned_marked_returns_v1",
+            "frequency": "bar",
+            "maximum_persisted_observations": 500,
+            "observation_count": len(strategy_returns),
+        },
         "paper_readiness": readiness,
         "research_score": research_score,
         "status": status,

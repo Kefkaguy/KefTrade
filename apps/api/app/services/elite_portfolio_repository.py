@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 from uuid import uuid4
 
@@ -33,6 +33,95 @@ class PortfolioStateError(ValueError):
     pass
 
 
+CORRELATION_EVIDENCE_VERSION = "aligned_marked_returns_v1"
+
+
+def backfill_correlation_evidence(conn: psycopg.Connection, *, limit: int = 20) -> dict[str, Any]:
+    """Generate compact evidence from frozen datasets without rewriting job results."""
+    from app.services.research_campaigns import run_campaign_job
+
+    bounded_limit = max(1, min(int(limit), 100))
+    rows = conn.execute(
+        """
+        SELECT DISTINCT ON (j.id)
+            j.id, j.symbol, j.timeframe, j.candidate, j.dataset_id,
+            e.id AS elite_candidate_id
+        FROM elite_research_candidates e
+        JOIN research_campaign_jobs j
+          ON j.campaign_id = e.campaign_id
+         AND j.candidate_id = e.candidate_id
+         AND j.status IN ('completed', 'promoted')
+         AND j.simulation_only = TRUE
+        WHERE e.simulation_only = TRUE
+          AND j.dataset_id IS NOT NULL
+          AND COALESCE(jsonb_object_length(j.result->'strategy_returns'), 0) = 0
+          AND NOT EXISTS (
+              SELECT 1
+              FROM elite_candidate_correlation_evidence evidence
+              WHERE evidence.research_job_id = j.id
+                AND evidence.evidence_version = %s
+                AND evidence.simulation_only = TRUE
+          )
+        ORDER BY j.id, e.id
+        LIMIT %s
+        """,
+        (CORRELATION_EVIDENCE_VERSION, bounded_limit + 1),
+    ).fetchall()
+    remaining = len(rows) > bounded_limit
+    rows = rows[:bounded_limit]
+    cache: dict[Any, Any] = {}
+    generated = 0
+    insufficient = 0
+    failures: list[dict[str, Any]] = []
+    for raw in rows:
+        job = dict(raw)
+        try:
+            rerun = run_campaign_job(conn, {**job, "_dataset_cache": cache})
+            strategy_returns = dict(rerun.get("strategy_returns") or {})
+            signal_exposure = dict(rerun.get("signal_exposure") or {})
+            evidence_hash = decision_hash({
+                "research_job_id": job["id"],
+                "dataset_id": job["dataset_id"],
+                "candidate": job["candidate"],
+                "evidence_version": CORRELATION_EVIDENCE_VERSION,
+                "strategy_returns": strategy_returns,
+                "signal_exposure": signal_exposure,
+            })
+            conn.execute(
+                """
+                INSERT INTO elite_candidate_correlation_evidence(
+                    research_job_id, elite_candidate_id, dataset_id, evidence_version,
+                    strategy_returns, signal_exposure, observation_count, evidence_hash,
+                    simulation_only
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+                ON CONFLICT(research_job_id, evidence_version, evidence_hash) DO NOTHING
+                """,
+                (
+                    job["id"], job["elite_candidate_id"], job["dataset_id"],
+                    CORRELATION_EVIDENCE_VERSION, Jsonb(strategy_returns), Jsonb(signal_exposure),
+                    len(strategy_returns), evidence_hash,
+                ),
+            )
+            conn.commit()
+            generated += 1
+            if len(strategy_returns) < 30:
+                insufficient += 1
+        except Exception as error:
+            conn.rollback()
+            failures.append({"research_job_id": job["id"], "error": str(error)})
+    return {
+        "evidence_version": CORRELATION_EVIDENCE_VERSION,
+        "examined": len(rows),
+        "generated": generated,
+        "insufficient": insufficient,
+        "failures": failures,
+        "remaining": remaining,
+        "simulation_only": True,
+        "historical_results_rewritten": False,
+        "constraints_relaxed": 0,
+    }
+
+
 def load_elite_candidate_variants(conn: psycopg.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         """
@@ -44,7 +133,10 @@ def load_elite_candidate_variants(conn: psycopg.Connection) -> list[dict[str, An
             j.candidate,
             j.result,
             j.validation_score,
-            j.consistency_score
+            j.consistency_score,
+            stored.strategy_returns AS stored_strategy_returns,
+            stored.signal_exposure AS stored_signal_exposure,
+            replay.replay_trades
         FROM elite_research_candidates e
         JOIN LATERAL (
             SELECT DISTINCT ON (symbol, timeframe)
@@ -56,6 +148,43 @@ def load_elite_candidate_variants(conn: psycopg.Connection) -> list[dict[str, An
               AND simulation_only = TRUE
             ORDER BY symbol, timeframe, validation_score DESC, id ASC
         ) j ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT evidence.strategy_returns, evidence.signal_exposure
+            FROM elite_candidate_correlation_evidence evidence
+            WHERE evidence.research_job_id = j.id
+              AND evidence.simulation_only = TRUE
+            ORDER BY evidence.created_at DESC, evidence.id DESC
+            LIMIT 1
+        ) stored ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT jsonb_agg(
+                jsonb_build_object(
+                    'entry_time', outcome.entry_time,
+                    'exit_time', outcome.exit_time,
+                    'side', 'long',
+                    'pnl_pct', outcome.net_return_on_allocated_capital
+                ) ORDER BY outcome.exit_time, outcome.id
+            ) AS replay_trades
+            FROM (
+                SELECT x.id
+                FROM external_paper_deployments x
+                WHERE x.elite_candidate_id = e.id
+                  AND x.symbol = j.symbol
+                  AND x.timeframe = j.timeframe
+                ORDER BY x.id DESC
+                LIMIT 1
+            ) deployment
+            JOIN LATERAL (
+                SELECT MAX(o.replay_run_id) AS replay_run_id
+                FROM elite_shadow_replay_outcomes o
+                WHERE o.external_deployment_id = deployment.id
+                  AND o.status = 'completed'
+            ) latest ON latest.replay_run_id IS NOT NULL
+            JOIN elite_shadow_replay_outcomes outcome
+              ON outcome.external_deployment_id = deployment.id
+             AND outcome.replay_run_id = latest.replay_run_id
+             AND outcome.status = 'completed'
+        ) replay ON TRUE
         WHERE e.simulation_only = TRUE
         ORDER BY e.candidate_id, j.symbol, j.timeframe, e.id
         """
@@ -73,7 +202,16 @@ def candidate_variant(row: dict[str, Any]) -> dict[str, Any]:
     timeframe = str(row.get("timeframe") or "")
     original_id = str(row["candidate_id"])
     key = f"{original_id}|{symbol}|{timeframe}"
-    strategy_returns = trade_return_series(result)
+    evidence_result = result
+    if not result.get("strategy_returns") and row.get("stored_strategy_returns"):
+        evidence_result = {
+            **result,
+            "strategy_returns": dict(row["stored_strategy_returns"]),
+            "signal_exposure": dict(row.get("stored_signal_exposure") or {}),
+        }
+    elif not result.get("strategy_returns") and row.get("replay_trades"):
+        evidence_result = {**result, "trades": list(row["replay_trades"])}
+    strategy_returns, signal_returns = aligned_daily_evidence(evidence_result)
     health = health_classification(row)
     return {
         "elite_id": row.get("id"),
@@ -109,7 +247,7 @@ def candidate_variant(row: dict[str, Any]) -> dict[str, Any]:
         "dataset_ids": sorted(_dataset_ids(candidate, result)),
         "data_snapshot_hash": decision_hash({"candidate": candidate, "result": result}),
         "strategy_returns": strategy_returns,
-        "signal_returns": deepcopy(strategy_returns),
+        "signal_returns": signal_returns,
         "opportunity_frequency": float(metrics.get("number_of_trades") or 0),
         "sector": candidate.get("sector"),
         "asset_class": candidate.get("asset_class") or "equity",
@@ -119,11 +257,119 @@ def candidate_variant(row: dict[str, Any]) -> dict[str, Any]:
 def trade_return_series(result: dict[str, Any]) -> dict[str, float]:
     series: dict[str, float] = {}
     for index, trade in enumerate(result.get("trades") or []):
-        key = str(trade.get("exit_timestamp") or trade.get("entry_timestamp") or f"trade-{index:06d}")
+        key = str(trade.get("exit_time") or trade.get("exit_timestamp") or trade.get("entry_time") or trade.get("entry_timestamp") or f"trade-{index:06d}")
         while key in series:
             key = f"{key}#{index}"
         series[key] = float(trade.get("pnl_pct") or 0)
     return series
+
+
+def aligned_daily_evidence(result: dict[str, Any], maximum_observations: int = 252) -> tuple[dict[str, float], dict[str, float]]:
+    """Build aligned normalized equity changes and exposure on a weekday grid.
+
+    New backtests persist per-bar marked returns and exposure. Historical
+    backtests are reconstructed as realized daily equity changes plus active
+    directional exposure, preserving existing outcomes without recalculation.
+    """
+    raw_returns = dict(result.get("strategy_returns") or {})
+    raw_exposure = dict(result.get("signal_exposure") or {})
+    trades = list(result.get("trades") or [])
+    start, end = _evidence_window(result, raw_returns, trades)
+    if start is None or end is None:
+        return {}, {}
+    days = [current for current in _date_range(start, end) if current.weekday() < 5]
+    days = days[-maximum_observations:]
+    if not days:
+        return {}, {}
+
+    daily_returns: dict[date, float] = {day: 0.0 for day in days}
+    daily_exposure: dict[date, float] = {day: 0.0 for day in days}
+    if raw_returns:
+        grouped: dict[date, list[float]] = {}
+        for timestamp, value in raw_returns.items():
+            parsed = _parse_datetime(timestamp)
+            if parsed and parsed.date() in daily_returns:
+                grouped.setdefault(parsed.date(), []).append(float(value))
+        for day, values in grouped.items():
+            compounded = 1.0
+            for value in values:
+                compounded *= 1.0 + value
+            daily_returns[day] = compounded - 1.0
+    else:
+        for trade in trades:
+            exited = _parse_datetime(trade.get("exit_time") or trade.get("exit_timestamp"))
+            if exited and exited.date() in daily_returns:
+                daily_returns[exited.date()] += float(
+                    trade.get("pnl_pct")
+                    if trade.get("pnl_pct") is not None
+                    else trade.get("net_return_on_allocated_capital") or 0
+                )
+
+    if raw_exposure:
+        for timestamp, value in raw_exposure.items():
+            parsed = _parse_datetime(timestamp)
+            if not parsed or parsed.date() not in daily_exposure:
+                continue
+            exposure = float(value)
+            current = daily_exposure[parsed.date()]
+            if abs(exposure) >= abs(current):
+                daily_exposure[parsed.date()] = exposure
+    else:
+        for trade in trades:
+            entered = _parse_datetime(trade.get("entry_time") or trade.get("entry_timestamp"))
+            exited = _parse_datetime(trade.get("exit_time") or trade.get("exit_timestamp"))
+            if not entered or not exited:
+                continue
+            direction = -1.0 if str(trade.get("side") or "long") == "short" else 1.0
+            for day in days:
+                if entered.date() <= day <= exited.date():
+                    daily_exposure[day] = direction
+
+    return (
+        {_daily_key(day): daily_returns[day] for day in days},
+        {_daily_key(day): daily_exposure[day] for day in days},
+    )
+
+
+def _evidence_window(result: dict[str, Any], raw_returns: dict[str, Any], trades: list[dict[str, Any]]) -> tuple[date | None, date | None]:
+    walk_forward = dict((result.get("metrics") or {}).get("walk_forward") or {})
+    start = None if raw_returns else _parse_datetime(walk_forward.get("validation_start"))
+    end = None if raw_returns else _parse_datetime(walk_forward.get("validation_end"))
+    timestamps = [
+        parsed
+        for value in (
+            list(raw_returns)
+            + [trade.get("entry_time") or trade.get("entry_timestamp") for trade in trades]
+            + [trade.get("exit_time") or trade.get("exit_timestamp") for trade in trades]
+        )
+        if (parsed := _parse_datetime(value)) is not None
+    ]
+    start = start or (min(timestamps) if timestamps else None)
+    end = end or (max(timestamps) if timestamps else None)
+    return (start.date() if start else None, end.date() if end else None)
+
+
+def _date_range(start: date, end: date):
+    current = start
+    while current <= end:
+        yield current
+        current += timedelta(days=1)
+
+
+def _daily_key(day: date) -> str:
+    return datetime(day.year, day.month, day.day, tzinfo=UTC).isoformat()
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if not value or str(value).startswith("trade-"):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00").split("#", 1)[0])
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    except (TypeError, ValueError):
+        return None
 
 
 def health_classification(row: dict[str, Any]) -> str:
@@ -407,6 +653,8 @@ def candidate_evidence_version(conn: psycopg.Connection) -> dict[str, Any]:
         """
         SELECT
             COUNT(*) AS variant_count,
+            (SELECT MAX(id) FROM elite_candidate_correlation_evidence) AS correlation_evidence_id,
+            (SELECT MAX(id) FROM elite_shadow_replay_outcomes) AS replay_outcome_id,
             MD5(COALESCE(STRING_AGG(
                 MD5(CONCAT_WS('|',
                     e.id::text,e.candidate_id,e.research_score::text,e.profit_factor::text,
@@ -425,4 +673,9 @@ def candidate_evidence_version(conn: psycopg.Connection) -> dict[str, Any]:
         WHERE e.simulation_only=TRUE
         """
     ).fetchone() or {}
-    return {"variant_count": int(row.get("variant_count") or 0), "evidence_digest": row.get("evidence_digest")}
+    return {
+        "variant_count": int(row.get("variant_count") or 0),
+        "evidence_digest": row.get("evidence_digest"),
+        "correlation_evidence_id": row.get("correlation_evidence_id"),
+        "replay_outcome_id": row.get("replay_outcome_id"),
+    }

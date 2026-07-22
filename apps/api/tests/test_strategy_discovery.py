@@ -175,6 +175,8 @@ def test_run_strategy_discovery_persists_research_only_rows(monkeypatch) -> None
                 "walk_forward": {"enabled": True},
             },
             "trades": [],
+            "strategy_returns": {"2026-01-01T10:00:00Z": 0.001},
+            "signal_exposure": {"2026-01-01T10:00:00Z": 1},
         },
     )
 
@@ -184,6 +186,8 @@ def test_run_strategy_discovery_persists_research_only_rows(monkeypatch) -> None
     assert conn.strategies[0]["simulation_only"] is True
     assert conn.strategies[0]["status"] == "promoted"
     assert conn.commits == 1
+    assert result["leaderboard"][0]["strategy_returns"] == {"2026-01-01T10:00:00Z": 0.001}
+    assert result["leaderboard"][0]["correlation_evidence"]["version"] == "aligned_marked_returns_v1"
 
 
 def test_dashboard_and_evolution_use_stored_evidence_only() -> None:
