@@ -120,7 +120,7 @@ def test_campaign_backed_counts_and_funnel_reconcile() -> None:
         "candidates_rejected": 1,
         "candidates_completed": 2,
         "needs_more_evidence": 0,
-        "research_candidates": 1,
+        "research_candidates": 0,
         "elite_candidates": 1,
         "candidate_linked_deployments": 1,
     }

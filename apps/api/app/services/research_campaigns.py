@@ -5459,7 +5459,7 @@ def refresh_command_center_aggregate_snapshot(conn: psycopg.Connection) -> dict[
         ).fetchall()
     ]
     completed_campaigns = [row for row in campaigns if row.get("status") == "completed"]
-    overview = aggregate_snapshot_overview(completed_campaigns)
+    overview = aggregate_snapshot_overview(conn, completed_campaigns)
     assets = aggregate_snapshot_dimension(completed_campaigns, "asset_intelligence")
     families = aggregate_snapshot_dimension(completed_campaigns, "strategy_family_intelligence")
     timeframes = aggregate_snapshot_dimension(completed_campaigns, "timeframe_intelligence")
@@ -5498,14 +5498,14 @@ def refresh_command_center_aggregate_snapshot(conn: psycopg.Connection) -> dict[
         "historical_research": {},
         "terminology": {},
         "source": {
-            "authoritative_tables": ["research_campaigns", "research_campaign_analytics_snapshots", "research_command_center_snapshots"],
-            "candidate_grain": "persisted completed-campaign aggregate intelligence",
+            "authoritative_tables": ["research_campaigns", "research_campaign_jobs", "elite_research_candidates", "strategy_deployments", "research_command_center_snapshots"],
+            "candidate_grain": "distinct candidate_id across completed campaigns; research and elite stages are exclusive",
             "refreshed_at": datetime.now(UTC),
         },
         "live_evidence": any(row.get("status") in {"queued", "running"} for row in campaigns),
         "simulation_only": True,
     }
-    snapshot_key = sha256(f"command_center|{len(completed_campaigns)}|{max((str(row.get('updated_at') or '') for row in completed_campaigns), default='none')}".encode()).hexdigest()
+    snapshot_key = sha256(f"command_center_v2|{len(completed_campaigns)}|{max((str(row.get('updated_at') or '') for row in completed_campaigns), default='none')}".encode()).hexdigest()
     conn.execute(
         """
         INSERT INTO research_command_center_snapshots(
@@ -5518,29 +5518,73 @@ def refresh_command_center_aggregate_snapshot(conn: psycopg.Connection) -> dict[
             completed_campaign_count = EXCLUDED.completed_campaign_count,
             created_at = NOW()
         """,
-        (snapshot_key, Jsonb(jsonable(payload)), len(campaigns), len(completed_campaigns), "command_center_aggregate_v1"),
+        (snapshot_key, Jsonb(jsonable(payload)), len(campaigns), len(completed_campaigns), "command_center_aggregate_v2"),
     )
     clear_command_center_cache()
     return payload
 
 
-def aggregate_snapshot_overview(campaigns: list[dict[str, Any]]) -> dict[str, int]:
-    generated = sum(int((row.get("analytics") or {}).get("strategies_generated") or 0) for row in campaigns)
-    tested = sum(int((row.get("analytics") or {}).get("strategies_tested") or 0) for row in campaigns)
-    rejected = sum(int((row.get("analytics") or {}).get("rejected") or 0) for row in campaigns)
-    promoted = sum(int((row.get("analytics") or {}).get("promoted") or 0) for row in campaigns)
-    jobs = sum(int((row.get("analytics") or {}).get("jobs_total") or 0) for row in campaigns)
-    return {
-        "campaign_jobs": jobs,
-        "candidates_generated": generated,
-        "candidates_tested": tested,
-        "candidates_rejected": rejected,
-        "candidates_completed": tested,
-        "needs_more_evidence": max(0, tested - rejected - promoted),
-        "research_candidates": promoted,
-        "elite_candidates": promoted,
-        "candidate_linked_deployments": 0,
-    }
+def aggregate_snapshot_overview(conn: psycopg.Connection, campaigns: list[dict[str, Any]]) -> dict[str, int]:
+    campaign_ids = [int(row["id"]) for row in campaigns if row.get("id") is not None]
+    if not campaign_ids:
+        return {
+            "campaign_jobs": 0,
+            "candidates_generated": 0,
+            "candidates_tested": 0,
+            "candidates_rejected": 0,
+            "candidates_completed": 0,
+            "needs_more_evidence": 0,
+            "research_candidates": 0,
+            "elite_candidates": 0,
+            "candidate_linked_deployments": 0,
+        }
+    row = conn.execute(
+        """
+        WITH candidate_status AS (
+            SELECT
+                candidate_id,
+                BOOL_OR(status IN ('completed','rejected','promoted')) AS tested,
+                BOOL_OR(status = 'promoted') AS promoted,
+                BOOL_AND(status IN ('completed','rejected','promoted','failed','canceled')) AS terminal
+            FROM research_campaign_jobs
+            WHERE campaign_id = ANY(%s) AND simulation_only = TRUE
+            GROUP BY candidate_id
+        ),
+        elite_ids AS (
+            SELECT DISTINCT candidate_id
+            FROM elite_research_candidates
+            WHERE campaign_id = ANY(%s) AND simulation_only = TRUE
+        )
+        SELECT
+            (SELECT COUNT(*) FROM research_campaign_jobs WHERE campaign_id = ANY(%s) AND simulation_only = TRUE) AS campaign_jobs,
+            COUNT(*) AS candidates_generated,
+            COUNT(*) FILTER (WHERE candidate_status.tested) AS candidates_tested,
+            COUNT(*) FILTER (WHERE candidate_status.terminal AND NOT candidate_status.promoted) AS candidates_rejected,
+            COUNT(*) FILTER (WHERE candidate_status.terminal) AS candidates_completed,
+            COUNT(*) FILTER (WHERE candidate_status.tested AND NOT candidate_status.terminal AND NOT candidate_status.promoted) AS needs_more_evidence,
+            COUNT(*) FILTER (WHERE candidate_status.promoted AND elite_ids.candidate_id IS NULL) AS research_candidates,
+            COUNT(elite_ids.candidate_id) AS elite_candidates,
+            (
+              SELECT COUNT(DISTINCT candidate_id)
+              FROM strategy_deployments
+              WHERE campaign_id = ANY(%s) AND candidate_id IS NOT NULL AND simulation_only = TRUE
+            ) AS candidate_linked_deployments
+        FROM candidate_status
+        LEFT JOIN elite_ids USING(candidate_id)
+        """,
+        (campaign_ids, campaign_ids, campaign_ids, campaign_ids),
+    ).fetchone() or {}
+    return {key: int(row.get(key) or 0) for key in (
+        "campaign_jobs",
+        "candidates_generated",
+        "candidates_tested",
+        "candidates_rejected",
+        "candidates_completed",
+        "needs_more_evidence",
+        "research_candidates",
+        "elite_candidates",
+        "candidate_linked_deployments",
+    )}
 
 
 def aggregate_snapshot_dimension(campaigns: list[dict[str, Any]], key: str) -> list[dict[str, Any]]:

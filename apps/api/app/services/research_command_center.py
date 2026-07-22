@@ -223,6 +223,18 @@ def live_campaign_command_center(
         "SELECT COUNT(DISTINCT candidate_id) AS count FROM elite_research_candidates WHERE campaign_id = %s AND simulation_only = TRUE",
         (campaign_id,),
     ).fetchone()["count"])
+    research_only_count = int((conn.execute(
+        """
+        SELECT COUNT(DISTINCT j.candidate_id) AS count
+        FROM research_campaign_jobs j
+        WHERE j.campaign_id=%s AND j.simulation_only=TRUE AND j.status='promoted'
+          AND NOT EXISTS (
+            SELECT 1 FROM elite_research_candidates e
+            WHERE e.campaign_id=j.campaign_id AND e.candidate_id=j.candidate_id AND e.simulation_only=TRUE
+          )
+        """,
+        (campaign_id,),
+    ).fetchone() or {}).get("count") or 0)
     deployment_count = int(conn.execute(
         "SELECT COUNT(*) AS count FROM strategy_deployments WHERE campaign_id = %s AND candidate_id IS NOT NULL AND simulation_only = TRUE",
         (campaign_id,),
@@ -238,7 +250,7 @@ def live_campaign_command_center(
         "candidates_rejected": rejected,
         "candidates_completed": 0,
         "needs_more_evidence": max(0, tested - rejected - promoted),
-        "research_candidates": promoted,
+        "research_candidates": research_only_count,
         "elite_candidates": elite_count,
         "candidate_linked_deployments": deployment_count,
     }
@@ -247,7 +259,7 @@ def live_campaign_command_center(
         {"key": "tested", "label": "Tested", "count": tested},
         {"key": "rejected", "label": "Rejected", "count": rejected},
         {"key": "needs_more_evidence", "label": "Needs More Evidence", "count": overview_payload["needs_more_evidence"]},
-        {"key": "research_candidate", "label": "Research Candidate", "count": promoted},
+        {"key": "research_candidate", "label": "Research Candidate", "count": research_only_count},
         {"key": "elite_candidate", "label": "Elite Candidate", "count": elite_count},
         {"key": "paper_deployed", "label": "Paper Deployed", "count": deployment_count},
     ]
@@ -432,6 +444,19 @@ def aggregate_command_center(
     ).fetchone() or {}
     elite_count = int(elite_row.get("count") or 0)
     deployment_count = int(deployment_row.get("count") or 0)
+    research_only_row = conn.execute(
+        """
+        SELECT COUNT(DISTINCT j.candidate_id) AS count
+        FROM research_campaign_jobs j
+        WHERE j.campaign_id=ANY(%s) AND j.simulation_only=TRUE AND j.status='promoted'
+          AND NOT EXISTS (
+            SELECT 1 FROM elite_research_candidates e
+            WHERE e.candidate_id=j.candidate_id AND e.campaign_id=ANY(%s) AND e.simulation_only=TRUE
+          )
+        """,
+        (scope_ids, scope_ids),
+    ).fetchone() or {}
+    research_only_count = int(research_only_row.get("count") or 0)
     aggregate_rejection = aggregate_rejection_analysis(conn, where_sql, params)
 
     generated = int(overview.get("candidates_generated") or 0)
@@ -447,11 +472,11 @@ def aggregate_command_center(
         "candidates_rejected": rejected,
         "candidates_completed": completed,
         "needs_more_evidence": needs_more,
-        "research_candidates": promoted,
+        "research_candidates": research_only_count,
         "elite_candidates": elite_count,
         "candidate_linked_deployments": deployment_count,
     }
-    funnel = aggregate_funnel(generated, tested, rejected, needs_more, promoted, elite_count, deployment_count)
+    funnel = aggregate_funnel(generated, tested, rejected, needs_more, research_only_count, elite_count, deployment_count)
     payload = empty_command_center(filters)
     payload.update(
         {
@@ -507,7 +532,7 @@ def aggregate_funnel(generated: int, tested: int, rejected: int, needs_more: int
         "rejected": "tested",
         "needs_more_evidence": "tested",
         "research_candidate": "tested",
-        "elite_candidate": "research_candidate",
+        "elite_candidate": "tested",
         "paper_deployed": "elite_candidate",
     }
     return [
@@ -937,8 +962,13 @@ def candidate_funnel(
         any(row["status"] in TESTED_STATUSES for row in rows) and candidate_id not in completed
         for candidate_id, rows in grouped.items()
     )
-    research = sum(any(row["status"] == "promoted" for row in rows) for rows in grouped.values())
     elite_ids = {candidate_scope_id(row) for row in elite}
+    research_ids = {
+        candidate_id
+        for candidate_id, rows in grouped.items()
+        if any(row["status"] == "promoted" for row in rows)
+    }
+    research = len(research_ids - elite_ids)
     deployed_ids = {candidate_scope_id(row) for row in deployments}
     forward_ids = {
         candidate_scope_id(row)
@@ -963,7 +993,7 @@ def candidate_funnel(
         "rejected": "tested",
         "needs_more_evidence": "tested",
         "research_candidate": "tested",
-        "elite_candidate": "research_candidate",
+        "elite_candidate": "tested",
         "paper_deployed": "elite_candidate",
         "forward_active": "paper_deployed",
     }
