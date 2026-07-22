@@ -130,7 +130,23 @@ def test_worker_supervision_config_contains_restart_health_identity_and_logs() -
     result = validate_worker_supervision_config()
 
     assert result["passed"] is True
+    assert Path(result["path"]).parts[-3:] == ("deploy", "production", "docker-compose.prod.yml")
     assert {row["name"] for row in result["checks"]} >= {"automatic_restart", "healthcheck", "unique_worker_identity", "structured_logs"}
+
+
+def test_missing_worker_supervision_config_returns_failed_check(tmp_path) -> None:
+    missing_path = tmp_path / "missing-compose.yml"
+
+    result = validate_worker_supervision_config(missing_path)
+
+    assert result["passed"] is False
+    assert result["checks"] == [
+        {
+            "name": "compose_file_exists",
+            "passed": False,
+            "detail": str(missing_path),
+        }
+    ]
 
 
 def test_validation_campaign_config_is_reproducible_and_bounded() -> None:

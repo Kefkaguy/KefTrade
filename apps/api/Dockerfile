@@ -17,6 +17,7 @@ RUN pip install --upgrade pip \
 
 COPY apps/api /app/apps/api
 COPY database /app/database
+COPY deploy/production/docker-compose.prod.yml /app/deploy/production/docker-compose.prod.yml
 
 WORKDIR /app/apps/api
 

@@ -231,7 +231,18 @@ def verify_migrations(migration_dir: str | Path | None = None) -> dict[str, Any]
 
 
 def validate_worker_supervision_config(path: str | Path | None = None) -> dict[str, Any]:
-    config_path = Path(path) if path else Path(__file__).resolve().parents[4] / "deploy" / "campaign-worker.compose.yml"
+    config_path = (
+        Path(path)
+        if path
+        else Path(__file__).resolve().parents[4] / "deploy" / "production" / "docker-compose.prod.yml"
+    )
+    if not config_path.is_file():
+        return {
+            "path": str(config_path),
+            "checks": [check("compose_file_exists", False, str(config_path))],
+            "passed": False,
+            "simulation_only": True,
+        }
     text = config_path.read_text(encoding="utf-8")
     checks = [
         check("compose_file_exists", config_path.exists(), str(config_path)),
@@ -1053,7 +1064,7 @@ def readiness_gates(migration: dict[str, Any], worker: dict[str, Any], integrity
     return [
         gate("migrations_verified", migration["passed"], True, "engineering_reliability", "migration verification", bool(migration["passed"]), True, "All required migrations through 028 are ordered, idempotent, and simulation constrained.", "Apply missing migrations and rerun migration verification."),
         gate("backend_and_frontend_verified", bool(thresholds.get("backend_tests_passed") and thresholds.get("frontend_build_passed")), True, "engineering_reliability", "verification run", bool(thresholds.get("backend_tests_passed") and thresholds.get("frontend_build_passed")), True, "Backend tests and frontend build evidence must be supplied by the current verification run.", "Run backend tests and frontend build, then pass those results into the readiness assessment."),
-        gate("worker_supervision_configured", worker["passed"], True, "worker_reliability", "deploy/campaign-worker.compose.yml", bool(worker["passed"]), True, "Campaign worker has restart, healthcheck, shutdown, logs, identity.", "Fix campaign-worker.compose.yml supervision settings."),
+        gate("worker_supervision_configured", worker["passed"], True, "worker_reliability", worker.get("path"), bool(worker["passed"]), True, "Campaign worker has restart, healthcheck, shutdown, logs, identity.", "Fix the production Compose worker supervision settings."),
         gate("no_critical_integrity_failures", integrity["summary"]["critical_failures"] == 0, True, "data_integrity", "integrity audit", integrity["summary"]["critical_failures"], 0, "Data integrity audit has no critical failures.", "Resolve critical audit failures before Phase 10 readiness."),
         gate("paper_reconciliation_clean", paper["passed"], False, "paper_evidence", "paper ledger reconciliation", paper_summary["mismatch_count"], 0, "Paper ledger reconciliation has no mismatches.", "Fix paper order/fill/position mismatches."),
         gate("safety_audit_passed", safety["status"] == "passed", True, "safety", "safety audit", safety["status"], "passed", "No live routing or simulation-only violations.", "Remove any non-simulation rows and keep broker routing disabled."),
