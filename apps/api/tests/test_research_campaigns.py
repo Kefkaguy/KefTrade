@@ -117,6 +117,11 @@ class CampaignConn:
                 "updated_at": self.now,
                 "simulation_only": True,
             }
+            if "dataset_id, dataset_mode" in query:
+                row["dataset_id"] = params[7]
+                row["dataset_mode"] = params[8]
+                row["immutable_config"] = jsonb(params[9])
+                row["generator_version"] = params[10]
             self.campaigns.append(row)
             return Result([row])
         if "WITH claimable AS" in query:
@@ -234,6 +239,11 @@ class CampaignConn:
             job["attempts"] += 1
             return Result([])
         if "UPDATE research_campaign_jobs" in query and "heartbeat_at = NOW()" in query:
+            return Result([])
+        if "UPDATE research_campaign_jobs SET dataset_id" in query:
+            for job in self.jobs:
+                if job["campaign_id"] == params[1] and job.get("dataset_id") is None:
+                    job["dataset_id"] = params[0]
             return Result([])
         if "UPDATE research_campaign_jobs" in query and "validation_score" in query:
             job = self.job(params[4])
@@ -364,6 +374,51 @@ def test_campaign_status_keeps_campaign_summary_nested() -> None:
     assert status["campaign"]["failed_jobs"] == 0
     assert status["campaign"]["promoted_candidates"] == 0
     assert status["campaign"]["rejected_candidates"] == 0
+
+
+def test_portfolio_evidence_campaign_freezes_one_dataset_for_every_job(monkeypatch) -> None:
+    from app.services import research_architecture
+
+    conn = CampaignConn()
+    monkeypatch.setattr(
+        research_architecture,
+        "record_dataset_snapshot",
+        lambda _conn, *, assets, timeframes, mode: {
+            "id": 44,
+            "mode": mode,
+            "content_hash": "a" * 64,
+            "assets": assets,
+            "timeframes": timeframes,
+        },
+    )
+    monkeypatch.setattr(
+        research_architecture,
+        "verify_dataset_snapshot",
+        lambda _conn, dataset_id: {"passed": dataset_id == 44},
+    )
+
+    created = create_research_campaign(
+        conn,
+        universe_key="sp500_leaders",
+        max_candidates=30,
+        asset_limit=2,
+        timeframes=["1h", "4h"],
+        search_mode="scout_expand",
+        dataset_mode="reproducibility",
+    )
+
+    assert created["dataset_id"] == 44
+    assert created["dataset_mode"] == "reproducibility"
+    assert created["campaign"]["dataset_id"] == 44
+    assert created["campaign"]["generator_version"] == "portfolio_evidence_broad_v1"
+    assert conn.jobs
+    assert {job["dataset_id"] for job in conn.jobs} == {44}
+    assert {job["strategy_family"] for job in conn.jobs} >= {
+        "Breakout",
+        "Mean Reversion",
+        "Pullback",
+        "Trend Following",
+    }
 
 
 def test_large_strategy_generation_supports_thousands_without_duplicates() -> None:

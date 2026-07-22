@@ -537,6 +537,8 @@ def create_large_scale_research_campaign(
             asset_limit=asset_limit,
             timeframes=timeframes,
             search_mode=search_mode,
+            dataset_mode=dataset_mode,
+            dataset_id=dataset_id,
         )
         log_event("Campaign launch complete", campaign_id=result.get("campaign", {}).get("id"), elapsed_ms=elapsed_ms(started))
         return result

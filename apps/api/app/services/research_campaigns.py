@@ -920,6 +920,8 @@ def create_research_campaign(
     asset_limit: int = 100,
     timeframes: list[str] | None = None,
     search_mode: str = "full",
+    dataset_mode: str = "rolling",
+    dataset_id: int | None = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     log_event("Research campaign launch requested", universe_key=universe_key, max_candidates=max_candidates, asset_limit=asset_limit, timeframes=timeframes)
@@ -927,6 +929,24 @@ def create_research_campaign(
     universe = get_universe(conn, universe_key)
     assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
     selected_timeframes = list(timeframes or universe.get("default_timeframes") or DEFAULT_CAMPAIGN_TIMEFRAMES)
+    dataset: dict[str, Any] | None = None
+    if dataset_mode not in {"rolling", "reproducibility"}:
+        raise ValueError("dataset_mode must be rolling or reproducibility")
+    if dataset_mode == "reproducibility" or dataset_id is not None:
+        from app.services.research_architecture import record_dataset_snapshot, verify_dataset_snapshot
+
+        if dataset_id is None:
+            dataset = record_dataset_snapshot(conn, assets=assets, timeframes=selected_timeframes, mode="reproducibility")
+            dataset_id = int(dataset["id"])
+        else:
+            row = conn.execute("SELECT * FROM research_dataset_manifests WHERE id = %s", (dataset_id,)).fetchone()
+            if not row:
+                raise ValueError(f"research dataset {dataset_id} was not found")
+            dataset = jsonable(dict(row))
+        integrity = verify_dataset_snapshot(conn, dataset_id)
+        if not integrity["passed"]:
+            raise ValueError(f"research dataset {dataset_id} failed integrity verification")
+        dataset_mode = str(dataset.get("mode") or "reproducibility")
     log_event("Job generation started", assets=len(assets), timeframes=len(selected_timeframes), strategies=max_candidates, expected_jobs=len(assets) * len(selected_timeframes) * max_candidates)
     if search_mode not in {"full", "scout_expand"}:
         raise ValueError("search_mode must be full or scout_expand")
@@ -936,24 +956,18 @@ def create_research_campaign(
     if search_mode == "scout_expand":
         queued_candidates = diverse_candidate_selection(candidates, scout_candidate_budget(max_candidates))
         scout_ids = [candidate.candidate_id for candidate in queued_candidates]
-    campaign_key = research_campaign_key(universe_key, assets, selected_timeframes, max_candidates, search_mode=search_mode)
+    campaign_key = research_campaign_key(
+        universe_key,
+        assets,
+        selected_timeframes,
+        max_candidates,
+        search_mode=search_mode,
+        dataset_id=dataset_id,
+    )
     campaign_name = name or f"{universe['name']} strategy discovery campaign"
     insert_started = time.perf_counter()
     log_event("Before INSERT research_campaigns", campaign_key=campaign_key, name=campaign_name)
-    row = conn.execute(
-        """
-        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
-        VALUES (%s, %s, %s, 'queued', %s, %s, %s, %s, TRUE)
-        ON CONFLICT(campaign_key) DO UPDATE
-        SET updated_at = NOW()
-        RETURNING *
-        """,
-        (
-            campaign_key,
-            campaign_name,
-            universe_key,
-            max_candidates,
-            Jsonb({
+    controls = Jsonb({
                 "asset_limit": asset_limit,
                 "timeframes": selected_timeframes,
                 "campaign_version": CAMPAIGN_VERSION,
@@ -969,14 +983,58 @@ def create_research_campaign(
                     "expansion_jobs_created": 0,
                 },
                 "validation_policy": "All existing trade-count, quality, walk-forward, and cross-market gates remain unchanged.",
-            }),
-            Jsonb(DEFAULT_SCHEDULING_CONFIG),
-            SAFETY_STATEMENT,
-        ),
-    ).fetchone()
+                "correlation_evidence": {
+                    "required": dataset_id is not None,
+                    "dataset_id": dataset_id,
+                    "evidence_version": "aligned_marked_returns_v1",
+                    "shared_across_all_jobs": dataset_id is not None,
+                },
+            })
+    if dataset_id is None:
+        row = conn.execute(
+            """
+            INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, simulation_only)
+            VALUES (%s, %s, %s, 'queued', %s, %s, %s, %s, TRUE)
+            ON CONFLICT(campaign_key) DO UPDATE SET updated_at = NOW()
+            RETURNING *
+            """,
+            (campaign_key, campaign_name, universe_key, max_candidates, controls, Jsonb(DEFAULT_SCHEDULING_CONFIG), SAFETY_STATEMENT),
+        ).fetchone()
+    else:
+        row = conn.execute(
+            """
+            INSERT INTO research_campaigns(
+                campaign_key, name, universe_key, status, requested_candidates, controls,
+                scheduling_config, safety_statement, dataset_id, dataset_mode,
+                immutable_config, generator_version, simulation_only
+            )
+            VALUES (%s, %s, %s, 'queued', %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            ON CONFLICT(campaign_key) DO UPDATE SET updated_at = NOW()
+            RETURNING *
+            """,
+            (
+                campaign_key, campaign_name, universe_key, max_candidates, controls,
+                Jsonb(DEFAULT_SCHEDULING_CONFIG), SAFETY_STATEMENT, dataset_id, dataset_mode,
+                Jsonb({
+                    "dataset_id": dataset_id,
+                    "dataset_content_hash": dataset.get("content_hash") if dataset else None,
+                    "assets": assets,
+                    "timeframes": selected_timeframes,
+                    "candidate_generation": "family_balanced_frequency_hypotheses_v1",
+                    "search_mode": search_mode,
+                    "correlation_evidence_version": "aligned_marked_returns_v1",
+                }),
+                "portfolio_evidence_broad_v1",
+            ),
+        ).fetchone()
     log_event("After INSERT research_campaigns", elapsed_ms=elapsed_ms(insert_started), rows_affected=1 if row else 0, campaign_id=row["id"] if row else None)
     campaign_id = int(row["id"])
     created = queue_campaign_jobs(conn, campaign_id, queued_candidates, assets, selected_timeframes)
+    if dataset_id is not None:
+        conn.execute(
+            "UPDATE research_campaign_jobs SET dataset_id = %s WHERE campaign_id = %s AND dataset_id IS NULL",
+            (dataset_id, campaign_id),
+        )
     update_campaign_counts(conn, campaign_id)
     log_event("Before COMMIT research_campaigns", campaign_id=campaign_id)
     conn.commit()
@@ -989,6 +1047,9 @@ def create_research_campaign(
         "candidates_generated": len(queued_candidates),
         "candidate_budget": len(candidates),
         "search_mode": search_mode,
+        "dataset": dataset,
+        "dataset_id": dataset_id,
+        "dataset_mode": dataset_mode,
         "jobs_created": created,
         "campaign_version": CAMPAIGN_VERSION,
         "simulation_only": True,
@@ -4098,6 +4159,11 @@ def expand_scout_campaign(conn: psycopg.Connection, campaign_id: int) -> dict[st
     scout_count = int(execution.get("scout_candidate_count") or 0)
     candidates = expansion_candidate_mix(base_candidates, parent_evidence, max(0, full_budget - scout_count))
     created = queue_campaign_route_jobs(conn, campaign_id, candidates, routes)
+    if campaign.get("dataset_id") is not None:
+        conn.execute(
+            "UPDATE research_campaign_jobs SET dataset_id = %s WHERE campaign_id = %s AND dataset_id IS NULL",
+            (campaign["dataset_id"], campaign_id),
+        )
     route_payload = [{key: row[key] for key in ("symbol", "timeframe", "strategy_family", "candidate_id", "score")} for row in routes]
     execution.update({"stage": "expanded" if created else "stopped_no_inventory", "expanded_routes": route_payload, "expansion_jobs_created": created})
     controls["research_execution"] = execution
@@ -7095,9 +7161,18 @@ def rejection_rate(rows: list[dict[str, Any]]) -> float:
     return round(rejected / total, 4) if total else 0.0
 
 
-def research_campaign_key(universe_key: str, assets: list[str], timeframes: list[str], max_candidates: int, *, search_mode: str = "full") -> str:
+def research_campaign_key(
+    universe_key: str,
+    assets: list[str],
+    timeframes: list[str],
+    max_candidates: int,
+    *,
+    search_mode: str = "full",
+    dataset_id: int | None = None,
+) -> str:
     mode_suffix = "" if search_mode == "full" else f"|{search_mode}_v1"
-    raw = f"{CAMPAIGN_VERSION}|{universe_key}|{','.join(assets)}|{','.join(timeframes)}|{max_candidates}{mode_suffix}"
+    dataset_suffix = "" if dataset_id is None else f"|dataset:{dataset_id}|portfolio_evidence_v1"
+    raw = f"{CAMPAIGN_VERSION}|{universe_key}|{','.join(assets)}|{','.join(timeframes)}|{max_candidates}{mode_suffix}{dataset_suffix}"
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
