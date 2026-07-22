@@ -84,6 +84,36 @@ def test_exact_timeframe_cap_uses_integer_arithmetic_for_odd_and_even_sizes() ->
     assert exact_timeframe_cap_holds([{"timeframe": "1h"}, {"timeframe": "1h"}, {"timeframe": "4h"}, {"timeframe": "4h"}])
 
 
+def test_constructor_enforces_exact_cap_on_odd_and_even_portfolios() -> None:
+    patterns = (
+        [1 if day % 2 else -1 for day in range(60)],
+        [1 if day % 4 < 2 else -1 for day in range(60)],
+        [1 if day % 6 < 3 else -1 for day in range(60)],
+        [1 if day % 10 in {0, 3, 7} else -1 for day in range(60)],
+    )
+    rows = []
+    for index, timeframe in enumerate(("1h", "4h", "1d", "1d")):
+        row = candidate(index + 100, timeframe=timeframe, family=f"distinct_{index}")
+        row["parameters"] = {"unique": index * 100}
+        row["strategy_returns"] = {str(day): patterns[index][day] / 100 for day in range(60)}
+        row["signal_returns"] = dict(row["strategy_returns"])
+        rows.append(row)
+
+    base_constraints = {
+        "minimum_unique_assets": 2,
+        "minimum_families": 2,
+        "minimum_timeframes": 2,
+        "maximum_per_family": 2,
+    }
+    even = preview(rows[:2], {"custom_size": 2, "constraints": {**base_constraints, "minimum_portfolio_size": 2}})
+    odd = preview(rows[:3], {"custom_size": 3, "constraints": {**base_constraints, "minimum_portfolio_size": 3}})
+
+    assert even["status"] == "review_ready"
+    assert odd["status"] == "review_ready"
+    assert even["analytics"]["timeframe_distribution"] == {"1h": 1, "4h": 1}
+    assert odd["analytics"]["timeframe_distribution"] == {"1d": 1, "1h": 1, "4h": 1}
+
+
 def test_insufficient_correlation_is_a_hard_conflict_and_infeasibility_is_explained() -> None:
     candidates = diversified_candidates(5)
     for row in candidates:
