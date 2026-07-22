@@ -72,6 +72,7 @@ type AssetEvidence = {
 const scopeIcons = {
   single: Crosshair,
   core: Layers3,
+  portfolio: ShieldCheck,
   technology: CircuitBoard,
   crypto: Bitcoin,
   index: ChartNoAxesCombined,
@@ -192,6 +193,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
       ? prioritizeAssets(stockCatalog).slice(0, MAX_PROFILE_ASSETS).map((asset) => asset.id)
       : scope.assets.filter((id) => allAssets.some((asset) => asset.id === id));
     if (!nextIds.length) return;
+    if (nextScopeId === "portfolio") setUniverseMode("random");
     setScopeId(nextScopeId);
     setAssetIds(nextIds);
   }
@@ -454,7 +456,9 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
             <Sparkles size={19} />
             <div>
               <strong>What happens next</strong>
-              <p>KefTrade observes the selected markets first, groups similar assets, and tests a 70/20/10 mix of strong-region, nearby, and exploratory variations. Weak ideas remain preserved as evidence.</p>
+              <p>{scopeId === "portfolio"
+                ? "KefTrade freezes one shared Research Core dataset, then tests a family-balanced 70/20/10 mix across 1h and 4h. Every expanded job inherits the same evidence window."
+                : "KefTrade observes the selected markets first, groups similar assets, and tests a 70/20/10 mix of strong-region, nearby, and exploratory variations. Weak ideas remain preserved as evidence."}</p>
             </div>
           </div>
         </div>
@@ -467,7 +471,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
 
           <div className="previewSummary">
             <PreviewValue label="Research scope" value={selection.scopeLabel} />
-            <PreviewValue label="Universe mode" value={universeMode === "established" ? "Evidence-guided" : "Random"} />
+            <PreviewValue label="Universe mode" value={scopeId === "portfolio" ? "Fixed Research Core" : universeMode === "established" ? "Evidence-guided" : "Random"} />
             <PreviewValue label="Scout evaluations" value={selection.scoutEstimatedJobs.toLocaleString()} mono />
             <PreviewValue label="Selected assets" value={selection.assets.length.toLocaleString()} mono />
             <PreviewValue label="Scout variations" value={selection.scoutCandidateCount.toLocaleString()} mono />
@@ -494,7 +498,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
             whileHover={reduceMotion || launching ? undefined : { y: -3 }}
             whileTap={reduceMotion || launching ? undefined : { scale: 0.985 }}
           >
-            <span><Sparkles size={18} /> {launching ? "Preparing campaign" : "Start Research Campaign"}</span>
+            <span><Sparkles size={18} /> {launching ? "Preparing campaign" : scopeId === "portfolio" ? "Start Portfolio Evidence Campaign" : "Start Research Campaign"}</span>
             <ArrowRight size={19} />
           </motion.button>
           <p className="previewSafety">Research runs in simulation only. No live orders can be placed.</p>

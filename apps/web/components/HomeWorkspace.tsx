@@ -201,6 +201,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
 
       const createStartedAt = now();
       logLaunchDiagnostic("Campaign create request sent", { universeKey, maxCandidates: campaignSelection.candidateCount, assetLimit: campaignSelection.assets.length });
+      const portfolioEvidence = campaignSelection.scopeId === "portfolio";
       const created = await createResearchCampaign({
         universeKey,
         name: `${campaignSelection.scopeLabel} hypothesis research`,
@@ -208,6 +209,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
         assetLimit: campaignSelection.assets.length,
         timeframes: selectedTimeframes,
         architectureMode: "legacy",
+        datasetMode: portfolioEvidence ? "reproducibility" : "rolling",
         searchMode: "scout_expand"
       });
       if (!aliveRef.current || generation !== runGenerationRef.current) return;

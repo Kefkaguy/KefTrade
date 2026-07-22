@@ -15,7 +15,7 @@ export type ResearchAsset = {
   latest4hCandleAt?: string | null;
 };
 
-export type ResearchScopeId = "single" | "core" | "technology" | "crypto" | "index" | "universe" | "custom";
+export type ResearchScopeId = "single" | "core" | "portfolio" | "technology" | "crypto" | "index" | "universe" | "custom";
 
 export type ResearchScope = {
   id: Exclude<ResearchScopeId, "custom">;
@@ -71,6 +71,12 @@ export const RESEARCH_SCOPES: ResearchScope[] = [
     id: "core",
     label: "Research Core",
     description: "Profile liquid technology leaders and market ETFs.",
+    assets: ["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "AMZN", "SPY", "QQQ"]
+  },
+  {
+    id: "portfolio",
+    label: "Portfolio Evidence",
+    description: "Freeze one shared dataset and test diverse families across the Research Core.",
     assets: ["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "AMZN", "SPY", "QQQ"]
   },
   {
