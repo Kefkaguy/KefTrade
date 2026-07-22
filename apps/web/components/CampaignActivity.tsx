@@ -40,7 +40,7 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
       setData(next);
       setError(null);
     } catch (requestError) {
-      setError(readCampaignError(requestError));
+      setError(readCampaignLoadError(requestError));
     } finally {
       listRequestActive.current = false;
       if (showActivity) setRefreshing(false);
@@ -153,9 +153,9 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
           <p>See what is running, pause work, or resume it when the market data is ready.</p>
         </div>
         <div className="campaignActivitySummary" aria-label="Campaign status summary">
-          <span><i className="campaignStatusDot running" /> <strong>{data?.summary.running ?? 0}</strong> Running</span>
-          <span><i className="campaignStatusDot queued" /> <strong>{data?.summary.queued ?? 0}</strong> Queued</span>
-          <span><i className="campaignStatusDot paused" /> <strong>{data?.summary.paused ?? 0}</strong> Paused</span>
+          <span><i className="campaignStatusDot running" /> <strong>{data ? data.summary.running : "—"}</strong> Running</span>
+          <span><i className="campaignStatusDot queued" /> <strong>{data ? data.summary.queued : "—"}</strong> Queued</span>
+          <span><i className="campaignStatusDot paused" /> <strong>{data ? data.summary.paused : "—"}</strong> Paused</span>
           <button className="campaignIconButton" type="button" onClick={() => void refresh(true)} disabled={refreshing || !enabled} title="Refresh campaigns" aria-label="Refresh campaigns">
             <RefreshCw size={16} className={refreshing ? "isSpinning" : undefined} />
           </button>
@@ -336,4 +336,9 @@ function estimatedSecondsRemaining(campaign: ResearchCampaignListRow) {
 
 function readCampaignError(error: unknown) {
   return error instanceof Error ? `Campaign action failed: ${error.message}.` : "Campaign action failed. Try again.";
+}
+
+function readCampaignLoadError(error: unknown) {
+  const detail = error instanceof Error && error.message ? ` (${error.message})` : "";
+  return `Campaign activity is temporarily unavailable${detail}. Retrying automatically.`;
 }
