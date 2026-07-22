@@ -74,6 +74,11 @@ def decision_hash(value: Any) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def candidate_key(candidate: dict[str, Any]) -> str:
+    """Identify a deployable strategy-market variant immutably."""
+    return str(candidate.get("candidate_key") or candidate["candidate_id"])
+
+
 def normalized_configuration(configuration: dict[str, Any] | None = None) -> dict[str, Any]:
     supplied = deepcopy(configuration or {})
     constraints = {**DEFAULT_CONSTRAINTS, **dict(supplied.get("constraints") or {})}
@@ -98,6 +103,7 @@ def normalized_configuration(configuration: dict[str, Any] | None = None) -> dic
 def immutable_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     return {
         "elite_id": candidate.get("elite_id") or candidate.get("id"),
+        "candidate_key": candidate_key(candidate),
         "candidate_id": str(candidate["candidate_id"]),
         "campaign_id": candidate.get("campaign_id"),
         "strategy_version": candidate.get("strategy_version"),
@@ -125,12 +131,12 @@ def immutable_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
 
 
 def candidate_snapshot(candidates: Iterable[dict[str, Any]], configuration: dict[str, Any], eligibility: list[dict[str, Any]], correlations: list[dict[str, Any]]) -> dict[str, Any]:
-    frozen_candidates = sorted((immutable_candidate(row) for row in candidates), key=lambda row: row["candidate_id"])
+    frozen_candidates = sorted((immutable_candidate(row) for row in candidates), key=lambda row: row["candidate_key"])
     return {
         "solver_version": SOLVER_VERSION,
         "configuration": normalized_configuration(configuration),
         "candidate_evidence": frozen_candidates,
-        "eligibility_decisions": sorted(eligibility, key=lambda row: row["candidate_id"]),
+        "eligibility_decisions": sorted(eligibility, key=lambda row: row["candidate_key"]),
         "correlations": sorted(correlations, key=lambda row: (row["left_candidate_id"], row["right_candidate_id"], row["correlation_type"])),
     }
 
@@ -177,9 +183,10 @@ def eligibility_reasons(candidate: dict[str, Any], configuration: dict[str, Any]
 def evaluate_eligibility(candidates: Iterable[dict[str, Any]], configuration: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     decisions = []
     eligible = []
-    for candidate in sorted(candidates, key=lambda row: str(row["candidate_id"])):
+    for candidate in sorted(candidates, key=candidate_key):
         reasons = eligibility_reasons(candidate, configuration)
         decisions.append({
+            "candidate_key": candidate_key(candidate),
             "candidate_id": str(candidate["candidate_id"]),
             "eligible": not reasons,
             "reasons": reasons,
@@ -234,10 +241,10 @@ def build_conflicts(candidates: list[dict[str, Any]], configuration: dict[str, A
     constraints = normalized_configuration(configuration)["constraints"]
     conflicts: list[dict[str, Any]] = []
     correlations: list[dict[str, Any]] = []
-    ordered = sorted(candidates, key=lambda row: str(row["candidate_id"]))
+    ordered = sorted(candidates, key=candidate_key)
     for index, left in enumerate(ordered):
         for right in ordered[index + 1:]:
-            left_id, right_id = str(left["candidate_id"]), str(right["candidate_id"])
+            left_id, right_id = candidate_key(left), candidate_key(right)
             pair_reasons: list[tuple[str, dict[str, Any]]] = []
             if str(left.get("symbol")) == str(right.get("symbol")) and str(left.get("family_id")) == str(right.get("family_id")):
                 pair_reasons.append(("SYMBOL_FAMILY_DUPLICATE", {}))
@@ -298,7 +305,7 @@ def candidate_order(candidates: Iterable[dict[str, Any]], objective: str) -> lis
             -int(str(row.get("forward_validation_state") or "") == "forward_validation_passed"),
             float(row.get("max_drawdown") or 0),
             -int(row.get("trade_count") or 0),
-            str(row["candidate_id"]),
+            candidate_key(row),
         ),
     )
 
@@ -323,15 +330,15 @@ def portfolio_constraint_reasons(selected: list[dict[str, Any]], constraints: di
         reasons.append("MAXIMUM_PER_FAMILY")
     if not exact_timeframe_cap_holds(selected):
         reasons.append("TIMEFRAME_50_PERCENT_CAP")
-    ids = [str(row["candidate_id"]) for row in selected]
+    ids = [candidate_key(row) for row in selected]
     if any(frozenset((left, right)) in conflicts for index, left in enumerate(ids) for right in ids[index + 1:]):
         reasons.append("PAIRWISE_HARD_CONFLICT")
     return reasons
 
 
 def _can_add(selected: list[dict[str, Any]], candidate: dict[str, Any], target: int, constraints: dict[str, Any], conflicts: set[frozenset[str]]) -> bool:
-    candidate_id = str(candidate["candidate_id"])
-    if any(frozenset((candidate_id, str(row["candidate_id"]))) in conflicts for row in selected):
+    candidate_id = candidate_key(candidate)
+    if any(frozenset((candidate_id, candidate_key(row))) in conflicts for row in selected):
         return False
     if sum(str(row.get("symbol")) == str(candidate.get("symbol")) for row in selected) >= int(constraints["maximum_per_symbol"]):
         return False
@@ -351,7 +358,7 @@ def _selection_score(selected: list[dict[str, Any]], objective: str) -> tuple[An
         sum(str(row.get("forward_validation_state")) == "forward_validation_passed" for row in selected),
         -sum(float(row.get("max_drawdown") or 0) for row in selected),
         sum(int(row.get("trade_count") or 0) for row in selected),
-        tuple(sorted(str(row["candidate_id"]) for row in selected)),
+        tuple(sorted(candidate_key(row) for row in selected)),
     )
 
 
@@ -389,7 +396,7 @@ def construct_portfolio(candidates: list[dict[str, Any]], conflicts: list[dict[s
                 continue
             if not best or _selection_score(selected, objective) > _selection_score(best, objective):
                 best = selected
-                operations.append({"operation": "select", "target_size": target, "seed": seed and seed["candidate_id"]})
+                operations.append({"operation": "select", "target_size": target, "seed": seed and candidate_key(seed)})
         if best:
             break
     swaps = 0
@@ -407,7 +414,7 @@ def construct_portfolio(candidates: list[dict[str, Any]], conflicts: list[dict[s
                         best = trial
                         unselected = [row for row in ordered if row not in best]
                         swaps += 1
-                        operations.append({"operation": "swap", "removed": current["candidate_id"], "added": replacement["candidate_id"]})
+                        operations.append({"operation": "swap", "removed": candidate_key(current), "added": candidate_key(replacement)})
                         improved = True
                         break
                 if improved:
@@ -418,11 +425,11 @@ def construct_portfolio(candidates: list[dict[str, Any]], conflicts: list[dict[s
     return {
         "status": status,
         "solver_version": SOLVER_VERSION,
-        "selected": [str(row["candidate_id"]) for row in candidate_order(best, objective)],
+        "selected": [candidate_key(row) for row in candidate_order(best, objective)],
         "maximum_feasible_size": len(best),
         "constraint_relaxations": [],
         "constraint_relaxation_count": 0,
-        "candidate_order": [str(row["candidate_id"]) for row in ordered],
+        "candidate_order": [candidate_key(row) for row in ordered],
         "iterations": iterations,
         "operations": operations,
         "swap_count": swaps,
@@ -443,12 +450,12 @@ def binding_constraints(eligibility: list[dict[str, Any]], conflicts: list[dict[
 
 
 def portfolio_analytics(selected: list[dict[str, Any]], correlations: list[dict[str, Any]]) -> dict[str, Any]:
-    ids = {str(row["candidate_id"]) for row in selected}
+    ids = {candidate_key(row) for row in selected}
     coefficients = [abs(float(row["coefficient"])) for row in correlations if row.get("coefficient") is not None and row["left_candidate_id"] in ids and row["right_candidate_id"] in ids and row["correlation_type"] == "strategy_return"]
     expectancies = [float(row.get("expectancy") or 0) for row in selected]
     profit_factors = [float(row.get("profit_factor") or 0) for row in selected]
     drawdowns = [float(row.get("max_drawdown") or 0) for row in selected]
-    contributions = [{"candidate_id": row["candidate_id"], "expectancy": float(row.get("expectancy") or 0), "quality_score": candidate_quality(row, "balanced")} for row in selected]
+    contributions = [{"candidate_key": candidate_key(row), "candidate_id": row["candidate_id"], "expectancy": float(row.get("expectancy") or 0), "quality_score": candidate_quality(row, "balanced")} for row in selected]
     return {
         "portfolio_profit_factor": sum(profit_factors) / len(profit_factors) if profit_factors else 0,
         "portfolio_expectancy": sum(expectancies),
@@ -491,9 +498,9 @@ def preview(candidates: list[dict[str, Any]], configuration: dict[str, Any] | No
     result = construct_portfolio(conflict_pool, conflicts, config)
     result["candidates_examined"] = len(eligible)
     result["construction_pool_count"] = len(conflict_pool)
-    result["construction_pool_candidate_ids"] = [str(row["candidate_id"]) for row in conflict_pool]
+    result["construction_pool_candidate_ids"] = [candidate_key(row) for row in conflict_pool]
     selected_ids = set(result["selected"])
-    selected = [row for row in eligible if str(row["candidate_id"]) in selected_ids]
+    selected = [row for row in eligible if candidate_key(row) in selected_ids]
     snapshot = snapshot_with_hash(candidate_snapshot(candidates, config, eligibility, correlations))
     response = {
         **result,
@@ -508,7 +515,7 @@ def preview(candidates: list[dict[str, Any]], configuration: dict[str, Any] | No
         "binding_constraints": binding_constraints(eligibility, conflicts),
         "analytics": portfolio_analytics(selected, correlations),
         "selection_explanations": [{"candidate_id": candidate_id, "reason": "Selected by deterministic objective hierarchy."} for candidate_id in result["selected"]],
-        "rejection_explanations": [{"candidate_id": row["candidate_id"], "reasons": row["reasons"]} for row in eligibility if not row["eligible"]],
+        "rejection_explanations": [{"candidate_key": row["candidate_key"], "candidate_id": row["candidate_id"], "reasons": row["reasons"]} for row in eligibility if not row["eligible"]],
     }
     response["timing"] = {
         "eligibility_ms": eligibility_ms,

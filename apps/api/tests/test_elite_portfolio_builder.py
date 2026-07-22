@@ -65,6 +65,18 @@ def test_snapshot_changes_when_any_decision_input_changes() -> None:
     assert preview(candidates, {"objective": "expectancy"})["snapshot"]["decision_hash"] != original["snapshot"]["decision_hash"]
 
 
+def test_strategy_market_variants_have_distinct_immutable_keys() -> None:
+    first = candidate(1, timeframe="1h", symbol="AAPL")
+    second = {**candidate(2, timeframe="4h", symbol="AAPL"), "candidate_id": first["candidate_id"]}
+    first["candidate_key"] = f"{first['candidate_id']}|AAPL|1h"
+    second["candidate_key"] = f"{second['candidate_id']}|AAPL|4h"
+
+    result = preview([first, second], {"constraints": {"minimum_portfolio_size": 1, "minimum_unique_assets": 1, "minimum_families": 1, "minimum_timeframes": 1}})
+
+    keys = [row["candidate_key"] for row in result["snapshot"]["candidate_evidence"]]
+    assert keys == [first["candidate_key"], second["candidate_key"]]
+
+
 def test_exact_timeframe_cap_uses_integer_arithmetic_for_odd_and_even_sizes() -> None:
     assert exact_timeframe_cap_holds([{"timeframe": "1h"}, {"timeframe": "4h"}])
     assert not exact_timeframe_cap_holds([{"timeframe": "1h"}, {"timeframe": "1h"}, {"timeframe": "4h"}])
