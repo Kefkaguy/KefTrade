@@ -57,7 +57,7 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
     <motion.div className="pageContainer missionWorkspace" initial="hidden" animate="visible" transition={{ staggerChildren: reduceMotion ? 0 : 0.07 }}>
       <motion.header className="pageIntro missionIntro" variants={reveal}>
         <div><span className="eyebrow">Mission Control</span><h1>System health at a glance.</h1><p>Research infrastructure, data freshness, and automation status without the operational noise.</p></div>
-        <div className="pageActions"><span className="lastUpdated"><Clock3 size={14} /> Updated {relativeTime(snapshot.generated_at)}</span><Link className="button secondary compact" href="/mission-control"><RefreshCw size={15} /> Refresh</Link></div>
+        <div className="pageActions"><span className="lastUpdated"><Clock3 size={14} /> Updated {relativeTime(snapshot.generated_at, snapshot.generated_at)}</span><Link className="button secondary compact" href="/mission-control"><RefreshCw size={15} /> Refresh</Link></div>
       </motion.header>
 
       <motion.section className={`healthHero ${overallTone}`} variants={reveal}>
@@ -147,7 +147,7 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
                         <td><strong>{numberValue(elite.evaluations_today)} checks</strong><small>{numberValue(elite.setups_today)} setups · {numberValue(elite.would_submit_today)} would trade</small></td>
                         <td><strong>{today.realized_pnl == null ? "Pending attribution" : money(numberValue(today.realized_pnl))}</strong><small>{numberValue(today.submitted_orders)} submitted orders · {title(String(today.attribution_status ?? "unknown"))}</small></td>
                         <td><strong>{replay.net_pnl == null ? "No completed trades" : money(numberValue(replay.net_pnl))}</strong><small>{replay.profit_factor == null ? "PF —" : `PF ${numberValue(replay.profit_factor).toFixed(3)}`} · {numberValue(replay.completed_trades)} trades · {outcomeHealth(replay)}</small></td>
-                        <td><strong>{relativeTime(elite.latest_evaluation_at ?? elite.latest_shadow_at)}</strong><small>{elite.latest_bar ? `Bar ${new Date(elite.latest_bar).toLocaleString()}` : "No evaluated bar"}</small></td>
+                        <td><strong>{relativeTime(elite.latest_evaluation_at ?? elite.latest_shadow_at, snapshot.generated_at)}</strong><small>{elite.latest_bar ? `Bar ${formatNewYorkDate(elite.latest_bar)}` : "No evaluated bar"}</small></td>
                       </tr>
                     );
                   })}
@@ -162,7 +162,7 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
         <div className="sectionHeading"><div><span className="eyebrow">Recent operations</span><h2>Latest system events</h2></div><Link className="textLink" href="/journal">Full journal <ArrowRight size={14} /></Link></div>
         <div className="operationList">
           {snapshot.recent_activity.slice(0, 5).map((item) => (
-            <article key={`${item.event_type}-${item.timestamp}-${item.symbol ?? "workspace"}-${item.description}`}><span className={`operationDot ${statusTone(item.status)}`} /><div><strong>{item.description}</strong><small>{item.symbol ? `${item.symbol} / ` : ""}{title(item.event_type)}</small></div><time>{relativeTime(item.timestamp)}</time></article>
+            <article key={`${item.event_type}-${item.timestamp}-${item.symbol ?? "workspace"}-${item.description}`}><span className={`operationDot ${statusTone(item.status)}`} /><div><strong>{item.description}</strong><small>{item.symbol ? `${item.symbol} / ` : ""}{title(item.event_type)}</small></div><time dateTime={item.timestamp ?? undefined}>{relativeTime(item.timestamp, snapshot.generated_at)}</time></article>
           ))}
           {!snapshot.recent_activity.length ? <div className="inlineEmpty"><strong>No recent operations</strong><span>Scheduler and research events will appear here.</span></div> : null}
         </div>
@@ -342,11 +342,27 @@ function title(value: string) {
   return value.replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function relativeTime(value?: string | null) {
+function relativeTime(value?: string | null, referenceValue?: string | null) {
   if (!value) return "Recently";
-  const minutes = Math.max(0, Math.floor((Date.now() - new Date(value).getTime()) / 60000));
+  const timestamp = new Date(value).getTime();
+  const reference = referenceValue ? new Date(referenceValue).getTime() : timestamp;
+  const minutes = Math.max(0, Math.floor((reference - timestamp) / 60000));
   if (!Number.isFinite(minutes) || minutes < 1) return "Just now";
   if (minutes < 60) return `${minutes}m ago`;
   if (minutes < 1440) return `${Math.floor(minutes / 60)}h ago`;
   return `${Math.floor(minutes / 1440)}d ago`;
+}
+
+function formatNewYorkDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    month: "numeric",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
 }
