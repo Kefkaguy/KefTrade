@@ -626,9 +626,13 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .compactMetrics span { color: var(--muted); font-size: 9px; }
 .compactMetrics strong { margin-top: 5px; font: 650 17px var(--font-mono); }
 
-.missionIntro { align-items: center; }
+.missionWorkspace { gap: 20px; }
+.missionIntro { align-items: center; min-height: 122px; padding: 6px 2px 10px; }
+.missionIntro h1 { max-width: 760px; font-size: clamp(34px, 4vw, 54px); letter-spacing: -.045em; }
+.missionIntro p { color: var(--muted-accent); }
 .lastUpdated { gap: 6px; color: var(--muted); font-size: 9px; }
-.healthHero { display: grid; min-height: 128px; grid-template-columns: 54px minmax(0, 1fr) auto; align-items: center; gap: 18px; padding: 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow); }
+.healthHero { position: relative; display: grid; min-height: 142px; grid-template-columns: 54px minmax(0, 1fr) auto; align-items: center; gap: 20px; padding: 27px 28px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: linear-gradient(118deg, var(--panel), color-mix(in srgb, var(--panel-strong) 68%, var(--bg))); box-shadow: var(--shadow); }
+.healthHero::after { position: absolute; inset: 0 0 auto; height: 2px; background: linear-gradient(90deg, var(--accent), transparent 72%); content: ""; }
 .healthHero.success { border-color: color-mix(in srgb, var(--accent) 35%, var(--line)); }
 .healthHero.error { border-color: var(--accent-2); }
 .healthHeroIcon { display: grid; width: 54px; height: 54px; place-items: center; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-soft); color: var(--accent); }
@@ -638,8 +642,9 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .statusChip.success { border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); background: var(--accent-soft); color: var(--accent); }
 .statusChip.warning, .issueCount { border-color: var(--accent-2); color: var(--muted-accent); }
 .statusChip.error { border-color: var(--accent); color: var(--accent); }
-.serviceGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.serviceGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--line); box-shadow: var(--shadow-soft); }
 .serviceStatus { position: relative; display: grid; min-width: 0; min-height: 112px; grid-template-columns: 38px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 16px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); box-shadow: var(--shadow-soft); }
+.serviceGrid .serviceStatus { border: 0; border-radius: 0; box-shadow: none; }
 .serviceStatus::after { position: absolute; inset: auto 0 0; height: 2px; background: var(--line-strong); content: ""; }
 .serviceStatus.success::after { background: var(--accent); }
 .serviceStatus.warning::after { background: var(--accent-2); }
@@ -683,7 +688,7 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .overviewMetric.success > span { color: var(--accent); }
 .overviewMetric.error { border-color: var(--accent-2); }
 .activityBand { padding-bottom: 10px; }
-.elitePerformanceSurface { overflow: hidden; }
+.elitePerformanceSurface { padding: 26px; overflow: hidden; background: linear-gradient(145deg, var(--panel), color-mix(in srgb, var(--bg-secondary) 78%, var(--panel))); }
 .elitePerformanceBody { display: grid; gap: 24px; margin-top: 22px; }
 .eliteKpiGrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .eliteKpi { min-height: 112px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); }
@@ -694,7 +699,7 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .eliteKpi.positive { border-color: color-mix(in srgb, var(--accent) 32%, var(--line)); background: var(--accent-soft); }
 .eliteKpi.negative { border-style: dashed; }
 .eliteChartGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.eliteChartCard { min-width: 0; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-soft); }
+.eliteChartCard { min-width: 0; padding: 20px; border: 1px solid var(--line); border-radius: var(--radius); background: color-mix(in srgb, var(--panel-soft) 72%, var(--bg)); }
 .eliteChartHeader { display: flex; min-height: 48px; align-items: flex-start; justify-content: space-between; gap: 16px; }
 .eliteChartHeader h3 { font-size: 12px; }
 .eliteChartHeader p { max-width: 390px; margin-top: 4px; font-size: 8px; line-height: 1.5; }
@@ -702,27 +707,23 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .chartLegend i { width: 12px; height: 7px; margin-left: 5px; border: 1px solid var(--accent); background: var(--accent); }
 .chartLegend i:last-of-type { border-style: dashed; border-color: var(--muted); background: transparent; }
 .benchmarkLabel { flex: 0 0 auto; padding: 4px 7px; border: 1px solid var(--line-strong); border-radius: 999px; color: var(--muted-accent); font: 650 8px var(--font-mono); }
-.signedBarChart, .benchmarkChart { display: grid; gap: 11px; margin-top: 17px; }
-.signedBarRow, .benchmarkRow { display: grid; grid-template-columns: 100px minmax(120px, 1fr) 62px; align-items: center; gap: 10px; }
-.signedBarRow > span, .benchmarkRow > span { overflow: hidden; font: 650 9px var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
-.signedBarRow > span small, .benchmarkRow > span small { display: block; margin-top: 1px; color: var(--muted); font: 400 7px var(--font-sans); }
-.signedBarRow > strong, .benchmarkRow > strong { justify-self: end; font: 650 9px var(--font-mono); }
-.signedBarPlot { position: relative; height: 20px; overflow: hidden; border-block: 1px solid var(--line); background: color-mix(in srgb, var(--panel-strong) 34%, transparent); }
-.signedBarPlot .zeroLine { position: absolute; z-index: 2; top: -1px; bottom: -1px; left: 50%; width: 1px; background: var(--muted-accent); opacity: .7; }
-.signedBarPlot b { position: absolute; top: 4px; bottom: 4px; max-width: 50%; }
-.signedBarPlot b.positive { left: 50%; border: 1px solid var(--accent); background: var(--accent); }
-.signedBarPlot b.negative { right: 50%; border: 1px dashed var(--muted); background: transparent; }
-.signedBarPlot em { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 7px; font-style: normal; }
-.signedBarRow > strong.positive { color: var(--accent); }
-.signedBarRow > strong.negative { color: var(--muted-accent); }
-.benchmarkTrack { position: relative; height: 16px; border-bottom: 1px solid var(--line-strong); background: color-mix(in srgb, var(--panel-strong) 24%, transparent); }
-.benchmarkTrack > i { position: absolute; z-index: 2; top: -3px; bottom: -3px; width: 1px; border-left: 1px dashed var(--ink); opacity: .75; }
-.benchmarkTrack > b { position: absolute; top: 4px; bottom: 4px; left: 0; max-width: 100%; }
-.benchmarkTrack > b.passes { border: 1px solid var(--accent); background: var(--accent); }
-.benchmarkTrack > b.below { border: 1px solid var(--muted); background: transparent; }
-.benchmarkRow > strong.passes { color: var(--accent); }
-.benchmarkRow > strong.below { color: var(--muted-accent); }
-.chartFootnote { margin-top: 16px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 7px; line-height: 1.5; }
+.chartContainer { display: flex; width: 100%; min-width: 0; justify-content: center; font-size: 9px; }
+.chartContainer .recharts-responsive-container { min-height: 210px; }
+.chartContainer .recharts-cartesian-axis-tick-value { fill: var(--muted); font-family: var(--font-mono); font-size: 7px; }
+.chartContainer .recharts-line-dot { filter: drop-shadow(0 0 5px color-mix(in srgb, var(--accent) 48%, transparent)); }
+.eliteLineChart { height: 230px; margin-top: 13px; }
+.chartTooltipContent { min-width: 148px; padding: 10px 11px; border: 1px solid var(--line-strong); border-radius: var(--radius-small); background: color-mix(in srgb, var(--bg-secondary) 94%, transparent); box-shadow: var(--shadow-soft); backdrop-filter: blur(16px); }
+.chartTooltipContent > strong { display: block; margin-bottom: 7px; font: 650 8px var(--font-mono); }
+.chartTooltipContent > div { display: grid; grid-template-columns: 7px minmax(0, 1fr) auto; align-items: center; gap: 7px; margin-top: 4px; color: var(--muted); font-size: 8px; }
+.chartTooltipContent i { width: 6px; height: 6px; border-radius: 50%; }
+.chartTooltipContent b { color: var(--ink); font: 650 8px var(--font-mono); }
+.chartEvidenceRow { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 1px; margin-top: 13px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--line); }
+.chartEvidenceRow span { min-width: 0; padding: 8px; background: var(--panel-soft); text-align: center; }
+.chartEvidenceRow small, .chartEvidenceRow strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chartEvidenceRow small { color: var(--muted); font-size: 7px; }
+.chartEvidenceRow strong { margin-top: 2px; font: 650 8px var(--font-mono); }
+.chartEvidenceRow strong.positive { color: var(--accent); }
+.chartEvidenceRow strong.negative { color: var(--muted-accent); }
 .eliteLedgerHeading { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; padding-top: 3px; }
 .eliteLedgerHeading h3 { margin-top: 4px; font-size: 13px; }
 .eliteLedgerHeading > span { color: var(--muted); font: 500 8px var(--font-mono); }
@@ -966,7 +967,6 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   .commandGroups { grid-template-columns: 1fr; }
   .eliteChartCard { padding: 14px; }
   .eliteChartHeader { align-items: flex-start; flex-direction: column; }
-  .signedBarRow, .benchmarkRow { grid-template-columns: 82px minmax(105px, 1fr) 54px; gap: 7px; }
 }
 
 @media (max-width: 480px) {

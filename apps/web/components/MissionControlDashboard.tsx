@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { motion, useReducedMotion } from "framer-motion";
+import { CartesianGrid, Line, LineChart, ReferenceLine, XAxis, YAxis } from "recharts";
 import {
   Activity,
   AlertTriangle,
@@ -19,6 +20,7 @@ import {
   TriangleAlert,
   UsersRound
 } from "lucide-react";
+import { ChartContainer, ChartTooltip, ChartTooltipContent, type ChartConfig } from "@/components/ui/chart";
 import type { DeploymentManagementSnapshot, MissionControlSnapshot, MissionControlStatus, ResearchIntelligence } from "@/lib/api";
 
 type MissionControlProps = {
@@ -196,9 +198,11 @@ function ElitePerformanceVisuals({ elites }: { elites: Array<Record<string, any>
   const completedTrades = chartRows.reduce((total, row) => total + row.trades, 0);
   const checksToday = elites.reduce((total, elite) => total + numberValue(elite.evaluations_today), 0);
   const wouldTradeToday = elites.reduce((total, elite) => total + numberValue(elite.would_submit_today), 0);
-  const maxAbsolutePnl = Math.max(1, ...chartRows.map((row) => Math.abs(row.pnl ?? 0)));
-  const maxProfitFactor = Math.max(1.5, ...chartRows.map((row) => row.profitFactor ?? 0));
-  const thresholdPosition = (1.2 / maxProfitFactor) * 100;
+  const pnlChartConfig = { pnl: { label: "Replay P&L", color: "var(--accent)" } } satisfies ChartConfig;
+  const factorChartConfig = {
+    profitFactor: { label: "Profit factor", color: "var(--accent)" },
+    gate: { label: "Promotion gate", color: "var(--muted-accent)" },
+  } satisfies ChartConfig;
 
   return (
     <>
@@ -211,45 +215,33 @@ function ElitePerformanceVisuals({ elites }: { elites: Array<Record<string, any>
 
       <div className="eliteChartGrid">
         <section className="eliteChartCard" aria-labelledby="elite-pnl-chart-title">
-          <div className="eliteChartHeader"><div><h3 id="elite-pnl-chart-title">Historical replay P&amp;L</h3><p>Net simulated USD after modeled slippage and fees · latest replay</p></div><span className="chartLegend"><i /> Profit <i /> Loss</span></div>
-          <div className="signedBarChart">
-            {chartRows.map((row) => {
-              const value = row.pnl ?? 0;
-              const width = (Math.abs(value) / maxAbsolutePnl) * 50;
-              return (
-                <div className="signedBarRow" key={row.id}>
-                  <span>{row.label}<small>Elite #{row.id}</small></span>
-                  <div className="signedBarPlot" aria-label={`${row.label}: ${row.pnl == null ? "no completed trades" : money(value)}`}>
-                    <i className="zeroLine" />
-                    {row.pnl != null ? <b className={value >= 0 ? "positive" : "negative"} style={{ width: `${width}%` }} /> : <em>no trades</em>}
-                  </div>
-                  <strong className={value >= 0 ? "positive" : "negative"}>{row.pnl == null ? "—" : signedMoney(value)}</strong>
-                </div>
-              );
-            })}
-          </div>
-          <p className="chartFootnote">Zero is centered. Filled bars extend right for profit; outlined bars extend left for loss.</p>
+          <div className="eliteChartHeader"><div><h3 id="elite-pnl-chart-title">Historical replay P&amp;L</h3><p>Net simulated USD after modeled slippage and fees · latest replay</p></div><span className="chartLegend"><i /> Replay P&amp;L</span></div>
+          <ChartContainer config={pnlChartConfig} className="eliteLineChart">
+            <LineChart accessibilityLayer data={chartRows} margin={{ top: 16, right: 12, left: 0, bottom: 4 }}>
+              <CartesianGrid vertical={false} stroke="var(--line)" strokeDasharray="3 5" />
+              <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={11} minTickGap={12} />
+              <YAxis tickLine={false} axisLine={false} width={45} tickFormatter={(value) => `$${value}`} />
+              <ReferenceLine y={0} stroke="var(--muted-accent)" strokeDasharray="4 4" />
+              <ChartTooltip cursor={{ stroke: "var(--line-strong)", strokeDasharray: "3 3" }} content={<ChartTooltipContent valueFormatter={(value) => money(value)} />} />
+              <Line type="monotone" dataKey="pnl" stroke="var(--color-pnl)" strokeWidth={2.25} dot={{ r: 4, fill: "var(--panel)", strokeWidth: 2 }} activeDot={{ r: 6 }} connectNulls={false} />
+            </LineChart>
+          </ChartContainer>
+          <div className="chartEvidenceRow">{chartRows.map((row) => <span key={row.id}><small>Elite #{row.id}</small><strong className={(row.pnl ?? 0) >= 0 ? "positive" : "negative"}>{row.pnl == null ? "—" : signedMoney(row.pnl)}</strong></span>)}</div>
         </section>
 
         <section className="eliteChartCard" aria-labelledby="elite-pf-chart-title">
           <div className="eliteChartHeader"><div><h3 id="elite-pf-chart-title">Profit factor vs promotion gate</h3><p>Gross winning P&amp;L divided by gross losing P&amp;L · 1.20 required</p></div><span className="benchmarkLabel">Gate 1.20</span></div>
-          <div className="benchmarkChart">
-            {chartRows.map((row) => {
-              const factor = row.profitFactor ?? 0;
-              const passes = row.profitFactor != null && factor >= 1.2;
-              return (
-                <div className="benchmarkRow" key={row.id}>
-                  <span>{row.label}<small>{row.trades} trades</small></span>
-                  <div className="benchmarkTrack" aria-label={`${row.label}: ${row.profitFactor == null ? "no profit factor" : factor.toFixed(3)}`}>
-                    <i style={{ left: `${thresholdPosition}%` }} />
-                    {row.profitFactor != null ? <b className={passes ? "passes" : "below"} style={{ width: `${Math.min(100, (factor / maxProfitFactor) * 100)}%` }} /> : null}
-                  </div>
-                  <strong className={passes ? "passes" : "below"}>{row.profitFactor == null ? "—" : factor.toFixed(3)}</strong>
-                </div>
-              );
-            })}
-          </div>
-          <p className="chartFootnote">The vertical marker is the deterministic 1.20 health threshold. Trade counts show the available sample.</p>
+          <ChartContainer config={factorChartConfig} className="eliteLineChart">
+            <LineChart accessibilityLayer data={chartRows.map((row) => ({ ...row, gate: 1.2 }))} margin={{ top: 16, right: 12, left: 0, bottom: 4 }}>
+              <CartesianGrid vertical={false} stroke="var(--line)" strokeDasharray="3 5" />
+              <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={11} minTickGap={12} />
+              <YAxis domain={[0, "auto"]} tickLine={false} axisLine={false} width={35} tickFormatter={(value) => Number(value).toFixed(1)} />
+              <ChartTooltip cursor={{ stroke: "var(--line-strong)", strokeDasharray: "3 3" }} content={<ChartTooltipContent valueFormatter={(value) => value.toFixed(3)} />} />
+              <Line type="monotone" dataKey="gate" stroke="var(--color-gate)" strokeWidth={1.25} strokeDasharray="5 5" dot={false} activeDot={false} />
+              <Line type="monotone" dataKey="profitFactor" stroke="var(--color-profitFactor)" strokeWidth={2.25} dot={{ r: 4, fill: "var(--panel)", strokeWidth: 2 }} activeDot={{ r: 6 }} connectNulls={false} />
+            </LineChart>
+          </ChartContainer>
+          <div className="chartEvidenceRow">{chartRows.map((row) => <span key={row.id}><small>{row.trades} trades</small><strong className={(row.profitFactor ?? 0) >= 1.2 ? "positive" : "negative"}>{row.profitFactor == null ? "—" : row.profitFactor.toFixed(3)}</strong></span>)}</div>
         </section>
       </div>
     </>
