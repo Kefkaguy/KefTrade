@@ -198,11 +198,21 @@ function ElitePerformanceVisuals({ elites }: { elites: Array<Record<string, any>
   const completedTrades = chartRows.reduce((total, row) => total + row.trades, 0);
   const checksToday = elites.reduce((total, elite) => total + numberValue(elite.evaluations_today), 0);
   const wouldTradeToday = elites.reduce((total, elite) => total + numberValue(elite.would_submit_today), 0);
-  const pnlChartConfig = { pnl: { label: "Replay P&L", color: "var(--accent)" } } satisfies ChartConfig;
+  const pnlChartConfig = {
+    pnl: { label: "Replay P&L", color: "var(--accent)" },
+    missingPnl: { label: "Replay P&L", color: "var(--muted-accent)" },
+  } satisfies ChartConfig;
   const factorChartConfig = {
     profitFactor: { label: "Profit factor", color: "var(--accent)" },
     gate: { label: "Promotion gate", color: "var(--muted-accent)" },
+    missingProfitFactor: { label: "Profit factor", color: "var(--muted-accent)" },
   } satisfies ChartConfig;
+  const chartData = chartRows.map((row) => ({
+    ...row,
+    missingPnl: row.pnl == null ? 0 : null,
+    missingProfitFactor: row.profitFactor == null ? 0 : null,
+    gate: 1.2,
+  }));
 
   return (
     <>
@@ -215,30 +225,32 @@ function ElitePerformanceVisuals({ elites }: { elites: Array<Record<string, any>
 
       <div className="eliteChartGrid">
         <section className="eliteChartCard" aria-labelledby="elite-pnl-chart-title">
-          <div className="eliteChartHeader"><div><h3 id="elite-pnl-chart-title">Historical replay P&amp;L</h3><p>Net simulated USD after modeled slippage and fees · latest replay</p></div><span className="chartLegend"><i /> Replay P&amp;L</span></div>
+          <div className="eliteChartHeader"><div><h3 id="elite-pnl-chart-title">Historical replay P&amp;L</h3><p>Net simulated USD after modeled slippage and fees · latest replay</p></div><span className="chartLegend"><i /> Replay P&amp;L <i /> No trades</span></div>
           <ChartContainer config={pnlChartConfig} className="eliteLineChart">
-            <LineChart accessibilityLayer data={chartRows} margin={{ top: 16, right: 12, left: 0, bottom: 4 }}>
+            <LineChart accessibilityLayer data={chartData} margin={{ top: 16, right: 12, left: 0, bottom: 4 }}>
               <CartesianGrid vertical={false} stroke="var(--line)" strokeDasharray="3 5" />
               <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={11} minTickGap={12} />
               <YAxis tickLine={false} axisLine={false} width={45} tickFormatter={(value) => `$${value}`} />
               <ReferenceLine y={0} stroke="var(--muted-accent)" strokeDasharray="4 4" />
-              <ChartTooltip cursor={{ stroke: "var(--line-strong)", strokeDasharray: "3 3" }} content={<ChartTooltipContent valueFormatter={(value) => money(value)} />} />
+              <ChartTooltip cursor={{ stroke: "var(--line-strong)", strokeDasharray: "3 3" }} content={<ChartTooltipContent valueFormatter={(value, key) => key === "missingPnl" ? "No completed trades" : money(value)} />} />
               <Line type="monotone" dataKey="pnl" stroke="var(--color-pnl)" strokeWidth={2.25} dot={{ r: 4, fill: "var(--panel)", strokeWidth: 2 }} activeDot={{ r: 6 }} connectNulls={false} />
+              <Line type="linear" dataKey="missingPnl" stroke="transparent" strokeWidth={0} dot={{ r: 5, fill: "var(--panel)", stroke: "var(--color-missingPnl)", strokeWidth: 2, strokeDasharray: "2 2" }} activeDot={{ r: 6, fill: "var(--panel)", stroke: "var(--color-missingPnl)", strokeWidth: 2 }} connectNulls={false} />
             </LineChart>
           </ChartContainer>
           <div className="chartEvidenceRow">{chartRows.map((row) => <span key={row.id}><small>Elite #{row.id}</small><strong className={(row.pnl ?? 0) >= 0 ? "positive" : "negative"}>{row.pnl == null ? "—" : signedMoney(row.pnl)}</strong></span>)}</div>
         </section>
 
         <section className="eliteChartCard" aria-labelledby="elite-pf-chart-title">
-          <div className="eliteChartHeader"><div><h3 id="elite-pf-chart-title">Profit factor vs promotion gate</h3><p>Gross winning P&amp;L divided by gross losing P&amp;L · 1.20 required</p></div><span className="benchmarkLabel">Gate 1.20</span></div>
+          <div className="eliteChartHeader"><div><h3 id="elite-pf-chart-title">Profit factor vs promotion gate</h3><p>Gross winning P&amp;L divided by gross losing P&amp;L · 1.20 required</p></div><span className="benchmarkLabel">Gate 1.20 · ○ no trades</span></div>
           <ChartContainer config={factorChartConfig} className="eliteLineChart">
-            <LineChart accessibilityLayer data={chartRows.map((row) => ({ ...row, gate: 1.2 }))} margin={{ top: 16, right: 12, left: 0, bottom: 4 }}>
+            <LineChart accessibilityLayer data={chartData} margin={{ top: 16, right: 12, left: 0, bottom: 4 }}>
               <CartesianGrid vertical={false} stroke="var(--line)" strokeDasharray="3 5" />
               <XAxis dataKey="label" tickLine={false} axisLine={false} tickMargin={11} minTickGap={12} />
               <YAxis domain={[0, "auto"]} tickLine={false} axisLine={false} width={35} tickFormatter={(value) => Number(value).toFixed(1)} />
-              <ChartTooltip cursor={{ stroke: "var(--line-strong)", strokeDasharray: "3 3" }} content={<ChartTooltipContent valueFormatter={(value) => value.toFixed(3)} />} />
+              <ChartTooltip cursor={{ stroke: "var(--line-strong)", strokeDasharray: "3 3" }} content={<ChartTooltipContent valueFormatter={(value, key) => key === "missingProfitFactor" ? "No completed trades" : value.toFixed(3)} />} />
               <Line type="monotone" dataKey="gate" stroke="var(--color-gate)" strokeWidth={1.25} strokeDasharray="5 5" dot={false} activeDot={false} />
               <Line type="monotone" dataKey="profitFactor" stroke="var(--color-profitFactor)" strokeWidth={2.25} dot={{ r: 4, fill: "var(--panel)", strokeWidth: 2 }} activeDot={{ r: 6 }} connectNulls={false} />
+              <Line type="linear" dataKey="missingProfitFactor" stroke="transparent" strokeWidth={0} dot={{ r: 5, fill: "var(--panel)", stroke: "var(--color-missingProfitFactor)", strokeWidth: 2, strokeDasharray: "2 2" }} activeDot={{ r: 6, fill: "var(--panel)", stroke: "var(--color-missingProfitFactor)", strokeWidth: 2 }} connectNulls={false} />
             </LineChart>
           </ChartContainer>
           <div className="chartEvidenceRow">{chartRows.map((row) => <span key={row.id}><small>{row.trades} trades</small><strong className={(row.profitFactor ?? 0) >= 1.2 ? "positive" : "negative"}>{row.profitFactor == null ? "—" : row.profitFactor.toFixed(3)}</strong></span>)}</div>
