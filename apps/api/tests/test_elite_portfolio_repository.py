@@ -142,6 +142,8 @@ class BackfillConnection:
 
     def execute(self, query, params=()):
         if "SELECT DISTINCT ON (j.id)" in query:
+            assert "jsonb_object_length" not in query
+            assert "COALESCE(j.result->'strategy_returns', '{}'::jsonb) = '{}'::jsonb" in query
             return BackfillResult([{
                 "id": 41,
                 "symbol": "AAPL",

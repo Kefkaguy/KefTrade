@@ -54,7 +54,7 @@ def backfill_correlation_evidence(conn: psycopg.Connection, *, limit: int = 20) 
          AND j.simulation_only = TRUE
         WHERE e.simulation_only = TRUE
           AND j.dataset_id IS NOT NULL
-          AND COALESCE(jsonb_object_length(j.result->'strategy_returns'), 0) = 0
+          AND COALESCE(j.result->'strategy_returns', '{}'::jsonb) = '{}'::jsonb
           AND NOT EXISTS (
               SELECT 1
               FROM elite_candidate_correlation_evidence evidence
