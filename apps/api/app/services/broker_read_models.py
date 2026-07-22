@@ -81,7 +81,7 @@ def elite_observability(conn: psycopg.Connection) -> list[dict[str, Any]]:
                 COUNT(*) FILTER (WHERE se.signal_type = 'avoid') AS avoids
             FROM strategy_evaluations se
             WHERE se.external_deployment_id = x.id
-              AND se.created_at >= CURRENT_DATE
+              AND se.created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date AT TIME ZONE 'America/New_York')
         ) today_evaluations ON TRUE
         LEFT JOIN LATERAL (
             SELECT se.signal_type, se.completed_bar_timestamp, se.created_at, se.gates
@@ -96,7 +96,7 @@ def elite_observability(conn: psycopg.Connection) -> list[dict[str, Any]]:
                 COUNT(*) FILTER (WHERE sx.would_submit) AS would_submit
             FROM shadow_executions sx
             WHERE sx.external_deployment_id = x.id
-              AND sx.created_at >= CURRENT_DATE
+              AND sx.created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date AT TIME ZONE 'America/New_York')
         ) today_shadows ON TRUE
         LEFT JOIN LATERAL (
             SELECT sx.would_submit, sx.rejection_reasons, sx.created_at
@@ -111,7 +111,7 @@ def elite_observability(conn: psycopg.Connection) -> list[dict[str, Any]]:
                 COUNT(*) FILTER (WHERE bea.status IN ('submitted', 'accepted', 'reconciled')) AS submitted_attempts
             FROM broker_execution_attempts bea
             WHERE bea.external_deployment_id = x.id
-              AND bea.created_at >= CURRENT_DATE
+              AND bea.created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date AT TIME ZONE 'America/New_York')
         ) today_attempts ON TRUE
         ORDER BY e.research_score DESC, x.id
         """,

@@ -76,10 +76,10 @@ def persist_daily_summary(conn, sync: dict[str, Any], reconciliation: dict[str, 
     counts = conn.execute(
         """
         SELECT
-          (SELECT COUNT(*) FROM broker_raw_ingest_events WHERE received_at >= CURRENT_DATE) AS raw_events,
-          (SELECT COUNT(*) FROM broker_reconciliation_findings WHERE created_at >= CURRENT_DATE) AS findings,
-          (SELECT COUNT(*) FROM execution_halts WHERE first_seen_at >= CURRENT_DATE) AS halts,
-          (SELECT COUNT(*) FROM shadow_executions WHERE created_at >= CURRENT_DATE) AS shadow_executions
+          (SELECT COUNT(*) FROM broker_raw_ingest_events WHERE received_at >= ((NOW() AT TIME ZONE 'America/New_York')::date AT TIME ZONE 'America/New_York')) AS raw_events,
+          (SELECT COUNT(*) FROM broker_reconciliation_findings WHERE created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date AT TIME ZONE 'America/New_York')) AS findings,
+          (SELECT COUNT(*) FROM execution_halts WHERE first_seen_at >= ((NOW() AT TIME ZONE 'America/New_York')::date AT TIME ZONE 'America/New_York')) AS halts,
+          (SELECT COUNT(*) FROM shadow_executions WHERE created_at >= ((NOW() AT TIME ZONE 'America/New_York')::date AT TIME ZONE 'America/New_York')) AS shadow_executions
         """
     ).fetchone()
     summary = {
@@ -90,7 +90,7 @@ def persist_daily_summary(conn, sync: dict[str, Any], reconciliation: dict[str, 
         "elite_cycle": [cycle_result_summary(int(item.get("deployment_id") or 0), item) for item in shadows],
         "broker_mutation": False,
     }
-    conn.execute("INSERT INTO broker_daily_summaries(summary_date, summary) VALUES (CURRENT_DATE,%s) ON CONFLICT(summary_date) DO UPDATE SET summary=EXCLUDED.summary, updated_at=NOW()", (Jsonb(summary),))
+    conn.execute("INSERT INTO broker_daily_summaries(summary_date, summary) VALUES ((NOW() AT TIME ZONE 'America/New_York')::date,%s) ON CONFLICT(summary_date) DO UPDATE SET summary=EXCLUDED.summary, updated_at=NOW()", (Jsonb(summary),))
     conn.commit()
 
 
