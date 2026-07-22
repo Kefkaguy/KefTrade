@@ -39,6 +39,7 @@ const primaryNavigation: NavigationItem[] = [
   { href: "/", label: "Home", icon: Grid2X2 },
   { href: "/research", label: "Research", icon: FlaskConical },
   { href: "/research-intelligence", label: "Candidates", icon: Trophy },
+  { href: "/elite-builder", label: "Elite Builder", icon: BrainCircuit },
   { href: "/paper", label: "Forward validation", icon: CandlestickChart },
   { href: "/reports", label: "Reports", icon: FileText },
   { href: "/mission-control", label: "Mission Control", icon: Radar },
@@ -52,6 +53,7 @@ const workspaceGroups: Array<{ label: string; items: NavigationItem[] }> = [
       { href: "/research", label: "Campaigns", detail: "Launch and monitor research campaigns", icon: FlaskConical },
       { href: "/experiments", label: "Experiments", detail: "Inspect active jobs and evidence", icon: BrainCircuit },
       { href: "/validation", label: "Validation", detail: "Review promotion gates", icon: ShieldCheck },
+      { href: "/elite-builder", label: "Elite portfolio builder", detail: "Construct constrained diversified portfolios", icon: BrainCircuit },
       { href: "/market-intelligence", label: "Market intelligence", detail: "Regimes, drift, and context", icon: Activity }
     ]
   },

@@ -1384,6 +1384,60 @@ export type PortfolioReadiness = {
   correlation_limit: string | number;
 };
 
+export type ElitePortfolioConfiguration = {
+  universe: string[];
+  families: string[];
+  directions: string[];
+  timeframes: string[];
+  thresholds: Record<string, unknown>;
+  constraints: Record<string, unknown>;
+  objective: string;
+  custom_size: number | null;
+};
+
+export type ElitePortfolioOptions = {
+  solver_version: string;
+  universes: string[];
+  families: string[];
+  directions: string[];
+  timeframes: string[];
+  candidate_count: number;
+  default_thresholds: Record<string, unknown>;
+  default_constraints: Record<string, unknown>;
+  objectives: string[];
+  maximum_portfolio_size: number;
+  execution_policy: Record<string, string>;
+};
+
+export type ElitePortfolioResult = {
+  id?: number;
+  status: string;
+  solver_version?: string;
+  selected?: string[];
+  maximum_feasible_size?: number;
+  eligible_count?: number;
+  excluded_count?: number;
+  constraint_relaxation_count?: number;
+  binding_constraints?: Array<{ constraint: string; excluded_candidates_or_pairs: number }>;
+  analytics?: Record<string, any>;
+  portfolio_analytics?: Record<string, any>;
+  eligibility?: Array<Record<string, any>>;
+  conflicts?: Array<Record<string, any>>;
+  selection_explanations?: Array<Record<string, any>>;
+  rejection_explanations?: Array<Record<string, any>>;
+  snapshot?: { decision_hash?: string; snapshot_hash?: string; decision_inputs?: Record<string, any> } | null;
+  snapshot_hash?: string;
+  approved_snapshot_hash?: string | null;
+  members?: Array<Record<string, any>>;
+  statistics?: Record<string, any>;
+  timing?: Record<string, number>;
+  response_size_bytes?: number;
+  cache?: { hit: boolean; key: string };
+  execution_notice?: string;
+  authorization_instructions?: Array<Record<string, any>>;
+  errors?: Array<Record<string, any>>;
+};
+
 const API_TIMING_ENABLED = process.env.NODE_ENV !== "production" || process.env.NEXT_PUBLIC_DIAGNOSTIC_LOGGING === "true";
 
 async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
@@ -1459,6 +1513,26 @@ function logApiTiming(path: string, method: string, startedAt: number, status: n
 function logFrontendDiagnostic(message: string, fields: Record<string, unknown>) {
   if (!API_TIMING_ENABLED) return;
   console.info(`[frontend-diagnostic] ${message}`, fields);
+}
+
+export function getElitePortfolioOptions() {
+  return request<ElitePortfolioOptions>("/research/elite-portfolios/options", { cache: "no-store", timeoutMs: 60000 });
+}
+
+export function previewElitePortfolio(configuration: ElitePortfolioConfiguration) {
+  return request<ElitePortfolioResult>("/research/elite-portfolios/preview", { method: "POST", body: JSON.stringify(configuration), timeoutMs: 60000 });
+}
+
+export function createElitePortfolio(configuration: ElitePortfolioConfiguration) {
+  return request<ElitePortfolioResult>("/research/elite-portfolios", { method: "POST", body: JSON.stringify(configuration), timeoutMs: 60000 });
+}
+
+export function approveElitePortfolio(portfolioId: number, snapshotHash: string) {
+  return request<ElitePortfolioResult>(`/research/elite-portfolios/${portfolioId}/approve`, { method: "POST", body: JSON.stringify({ snapshot_hash: snapshotHash }), timeoutMs: 60000 });
+}
+
+export function activateElitePortfolio(portfolioId: number, snapshotHash: string, idempotencyKey: string) {
+  return request<ElitePortfolioResult>(`/research/elite-portfolios/${portfolioId}/activate-internal`, { method: "POST", body: JSON.stringify({ snapshot_hash: snapshotHash, idempotency_key: idempotencyKey }), timeoutMs: 60000 });
 }
 
 export function getCandles(limit = 220, input: ResearchAssetInput = { symbol: "BTCUSDT", timeframe: "4h" }) {
