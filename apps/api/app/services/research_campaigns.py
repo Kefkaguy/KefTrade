@@ -378,6 +378,9 @@ def ensure_worker_tables(conn: psycopg.Connection) -> None:
             drift_classification TEXT NOT NULL,
             detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             simulation_only BOOLEAN NOT NULL DEFAULT TRUE,
+            CONSTRAINT elite_candidate_evidence_drift_classification_check CHECK (
+                drift_classification IN ('normal', 'warning', 'severe', 'insufficient_forward_sample')
+            ),
             CONSTRAINT elite_candidate_evidence_drift_simulation_only_check CHECK (simulation_only = TRUE)
         )
         """
