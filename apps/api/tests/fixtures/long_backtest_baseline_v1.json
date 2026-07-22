@@ -1,0 +1,44 @@
+{
+  "metrics": {
+    "average_holding_time_hours": 0.0,
+    "average_loss": 100.0,
+    "average_win": 0.0,
+    "expectancy_per_trade": -100.0,
+    "final_equity": 9900.0,
+    "gross_loss": 100.0,
+    "gross_profit": 0.0,
+    "initial_equity": 10000.0,
+    "longest_losing_streak": 1,
+    "max_drawdown": 0.01,
+    "number_of_trades": 1,
+    "profit_factor": 0.0,
+    "profit_factor_is_infinite": false,
+    "sharpe_ratio": null,
+    "total_return": -0.01,
+    "walk_forward": {
+      "enabled": true,
+      "train_end": "2024-01-12T12:00:00+00:00",
+      "train_start": "2024-01-01T00:00:00+00:00",
+      "validation_end": "2024-01-17T12:00:00+00:00",
+      "validation_start": "2024-01-12T16:00:00+00:00"
+    },
+    "win_rate": 0.0
+  },
+  "trades": [
+    {
+      "entry_price": "103",
+      "entry_time": "2024-01-12T20:00:00+00:00",
+      "exit_price": "99",
+      "exit_reason": "stop_loss_stop_first",
+      "exit_time": "2024-01-12T20:00:00+00:00",
+      "holding_period_hours": 0.0,
+      "pnl": "-100.00",
+      "pnl_pct": "-0.01",
+      "quantity": "25.00",
+      "side": "long",
+      "stop_loss": "99",
+      "symbol": "BTCUSDT",
+      "take_profit": "111"
+    }
+  ]
+}

@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+import json
+from pathlib import Path
 
 from app.services.backtester import calculate_metrics, count_setup_opportunities, run_backtest, walk_forward_split
 from app.services.strategy import StrategyDecision
@@ -100,6 +102,23 @@ def test_backtest_enters_after_signal_candle_to_avoid_lookahead() -> None:
     assert result["trades"]
     assert result["trades"][0]["entry_time"] == candles[71]["timestamp"]
     assert result["trades"][0]["entry_price"] == candles[71]["open"]
+
+
+def test_frozen_long_backtest_baseline_v1() -> None:
+    candles, features = make_rows()
+    result = run_backtest(candles, features, PARAMS)
+    fixture = json.loads((Path(__file__).parent / "fixtures" / "long_backtest_baseline_v1.json").read_text(encoding="utf-8"))
+    trades = [
+        {
+            key: value.isoformat() if hasattr(value, "isoformat") else str(value) if isinstance(value, Decimal) else value
+            for key, value in trade.items()
+            if key in fixture["trades"][0]
+        }
+        for trade in result["trades"]
+    ]
+
+    assert result["metrics"] == fixture["metrics"]
+    assert trades == fixture["trades"]
 
 
 def test_backtest_can_delay_entry_by_additional_bars() -> None:
