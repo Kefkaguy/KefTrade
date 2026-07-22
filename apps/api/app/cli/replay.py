@@ -4,6 +4,7 @@ import argparse
 import json
 
 from app.db import connect
+from app.services.elite_replay_outcomes import run_replay_outcomes
 from app.services.elite_shadow_replay import run_elite_shadow_replay
 from app.services.research_campaigns import refresh_command_center_aggregate_snapshot
 
@@ -16,6 +17,8 @@ def execute(args: argparse.Namespace) -> dict:
                 external_deployment_id=args.external_deployment_id,
                 candle_limit=args.candle_limit,
             )
+        if args.command == "outcomes":
+            return run_replay_outcomes(conn, replay_run_id=args.replay_run_id)
         if args.command == "refresh-command-center":
             payload = refresh_command_center_aggregate_snapshot(conn)
             conn.commit()
@@ -35,6 +38,8 @@ def parser() -> argparse.ArgumentParser:
     replay = commands.add_parser("elite-shadow", help="Replay frozen active elites over historical candles.")
     replay.add_argument("--external-deployment-id", type=int)
     replay.add_argument("--candle-limit", type=int, default=2000)
+    outcomes = commands.add_parser("outcomes", help="Calculate stop/target outcomes, performance, regimes, and timing compatibility.")
+    outcomes.add_argument("--replay-run-id", type=int)
     commands.add_parser("refresh-command-center", help="Refresh authoritative candidate counts without deleting evidence.")
     return root
 
@@ -46,4 +51,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

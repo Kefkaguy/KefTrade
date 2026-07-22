@@ -30,6 +30,8 @@ def replay_risk_configuration(active_elites: int) -> dict[str, Any]:
         "portfolio_strategy_cap_pct": strategy_cap,
         "total_exposure_cap_pct": total_heat,
         "active_elites": active_elites,
+        "max_open_positions": settings.broker_max_open_positions,
+        "max_open_orders": settings.broker_max_open_orders,
     }
 
 
@@ -329,7 +331,7 @@ def run_elite_shadow_replay(
             )
         summary = replay_summary(all_rows)
         completed = conn.execute(
-            "UPDATE elite_shadow_replay_runs SET status='complete', summary=%s, completed_at=NOW() WHERE id=%s RETURNING *",
+            "UPDATE elite_shadow_replay_runs SET status='complete', summary=%s, completed_at=clock_timestamp() WHERE id=%s RETURNING *",
             (Jsonb(json_safe(summary)), run["id"]),
         ).fetchone()
         conn.commit()
@@ -337,7 +339,7 @@ def run_elite_shadow_replay(
     except Exception as error:
         conn.rollback()
         conn.execute(
-            "UPDATE elite_shadow_replay_runs SET status='failed', summary=%s, completed_at=NOW() WHERE id=%s",
+            "UPDATE elite_shadow_replay_runs SET status='failed', summary=%s, completed_at=clock_timestamp() WHERE id=%s",
             (Jsonb({"error_class": error.__class__.__name__, "error": str(error), "broker_mutation": False}), run["id"]),
         )
         conn.commit()
