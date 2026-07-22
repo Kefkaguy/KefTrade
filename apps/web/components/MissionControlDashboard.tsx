@@ -119,6 +119,7 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
           <Metric label="Execution epochs" value={broker?.epochs?.length ?? 0} />
           <Metric label="Shadow decisions" value={broker?.shadow_executions?.length ?? 0} />
         </div>
+        <OpportunityCoverage coverage={broker?.opportunity_coverage} />
         <p className="surfaceNote">Broker state is read from persisted snapshots. Order submission and external execution remain disabled.</p>
       </motion.section>
 
@@ -144,7 +145,7 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
                       <tr key={elite.id}>
                         <td><strong>{elite.symbol} <small>{elite.timeframe}</small></strong><small>Elite #{elite.id} · {elite.candidate_id}</small></td>
                         <td><span className={`statusChip ${decision.tone}`}>{decision.label}</span><small>{decision.reason}</small></td>
-                        <td><strong>{numberValue(elite.evaluations_today)} checks</strong><small>{numberValue(elite.setups_today)} setups · {numberValue(elite.would_submit_today)} would trade</small></td>
+                        <td><strong>{numberValue(elite.evaluations_today)} unique bars</strong><small>{numberValue(elite.setups_today)} setups · {numberValue(elite.shadow_decisions_today)} shadow decisions · {numberValue(elite.would_submit_today)} would trade</small></td>
                         <td><strong>{today.realized_pnl == null ? "Pending attribution" : money(numberValue(today.realized_pnl))}</strong><small>{numberValue(today.submitted_orders)} submitted orders · {title(String(today.attribution_status ?? "unknown"))}</small></td>
                         <td><strong>{replay.net_pnl == null ? "No completed trades" : money(numberValue(replay.net_pnl))}</strong><small>{replay.profit_factor == null ? "PF —" : `PF ${numberValue(replay.profit_factor).toFixed(3)}`} · {numberValue(replay.completed_trades)} trades · {outcomeHealth(replay)}</small></td>
                         <td><strong>{relativeTime(elite.latest_evaluation_at ?? elite.latest_shadow_at, snapshot.generated_at)}</strong><small>{elite.latest_bar ? `Bar ${formatNewYorkDate(elite.latest_bar)}` : "No evaluated bar"}</small></td>
@@ -184,6 +185,29 @@ function Metric({ label, value }: { label: string; value: unknown }) {
   return <div><span>{label}</span><strong>{String(value ?? 0)}</strong></div>;
 }
 
+function OpportunityCoverage({ coverage }: { coverage?: NonNullable<NonNullable<MissionControlSnapshot["external_broker_paper"]>["opportunity_coverage"]> }) {
+  if (!coverage) return null;
+  const dominantPercent = Math.round(numberValue(coverage.dominant_symbol_share) * 100);
+  return (
+    <div className="opportunityCoverage" aria-label="Trading opportunity coverage">
+      <div className="opportunityCoverageSummary">
+        <span className="eyebrow">Opportunity coverage</span>
+        <strong>{title(coverage.classification)}</strong>
+        <p>{coverage.unique_symbols} symbols across {coverage.unique_timeframes} timeframes. {coverage.dominant_symbol ?? "No symbol"} represents {dominantPercent}% of active elites.</p>
+      </div>
+      <div className="coverageMetrics">
+        <Metric label="Active elites" value={coverage.active_elites} />
+        <Metric label="Unique symbols" value={coverage.unique_symbols} />
+        <Metric label="Setup rate today" value={`${(numberValue(coverage.setup_frequency_today) * 100).toFixed(1)}%`} />
+        <Metric label="Execution direction" value={coverage.long_only ? "Long only" : "Mixed"} />
+      </div>
+      <div className="coverageRecommendations">
+        {coverage.research_recommendations.map((item) => <span key={item.code}><strong>{title(item.code)}</strong><small>{item.detail}</small></span>)}
+      </div>
+    </div>
+  );
+}
+
 function ElitePerformanceVisuals({ elites }: { elites: Array<Record<string, any>> }) {
   const chartRows = elites
     .map((elite) => ({
@@ -219,7 +243,7 @@ function ElitePerformanceVisuals({ elites }: { elites: Array<Record<string, any>
       <div className="eliteKpiGrid" aria-label="Elite performance summary">
         <EliteKpi label="Replay net P&L" value={money(replayPnl)} detail={`${completedTrades} completed portfolio trades`} tone={replayPnl >= 0 ? "positive" : "negative"} />
         <EliteKpi label="Elites above PF gate" value={`${chartRows.filter((row) => (row.profitFactor ?? 0) >= 1.2).length} / ${chartRows.length}`} detail="Profit factor at or above 1.20" />
-        <EliteKpi label="Checks today" value={String(checksToday)} detail="Completed strategy evaluations" />
+        <EliteKpi label="Unique bars today" value={String(checksToday)} detail="One strategy evaluation per completed candle" />
         <EliteKpi label="Would trade today" value={String(wouldTradeToday)} detail="Shadow decisions passing every gate" tone={wouldTradeToday ? "positive" : "neutral"} />
       </div>
 

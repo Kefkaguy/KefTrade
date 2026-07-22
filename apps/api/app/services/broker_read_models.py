@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 
@@ -36,7 +37,52 @@ def broker_status(conn: psycopg.Connection) -> dict[str, Any]:
         "shadow_executions": shadows,
         "daily_summary": daily_summary,
         "elite_activity": elite_activity,
+        "opportunity_coverage": opportunity_coverage(elite_activity),
         "generated_at": datetime.now(UTC),
+    }
+
+
+def opportunity_coverage(elites: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe deployment diversity without changing any trading authority."""
+    active = [row for row in elites if row.get("state") in {"enabled_observe_only", "enabled_execution"}]
+    symbols = Counter(str(row.get("symbol") or "unknown") for row in active)
+    timeframes = Counter(str(row.get("timeframe") or "unknown") for row in active)
+    active_count = len(active)
+    dominant_symbol, dominant_count = symbols.most_common(1)[0] if symbols else (None, 0)
+    dominant_share = dominant_count / active_count if active_count else 0.0
+    evaluations = sum(int(row.get("evaluations_today") or 0) for row in active)
+    setups = sum(int(row.get("setups_today") or 0) for row in active)
+    concentrated = active_count > 1 and (len(symbols) < 3 or dominant_share >= 0.6)
+    classification = "concentrated_long_only" if concentrated else "long_only"
+    return {
+        "classification": classification,
+        "active_elites": active_count,
+        "unique_symbols": len(symbols),
+        "unique_timeframes": len(timeframes),
+        "dominant_symbol": dominant_symbol,
+        "dominant_symbol_share": round(dominant_share, 4),
+        "symbol_distribution": dict(symbols),
+        "timeframe_distribution": dict(timeframes),
+        "setup_frequency_today": round(setups / evaluations, 6) if evaluations else 0.0,
+        "long_only": True,
+        "external_short_execution_enabled": False,
+        "research_recommendations": [
+            {
+                "code": "INDEPENDENT_SYMBOLS",
+                "status": "research_required" if concentrated else "monitor",
+                "detail": "Validate elites on additional, less-correlated symbols before promotion.",
+            },
+            {
+                "code": "MEAN_REVERSION_DEFENSIVE",
+                "status": "research_required",
+                "detail": "Research mean-reversion and defensive candidates separately from the frozen elites.",
+            },
+            {
+                "code": "BEARISH_SHORT",
+                "status": "research_required",
+                "detail": "Validate short candidates in simulation before adding any external execution path.",
+            },
+        ],
     }
 
 

@@ -883,6 +883,20 @@ export type MissionControlSnapshot = {
     epochs: Array<Record<string, any>>;
     shadow_executions: Array<Record<string, any>>;
     daily_summary?: Record<string, any>;
+    opportunity_coverage?: {
+      classification: string;
+      active_elites: number;
+      unique_symbols: number;
+      unique_timeframes: number;
+      dominant_symbol?: string | null;
+      dominant_symbol_share: number;
+      symbol_distribution: Record<string, number>;
+      timeframe_distribution: Record<string, number>;
+      setup_frequency_today: number;
+      long_only: boolean;
+      external_short_execution_enabled: boolean;
+      research_recommendations: Array<{ code: string; status: string; detail: string }>;
+    };
     elite_activity?: Array<{
       id: number;
       candidate_id: string;

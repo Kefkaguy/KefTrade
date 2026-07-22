@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from app.services.broker_read_models import elite_observability
+from app.services.broker_read_models import elite_observability, opportunity_coverage
 from app.workers.broker_runner import cycle_result_summary
 
 
@@ -103,3 +103,22 @@ def test_cycle_log_summary_includes_failed_gates_for_duplicate_cycles() -> None:
     assert summary["signal"] == "avoid"
     assert summary["rejection_reasons"] == ["RSI_MIN"]
     assert summary["broker_mutation"] is False
+
+
+def test_opportunity_coverage_reports_symbol_concentration_without_enabling_shorts() -> None:
+    coverage = opportunity_coverage(
+        [
+            {"state": "enabled_observe_only", "symbol": "AAXJ", "timeframe": "1h", "evaluations_today": 1, "setups_today": 0},
+            {"state": "enabled_observe_only", "symbol": "AAXJ", "timeframe": "4h", "evaluations_today": 1, "setups_today": 0},
+            {"state": "enabled_observe_only", "symbol": "AAXJ", "timeframe": "4h", "evaluations_today": 1, "setups_today": 0},
+            {"state": "enabled_observe_only", "symbol": "AAXJ", "timeframe": "1h", "evaluations_today": 1, "setups_today": 0},
+            {"state": "enabled_observe_only", "symbol": "AAAU", "timeframe": "4h", "evaluations_today": 1, "setups_today": 0},
+        ]
+    )
+
+    assert coverage["classification"] == "concentrated_long_only"
+    assert coverage["unique_symbols"] == 2
+    assert coverage["dominant_symbol"] == "AAXJ"
+    assert coverage["dominant_symbol_share"] == 0.8
+    assert coverage["setup_frequency_today"] == 0.0
+    assert coverage["external_short_execution_enabled"] is False

@@ -110,7 +110,19 @@ def persist_strategy_evaluation(
             decision_version, configuration_fingerprint, symbol, timeframe,
             completed_bar_timestamp, signal_type, regime, gates, decision
         ) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        ON CONFLICT(internal_deployment_id, completed_bar_timestamp, decision_version) DO NOTHING
+        ON CONFLICT(internal_deployment_id, completed_bar_timestamp, decision_version) DO UPDATE SET
+            external_deployment_id = COALESCE(
+                strategy_evaluations.external_deployment_id,
+                EXCLUDED.external_deployment_id
+            ),
+            execution_epoch_id = COALESCE(
+                strategy_evaluations.execution_epoch_id,
+                EXCLUDED.execution_epoch_id
+            ),
+            configuration_fingerprint = COALESCE(
+                strategy_evaluations.configuration_fingerprint,
+                EXCLUDED.configuration_fingerprint
+            )
         RETURNING *
         """,
         (
@@ -119,11 +131,6 @@ def persist_strategy_evaluation(
             candle["timestamp"], decision.signal, Jsonb(decision.regime), Jsonb(decision.gates), Jsonb(payload),
         ),
     ).fetchone()
-    if not row:
-        row = conn.execute(
-            "SELECT * FROM strategy_evaluations WHERE internal_deployment_id=%s AND completed_bar_timestamp=%s AND decision_version=%s",
-            (internal_deployment_id, candle["timestamp"], decision.decision_version),
-        ).fetchone()
     return dict(row)
 
 
@@ -307,4 +314,3 @@ def health_score(total: int, setup_rate: float, not_evaluated: int, dominant_rat
     regime = min(1.0, regime_rows / total)
     risk_viability = 1.0 if setup_rate > 0 else 0.0
     return round(100 * (0.25 * integrity + 0.30 * opportunity + 0.20 * concentration + 0.15 * regime + 0.10 * risk_viability))
-
