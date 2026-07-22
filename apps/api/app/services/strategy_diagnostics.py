@@ -62,10 +62,13 @@ def enrich_decision(
     if volatility_min is not None:
         gates.append(compare_gate("VOLATILITY_MIN", "volatility", number(feature.get("volatility_20")), ">=", volatility_min, "Volatility must meet its configured minimum."))
 
+    stop_code = "STOP_BELOW_ENTRY" if decision.direction == "long" else "STOP_ABOVE_ENTRY"
     if decision.stop_loss is not None and close is not None:
-        gates.append(compare_gate("STOP_BELOW_ENTRY", "stop_geometry", number(decision.stop_loss), "<", close, "The long stop must be below the entry reference price."))
+        operator = "<" if decision.direction == "long" else ">"
+        reason = "The long stop must be below the entry reference price." if decision.direction == "long" else "The short stop must be above the entry reference price."
+        gates.append(compare_gate(stop_code, "stop_geometry", number(decision.stop_loss), operator, close, reason))
     else:
-        gates.append(not_evaluated_gate("STOP_BELOW_ENTRY", "stop_geometry", "No stop was produced because entry prerequisites did not pass."))
+        gates.append(not_evaluated_gate(stop_code, "stop_geometry", "No stop was produced because entry prerequisites did not pass."))
 
     # Preserve useful strategy-specific messages without pretending that unparsed text
     # contains a numeric threshold.
@@ -238,6 +241,7 @@ def decision_payload(decision: StrategyDecision) -> dict[str, Any]:
         "decision_version": decision.decision_version,
         "gates": decision.gates,
         "regime": decision.regime,
+        "strategy_direction": decision.direction,
     }
 
 

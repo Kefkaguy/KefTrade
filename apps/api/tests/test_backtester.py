@@ -3,7 +3,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 
-from app.services.backtester import calculate_metrics, count_setup_opportunities, run_backtest, walk_forward_split
+from app.services.backtester import calculate_metrics, count_setup_opportunities, find_exit_index, mark_to_market_equity, run_backtest, walk_forward_split
 from app.services.strategy import StrategyDecision
 
 
@@ -139,6 +139,39 @@ def test_same_candle_stop_target_policy_is_stop_first() -> None:
     assert result["trades"][0]["exit_reason"] == "stop_loss_stop_first"
     assert result["trades"][0]["exit_price"] == result["trades"][0]["stop_loss"]
     assert result["metrics"]["max_drawdown"] > 0
+
+
+def test_short_backtest_uses_inverse_geometry_and_pnl() -> None:
+    candles, features = make_rows()
+    candles[71].update({"open": Decimal("100"), "high": Decimal("101"), "low": Decimal("93"), "close": Decimal("95")})
+
+    def short_setup(candle, feature, recent_candles, params):
+        close = Decimal(candle["close"])
+        if candle["timestamp"] != candles[70]["timestamp"]:
+            return StrategyDecision("avoid", None, None, None, None, ["wait"], direction="short")
+        return StrategyDecision("setup", (close, close), Decimal("102"), Decimal("96"), Decimal("2"), ["short"], direction="short")
+
+    result = run_backtest(candles, features, PARAMS, short_setup)
+    trade = result["trades"][0]
+
+    assert trade["side"] == "short"
+    assert trade["stop_loss"] > trade["entry_price"]
+    assert trade["take_profit"] < trade["entry_price"]
+    assert trade["pnl"] > 0
+
+
+def test_short_same_candle_stop_and_target_is_stop_first() -> None:
+    rows = [{"candle": {"low": Decimal("90"), "high": Decimal("110")}}]
+    arrays = {"low": __import__("numpy").array([90.0]), "high": __import__("numpy").array([110.0])}
+
+    index, reason = find_exit_index(rows, arrays, start_index=0, stop_loss=Decimal("105"), take_profit=Decimal("95"), max_holding_bars=0, direction="short")
+
+    assert index == 0
+    assert reason == "stop_loss_stop_first"
+
+
+def test_short_mark_to_market_inverts_price_movement() -> None:
+    assert mark_to_market_equity(Decimal("10000"), Decimal("100"), Decimal("90"), Decimal("10"), direction="short") == Decimal("10100")
 
 
 def test_backtest_can_exit_after_max_holding_bars() -> None:

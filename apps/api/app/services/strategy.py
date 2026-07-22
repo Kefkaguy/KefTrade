@@ -19,6 +19,7 @@ class StrategyDecision:
     decision_version: str = "structured-gates-v1"
     gates: list[dict[str, Any]] = field(default_factory=list)
     regime: dict[str, Any] = field(default_factory=dict)
+    direction: Literal["long", "short"] = "long"
 
 
 @dataclass(frozen=True)

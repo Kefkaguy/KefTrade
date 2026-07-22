@@ -871,6 +871,7 @@ def decision_payload(decision: StrategyDecision) -> dict[str, Any]:
         "decision_version": decision.decision_version,
         "gates": decision.gates,
         "regime": decision.regime,
+        "strategy_direction": decision.direction,
     }
 
 

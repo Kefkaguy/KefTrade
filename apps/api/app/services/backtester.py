@@ -69,13 +69,20 @@ def run_backtest(
             continue
 
         entry_candle = rows[i + entry_offset]["candle"]
-        entry_price = Decimal(entry_candle["open"]) * (Decimal("1") + slippage_rate)
-        risk_per_unit = entry_price - decision.stop_loss
+        direction = decision.direction
+        entry_price = Decimal(entry_candle["open"]) * (
+            Decimal("1") + slippage_rate if direction == "long" else Decimal("1") - slippage_rate
+        )
+        risk_per_unit = entry_price - decision.stop_loss if direction == "long" else decision.stop_loss - entry_price
         if risk_per_unit <= 0:
             i += 1
             continue
         effective_risk_reward = decision.risk_reward if decision.risk_reward is not None else Decimal(str(params["risk_reward"]))
-        effective_take_profit = entry_price + (risk_per_unit * effective_risk_reward)
+        effective_take_profit = (
+            entry_price + (risk_per_unit * effective_risk_reward)
+            if direction == "long"
+            else entry_price - (risk_per_unit * effective_risk_reward)
+        )
 
         max_risk = equity * risk_per_trade
         quantity = max_risk / risk_per_unit
@@ -86,24 +93,25 @@ def run_backtest(
             stop_loss=decision.stop_loss,
             take_profit=effective_take_profit,
             max_holding_bars=int(params.get("max_holding_bars") or 0),
+            direction=direction,
         )
         exit_candle = rows[exit_index]["candle"]
         if exit_reason.startswith("stop_loss"):
-            exit_price = decision.stop_loss * (Decimal("1") - slippage_rate)
+            exit_price = decision.stop_loss * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
         elif exit_reason == "take_profit":
-            exit_price = effective_take_profit * (Decimal("1") - slippage_rate)
+            exit_price = effective_take_profit * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
         else:
-            exit_price = Decimal(exit_candle["close"]) * (Decimal("1") - slippage_rate)
+            exit_price = Decimal(exit_candle["close"]) * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
 
         for mark_index in range(i + entry_offset, exit_index + 1):
             mark_price = exit_price if mark_index == exit_index else Decimal(rows[mark_index]["candle"]["close"])
-            equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity))
+            equity_curve.append(mark_to_market_equity(equity, entry_price, mark_price, quantity, direction=direction))
 
         if exit_price is None:
             i += 1
             continue
 
-        gross_pnl = (exit_price - entry_price) * quantity
+        gross_pnl = ((exit_price - entry_price) if direction == "long" else (entry_price - exit_price)) * quantity
         fees = (entry_price * quantity * fee_rate) + (exit_price * quantity * fee_rate)
         pnl = gross_pnl - fees
         equity += pnl
@@ -112,7 +120,7 @@ def run_backtest(
         trades.append(
             {
                 "symbol": candle["symbol"],
-                "side": "long",
+                "side": direction,
                 "entry_time": entry_candle["timestamp"],
                 "exit_time": rows[exit_index]["candle"]["timestamp"],
                 "entry_price": entry_price,
@@ -195,17 +203,22 @@ def find_exit_index(
     stop_loss: Decimal,
     take_profit: Decimal,
     max_holding_bars: int,
+    direction: str = "long",
 ) -> tuple[int, str]:
     final_index = len(rows) - 1
     search_end = min(final_index, start_index + max_holding_bars) if max_holding_bars > 0 else final_index
     lows = arrays["low"][start_index : search_end + 1]
     highs = arrays["high"][start_index : search_end + 1]
-    hit_offsets = np.flatnonzero((lows <= float(stop_loss)) | (highs >= float(take_profit)))
+    hit_offsets = (
+        np.flatnonzero((lows <= float(stop_loss)) | (highs >= float(take_profit)))
+        if direction == "long"
+        else np.flatnonzero((highs >= float(stop_loss)) | (lows <= float(take_profit)))
+    )
     for offset in hit_offsets:
         index = start_index + int(offset)
         candle = rows[index]["candle"]
-        stop_touched = Decimal(candle["low"]) <= stop_loss
-        target_touched = Decimal(candle["high"]) >= take_profit
+        stop_touched = Decimal(candle["low"]) <= stop_loss if direction == "long" else Decimal(candle["high"]) >= stop_loss
+        target_touched = Decimal(candle["high"]) >= take_profit if direction == "long" else Decimal(candle["low"]) <= take_profit
         if stop_touched:
             return index, "stop_loss" if not target_touched else f"stop_loss_{SAME_CANDLE_EXIT_POLICY}"
         if target_touched:
@@ -215,8 +228,16 @@ def find_exit_index(
     return final_index, "end_of_data"
 
 
-def mark_to_market_equity(equity_before_trade: Decimal, entry_price: Decimal, mark_price: Decimal, quantity: Decimal) -> Decimal:
-    return equity_before_trade + ((mark_price - entry_price) * quantity)
+def mark_to_market_equity(
+    equity_before_trade: Decimal,
+    entry_price: Decimal,
+    mark_price: Decimal,
+    quantity: Decimal,
+    *,
+    direction: str = "long",
+) -> Decimal:
+    movement = mark_price - entry_price if direction == "long" else entry_price - mark_price
+    return equity_before_trade + (movement * quantity)
 
 
 def calculate_metrics(initial_equity: Decimal, final_equity: Decimal, trades: list[dict[str, Any]], equity_curve: list[Decimal]) -> dict[str, Any]:
