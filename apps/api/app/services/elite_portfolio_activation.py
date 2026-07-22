@@ -26,6 +26,8 @@ def authorization_instruction(member: dict[str, Any], snapshot_hash: str) -> dic
         return None
     if str(member.get("execution_capability") or "external_observe") == "internal_only":
         return None
+    if member.get("activation_state") != "external_approval_required" or not member.get("external_deployment_id"):
+        return None
     deployment_id = int(member["internal_deployment_id"])
     return {
         "portfolio_snapshot_hash": snapshot_hash,
@@ -152,17 +154,21 @@ def _activate_member(conn: psycopg.Connection, member: dict[str, Any]) -> dict[s
         )
     external = None
     next_state = "internal_active"
+    latest_error = None
     if member["strategy_direction"] == "long" and member["execution_capability"] != "internal_only":
         external = _ensure_disabled_external_candidate(conn, member, deployment)
         if external:
             next_state = "external_approval_required"
+        else:
+            next_state = "blocked"
+            latest_error = "A successful broker sync is required before the disabled external candidate can be created."
     conn.execute(
         """
         UPDATE elite_portfolio_members
-        SET internal_deployment_id=%s,external_deployment_id=%s,activation_state=%s,latest_error=NULL,updated_at=NOW()
+        SET internal_deployment_id=%s,external_deployment_id=%s,activation_state=%s,latest_error=%s,updated_at=NOW()
         WHERE id=%s
         """,
-        (deployment["id"], external and external["id"], next_state, member["id"]),
+        (deployment["id"], external and external["id"], next_state, latest_error, member["id"]),
     )
     conn.commit()
     return {
@@ -172,6 +178,7 @@ def _activate_member(conn: psycopg.Connection, member: dict[str, Any]) -> dict[s
         "internal_deployment_id": deployment["id"],
         "external_deployment_id": external and external["id"],
         "activation_state": next_state,
+        "latest_error": latest_error,
     }
 
 

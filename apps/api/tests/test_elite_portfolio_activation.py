@@ -38,6 +38,7 @@ def member(index: int, *, direction: str = "long", state: str = "approved") -> d
         "strategy_direction": direction,
         "execution_capability": "internal_only" if direction == "short" else "external_observe",
         "internal_deployment_id": index + 100,
+        "external_deployment_id": index + 200 if direction == "long" else None,
         "activation_state": state,
     }
 
@@ -59,13 +60,14 @@ def test_server_authorization_instructions_are_long_only_and_snapshot_bound(monk
     monkeypatch.setattr(elite_portfolio_activation, "feature_flags", lambda: {"broker_order_submission_enabled": False, "external_paper_execution_enabled": False})
     snapshot_hash = "a" * 64
 
-    instruction = authorization_instruction(member(1), snapshot_hash)
+    instruction = authorization_instruction(member(1, state="external_approval_required"), snapshot_hash)
 
     assert instruction is not None
     assert instruction["portfolio_snapshot_hash"] == snapshot_hash
     assert "--confirm-deployment-id 101" in instruction["command"]
     assert instruction["expected_effect"].endswith("this command does not enable order submission.")
     assert authorization_instruction(member(2, direction="short"), snapshot_hash) is None
+    assert authorization_instruction(member(3, state="blocked"), snapshot_hash) is None
 
 
 def test_retry_after_post_creation_failure_reuses_internal_deployment(monkeypatch) -> None:

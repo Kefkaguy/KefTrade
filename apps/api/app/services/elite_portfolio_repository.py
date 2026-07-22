@@ -162,23 +162,38 @@ def options(conn: psycopg.Connection) -> dict[str, Any]:
     }
 
 
-def preview_from_database(conn: psycopg.Connection, configuration: dict[str, Any], *, use_cache: bool = True) -> dict[str, Any]:
-    candidates = load_elite_candidate_variants(conn)
+def preview_from_database(
+    conn: psycopg.Connection,
+    configuration: dict[str, Any],
+    *,
+    use_cache: bool = True,
+    include_decision_inputs: bool = False,
+) -> dict[str, Any]:
     normalized = normalized_configuration(configuration)
-    cache_key = f"elite-portfolio-preview:{decision_hash({'configuration': normalized, 'candidates': candidates})}"
+    evidence_version = candidate_evidence_version(conn) if use_cache else None
+    cache_key = f"elite-portfolio-preview:{decision_hash({'configuration': normalized, 'evidence_version': evidence_version})}"
     if use_cache:
         cached = get_json(cache_key)
         if cached is not None:
             cached["cache"] = {"hit": True, "key": cache_key}
             return cached
+    candidates = load_elite_candidate_variants(conn)
     result = preview(candidates, normalized)
+    if not include_decision_inputs:
+        result["snapshot"] = {
+            "decision_hash": result["snapshot"]["decision_hash"],
+            "solver_version": SOLVER_VERSION,
+            "candidate_evidence_count": len(candidates),
+        }
+        result["response_size_bytes"] = len(str(jsonable_encoder(result)).encode("utf-8"))
     result["cache"] = {"hit": False, "key": cache_key}
-    set_json(cache_key, result, 300)
+    if use_cache:
+        set_json(cache_key, result, 300)
     return result
 
 
 def create_run(conn: psycopg.Connection, configuration: dict[str, Any]) -> dict[str, Any]:
-    result = preview_from_database(conn, configuration, use_cache=False)
+    result = preview_from_database(conn, configuration, use_cache=False, include_decision_inputs=True)
     config = result["configuration"]
     run_key = f"ep_{uuid4().hex}"
     snapshot_hash = result["snapshot"]["decision_hash"]
@@ -218,10 +233,15 @@ def get_run(conn: psycopg.Connection, run_id: int) -> dict[str, Any]:
     if not run:
         raise PortfolioNotFound("elite portfolio run not found")
     members = conn.execute("SELECT * FROM elite_portfolio_members WHERE portfolio_run_id = %s ORDER BY rank", (run_id,)).fetchall()
-    eligibility = conn.execute("SELECT * FROM elite_portfolio_eligibility WHERE portfolio_run_id = %s ORDER BY candidate_id, symbol, timeframe", (run_id,)).fetchall()
-    conflicts = conn.execute("SELECT * FROM elite_portfolio_conflicts WHERE portfolio_run_id = %s ORDER BY conflict_type, left_candidate_key, right_candidate_key", (run_id,)).fetchall()
-    correlations = conn.execute("SELECT * FROM elite_portfolio_correlations WHERE portfolio_run_id = %s ORDER BY left_candidate_key, right_candidate_key, correlation_type", (run_id,)).fetchall()
-    snapshot = conn.execute("SELECT * FROM elite_portfolio_snapshots WHERE portfolio_run_id = %s ORDER BY id DESC LIMIT 1", (run_id,)).fetchone()
+    eligibility = conn.execute(
+        """SELECT id,portfolio_run_id,elite_candidate_id,candidate_id,campaign_id,symbol,timeframe,
+                  strategy_family,strategy_direction,execution_capability,eligible,health_classification,checks,created_at
+           FROM elite_portfolio_eligibility WHERE portfolio_run_id = %s ORDER BY candidate_id, symbol, timeframe""",
+        (run_id,),
+    ).fetchall()
+    conflicts = conn.execute("SELECT * FROM elite_portfolio_conflicts WHERE portfolio_run_id = %s ORDER BY conflict_type, left_candidate_key, right_candidate_key LIMIT 500", (run_id,)).fetchall()
+    correlations = conn.execute("SELECT * FROM elite_portfolio_correlations WHERE portfolio_run_id = %s ORDER BY left_candidate_key, right_candidate_key, correlation_type LIMIT 500", (run_id,)).fetchall()
+    snapshot = conn.execute("SELECT id,portfolio_run_id,snapshot_hash,created_at,simulation_only FROM elite_portfolio_snapshots WHERE portfolio_run_id = %s ORDER BY id DESC LIMIT 1", (run_id,)).fetchone()
     attempts = conn.execute("SELECT * FROM elite_portfolio_activation_attempts WHERE portfolio_run_id = %s ORDER BY id", (run_id,)).fetchall()
     return jsonable_encoder({
         **dict(run),
@@ -231,6 +251,7 @@ def get_run(conn: psycopg.Connection, run_id: int) -> dict[str, Any]:
         "correlations": [dict(item) for item in correlations],
         "snapshot": dict(snapshot) if snapshot else None,
         "activation_attempts": [dict(item) for item in attempts],
+        "detail_limits": {"conflicts": 500, "correlations": 500, "full_decision_inputs_persisted": True},
         "execution_notice": "Internal simulation only. Broker order submission remains disabled.",
     })
 
@@ -378,3 +399,30 @@ def _dataset_ids(candidate: dict[str, Any], result: dict[str, Any]) -> set[str]:
             if source.get(key) is not None:
                 values.add(str(source[key]))
     return values
+
+
+def candidate_evidence_version(conn: psycopg.Connection) -> dict[str, Any]:
+    """Small, deterministic cache validator without transferring evidence JSON."""
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS variant_count,
+            MD5(COALESCE(STRING_AGG(
+                MD5(CONCAT_WS('|',
+                    e.id::text,e.candidate_id,e.research_score::text,e.profit_factor::text,
+                    e.expectancy::text,e.max_drawdown::text,e.trade_count::text,e.stability::text,
+                    e.assets_passed::text,e.timeframes_passed::text,e.regimes_passed::text,
+                    e.strategy_direction,e.execution_capability,e.forward_validation_state,
+                    MD5(e.validation_history::text),MD5(e.paper_performance::text),
+                    j.id::text,j.symbol,j.timeframe,j.validation_score::text,j.consistency_score::text,
+                    MD5(j.candidate::text),MD5(j.result::text)
+                )), '' ORDER BY e.id,j.id
+            ), '')) AS evidence_digest
+        FROM elite_research_candidates e
+        JOIN research_campaign_jobs j
+          ON j.campaign_id=e.campaign_id AND j.candidate_id=e.candidate_id
+         AND j.status IN ('completed','promoted') AND j.simulation_only=TRUE
+        WHERE e.simulation_only=TRUE
+        """
+    ).fetchone() or {}
+    return {"variant_count": int(row.get("variant_count") or 0), "evidence_digest": row.get("evidence_digest")}

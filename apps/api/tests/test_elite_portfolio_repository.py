@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.services.elite_portfolio_repository import candidate_variant, trade_return_series
+from app.services.elite_portfolio_repository import candidate_variant, preview_from_database, trade_return_series
 
 
 def elite_job_row() -> dict:
@@ -52,3 +52,17 @@ def test_duplicate_trade_timestamps_remain_distinct_correlation_observations() -
 
     assert len(series) == 2
     assert sorted(series.values()) == [-0.1, 0.1]
+
+
+def test_cached_preview_uses_evidence_digest_without_loading_candidate_json(monkeypatch) -> None:
+    from app.services import elite_portfolio_repository
+
+    cached = {"status": "infeasible", "snapshot": {"decision_hash": "a" * 64}}
+    monkeypatch.setattr(elite_portfolio_repository, "candidate_evidence_version", lambda _conn: {"variant_count": 355, "evidence_digest": "digest"})
+    monkeypatch.setattr(elite_portfolio_repository, "get_json", lambda _key: dict(cached))
+    monkeypatch.setattr(elite_portfolio_repository, "load_elite_candidate_variants", lambda _conn: (_ for _ in ()).throw(AssertionError("cache hit loaded evidence")))
+
+    result = preview_from_database(object(), {})
+
+    assert result["cache"]["hit"] is True
+    assert result["snapshot"]["decision_hash"] == "a" * 64

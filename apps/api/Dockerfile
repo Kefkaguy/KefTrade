@@ -11,9 +11,9 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY apps/api/requirements.txt /app/apps/api/requirements.txt
+COPY apps/api/requirements.lock.txt /app/apps/api/requirements.lock.txt
 RUN pip install --upgrade pip \
-    && pip install -r /app/apps/api/requirements.txt
+    && pip install -r /app/apps/api/requirements.lock.txt
 
 COPY apps/api /app/apps/api
 COPY database /app/database
