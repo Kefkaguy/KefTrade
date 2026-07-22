@@ -18,6 +18,8 @@ def broker_status(conn: psycopg.Connection) -> dict[str, Any]:
     deployments = rows(conn, "SELECT * FROM external_paper_deployments ORDER BY updated_at DESC")
     epochs = rows(conn, "SELECT * FROM external_execution_epochs ORDER BY activated_at DESC LIMIT 100")
     shadows = rows(conn, "SELECT * FROM shadow_executions ORDER BY created_at DESC LIMIT 50")
+    daily_summary = latest_row(conn, "broker_daily_summaries", "updated_at")
+    elite_activity = elite_observability(conn)
     return {
         "provider": "alpaca",
         "environment": "paper",
@@ -32,8 +34,116 @@ def broker_status(conn: psycopg.Connection) -> dict[str, Any]:
         "deployments": deployments,
         "epochs": epochs,
         "shadow_executions": shadows,
+        "daily_summary": daily_summary,
+        "elite_activity": elite_activity,
         "generated_at": datetime.now(UTC),
     }
+
+
+def elite_observability(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """Build a bounded read model for every external elite deployment.
+
+    Forward observation and historical replay are deliberately kept separate:
+    observe-only decisions are not presented as earned P&L.
+    """
+    deployments = rows(
+        conn,
+        """
+        SELECT
+            x.id,
+            x.internal_deployment_id,
+            x.candidate_id,
+            x.symbol,
+            x.timeframe,
+            x.state,
+            x.updated_at,
+            e.research_score,
+            COALESCE(today_evaluations.evaluations, 0) AS evaluations_today,
+            COALESCE(today_evaluations.setups, 0) AS setups_today,
+            COALESCE(today_evaluations.avoids, 0) AS avoids_today,
+            latest_evaluation.signal_type AS latest_signal,
+            latest_evaluation.completed_bar_timestamp AS latest_bar,
+            latest_evaluation.created_at AS latest_evaluation_at,
+            latest_evaluation.gates AS latest_gates,
+            COALESCE(today_shadows.shadow_decisions, 0) AS shadow_decisions_today,
+            COALESCE(today_shadows.would_submit, 0) AS would_submit_today,
+            latest_shadow.would_submit AS latest_would_submit,
+            latest_shadow.rejection_reasons AS latest_rejection_reasons,
+            latest_shadow.created_at AS latest_shadow_at,
+            COALESCE(today_attempts.execution_attempts, 0) AS execution_attempts_today,
+            COALESCE(today_attempts.submitted_attempts, 0) AS submitted_attempts_today
+        FROM external_paper_deployments x
+        JOIN elite_research_candidates e ON e.id = x.elite_candidate_id
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*) AS evaluations,
+                COUNT(*) FILTER (WHERE se.signal_type = 'setup') AS setups,
+                COUNT(*) FILTER (WHERE se.signal_type = 'avoid') AS avoids
+            FROM strategy_evaluations se
+            WHERE se.external_deployment_id = x.id
+              AND se.created_at >= CURRENT_DATE
+        ) today_evaluations ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT se.signal_type, se.completed_bar_timestamp, se.created_at, se.gates
+            FROM strategy_evaluations se
+            WHERE se.external_deployment_id = x.id
+            ORDER BY se.created_at DESC, se.id DESC
+            LIMIT 1
+        ) latest_evaluation ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*) AS shadow_decisions,
+                COUNT(*) FILTER (WHERE sx.would_submit) AS would_submit
+            FROM shadow_executions sx
+            WHERE sx.external_deployment_id = x.id
+              AND sx.created_at >= CURRENT_DATE
+        ) today_shadows ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT sx.would_submit, sx.rejection_reasons, sx.created_at
+            FROM shadow_executions sx
+            WHERE sx.external_deployment_id = x.id
+            ORDER BY sx.created_at DESC, sx.id DESC
+            LIMIT 1
+        ) latest_shadow ON TRUE
+        LEFT JOIN LATERAL (
+            SELECT
+                COUNT(*) AS execution_attempts,
+                COUNT(*) FILTER (WHERE bea.status IN ('submitted', 'accepted', 'reconciled')) AS submitted_attempts
+            FROM broker_execution_attempts bea
+            WHERE bea.external_deployment_id = x.id
+              AND bea.created_at >= CURRENT_DATE
+        ) today_attempts ON TRUE
+        ORDER BY e.research_score DESC, x.id
+        """,
+    )
+    replay = conn.execute(
+        """
+        SELECT id, completed_at, outcome_summary
+        FROM elite_shadow_replay_runs
+        WHERE status = 'complete' AND outcome_summary <> '{}'::jsonb
+        ORDER BY completed_at DESC NULLS LAST, id DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    replay_summary = dict((replay or {}).get("outcome_summary") or {})
+    replay_by_deployment = dict(replay_summary.get("by_deployment") or {})
+    for deployment in deployments:
+        replay_metrics = dict(replay_by_deployment.get(str(deployment["id"])) or {})
+        submitted = int(deployment.get("submitted_attempts_today") or 0)
+        observe_only = deployment.get("state") != "enabled_execution"
+        deployment["today_performance"] = {
+            "realized_pnl": 0.0 if observe_only else None,
+            "unrealized_pnl": 0.0 if observe_only else None,
+            "submitted_orders": submitted,
+            "attribution_status": "observation_only_no_paper_trades" if observe_only else "awaiting_broker_lifecycle_attribution",
+            "simulation_only": True,
+        }
+        deployment["historical_replay"] = {
+            "run_id": replay.get("id") if replay else None,
+            "completed_at": replay.get("completed_at") if replay else None,
+            **replay_metrics,
+        }
+    return deployments
 
 
 def broker_account(conn: psycopg.Connection) -> dict[str, Any]:

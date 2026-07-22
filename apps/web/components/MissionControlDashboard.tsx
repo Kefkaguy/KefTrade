@@ -48,6 +48,7 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
   const databaseStatus: MissionControlStatus = databaseIssue ? "Error" : "Healthy";
   const readiness = snapshot.readiness;
   const broker = snapshot.external_broker_paper;
+  const eliteActivity = broker?.elite_activity ?? [];
   const deploymentChecks = broker ? deploymentCheckRows(broker.deployments ?? [], broker.shadow_executions ?? []) : [];
   const reveal = reduceMotion ? undefined : { hidden: { opacity: 0, y: 12 }, visible: { opacity: 1, y: 0 } };
 
@@ -137,6 +138,38 @@ export function MissionControlDashboard({ snapshot, deploymentManagement, deploy
       </motion.section>
 
       <motion.section className="surface activityBand" variants={reveal}>
+        <div className="sectionHeading">
+          <div><span className="eyebrow">Elite ledger</span><h2>Today&apos;s checks and historical earnings</h2></div>
+          <span className="statusChip neutral">{eliteActivity.length} tracked</span>
+        </div>
+        <p className="surfaceNote">Today&apos;s P&amp;L includes executed Alpaca Paper trades only. Observe-only decisions never count as earnings; replay results are shown separately.</p>
+        {eliteActivity.length ? (
+          <div className="tablePanel eliteLedgerTable">
+            <table>
+              <thead><tr><th>Elite</th><th>Latest decision</th><th>Today</th><th>Paper P&amp;L today</th><th>Historical replay</th><th>Last checked</th></tr></thead>
+              <tbody>
+                {eliteActivity.map((elite) => {
+                  const replay = elite.historical_replay ?? {};
+                  const today = elite.today_performance ?? {};
+                  const decision = eliteDecision(elite);
+                  return (
+                    <tr key={elite.id}>
+                      <td><strong>{elite.symbol} <small>{elite.timeframe}</small></strong><small>Elite #{elite.id} · {elite.candidate_id}</small></td>
+                      <td><span className={`statusChip ${decision.tone}`}>{decision.label}</span><small>{decision.reason}</small></td>
+                      <td><strong>{numberValue(elite.evaluations_today)} checks</strong><small>{numberValue(elite.setups_today)} setups · {numberValue(elite.would_submit_today)} would trade</small></td>
+                      <td><strong>{today.realized_pnl == null ? "Pending attribution" : money(numberValue(today.realized_pnl))}</strong><small>{numberValue(today.submitted_orders)} submitted orders · {title(String(today.attribution_status ?? "unknown"))}</small></td>
+                      <td><strong>{replay.net_pnl == null ? "No completed trades" : money(numberValue(replay.net_pnl))}</strong><small>{replay.profit_factor == null ? "PF —" : `PF ${numberValue(replay.profit_factor).toFixed(3)}`} · {numberValue(replay.completed_trades)} trades · {outcomeHealth(replay)}</small></td>
+                      <td><strong>{relativeTime(elite.latest_evaluation_at ?? elite.latest_shadow_at)}</strong><small>{elite.latest_bar ? `Bar ${new Date(elite.latest_bar).toLocaleString()}` : "No evaluated bar"}</small></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : <div className="inlineEmpty"><strong>No elite activity available</strong><span>The broker worker will populate this ledger after the next completed cycle.</span></div>}
+      </motion.section>
+
+      <motion.section className="surface activityBand" variants={reveal}>
         <div className="sectionHeading"><div><span className="eyebrow">Recent operations</span><h2>Latest system events</h2></div><Link className="textLink" href="/journal">Full journal <ArrowRight size={14} /></Link></div>
         <div className="operationList">
           {snapshot.recent_activity.slice(0, 5).map((item) => (
@@ -198,6 +231,28 @@ function deploymentCheckRows(deployments: Array<Record<string, any>>, shadows: A
       lastChecked: checked ? relativeTime(String(shadow?.created_at)) : "Not checked",
     };
   });
+}
+
+function eliteDecision(elite: Record<string, any>) {
+  if (elite.latest_would_submit) return { label: "Would trade", tone: "success", reason: "All shadow gates passed" };
+  const failedGates = Array.isArray(elite.latest_gates)
+    ? elite.latest_gates.filter((gate: Record<string, any>) => gate.status === "failed").map((gate: Record<string, any>) => String(gate.code ?? "failed gate"))
+    : [];
+  const rejectionReasons = Array.isArray(elite.latest_rejection_reasons) ? elite.latest_rejection_reasons.map(String) : [];
+  const reasons = [...new Set([...failedGates, ...rejectionReasons])];
+  if (elite.latest_signal) return { label: title(String(elite.latest_signal)), tone: elite.latest_signal === "setup" ? "warning" : "neutral", reason: reasons.slice(0, 3).join(", ") || "No actionable setup" };
+  return { label: "Waiting", tone: "neutral", reason: "No completed evaluation yet" };
+}
+
+function outcomeHealth(replay: Record<string, any>) {
+  if (!replay.health) return "unclassified";
+  if (replay.health === "broken" && numberValue(replay.expectancy) > 0) return "below 1.20 PF gate";
+  if (replay.health === "broken") return "negative expectancy";
+  return title(String(replay.health));
+}
+
+function money(value: number) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(value);
 }
 
 function collectIssues(snapshot: MissionControlSnapshot, deploymentManagement: DeploymentManagementSnapshot | null, deploymentError?: string | null): Issue[] {

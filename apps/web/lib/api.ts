@@ -882,6 +882,37 @@ export type MissionControlSnapshot = {
     deployments: Array<Record<string, any>>;
     epochs: Array<Record<string, any>>;
     shadow_executions: Array<Record<string, any>>;
+    daily_summary?: Record<string, any>;
+    elite_activity?: Array<{
+      id: number;
+      candidate_id: string;
+      symbol: string;
+      timeframe: string;
+      state: string;
+      research_score?: string | number | null;
+      evaluations_today: number;
+      setups_today: number;
+      avoids_today: number;
+      shadow_decisions_today: number;
+      would_submit_today: number;
+      latest_signal?: string | null;
+      latest_bar?: string | null;
+      latest_evaluation_at?: string | null;
+      latest_gates?: Array<Record<string, any>>;
+      latest_would_submit?: boolean | null;
+      latest_rejection_reasons?: string[];
+      latest_shadow_at?: string | null;
+      execution_attempts_today: number;
+      submitted_attempts_today: number;
+      today_performance: {
+        realized_pnl: number | null;
+        unrealized_pnl: number | null;
+        submitted_orders: number;
+        attribution_status: string;
+        simulation_only: boolean;
+      };
+      historical_replay: Record<string, any>;
+    }>;
     generated_at: string;
   };
   recent_activity: MissionControlActivity[];

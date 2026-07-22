@@ -695,6 +695,14 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .deploymentCheckItem span, .deploymentCheckItem small, .deploymentCheckItem time { color: var(--muted); font-size: 8px; }
 .deploymentCheckItem > div:nth-child(2) { display: grid; gap: 6px; justify-items: start; }
 .deploymentCheckItem time { justify-self: end; white-space: nowrap; }
+.eliteLedgerTable { margin-top: 16px; }
+.eliteLedgerTable table { min-width: 1040px; }
+.eliteLedgerTable td { white-space: normal; }
+.eliteLedgerTable td > strong, .eliteLedgerTable td > small { display: block; }
+.eliteLedgerTable td > strong { font-size: 10px; }
+.eliteLedgerTable td > strong small { display: inline; color: var(--muted); font-size: 8px; }
+.eliteLedgerTable td > small { max-width: 230px; margin-top: 5px; color: var(--muted); font-size: 8px; line-height: 1.45; }
+.eliteLedgerTable .statusChip + small { margin-top: 7px; }
 .operationList { display: grid; margin-top: 12px; }
 .operationList article { display: grid; min-height: 58px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; border-bottom: 1px solid var(--line); }
 .operationList article:last-child { border-bottom: 0; }
