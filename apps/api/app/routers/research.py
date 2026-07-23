@@ -63,6 +63,7 @@ from app.services.research_campaigns import (
     list_research_campaigns,
     list_research_universes,
     MIN_CAMPAIGN_CANDLES,
+    reevaluate_elite_candidates,
     refresh_elite_candidate_forward_evidence,
     repair_campaign,
     research_campaign_preflight,
@@ -630,6 +631,14 @@ async def prepare_large_scale_research_campaign(
         "readiness": readiness,
         "simulation_only": True,
     }
+
+
+@router.post("/research/elite-candidates/reevaluate")
+def reevaluate_elites_endpoint(
+    campaign_id: int | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return reevaluate_elite_candidates(conn, campaign_id=campaign_id)
 
 
 @router.get("/research/campaigns/{campaign_id}/progress")

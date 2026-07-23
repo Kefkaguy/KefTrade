@@ -345,6 +345,8 @@ def test_no_loss_profit_factor_is_not_rejected_by_validation_diagnostics() -> No
 
 
 def test_phase_9_12_elite_gate_regression_remains_pinned() -> None:
+    # Honest gate (consistency_v2): the pooled/aggregate checks still hold, and
+    # the median variant must itself be profitable with a real sample.
     known_good_summary = {
         "research_score": 71.4,
         "profit_factor": 1.52,
@@ -354,9 +356,33 @@ def test_phase_9_12_elite_gate_regression_remains_pinned() -> None:
         "stability": 1.0,
         "assets_passed": 2,
         "timeframes_passed": 1,
+        "median_profit_factor": 1.48,
+        "median_expectancy": 12.0,
+        "median_max_drawdown": 0.045,
+        "median_variant_trade_count": 38,
     }
 
     assert passes_cross_validation(known_good_summary) is True
+
+
+def test_lucky_variant_summary_is_rejected_by_honest_gate() -> None:
+    # Passes every pooled/aggregate check, but the typical variant loses money.
+    lucky_summary = {
+        "research_score": 71.4,
+        "profit_factor": 1.52,
+        "expectancy": 17.2,
+        "max_drawdown": 0.037,
+        "trade_count": 112,
+        "stability": 1.0,
+        "assets_passed": 2,
+        "timeframes_passed": 1,
+        "median_profit_factor": 0.94,
+        "median_expectancy": -0.5,
+        "median_max_drawdown": 0.045,
+        "median_variant_trade_count": 30,
+    }
+
+    assert passes_cross_validation(lucky_summary) is False
 
 
 def test_stable_hash_is_order_independent_for_archive_checksums() -> None:

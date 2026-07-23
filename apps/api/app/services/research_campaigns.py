@@ -4652,6 +4652,14 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
         results = [row.get("result") or {} for row in rows if row.get("result")]
         metrics = [result.get("metrics") or {} for result in results]
         aggregate_pf, aggregate_pf_infinite = aggregate_profit_factor(metrics)
+        # Median across the candidate's own symbol/timeframe variants. Unlike the
+        # pooled aggregate above (which a few lucky symbols can inflate), the
+        # median describes the *typical* variant, so the honest elite gate can
+        # require the median variant to itself be profitable.
+        variant_pf = [validation_profit_factor(metric) for metric in metrics]
+        variant_expectancy = [finite_metric(metric.get("expectancy_per_trade")) for metric in metrics]
+        variant_drawdown = [finite_metric(metric.get("max_drawdown")) for metric in metrics]
+        variant_trades = [finite_metric(metric.get("number_of_trades")) for metric in metrics]
         consistency_score = round(len(passed) / len(rows), 4) if rows else 0.0
         regime_counter: Counter[str] = Counter()
         for result in results:
@@ -4672,6 +4680,11 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
                 "expectancy": average(metric.get("expectancy_per_trade") for metric in metrics),
                 "max_drawdown": average(metric.get("max_drawdown") for metric in metrics),
                 "trade_count": int(sum(finite_metric(metric.get("number_of_trades")) for metric in metrics)),
+                "median_profit_factor": median(variant_pf),
+                "median_expectancy": median(variant_expectancy),
+                "median_max_drawdown": median(variant_drawdown),
+                "median_variant_trade_count": int(median(variant_trades)),
+                "variant_count": len(metrics),
                 "stability": consistency_score,
                 "assets_passed": len({row["symbol"] for row in passed}),
                 "timeframes_passed": len({row["timeframe"] for row in passed}),
@@ -4704,7 +4717,17 @@ def multi_objective_candidate_score(summary: dict[str, Any]) -> float:
     )
 
 
-def passes_cross_validation(summary: dict[str, Any]) -> bool:
+# The consistency gate (v2) adds median-variant requirements on top of every
+# original pooled/aggregate check. It only ADDS conditions -- no existing
+# threshold is weakened -- so a candidate that passed the pooled gate but whose
+# typical variant loses money no longer qualifies as elite.
+ELITE_PROMOTION_RULE_VERSION = "consistency_v2"
+ELITE_MEDIAN_MINIMUM_PROFIT_FACTOR = 1.2
+ELITE_MEDIAN_MINIMUM_TRADES = 20
+
+
+def passes_single_market_gate(summary: dict[str, Any]) -> bool:
+    """Original pooled/aggregate elite gate (kept intact, never weakened)."""
     return (
         summary["research_score"] > 0
         and profit_factor_passes(summary, 1.2)
@@ -4717,18 +4740,56 @@ def passes_cross_validation(summary: dict[str, Any]) -> bool:
     )
 
 
+def median_consistency_failures(summary: dict[str, Any]) -> list[str]:
+    """List which median-variant requirements a candidate fails (empty = passes)."""
+    failures: list[str] = []
+    if finite_metric(summary.get("median_profit_factor")) < ELITE_MEDIAN_MINIMUM_PROFIT_FACTOR:
+        failures.append("MEDIAN_PROFIT_FACTOR")
+    if finite_metric(summary.get("median_expectancy")) <= 0:
+        failures.append("MEDIAN_EXPECTANCY")
+    if finite_metric(summary.get("median_max_drawdown")) > 0.12:
+        failures.append("MEDIAN_DRAWDOWN")
+    if finite_metric(summary.get("median_variant_trade_count")) < ELITE_MEDIAN_MINIMUM_TRADES:
+        failures.append("MEDIAN_VARIANT_TRADES")
+    return failures
+
+
+def cross_validation_failures(summary: dict[str, Any]) -> list[str]:
+    """Every reason a candidate is not elite under the honest (v2) gate."""
+    failures: list[str] = []
+    if not passes_single_market_gate(summary):
+        failures.append("AGGREGATE_GATE")
+    failures.extend(median_consistency_failures(summary))
+    return failures
+
+
+def passes_cross_validation(summary: dict[str, Any]) -> bool:
+    return not cross_validation_failures(summary)
+
+
 def persist_elite_candidate(conn: psycopg.Connection, campaign_id: int, summary: dict[str, Any]) -> None:
     conn.execute(
         """
         INSERT INTO elite_research_candidates(
             campaign_id, candidate_id, family_id, strategy_name, strategy_version, research_score,
             profit_factor, expectancy, max_drawdown, trade_count, stability, assets_passed,
-            timeframes_passed, regimes_passed, validation_history, paper_performance, simulation_only
+            timeframes_passed, regimes_passed, validation_history, paper_performance, simulation_only,
+            promotion_state, promotion_rule_version, median_profit_factor, median_expectancy,
+            median_max_drawdown, median_variant_trade_count, demotion_reason, reevaluated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE,
+                'elite', %s, %s, %s, %s, %s, NULL, NOW())
         ON CONFLICT(candidate_id, campaign_id) DO UPDATE
         SET research_score = EXCLUDED.research_score,
-            validation_history = EXCLUDED.validation_history
+            validation_history = EXCLUDED.validation_history,
+            promotion_state = 'elite',
+            promotion_rule_version = EXCLUDED.promotion_rule_version,
+            median_profit_factor = EXCLUDED.median_profit_factor,
+            median_expectancy = EXCLUDED.median_expectancy,
+            median_max_drawdown = EXCLUDED.median_max_drawdown,
+            median_variant_trade_count = EXCLUDED.median_variant_trade_count,
+            demotion_reason = NULL,
+            reevaluated_at = NOW()
         """,
         (
             campaign_id,
@@ -4747,8 +4808,129 @@ def persist_elite_candidate(conn: psycopg.Connection, campaign_id: int, summary:
             summary["regimes_passed"],
             Jsonb(jsonable(summary["validation_history"])),
             Jsonb({"paper_trades": 0, "paper_pnl": 0, "drawdown": 0, "daily_performance": [], "signal_frequency": 0}),
+            ELITE_PROMOTION_RULE_VERSION,
+            summary.get("median_profit_factor"),
+            summary.get("median_expectancy"),
+            summary.get("median_max_drawdown"),
+            summary.get("median_variant_trade_count"),
         ),
     )
+
+
+def reevaluate_elite_candidates(conn: psycopg.Connection, *, campaign_id: int | None = None) -> dict[str, Any]:
+    """Rebuild elite status from immutable job evidence under the honest gate.
+
+    Recomputes every stored elite's consistency summary from its campaign's
+    frozen research jobs and applies `passes_cross_validation` (v2). Candidates
+    whose typical variant is unprofitable are DEMOTED (promotion_state set to
+    'demoted', reasons and median metrics recorded) -- their rows and evidence
+    are preserved, never deleted. Idempotent and deterministic: the same jobs
+    always yield the same promote/demote outcome.
+    """
+    ensure_campaign_tables(conn)
+    scope = "WHERE simulation_only = TRUE" + (" AND campaign_id = %s" if campaign_id is not None else "")
+    params = (campaign_id,) if campaign_id is not None else ()
+    elites = [dict(row) for row in conn.execute(
+        f"SELECT id, campaign_id, candidate_id, family_id, promotion_state FROM elite_research_candidates {scope} ORDER BY campaign_id, candidate_id",
+        params,
+    ).fetchall()]
+    summaries_by_campaign: dict[int, dict[str, dict[str, Any]]] = {}
+    for elite in elites:
+        cid = int(elite["campaign_id"])
+        if cid not in summaries_by_campaign:
+            jobs = list(conn.execute(
+                "SELECT * FROM research_campaign_jobs WHERE campaign_id = %s AND simulation_only = TRUE",
+                (cid,),
+            ).fetchall())
+            summaries_by_campaign[cid] = {s["candidate_id"]: s for s in candidate_consistency_summaries(jobs)}
+
+    retained: list[dict[str, Any]] = []
+    demoted: list[dict[str, Any]] = []
+    missing: list[dict[str, Any]] = []
+    for elite in elites:
+        summary = summaries_by_campaign[int(elite["campaign_id"])].get(elite["candidate_id"])
+        if summary is None:
+            missing.append({"candidate_id": elite["candidate_id"], "campaign_id": elite["campaign_id"]})
+            continue
+        failures = cross_validation_failures(summary)
+        detail = {
+            "candidate_id": elite["candidate_id"],
+            "campaign_id": elite["campaign_id"],
+            "family_id": elite["family_id"],
+            "median_profit_factor": summary.get("median_profit_factor"),
+            "pooled_profit_factor": summary.get("profit_factor"),
+            "median_variant_trade_count": summary.get("median_variant_trade_count"),
+            "variant_count": summary.get("variant_count"),
+            "failures": failures,
+        }
+        if failures:
+            conn.execute(
+                """
+                UPDATE elite_research_candidates
+                SET promotion_state = 'demoted',
+                    promotion_rule_version = %s,
+                    median_profit_factor = %s,
+                    median_expectancy = %s,
+                    median_max_drawdown = %s,
+                    median_variant_trade_count = %s,
+                    demotion_reason = %s,
+                    reevaluated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    ELITE_PROMOTION_RULE_VERSION,
+                    summary.get("median_profit_factor"),
+                    summary.get("median_expectancy"),
+                    summary.get("median_max_drawdown"),
+                    summary.get("median_variant_trade_count"),
+                    ",".join(failures),
+                    elite["id"],
+                ),
+            )
+            demoted.append(detail)
+        else:
+            conn.execute(
+                """
+                UPDATE elite_research_candidates
+                SET promotion_state = 'elite',
+                    promotion_rule_version = %s,
+                    median_profit_factor = %s,
+                    median_expectancy = %s,
+                    median_max_drawdown = %s,
+                    median_variant_trade_count = %s,
+                    demotion_reason = NULL,
+                    reevaluated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    ELITE_PROMOTION_RULE_VERSION,
+                    summary.get("median_profit_factor"),
+                    summary.get("median_expectancy"),
+                    summary.get("median_max_drawdown"),
+                    summary.get("median_variant_trade_count"),
+                    elite["id"],
+                ),
+            )
+            retained.append(detail)
+    conn.commit()
+    log_event(
+        "Elite re-evaluation complete",
+        rule_version=ELITE_PROMOTION_RULE_VERSION,
+        evaluated=len(elites),
+        retained=len(retained),
+        demoted=len(demoted),
+        missing_evidence=len(missing),
+    )
+    return {
+        "rule_version": ELITE_PROMOTION_RULE_VERSION,
+        "evaluated": len(elites),
+        "retained_count": len(retained),
+        "demoted_count": len(demoted),
+        "missing_evidence_count": len(missing),
+        "retained": retained,
+        "demoted": demoted,
+        "missing_evidence": missing,
+    }
 
 
 def promote_elite_to_paper_simulation(conn: psycopg.Connection, campaign_id: int, summary: dict[str, Any]) -> None:
@@ -7495,6 +7677,17 @@ def research_job_key(campaign_id: int, candidate_id: str, symbol: str, timeframe
 def average(values: Any) -> float:
     parsed = [finite_metric(value) for value in values if value is not None]
     return round(sum(parsed) / len(parsed), 4) if parsed else 0.0
+
+
+def median(values: Any) -> float:
+    """Deterministic median of finite numeric values (0.0 when empty)."""
+    parsed = sorted(finite_metric(value) for value in values if value is not None)
+    if not parsed:
+        return 0.0
+    mid = len(parsed) // 2
+    if len(parsed) % 2:
+        return round(parsed[mid], 6)
+    return round((parsed[mid - 1] + parsed[mid]) / 2, 6)
 
 
 def count_rows(conn: psycopg.Connection, table: str, where: str = "TRUE") -> int:

@@ -187,6 +187,7 @@ def load_elite_candidate_variants(conn: psycopg.Connection) -> list[dict[str, An
              AND outcome.status = 'completed'
         ) replay ON TRUE
         WHERE e.simulation_only = TRUE
+          AND COALESCE(e.promotion_state, 'elite') = 'elite'
         ORDER BY e.candidate_id, j.symbol, j.timeframe, e.id
         """
     ).fetchall()
