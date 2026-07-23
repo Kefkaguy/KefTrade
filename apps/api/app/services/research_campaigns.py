@@ -4422,6 +4422,27 @@ def passes_single_market_validation(result: dict[str, Any]) -> bool:
 
 
 def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
+    # Close the scout-expansion / finalize race that produced Campaign 34's
+    # "completed with 480 queued jobs" invariant violation. We take the same
+    # row lock the expansion path uses and re-check the open-job count inside
+    # it: if another worker enqueued expansion jobs after our caller observed
+    # open_job_count == 0, we refuse to finalize and return progress instead.
+    locked = conn.execute(
+        "SELECT status FROM research_campaigns WHERE id = %s AND simulation_only = TRUE FOR UPDATE",
+        (campaign_id,),
+    ).fetchone()
+    if locked is None:
+        raise ValueError("research campaign not found")
+    remaining_open = open_job_count(conn, campaign_id)
+    if remaining_open > 0:
+        update_campaign_counts(conn, campaign_id)
+        log_event(
+            "Campaign finalize skipped: open jobs remain",
+            campaign_id=campaign_id,
+            open_jobs=remaining_open,
+            prior_status=str(locked["status"]),
+        )
+        return {**campaign_progress_analytics(conn, campaign_id), "finalize_skipped_open_jobs": remaining_open}
     jobs = list(
         conn.execute(
             """
@@ -5903,6 +5924,296 @@ def get_campaign(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
     if not row:
         raise ValueError("research campaign not found")
     return dict(row)
+
+
+# --- Phase A: deterministic campaign reliability -----------------------------
+# A job is "terminal" when no worker will ever act on it again. A campaign may
+# only finalize once every job is terminal. `blocked_terminal` (migration 040)
+# is the terminal form of a data block whose retry ceiling is exhausted.
+TERMINAL_JOB_STATUSES = frozenset({"completed", "rejected", "promoted", "failed", "canceled", "blocked_terminal"})
+OPEN_JOB_STATUSES = frozenset({"queued", "running", "retrying", "blocked_data", "deferred_rate_limit"})
+RETRYABLE_BLOCKED_STATUSES = frozenset({"blocked_data", "deferred_rate_limit", "retrying"})
+CAMPAIGN_TERMINAL_STATUSES = frozenset({"completed", "canceled", "failed"})
+
+
+def live_campaign_worker_count(conn: psycopg.Connection) -> int:
+    """Authoritative count of workers whose heartbeat is within the stale window.
+
+    This is the single source of truth for "workers alive" -- never a frontend
+    cache. A worker that stopped heartbeating longer than `worker_stale_seconds`
+    ago is not counted, regardless of what its last recorded status said.
+    """
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS count
+        FROM research_campaign_workers
+        WHERE status <> 'stopped'
+          AND heartbeat_at IS NOT NULL
+          AND heartbeat_at >= NOW() - (%s * INTERVAL '1 second')
+        """,
+        (worker_stale_seconds(),),
+    ).fetchone()
+    return int(row["count"]) if row else 0
+
+
+def campaign_progress_breakdown(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
+    """Authoritative, terminology-correct progress for one campaign.
+
+    Distinguishes completed / running / queued / retryable-blocked /
+    terminal-blocked / failed / cancelled, exposes worker liveness, and flags
+    `repair_required` whenever a campaign invariant is broken (a completed
+    campaign still holding open jobs, or a running campaign that cannot make
+    progress because no worker is alive and nothing is runnable).
+    """
+    campaign = get_campaign(conn, campaign_id)
+    config = scheduling_config(campaign)
+    retry_limit = int(config["retry_limit"])
+    rows = conn.execute(
+        """
+        SELECT status,
+               COUNT(*) AS count,
+               COUNT(*) FILTER (WHERE status = 'blocked_data' AND attempts >= %s) AS exhausted_blocked,
+               COUNT(*) FILTER (
+                   WHERE status = 'running'
+                     AND (lease_expires_at IS NULL OR lease_expires_at <= NOW())
+               ) AS stale_leases
+        FROM research_campaign_jobs
+        WHERE campaign_id = %s AND simulation_only = TRUE
+        GROUP BY status
+        """,
+        (retry_limit, campaign_id),
+    ).fetchall()
+    counts = {str(row["status"]): int(row["count"]) for row in rows}
+    exhausted_blocked = sum(int(row["exhausted_blocked"] or 0) for row in rows)
+    stale_leases = sum(int(row["stale_leases"] or 0) for row in rows)
+    total = sum(counts.values())
+    completed = counts.get("completed", 0) + counts.get("rejected", 0) + counts.get("promoted", 0)
+    running = counts.get("running", 0)
+    queued = counts.get("queued", 0)
+    retryable_blocked = counts.get("blocked_data", 0) + counts.get("deferred_rate_limit", 0) + counts.get("retrying", 0)
+    terminal_blocked = counts.get("blocked_terminal", 0)
+    failed = counts.get("failed", 0)
+    cancelled = counts.get("canceled", 0)
+    open_jobs = sum(counts.get(status, 0) for status in OPEN_JOB_STATUSES)
+    terminal_jobs = sum(counts.get(status, 0) for status in TERMINAL_JOB_STATUSES)
+    live_workers = live_campaign_worker_count(conn)
+    status = str(campaign.get("status") or "")
+
+    completed_with_open = status == "completed" and open_jobs > 0
+    running_no_progress = status == "running" and open_jobs > 0 and live_workers == 0
+    exhausted_blocks_present = exhausted_blocked > 0
+    stale_leases_present = stale_leases > 0
+    repair_required = bool(completed_with_open or exhausted_blocks_present or stale_leases_present or (running_no_progress and queued == 0))
+
+    return {
+        "campaign_id": campaign_id,
+        "campaign_status": status,
+        "execution_status": campaign.get("execution_status"),
+        "total_jobs": total,
+        "buckets": {
+            "completed": completed,
+            "running": running,
+            "queued": queued,
+            "retryable_blocked": retryable_blocked,
+            "terminal_blocked": terminal_blocked,
+            "failed": failed,
+            "cancelled": cancelled,
+        },
+        "raw_status_counts": counts,
+        "open_jobs": open_jobs,
+        "terminal_jobs": terminal_jobs,
+        "progress_pct": round(100.0 * terminal_jobs / total, 2) if total else 0.0,
+        "live_workers": live_workers,
+        "target_workers": int(campaign.get("target_workers") or 0),
+        "exhausted_blocked_jobs": exhausted_blocked,
+        "stale_leases": stale_leases,
+        "retry_limit": retry_limit,
+        "invariants": {
+            "completed_with_open_jobs": completed_with_open,
+            "running_without_workers_or_runnable": running_no_progress and queued == 0,
+            "exhausted_blocks_present": exhausted_blocks_present,
+            "stale_leases_present": stale_leases_present,
+        },
+        "repair_required": repair_required,
+        "all_terminal": open_jobs == 0 and total > 0,
+    }
+
+
+def campaign_repair_plan(
+    jobs: list[dict[str, Any]],
+    *,
+    campaign_status: str,
+    retry_limit: int,
+    now: datetime,
+    terminalize_exhausted_blocks: bool = True,
+) -> dict[str, Any]:
+    """Pure, deterministic decision of what a repair must do to a job set.
+
+    Given the current jobs (each a dict with at least id/status/attempts/
+    lease_expires_at) it decides, without touching the database:
+      - which running jobs have a stale lease and must return to `queued`,
+      - which blocked_data jobs have exhausted their retry ceiling and must
+        become terminal `blocked_terminal`,
+      - the resulting open-job count,
+      - whether a terminal-marked campaign must be reopened (open jobs remain),
+      - whether the campaign may now finalize (no open jobs remain).
+
+    Keeping this pure makes every recovery rule unit-testable and guarantees
+    the same inputs always yield the same plan (determinism requirement).
+    """
+    release_lease_ids: list[Any] = []
+    terminalize_ids: list[Any] = []
+    resulting_status: dict[Any, str] = {}
+    for job in jobs:
+        status = str(job.get("status") or "")
+        job_id = job.get("id")
+        lease = job.get("lease_expires_at")
+        attempts = int(job.get("attempts") or 0)
+        if status == "running" and (lease is None or lease <= now):
+            release_lease_ids.append(job_id)
+            resulting_status[job_id] = "queued"
+        elif status == "blocked_data" and terminalize_exhausted_blocks and attempts >= retry_limit:
+            terminalize_ids.append(job_id)
+            resulting_status[job_id] = "blocked_terminal"
+        else:
+            resulting_status[job_id] = status
+
+    open_after = sum(1 for status in resulting_status.values() if status in OPEN_JOB_STATUSES)
+    total = len(jobs)
+    reopen = campaign_status in CAMPAIGN_TERMINAL_STATUSES and open_after > 0
+    finalize = open_after == 0 and total > 0
+    return {
+        "release_lease_ids": release_lease_ids,
+        "terminalize_ids": terminalize_ids,
+        "open_after": open_after,
+        "total": total,
+        "reopen": reopen,
+        "finalize": finalize,
+    }
+
+
+def repair_campaign(
+    conn: psycopg.Connection,
+    campaign_id: int,
+    *,
+    operator: str = "cli",
+    terminalize_exhausted_blocks: bool = True,
+) -> dict[str, Any]:
+    """Deterministically move a campaign back to a consistent state.
+
+    Idempotent. Under a campaign row lock it applies `campaign_repair_plan`:
+      1. Releases stale leases (running jobs whose lease expired -> queued).
+      2. Terminalizes unrecoverable blocked jobs (blocked_data whose retry
+         ceiling is exhausted -> blocked_terminal, reason preserved).
+      3. Reopens a campaign wrongly marked completed while open jobs remain
+         (the scout-expansion/finalize race) so its jobs can drain.
+      4. Recomputes campaign totals.
+      5. Finalizes the campaign iff every job is now terminal.
+
+    It never fabricates results, never weakens thresholds, and never deletes
+    evidence. Every action is counted and returned for audit.
+    """
+    ensure_campaign_tables(conn)
+    before = campaign_progress_breakdown(conn, campaign_id)
+    campaign = conn.execute(
+        "SELECT * FROM research_campaigns WHERE id = %s AND simulation_only = TRUE FOR UPDATE",
+        (campaign_id,),
+    ).fetchone()
+    if not campaign:
+        raise ValueError("research campaign not found")
+    campaign = dict(campaign)
+    config = scheduling_config(campaign)
+    retry_limit = int(config["retry_limit"])
+    jobs = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id, status, attempts, lease_expires_at FROM research_campaign_jobs WHERE campaign_id = %s AND simulation_only = TRUE",
+            (campaign_id,),
+        ).fetchall()
+    ]
+    now = conn.execute("SELECT NOW() AS now").fetchone()["now"]
+    plan = campaign_repair_plan(
+        jobs,
+        campaign_status=str(campaign.get("status") or ""),
+        retry_limit=retry_limit,
+        now=now,
+        terminalize_exhausted_blocks=terminalize_exhausted_blocks,
+    )
+
+    if plan["release_lease_ids"]:
+        conn.execute(
+            """
+            UPDATE research_campaign_jobs
+            SET status = 'queued',
+                worker_id = NULL,
+                claimed_at = NULL,
+                lease_expires_at = NULL,
+                heartbeat_at = NULL,
+                recovery_classification = 'stale_lease_released',
+                recovered_at = NOW(),
+                recovery_worker_id = %s,
+                updated_at = NOW()
+            WHERE id = ANY(%s)
+            """,
+            (f"repair::{operator}", plan["release_lease_ids"]),
+        )
+    if plan["terminalize_ids"]:
+        conn.execute(
+            """
+            UPDATE research_campaign_jobs
+            SET status = 'blocked_terminal',
+                blocked_reason = COALESCE(blocked_reason, latest_error, 'retry ceiling exhausted'),
+                failure_classification = COALESCE(failure_classification, 'blocked_terminal'),
+                updated_at = NOW()
+            WHERE id = ANY(%s)
+            """,
+            (plan["terminalize_ids"],),
+        )
+    if plan["reopen"]:
+        conn.execute(
+            """
+            UPDATE research_campaigns
+            SET status = 'running',
+                completed_at = NULL,
+                finalized_at = NULL,
+                canceled_at = NULL,
+                updated_at = NOW()
+            WHERE id = %s
+            """,
+            (campaign_id,),
+        )
+
+    update_campaign_counts(conn, campaign_id)
+
+    if plan["finalize"]:
+        finalize_research_campaign(conn, campaign_id)
+
+    actions = {
+        "stale_leases_released": len(plan["release_lease_ids"]),
+        "blocked_jobs_terminalized": len(plan["terminalize_ids"]),
+        "campaign_reopened": 1 if plan["reopen"] else 0,
+        "campaign_finalized": 1 if plan["finalize"] else 0,
+    }
+    conn.commit()
+    after = campaign_progress_breakdown(conn, campaign_id)
+    log_event(
+        "Campaign repair complete",
+        campaign_id=campaign_id,
+        operator=operator,
+        actions=actions,
+        repair_required_before=before["repair_required"],
+        repair_required_after=after["repair_required"],
+    )
+    return {
+        "campaign_id": campaign_id,
+        "operator": operator,
+        "actions": actions,
+        "reopened": plan["reopen"],
+        "finalized": plan["finalize"],
+        "before": before,
+        "after": after,
+        "repair_resolved": not after["repair_required"],
+    }
 
 
 def campaign_progress_analytics(

@@ -44,6 +44,7 @@ from app.services.research_architecture import (
 from app.services.research_campaigns import (
     blocked_campaign_jobs,
     campaign_control,
+    campaign_progress_breakdown,
     campaign_status,
     create_quality_first_research_campaign,
     create_overfit_regime_robustness_campaign,
@@ -63,6 +64,7 @@ from app.services.research_campaigns import (
     list_research_universes,
     MIN_CAMPAIGN_CANDLES,
     refresh_elite_candidate_forward_evidence,
+    repair_campaign,
     research_campaign_preflight,
     retry_campaign_job,
     run_campaign_scheduler_cycle,
@@ -628,6 +630,28 @@ async def prepare_large_scale_research_campaign(
         "readiness": readiness,
         "simulation_only": True,
     }
+
+
+@router.get("/research/campaigns/{campaign_id}/progress")
+def get_campaign_progress(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return campaign_progress_breakdown(conn, campaign_id)
+
+
+@router.post("/research/campaigns/{campaign_id}/repair")
+def repair_campaign_endpoint(
+    campaign_id: int,
+    keep_blocked: bool = Query(False),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return repair_campaign(
+        conn,
+        campaign_id,
+        operator="api",
+        terminalize_exhausted_blocks=not keep_blocked,
+    )
 
 
 @router.post("/research/campaigns/{campaign_id}/quality-follow-up")

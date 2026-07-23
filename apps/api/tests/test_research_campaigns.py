@@ -175,6 +175,9 @@ class CampaignConn:
             }
             self.jobs.append(row)
             return Result([{"id": row["id"]}])
+        if "SELECT status FROM research_campaigns WHERE id" in query and "FOR UPDATE" in query:
+            campaign = next((row for row in self.campaigns if row["id"] == params[0]), None)
+            return Result([{"status": campaign["status"]}] if campaign else [])
         if "SELECT * FROM research_campaigns WHERE id" in query:
             return Result([row for row in self.campaigns if row["id"] == params[0]])
         if "FROM research_campaigns" in query and "WHERE simulation_only = TRUE" in query:
