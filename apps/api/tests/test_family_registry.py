@@ -65,3 +65,37 @@ def test_explicit_low_timeframes_are_no_longer_stripped() -> None:
 
     assert strongest_quality_timeframes([], [], ["15m", "30m"]) == ["15m", "30m"]
     assert strongest_quality_timeframes([], [], ["15m", "bogus"]) == ["15m"]
+
+
+def test_move_thresholds_scale_with_sqrt_of_bar_duration() -> None:
+    from app.services.research_campaigns import timeframe_scaled_parameters
+
+    authored = {"returns_5_min": 0.012, "entry_distance_to_ema20_max": 0.02, "risk_reward": 1.5, "rsi_max": 72, "fee_rate": 0.001}
+    scaled = timeframe_scaled_parameters(authored, "15m")
+
+    # 15m is 1/16th of 4h, so moves scale by sqrt(1/16) = 0.25
+    assert scaled["timeframe_scaling_factor"] == 0.25
+    assert scaled["returns_5_min"] == 0.003
+    assert scaled["entry_distance_to_ema20_max"] == 0.005
+    # Ratios, periods and costs are never rescaled
+    assert scaled["risk_reward"] == 1.5
+    assert scaled["rsi_max"] == 72
+    assert scaled["fee_rate"] == 0.001
+
+
+def test_reference_timeframe_is_unchanged_and_scaling_is_opt_in() -> None:
+    from app.services.research_campaigns import DiscoveryCandidate, apply_timeframe_scaling, timeframe_scaled_parameters
+
+    authored = {"returns_5_min": 0.012}
+    assert timeframe_scaled_parameters(authored, "4h") == authored
+
+    def make(params):
+        return DiscoveryCandidate(
+            candidate_id="c1", family_id="f1", parent_candidate_id=None, generation=1,
+            blocks={"entry": "breakout"}, parameters=params, complexity=1, canonical_key="k1",
+        )
+
+    # Not opted in -> untouched, so existing evidence keeps its semantics.
+    assert apply_timeframe_scaling(make(dict(authored)), "15m").parameters == authored
+    opted = apply_timeframe_scaling(make({**authored, "timeframe_scaled_thresholds": True}), "15m")
+    assert opted.parameters["returns_5_min"] == 0.003

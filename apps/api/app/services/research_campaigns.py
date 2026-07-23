@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
-from dataclasses import asdict
+import math
+from dataclasses import asdict, replace
 from datetime import UTC, date, datetime, time as dt_time, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -774,7 +775,53 @@ def create_hidden_gem_recovery_campaign(
     }
 
 
+TIMEFRAME_SECONDS = {"15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+TIMEFRAME_SCALING_REFERENCE = "4h"
+# Entry thresholds that describe a PRICE MOVE and therefore scale with the
+# square root of the bar duration (a random walk's expected move grows as
+# sqrt(time)). A 1.2% move over 5 bars is routine on 4h and rare on 15m, so
+# leaving these fixed makes entries harder -- not easier -- on lower
+# timeframes. Measured: campaign 38 on 15m averaged 5.2 trades vs ~13 on 4h.
+MOVE_SCALED_PARAMETERS = (
+    "returns_5_min",
+    "low_volatility_returns_5_min",
+    "entry_distance_to_ema20_max",
+    "stop_buffer_pct",
+    "normal_volatility_min",
+    "normal_volatility_max",
+)
 HIGH_FREQUENCY_TIMEFRAMES = ("15m", "30m")
+
+
+def timeframe_scaled_parameters(parameters: dict[str, Any], timeframe: str, *, reference: str = TIMEFRAME_SCALING_REFERENCE) -> dict[str, Any]:
+    """Rescale move-based entry thresholds from a reference timeframe.
+
+    Thresholds are authored against 4h bars. Expected price movement scales
+    with sqrt(bar duration), so moving to 15m without rescaling leaves every
+    move threshold ~4x too demanding. Only parameters in
+    MOVE_SCALED_PARAMETERS are touched; counts, ratios, periods, fees and
+    risk settings are left exactly as authored.
+    """
+    target_seconds = TIMEFRAME_SECONDS.get(str(timeframe))
+    reference_seconds = TIMEFRAME_SECONDS.get(str(reference))
+    if not target_seconds or not reference_seconds or target_seconds == reference_seconds:
+        return dict(parameters)
+    factor = math.sqrt(target_seconds / reference_seconds)
+    scaled = dict(parameters)
+    for key in MOVE_SCALED_PARAMETERS:
+        value = scaled.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            scaled[key] = round(float(value) * factor, 8)
+    scaled["timeframe_scaling_factor"] = round(factor, 6)
+    scaled["timeframe_scaling_reference"] = reference
+    return scaled
+
+
+def apply_timeframe_scaling(candidate: DiscoveryCandidate, timeframe: str) -> DiscoveryCandidate:
+    """Opt-in per candidate, so existing evidence keeps its original semantics."""
+    if not candidate.parameters.get("timeframe_scaled_thresholds"):
+        return candidate
+    return replace(candidate, parameters=timeframe_scaled_parameters(candidate.parameters, timeframe))
 SHORT_HOLD_EXIT_BLOCKS = {"time_exit_12", "fixed_rr_15", "atr_stop_20"}
 
 
@@ -810,6 +857,10 @@ def create_high_frequency_campaign(
     short_hold = [c for c in pool if str(c.blocks.get("exit") or "") in SHORT_HOLD_EXIT_BLOCKS]
     ordered = short_hold or pool
     candidates = dedupe_candidates_by_execution_key(ordered, max_candidates)
+    # Opt these candidates into timeframe-proportional thresholds. Without this
+    # the authored 4h move thresholds are ~4x too demanding on 15m, which is
+    # why campaign 38 averaged only 5.2 trades there.
+    candidates = [replace(c, parameters={**c.parameters, "timeframe_scaled_thresholds": True}) for c in candidates]
     candidates, legacy_metrics = exclude_legacy_family_candidates(conn, candidates, {})
     if not candidates:
         raise ValueError("no non-legacy candidates available for a high-frequency campaign")
@@ -3284,6 +3335,7 @@ def run_campaign_job(
     symbol = job["symbol"]
     timeframe = job["timeframe"]
     candidate = candidate_from_payload(job["candidate"])
+    candidate = apply_timeframe_scaling(candidate, timeframe)
     needs_enriched_context = (
         candidate.parameters.get("phase_9_11_campaign_version") == STRATEGY_REDESIGN_CAMPAIGN_VERSION
         or candidate.parameters.get("phase_9_12_campaign_version") == VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION
