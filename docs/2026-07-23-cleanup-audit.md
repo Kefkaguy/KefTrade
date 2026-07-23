@@ -127,3 +127,36 @@ writes). Low risk; re-creatable.
 3. Add a retention policy for `research_command_center_snapshots` (keep latest N).
 4. Remove the 2 confirmed-dead feature flags.
 Everything else stays until individually confirmed.
+
+---
+
+## Phase 13 cleanup PERFORMED (2026-07-23)
+
+### Removed (recoverable via tag `pre-cleanup-2026-07-23` + backup)
+- **Frontend:** 5 unused components (AlphaDiscoveryRunner, CandidateComparison,
+  HypothesisWorkflow, ResearchConstellation, StrategyDiscoveryActions) and the
+  orphan `/strategies` page. Source type-checks clean.
+- **Backend:** 2 dead feature flags (`diagnostic_logging`,
+  `broker_raw_snapshot_retention_days`). 364 tests pass.
+
+### Database optimized (production)
+- Dropped 5 unused indexes. The 6th
+  (`broker_raw_ingest_events_2026_07_trace_id_received_at_idx`) was correctly
+  refused by Postgres — it backs a parent partitioned-table index; kept.
+- Pruned `research_command_center_snapshots` cache from 12 rows (249 MB) to the
+  latest 3 rows (84 MB). The read path only ever uses the single latest row;
+  this is regenerable cache, not evidence.
+- `VACUUM (FULL, ANALYZE)` the cache table; `VACUUM ANALYZE` the whole DB.
+- **Result: 1786 MB → 1618 MB (~168 MB / 9.4% reclaimed).**
+- Post-change health verified: `/health`, `/research/command-center`, and
+  `/research/families/registry` all return 200.
+
+### Deliberately NOT removed
+- ~40 unreferenced `lib/api.ts` exports: identified, left in place. They are
+  tree-shaken from the production bundle (zero runtime cost); a safe removal
+  needs a per-function pass, not a bulk regex on the central client. Two
+  automated attempts corrupted the file and were reverted.
+- 78 empty tables: kept — almost all are unexercised-feature schema and forward
+  partitions, not dead.
+- Migrations directory and all historical research/elite/campaign evidence:
+  untouched.
