@@ -2,7 +2,16 @@ from __future__ import annotations
 
 import time
 
-from app.services.elite_portfolio_builder import SOLVER_VERSION, exact_timeframe_cap_holds, preview
+import app.services.elite_portfolio_builder as elite_portfolio_builder
+from app.services.elite_portfolio_builder import (
+    SOLVER_VERSION,
+    exact_timeframe_cap_holds,
+    feasibility_report,
+    maximum_independent_set,
+    parameter_similarity_breakdown,
+    preview,
+    verify_feasibility,
+)
 
 
 def candidate(index: int, *, timeframe: str, family: str | None = None, symbol: str | None = None) -> dict:
@@ -124,7 +133,8 @@ def test_insufficient_correlation_is_a_hard_conflict_and_infeasibility_is_explai
 
     assert result["status"] == "infeasible"
     assert result["maximum_feasible_size"] == 0
-    assert result["termination_reason"] == "no_portfolio_satisfies_all_constraints"
+    assert result["termination_reason"] == "exact_search_proved_no_feasible_portfolio"
+    assert result["verified_infeasible"] is True
     assert result["constraint_relaxation_count"] == 0
     assert any(row["constraint"].endswith("CORRELATION_INSUFFICIENT") for row in result["binding_constraints"])
 
@@ -137,3 +147,185 @@ def test_500_candidate_preview_completes_under_two_seconds() -> None:
 
     assert result["candidates_examined"] == 500
     assert elapsed < 2.0
+
+
+def test_genuine_infeasibility_is_confirmed_by_exact_verification() -> None:
+    candidates = diversified_candidates(5)
+    for row in candidates:
+        row["strategy_returns"] = {"one": 0.1}
+        row["signal_returns"] = {"one": 0.1}
+
+    result = preview(candidates)
+
+    assert result["status"] == "infeasible"
+    assert result["heuristic_miss"] is False
+    assert result["verified_infeasible"] is True
+    assert result["verification"]["ran"] is True
+    assert result["verification"]["verified"] is True
+    assert result["verification"]["feasible"] is False
+    assert result["verification"]["maximum_feasible_size"] == 0
+    assert result["feasibility_report"]["greedy_missed_a_valid_solution"] is False
+
+
+def test_exact_verifier_recovers_a_heuristic_miss(monkeypatch) -> None:
+    candidates = diversified_candidates(24)
+    config = {"constraints": {"maximum_portfolio_size": 12, "minimum_portfolio_size": 5}}
+
+    baseline = preview(candidates, config)
+    assert baseline["status"] == "review_ready"  # sanity: a feasible portfolio genuinely exists here
+
+    def fake_infeasible_constructor(*_args, **_kwargs) -> dict:
+        return {
+            "status": "infeasible",
+            "solver_version": SOLVER_VERSION,
+            "selected": [],
+            "maximum_feasible_size": 0,
+            "constraint_relaxations": [],
+            "constraint_relaxation_count": 0,
+            "candidate_order": [],
+            "iterations": 0,
+            "operations": [],
+            "swap_count": 0,
+            "termination_reason": "no_portfolio_satisfies_all_constraints",
+            "objective_hierarchy": [],
+            "optimization_duration_ms": 0.0,
+            "candidates_examined": len(candidates),
+            "peak_memory_mb": None,
+        }
+
+    monkeypatch.setattr(elite_portfolio_builder, "construct_portfolio", fake_infeasible_constructor)
+    result = preview(candidates, config)
+
+    assert result["heuristic_miss"] is True
+    assert result["verified_infeasible"] is False
+    assert result["status"] == "review_ready"
+    assert result["maximum_feasible_size"] > 0
+    assert result["verification"]["ran"] is True
+    assert result["verification"]["verified"] is True
+    assert result["verification"]["feasible"] is True
+    assert result["feasibility_report"]["greedy_missed_a_valid_solution"] is True
+
+
+def test_exact_verifier_skips_pools_above_the_configured_limit() -> None:
+    candidates = diversified_candidates(41)
+    verification = verify_feasibility(candidates, [], {"constraints": {"minimum_portfolio_size": 5, "maximum_portfolio_size": 20}})
+
+    assert verification["ran"] is False
+    assert verification["verified"] is False
+    assert verification["termination_reason"] == "pool_exceeds_verification_limit"
+
+
+def test_verification_is_deterministic_across_repeated_runs() -> None:
+    candidates = diversified_candidates(5)
+    for row in candidates:
+        row["strategy_returns"] = {"one": 0.1}
+        row["signal_returns"] = {"one": 0.1}
+
+    first = preview(candidates)
+    second = preview(candidates)
+
+    def without_timing(verification: dict) -> dict:
+        return {key: value for key, value in verification.items() if key != "duration_ms"}
+
+    assert without_timing(first["verification"]) == without_timing(second["verification"])
+    assert first["verified_infeasible"] == second["verified_infeasible"] is True
+
+
+def test_parameter_similarity_breakdown_handles_missing_parameters_deterministically() -> None:
+    breakdown = parameter_similarity_breakdown({"lookback": 10, "threshold": 0.1}, {"lookback": 10})
+
+    threshold_row = next(row for row in breakdown["per_parameter"] if row["parameter"] == "threshold")
+    assert threshold_row["missing_on_one_side"] is True
+    assert threshold_row["key_similarity"] == 0.0
+    assert breakdown["compared_parameter_count"] == 2
+
+    repeated = parameter_similarity_breakdown({"lookback": 10, "threshold": 0.1}, {"lookback": 10})
+    assert repeated == breakdown
+
+
+def test_parameter_similarity_ignores_metadata_and_is_not_triggered_by_family_alone() -> None:
+    left = candidate(1, timeframe="1h", symbol="AAA", family="shared_family")
+    right = candidate(2, timeframe="4h", symbol="AAA", family="shared_family")
+    right["parameters"] = {"lookback": left["parameters"]["lookback"] * 5, "threshold": left["parameters"]["threshold"] + 5}
+
+    breakdown = parameter_similarity_breakdown(left["parameters"], right["parameters"])
+
+    assert breakdown["overall_similarity"] < 0.90
+
+
+def test_parameter_similarity_conflicts_are_individually_explained() -> None:
+    left = candidate(1, timeframe="1h", symbol="AAA")
+    right = candidate(2, timeframe="4h", symbol="BBB")
+    right["parameters"] = dict(left["parameters"])
+
+    result = preview(
+        [left, right],
+        {"constraints": {"minimum_portfolio_size": 1, "minimum_unique_assets": 1, "minimum_families": 1, "minimum_timeframes": 1}},
+    )
+
+    similarity_conflicts = [row for row in result["conflicts"] if row["conflict_type"] == "PARAMETER_SIMILARITY"]
+    assert similarity_conflicts
+    evidence = similarity_conflicts[0]["evidence"]
+    assert evidence["coefficient"] == 1.0
+    assert evidence["compared_parameters"]
+    assert "exceeded the" in evidence["reason"]
+
+
+def test_symbol_family_duplicate_conflicts_carry_explicit_evidence() -> None:
+    left = candidate(1, timeframe="1h", symbol="AAA", family="shared_family")
+    right = candidate(2, timeframe="4h", symbol="AAA", family="shared_family")
+    right["parameters"] = {"unrelated": 12345}
+
+    result = preview(
+        [left, right],
+        {"constraints": {"minimum_portfolio_size": 1, "minimum_unique_assets": 1, "minimum_families": 1, "minimum_timeframes": 1}},
+    )
+
+    duplicate_conflicts = [row for row in result["conflicts"] if row["conflict_type"] == "SYMBOL_FAMILY_DUPLICATE"]
+    assert duplicate_conflicts
+    evidence = duplicate_conflicts[0]["evidence"]
+    assert evidence["symbol"] == "AAA"
+    assert evidence["family_id"] == "shared_family"
+    assert "one member per symbol-family pair" in evidence["reason"]
+
+
+def test_feasibility_report_includes_expected_fields() -> None:
+    candidates = diversified_candidates(24)
+    config = {"constraints": {"maximum_portfolio_size": 12, "minimum_portfolio_size": 5}}
+
+    result = preview(candidates, config)
+    report = result["feasibility_report"]
+
+    assert report["pool_size"] == len(result["construction_pool_candidate_ids"])
+    assert report["total_possible_pairs"] == report["pool_size"] * (report["pool_size"] - 1) // 2
+    assert set(report["conflict_count_by_type"]).issubset(
+        {"PARAMETER_SIMILARITY", "SYMBOL_FAMILY_DUPLICATE", "SIGNAL_CORRELATION_LIMIT", "STRATEGY_RETURN_CORRELATION_LIMIT", "SIGNAL_CORRELATION_INSUFFICIENT", "STRATEGY_RETURN_CORRELATION_INSUFFICIENT"}
+    )
+    assert isinstance(report["available_symbols"], list)
+    assert isinstance(report["available_families"], list)
+    assert report["minimum_unique_assets_independently_achievable"] is True
+    assert report["minimum_families_independently_achievable"] is True
+
+
+def test_maximum_independent_set_matches_a_hand_verifiable_conflict_graph() -> None:
+    rows = diversified_candidates(4)
+    conflicts = [
+        {"left_candidate_id": rows[0]["candidate_id"], "right_candidate_id": rows[1]["candidate_id"], "conflict_type": "TEST", "hard_conflict": True, "evidence": {}},
+        {"left_candidate_id": rows[1]["candidate_id"], "right_candidate_id": rows[2]["candidate_id"], "conflict_type": "TEST", "hard_conflict": True, "evidence": {}},
+    ]
+
+    result = maximum_independent_set(rows, conflicts, {})
+
+    assert result["verified"] is True
+    assert result["size"] == 3  # rows[0], rows[2], rows[3] are mutually conflict-free
+
+
+def test_hard_rules_are_surfaced_and_include_symbol_family_uniqueness_independently() -> None:
+    result = preview(diversified_candidates(6))
+    rule_ids = {rule["id"] for rule in result["hard_rules"]}
+
+    assert "SYMBOL_FAMILY_DUPLICATE" in rule_ids
+    assert "PARAMETER_SIMILARITY" in rule_ids
+    assert "SIGNAL_CORRELATION_LIMIT" in rule_ids
+    assert "STRATEGY_RETURN_CORRELATION_LIMIT" in rule_ids
+    assert "TIMEFRAME_50_PERCENT_CAP" in rule_ids

@@ -25,6 +25,7 @@ import {
   getElitePortfolioOptions,
   previewElitePortfolio,
   type ElitePortfolioConfiguration,
+  type ElitePortfolioHardRule,
   type ElitePortfolioOptions,
   type ElitePortfolioResult
 } from "@/lib/api";
@@ -185,6 +186,15 @@ export function ElitePortfolioBuilder() {
               <Constraint label="Strategy correlation" value={`≤ ${configuration.constraints.maximum_strategy_return_correlation}`} />
               <Constraint label="Timeframe share" value="2 × count ≤ total" />
             </div>
+            <div className="eliteHardRules">
+              <h3>Hard rules (never relaxed)</h3>
+              {hardRules(options).map((rule) => (
+                <div key={rule.id} className="eliteHardRule">
+                  <strong>{rule.label}</strong>
+                  <p>{rule.description}</p>
+                </div>
+              ))}
+            </div>
           </section>
 
           {result ? <PortfolioReview result={result} analytics={analytics} members={members} /> : null}
@@ -227,15 +237,39 @@ export function ElitePortfolioBuilder() {
 
 function PortfolioReview({ result, analytics, members }: { result: ElitePortfolioResult; analytics: Record<string, any>; members: Array<Record<string, any>> }) {
   const infeasible = result.status === "infeasible";
+  const verification = result.verification;
+  const verifiedInfeasible = Boolean(result.verified_infeasible);
+  const heuristicMiss = Boolean(result.heuristic_miss);
+  const unverified = infeasible && !verifiedInfeasible;
   const distributions = [
     ["Direction", analytics.direction_distribution],
     ["Timeframe", analytics.timeframe_distribution],
     ["Family", analytics.family_distribution]
   ] as const;
+  const similarityConflicts = (result.conflicts ?? []).filter((row) => row.conflict_type === "PARAMETER_SIMILARITY");
   return (
     <section className={`elitePanel eliteReview ${infeasible ? "infeasible" : ""}`}>
-      <header><div><span className="eyebrow">Construction result</span><h2>{infeasible ? "No portfolio satisfies every constraint" : `${result.maximum_feasible_size ?? members.length} members ready for review`}</h2></div>{infeasible ? <AlertTriangle size={21} /> : <BarChart3 size={21} />}</header>
-      <p className="eliteReviewLead">{infeasible ? "The constructor relaxed zero constraints. Review the ranked binding constraints and deliberately change evidence requirements only if your research policy changes." : "The largest feasible portfolio found by the bounded deterministic constructor. Approval remains tied to this exact evidence snapshot."}</p>
+      <header>
+        <div>
+          <span className="eyebrow">Construction result</span>
+          <h2>{infeasible ? (verifiedInfeasible ? "No portfolio satisfies every constraint — exactly verified" : "The fast constructor found nothing — verification incomplete") : `${result.maximum_feasible_size ?? members.length} members ready for review`}</h2>
+        </div>
+        {infeasible ? <AlertTriangle size={21} /> : <BarChart3 size={21} />}
+      </header>
+      {heuristicMiss ? (
+        <p className="eliteReviewLead heuristicMiss">
+          <ShieldCheck size={15} /> The bounded greedy constructor missed this portfolio. The exact exhaustive verifier found it and it is shown below — nothing was relaxed.
+        </p>
+      ) : null}
+      {verifiedInfeasible ? (
+        <p className="eliteReviewLead">Exact exhaustive verification searched every candidate combination in this pool ({verification?.pool_size ?? "—"} candidates, {verification?.nodes_explored ?? "—"} nodes) and confirmed no feasible portfolio exists. Zero constraints were relaxed. Review the ranked binding constraints and deliberately change evidence requirements only if your research policy changes.</p>
+      ) : null}
+      {unverified ? (
+        <p className="eliteReviewLead warning">
+          The bounded greedy constructor found no portfolio, but exact verification {verification?.ran ? "did not complete within its search budget" : `did not run (pool of ${verification?.pool_size ?? "?"} candidates exceeds the ${verification?.verification_limit ?? "?"}-candidate verification limit)`}. This is <strong>not</strong> a proven infeasibility — treat it as unresolved rather than "no portfolio exists."
+        </p>
+      ) : null}
+      {!infeasible ? <p className="eliteReviewLead">The largest feasible portfolio found by the bounded deterministic constructor{heuristicMiss ? " (recovered by exact verification)" : ""}. Approval remains tied to this exact evidence snapshot.</p> : null}
       <div className="eliteAnalyticsStrip">
         <Metric label="Portfolio PF" value={number(analytics.portfolio_profit_factor)} />
         <Metric label="Expectancy" value={number(analytics.portfolio_expectancy)} />
@@ -246,6 +280,36 @@ function PortfolioReview({ result, analytics, members }: { result: ElitePortfoli
         {distributions.map(([label, distribution]) => <Distribution key={label} label={label} values={distribution ?? {}} />)}
       </div>
       {result.binding_constraints?.length ? <div className="eliteBinding"><h3>Binding constraints</h3>{result.binding_constraints.slice(0, 8).map((row) => <div key={row.constraint}><span>{title(row.constraint)}</span><strong>{row.excluded_candidates_or_pairs}</strong></div>)}</div> : null}
+      {similarityConflicts.length ? (
+        <div className="eliteSimilarity">
+          <h3>Parameter-similarity conflicts ({similarityConflicts.length})</h3>
+          {similarityConflicts.slice(0, 12).map((row, index) => (
+            <details key={`${row.left_candidate_id}-${row.right_candidate_id}-${index}`}>
+              <summary>
+                <span>{row.left_candidate_id} ↔ {row.right_candidate_id}</span>
+                <strong>{number(row.evidence?.coefficient)}</strong>
+              </summary>
+              <p>{row.evidence?.reason}</p>
+              {Array.isArray(row.evidence?.compared_parameters) ? (
+                <table>
+                  <thead><tr><th>Parameter</th><th>Left</th><th>Right</th><th>Normalized diff</th><th>Similarity</th></tr></thead>
+                  <tbody>
+                    {row.evidence.compared_parameters.map((param: Record<string, any>) => (
+                      <tr key={param.parameter}>
+                        <td>{param.parameter}</td>
+                        <td>{param.missing_on_one_side ? "—" : String(param.left_value)}</td>
+                        <td>{param.missing_on_one_side ? "—" : String(param.right_value)}</td>
+                        <td>{param.normalized_difference == null ? "n/a" : number(param.normalized_difference)}</td>
+                        <td>{number(param.key_similarity)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              ) : null}
+            </details>
+          ))}
+        </div>
+      ) : null}
       {members.length ? <div className="eliteMembers"><h3>Selected members</h3>{members.map((row, index) => <article key={`${row.candidate_id}-${row.symbol ?? "variant"}-${row.timeframe ?? "all"}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{row.symbol ? `${row.symbol} · ${row.timeframe}` : row.candidate_id}</strong><small>{row.strategy_family ?? row.strategy_direction ?? "Selected strategy variant"}</small></div><em>{title(row.execution_capability ?? "selected")}</em></article>)}</div> : null}
     </section>
   );
@@ -264,6 +328,18 @@ function Metric({ label, value, tone }: { label: string; value: unknown; tone?: 
 function Distribution({ label, values }: { label: string; values: Record<string, number> }) {
   const total = Object.values(values).reduce((sum, value) => sum + Number(value), 0);
   return <div className="eliteDistribution"><h3>{label}</h3>{Object.entries(values).map(([key, value]) => <div key={key}><span>{title(key)}</span><i><b style={{ width: `${total ? (Number(value) / total) * 100 : 0}%` }} /></i><strong>{value}</strong></div>)}</div>;
+}
+
+const FALLBACK_HARD_RULES: ElitePortfolioHardRule[] = [
+  { id: "SYMBOL_FAMILY_DUPLICATE", label: "One member per symbol-family pair", description: "At most one candidate may occupy a given (symbol, family) pair, even when the per-symbol and per-family caps would otherwise allow two." },
+  { id: "PARAMETER_SIMILARITY", label: "Maximum parameter similarity 0.90", description: "Two candidates whose strategy parameters are more than 90% similar can never appear in the same portfolio." },
+  { id: "SIGNAL_CORRELATION_LIMIT", label: "Signal-correlation conflict rule", description: "Candidates whose signal-exposure series correlate above the configured signal-correlation limit are a hard conflict." },
+  { id: "STRATEGY_RETURN_CORRELATION_LIMIT", label: "Strategy-return-correlation rule", description: "Candidates whose strategy-return series correlate above the configured strategy-return-correlation limit are a hard conflict." },
+  { id: "TIMEFRAME_50_PERCENT_CAP", label: "Exact timeframe balance (2 × count ≤ total)", description: "No single timeframe may exceed half the portfolio. With exactly two timeframes selected this forces an exact 50/50 split, only reachable at even portfolio sizes." }
+];
+
+function hardRules(options: ElitePortfolioOptions): ElitePortfolioHardRule[] {
+  return options.hard_rules?.length ? options.hard_rules : FALLBACK_HARD_RULES;
 }
 
 function toggle(values: string[], value: string) { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value].sort(); }

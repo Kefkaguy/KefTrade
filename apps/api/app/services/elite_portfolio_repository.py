@@ -12,6 +12,7 @@ from psycopg.types.json import Jsonb
 from app.services.elite_portfolio_builder import (
     DEFAULT_CONSTRAINTS,
     DEFAULT_THRESHOLDS,
+    HARD_RULES,
     SOLVER_VERSION,
     candidate_key,
     decision_hash,
@@ -399,6 +400,7 @@ def options(conn: psycopg.Connection) -> dict[str, Any]:
         "candidate_count": len(candidates),
         "default_thresholds": deepcopy(DEFAULT_THRESHOLDS),
         "default_constraints": deepcopy(DEFAULT_CONSTRAINTS),
+        "hard_rules": deepcopy(HARD_RULES),
         "objectives": ["balanced", "profit_factor", "expectancy", "minimum_drawdown"],
         "maximum_portfolio_size": 20,
         "execution_policy": {
@@ -623,6 +625,10 @@ def _statistics(result: dict[str, Any]) -> dict[str, Any]:
         "peak_memory_mb": result["peak_memory_mb"],
         "constraint_relaxation_count": 0,
         "binding_constraints": result["binding_constraints"],
+        "heuristic_miss": result.get("heuristic_miss", False),
+        "verified_infeasible": result.get("verified_infeasible", False),
+        "verification": result.get("verification"),
+        "feasibility_report": result.get("feasibility_report"),
     }
 
 

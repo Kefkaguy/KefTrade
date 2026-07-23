@@ -1288,6 +1288,24 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .eliteMembers article strong { font-size: 9px; }
 .eliteMembers article small { margin-top: 2px; color: var(--muted); font-size: 7px; }
 .eliteMembers article em { color: var(--muted); font: 7px var(--font-mono); font-style: normal; }
+.eliteHardRules { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.eliteHardRules h3 { margin-bottom: 12px; font-size: 9px; color: var(--muted); }
+.eliteHardRule { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.eliteHardRule:last-child { border-bottom: 0; }
+.eliteHardRule strong { display: block; font-size: 9px; }
+.eliteHardRule p { margin-top: 4px; font-size: 8px; line-height: 1.6; color: var(--muted); }
+.eliteReviewLead.heuristicMiss { display: flex; align-items: flex-start; gap: 8px; color: var(--accent); }
+.eliteReviewLead.warning { color: var(--warning); }
+.eliteSimilarity { margin-top: 36px; }
+.eliteSimilarity h3 { margin-bottom: 14px; font-size: 9px; }
+.eliteSimilarity details { padding: 10px 0; border-bottom: 1px solid var(--line); font-size: 8px; }
+.eliteSimilarity summary { display: flex; justify-content: space-between; gap: 12px; cursor: pointer; list-style: none; }
+.eliteSimilarity summary::-webkit-details-marker { display: none; }
+.eliteSimilarity summary strong { font-family: var(--font-mono); }
+.eliteSimilarity p { margin-top: 8px; color: var(--muted); line-height: 1.6; }
+.eliteSimilarity table { width: 100%; margin-top: 10px; border-collapse: collapse; font-size: 7px; }
+.eliteSimilarity th, .eliteSimilarity td { padding: 5px 6px; text-align: left; border-bottom: 1px solid var(--line); }
+.eliteSimilarity th { color: var(--muted); font-weight: 500; }
 .eliteBuilderRail { position: sticky; top: calc(var(--header-height) + 24px); border-left: 1px solid var(--line); }
 .eliteBuilderRail > section { padding: 26px 0 26px 27px; border-bottom: 1px solid var(--line); }
 .eliteBuilderRail .eliteMetric { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border: 0; }

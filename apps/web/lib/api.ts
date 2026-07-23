@@ -1395,6 +1395,8 @@ export type ElitePortfolioConfiguration = {
   custom_size: number | null;
 };
 
+export type ElitePortfolioHardRule = { id: string; label: string; description: string };
+
 export type ElitePortfolioOptions = {
   solver_version: string;
   universes: string[];
@@ -1404,9 +1406,47 @@ export type ElitePortfolioOptions = {
   candidate_count: number;
   default_thresholds: Record<string, unknown>;
   default_constraints: Record<string, unknown>;
+  hard_rules?: ElitePortfolioHardRule[];
   objectives: string[];
   maximum_portfolio_size: number;
   execution_policy: Record<string, string>;
+};
+
+export type ElitePortfolioVerification = {
+  ran: boolean;
+  verified: boolean;
+  feasible: boolean | null;
+  maximum_feasible_size: number | null;
+  witness: string[] | null;
+  pool_size: number;
+  verification_limit: number | null;
+  nodes_explored: number;
+  duration_ms: number;
+  termination_reason: string;
+};
+
+export type ElitePortfolioFeasibilityReport = {
+  pool_size: number;
+  total_possible_pairs: number;
+  conflict_count_by_type: Record<string, number>;
+  unique_conflict_edges: number;
+  candidate_conflict_degree: Record<string, number>;
+  available_symbols: string[];
+  available_families: string[];
+  available_timeframes: string[];
+  symbol_count: number;
+  family_count: number;
+  timeframe_count: number;
+  maximum_independent_set_size: number | null;
+  maximum_independent_set_witness: string[] | null;
+  maximum_independent_set_verified: boolean;
+  maximum_feasible_size_after_all_constraints: number | null;
+  minimum_unique_assets_independently_achievable: boolean;
+  minimum_families_independently_achievable: boolean;
+  exact_timeframe_balance_achievable: boolean | null;
+  greedy_missed_a_valid_solution: boolean;
+  verification_ran: boolean;
+  verification_verified: boolean;
 };
 
 export type ElitePortfolioResult = {
@@ -1419,6 +1459,11 @@ export type ElitePortfolioResult = {
   excluded_count?: number;
   constraint_relaxation_count?: number;
   binding_constraints?: Array<{ constraint: string; excluded_candidates_or_pairs: number }>;
+  heuristic_miss?: boolean;
+  verified_infeasible?: boolean;
+  verification?: ElitePortfolioVerification;
+  feasibility_report?: ElitePortfolioFeasibilityReport;
+  hard_rules?: ElitePortfolioHardRule[];
   analytics?: Record<string, any>;
   portfolio_analytics?: Record<string, any>;
   eligibility?: Array<Record<string, any>>;
