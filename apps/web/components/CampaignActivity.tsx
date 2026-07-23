@@ -1,25 +1,29 @@
 "use client";
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { Cpu, Gauge, MemoryStick, Pause, Play, RefreshCw, Trash2 } from "lucide-react";
+import { Cpu, Gauge, MemoryStick, Pause, Play, RefreshCw, Trash2, Wrench } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   controlResearchCampaign,
   deleteResearchCampaign,
   getResearchCampaignProfile,
   getResearchCampaigns,
+  repairResearchCampaign,
   runParallelResearchCampaign,
   type ResearchCampaignList,
   type ResearchCampaignListRow,
   type ResearchCampaignProfile
 } from "@/lib/api";
 
-type CampaignFilter = "all" | "running" | "paused";
+type CampaignFilter = "active" | "history" | "all";
+
+const ACTIVE_STATUSES = new Set(["running", "queued", "paused"]);
+const HISTORY_PREVIEW_LIMIT = 8;
 
 export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
   const reduceMotion = useReducedMotion();
   const [data, setData] = useState<ResearchCampaignList | null>(null);
-  const [filter, setFilter] = useState<CampaignFilter>("all");
+  const [filter, setFilter] = useState<CampaignFilter>("active");
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleteId, setDeleteId] = useState<number | null>(null);
   const [executionId, setExecutionId] = useState<number | null>(null);
@@ -77,11 +81,17 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
     return () => window.clearInterval(timer);
   }, [executionId]);
 
-  const campaigns = useMemo(() => (data?.campaigns ?? []).filter((campaign) => {
-    if (filter === "running") return campaign.status === "running";
-    if (filter === "paused") return campaign.status === "paused";
-    return true;
-  }), [data?.campaigns, filter]);
+  const allCampaigns = data?.campaigns ?? [];
+  const historyTotal = useMemo(() => allCampaigns.filter((campaign) => !ACTIVE_STATUSES.has(campaign.status)).length, [allCampaigns]);
+  const campaigns = useMemo(() => {
+    if (filter === "active") return allCampaigns.filter((campaign) => ACTIVE_STATUSES.has(campaign.status));
+    if (filter === "history") {
+      return allCampaigns
+        .filter((campaign) => !ACTIVE_STATUSES.has(campaign.status))
+        .slice(0, HISTORY_PREVIEW_LIMIT);
+    }
+    return allCampaigns;
+  }, [allCampaigns, filter]);
 
   async function changeState(campaign: ResearchCampaignListRow) {
     const action = campaign.status === "paused" ? "resume" : "pause";
@@ -107,6 +117,19 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
         setExecutionId(null);
         setProfile(null);
       }
+      await refresh();
+    } catch (requestError) {
+      setError(readCampaignError(requestError));
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function repairCampaign(campaignId: number) {
+    setBusyId(campaignId);
+    setError(null);
+    try {
+      await repairResearchCampaign(campaignId);
       await refresh();
     } catch (requestError) {
       setError(readCampaignError(requestError));
@@ -163,9 +186,9 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
       </header>
 
       <div className="campaignFilters" role="group" aria-label="Filter campaigns">
-        {(["all", "running", "paused"] as const).map((option) => (
+        {(["active", "history", "all"] as const).map((option) => (
           <button key={option} type="button" className={filter === option ? "active" : undefined} onClick={() => setFilter(option)}>
-            {option === "all" ? "All" : option === "running" ? "Running" : "Paused"}
+            {option === "active" ? "Active" : option === "history" ? `History (${historyTotal})` : "All"}
           </button>
         ))}
       </div>
@@ -175,7 +198,8 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
       <div className="campaignRows">
         {!data && enabled ? <CampaignLoading /> : null}
         {!enabled ? <div className="campaignActivityEmpty">Research services are unavailable.</div> : null}
-        {data && campaigns.length === 0 ? <div className="campaignActivityEmpty">No {filter === "all" ? "saved" : filter} campaigns.</div> : null}
+        {data && campaigns.length === 0 ? <div className="campaignActivityEmpty">{filter === "active" ? "No active campaigns. Completed work lives under History." : "No campaigns here."}</div> : null}
+        {filter === "history" && historyTotal > HISTORY_PREVIEW_LIMIT ? <div className="campaignActivityEmpty">Showing the {HISTORY_PREVIEW_LIMIT} most recent of {historyTotal} archived campaigns. Their evidence is preserved and searchable through Reports.</div> : null}
         <AnimatePresence initial={false}>
           {campaigns.map((campaign) => {
             const progress = campaign.total_jobs > 0 ? Math.min(100, Math.round((campaign.terminal_jobs / campaign.total_jobs) * 100)) : 0;
@@ -216,6 +240,11 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                   {canControl ? (
                     <button className="campaignIconButton" type="button" onClick={() => void changeState(campaign)} disabled={busyId === campaign.id} title={isPaused ? "Resume campaign" : "Pause campaign"} aria-label={isPaused ? `Resume ${campaign.name}` : `Pause ${campaign.name}`}>
                       {isPaused ? <Play size={16} /> : <Pause size={16} />}
+                    </button>
+                  ) : null}
+                  {campaign.blocked_jobs > 0 ? (
+                    <button className="campaignIconButton" type="button" onClick={() => void repairCampaign(campaign.id)} disabled={busyId === campaign.id} title="Repair campaign: release stale leases, terminalize exhausted blocks, finalize if every job is terminal" aria-label={`Repair ${campaign.name}`}>
+                      <Wrench size={16} />
                     </button>
                   ) : null}
                   <button className="campaignIconButton danger" type="button" onClick={() => setDeleteId(campaign.id)} disabled={!canDelete || busyId === campaign.id} title={canDelete ? "Delete campaign" : campaign.status === "running" ? "Pause before deleting" : "Completed evidence cannot be deleted"} aria-label={`Delete ${campaign.name}`}>

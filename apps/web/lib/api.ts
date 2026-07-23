@@ -1929,6 +1929,13 @@ export function controlResearchCampaign(campaignId: number, action: "pause" | "r
   });
 }
 
+export function repairResearchCampaign(campaignId: number) {
+  return request<{ campaign_id: number; actions: Record<string, number>; reopened: boolean; finalized: boolean; repair_resolved: boolean }>(`/research/campaigns/${campaignId}/repair`, {
+    method: "POST",
+    timeoutMs: 120000
+  });
+}
+
 export function deleteResearchCampaign(campaignId: number, force = false) {
   return request<{ deleted: boolean; campaign_id: number; name: string; deleted_jobs: number; deleted_evidence_jobs: number; forced: boolean }>(`/research/campaigns/${campaignId}?force=${force}`, {
     method: "DELETE",
