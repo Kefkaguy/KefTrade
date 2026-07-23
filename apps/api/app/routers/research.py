@@ -633,6 +633,35 @@ async def prepare_large_scale_research_campaign(
     }
 
 
+@router.post("/research/families/refresh-registry")
+def refresh_family_registry_endpoint(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    from app.services.family_registry import refresh_family_registry
+
+    return refresh_family_registry(conn)
+
+
+@router.get("/research/families/registry")
+def family_registry_endpoint(
+    status: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    from app.services.family_registry import list_family_registry
+
+    rows = list_family_registry(conn, status=status)
+    return {"families": rows, "count": len(rows)}
+
+
+@router.post("/research/campaigns/hidden-gem-recovery")
+def create_hidden_gem_recovery_endpoint(
+    name: str | None = Query(None),
+    max_families: int = Query(27, ge=1, le=50),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    from app.services.research_campaigns import create_hidden_gem_recovery_campaign
+
+    return create_hidden_gem_recovery_campaign(conn, name=name, max_families=max_families)
+
+
 @router.post("/research/elite-candidates/reevaluate")
 def reevaluate_elites_endpoint(
     campaign_id: int | None = Query(None),

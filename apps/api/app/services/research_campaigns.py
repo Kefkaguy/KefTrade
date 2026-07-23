@@ -627,14 +627,38 @@ def upsert_research_universe(
     return jsonable(dict(row))
 
 
+def exclude_legacy_family_candidates(
+    conn: psycopg.Connection,
+    candidates: list[DiscoveryCandidate],
+    metrics: dict[str, Any],
+) -> tuple[list[DiscoveryCandidate], dict[str, Any]]:
+    """Drop candidates from families archived as legacy in the family registry.
+
+    Legacy families keep their evidence but receive no new campaign compute.
+    Families not present in the registry (genuinely new structures) pass
+    through untouched.
+    """
+    from app.services.family_registry import legacy_family_ids
+
+    legacy = legacy_family_ids(conn)
+    if not legacy:
+        return candidates, metrics
+    kept = [candidate for candidate in candidates if candidate.family_id not in legacy]
+    excluded = len(candidates) - len(kept)
+    return kept, {**metrics, "legacy_families_excluded_candidates": excluded, "legacy_family_policy": "registry_legacy_families_receive_no_new_compute"}
+
+
 def campaign_generation_candidates(conn: psycopg.Connection, *, universe_key: str, max_candidates: int) -> tuple[list[DiscoveryCandidate], dict[str, Any]]:
     if universe_key == "research_core_ten":
-        return elite_focused_research_core_candidates(conn, max_candidates=max_candidates)
+        selected, metrics = elite_focused_research_core_candidates(conn, max_candidates=max_candidates)
+        return exclude_legacy_family_candidates(conn, selected, metrics)
     guidance = research_generation_guidance(conn)
     generated = generate_balanced_discovery_candidates(max_candidates=max_candidates * 3)
     ranked = rank_candidates_with_learning(generated, guidance)
     candidates = dedupe_candidates_by_execution_key(ranked, max_candidates)
+    candidates, extra_metrics = exclude_legacy_family_candidates(conn, candidates, {})
     return candidates, {
+        **extra_metrics,
         "mode": "global_learning_guided_balanced" if guidance.get("available") else "balanced",
         "attempted_candidate_generations": len(generated),
         "duplicates_prevented": max(0, len(generated) - len(candidates)),
@@ -645,6 +669,102 @@ def campaign_generation_candidates(conn: psycopg.Connection, *, universe_key: st
             "calculation_version": guidance.get("calculation_version"),
             "policy": "rank generation candidates by accumulated evidence; keep deterministic exploration; validation thresholds unchanged",
         },
+    }
+
+
+def create_hidden_gem_recovery_campaign(
+    conn: psycopg.Connection,
+    *,
+    name: str | None = None,
+    max_families: int = 27,
+    asset_limit: int = 10,
+    timeframes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Re-sample high-edge, trade-starved families so they can validate honestly.
+
+    The library audit found families with median PF up to 5.8 that never
+    reached elite because their long-hold variants take too few trades to
+    clear the 60-trade minimum. This campaign re-runs each such family's best
+    stored candidate across the full research core and every supported
+    timeframe -- more independent samples, longer effective history, and NO
+    weakened thresholds. Deterministic: same registry + same stored evidence
+    produce the same campaign.
+    """
+    from app.services.elite_repair_generator import candidate_from_payload
+    from app.services.family_registry import hidden_gem_families
+
+    ensure_campaign_tables(conn)
+    seed_default_universes(conn)
+    families = hidden_gem_families(conn, limit=max_families)
+    if not families:
+        raise ValueError("no active 'Too restrictive' families in the registry; run the family-registry refresh first")
+    universe = get_universe(conn, "research_core_ten")
+    assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
+    selected_timeframes = list(timeframes or ("4h", "1d"))
+    candidates: list[DiscoveryCandidate] = []
+    family_sources: list[dict[str, Any]] = []
+    for family in families:
+        row = conn.execute(
+            """
+            SELECT candidate, validation_score,
+                   (result->'metrics'->>'profit_factor')::float AS pf
+            FROM research_campaign_jobs
+            WHERE simulation_only = TRUE
+              AND COALESCE(NULLIF(result->>'family_id',''), family_id) = %s
+              AND candidate IS NOT NULL
+              AND result->'metrics' IS NOT NULL
+            ORDER BY (result->'metrics'->>'profit_factor')::float DESC NULLS LAST, validation_score DESC NULLS LAST, id
+            LIMIT 1
+            """,
+            (family["family_id"],),
+        ).fetchone()
+        if not row or not row.get("candidate"):
+            continue
+        try:
+            candidate = candidate_from_payload(dict(row["candidate"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        candidates.append(candidate)
+        family_sources.append({"family_id": family["family_id"], "median_profit_factor": family.get("median_profit_factor"), "source_best_pf": row.get("pf")})
+    if not candidates:
+        raise ValueError("no reconstructable candidates found for hidden-gem families")
+    campaign_key = research_campaign_key("research_core_ten", assets, selected_timeframes, len(candidates), search_mode="hidden_gem_recovery")
+    controls = Jsonb({
+        "asset_limit": asset_limit,
+        "timeframes": selected_timeframes,
+        "campaign_version": CAMPAIGN_VERSION,
+        "candidate_generation": "hidden_gem_recovery_v1",
+        "candidate_generation_mix": {
+            "mode": "hidden_gem_recovery",
+            "families": family_sources,
+            "policy": "re-sample best stored candidate of each high-PF trade-starved family across the research core; validation thresholds unchanged",
+        },
+        "research_execution": {"search_mode": "full", "stage": "full", "full_candidate_budget": len(candidates), "scout_candidate_ids": [], "expanded_routes": [], "expansion_jobs_created": 0},
+        "validation_policy": "All existing trade-count, quality, walk-forward, and cross-market gates remain unchanged.",
+    })
+    row = conn.execute(
+        """
+        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, generator_version, simulation_only)
+        VALUES (%s, %s, 'research_core_ten', 'queued', %s, %s, %s, %s, 'hidden_gem_recovery_v1', TRUE)
+        ON CONFLICT(campaign_key) DO UPDATE SET updated_at = NOW()
+        RETURNING *
+        """,
+        (campaign_key, name or "Hidden-gem recovery: re-sample trade-starved high-PF families", len(candidates), controls, Jsonb(DEFAULT_SCHEDULING_CONFIG), SAFETY_STATEMENT),
+    ).fetchone()
+    campaign_id = int(row["id"])
+    created = queue_campaign_jobs(conn, campaign_id, candidates, assets, selected_timeframes)
+    update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    log_event("Hidden-gem recovery campaign created", campaign_id=campaign_id, families=len(family_sources), candidates=len(candidates), jobs=created)
+    return {
+        "campaign": jsonable(dict(row)),
+        "campaign_id": campaign_id,
+        "families": family_sources,
+        "candidates_queued": len(candidates),
+        "jobs_created": created,
+        "assets": assets,
+        "timeframes": selected_timeframes,
+        "thresholds_weakened": False,
     }
 
 
