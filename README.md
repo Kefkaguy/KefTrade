@@ -9,15 +9,19 @@ The platform is designed around one rule: strategies advance only when stored ev
 
 New campaigns use the reproducible research architecture: exact dataset snapshots, versioned asset profiles, measured clusters, evidence-scored hypotheses, focused 70/20/10 candidate generation, explicit specialist/elite levels, complete rejection funnels, and checksum-verified campaign archives. See [Reproducible Research Architecture](docs/reproducible-research-architecture.md).
 
-KefTrade is still research and simulation only. It can now connect to an Alpaca Paper account for read-only synchronization, deterministic reconciliation, and observe-only shadow execution. It does not route broker orders, does not trade live capital, and does not support leverage, margin, shorting, or automatic live execution.
+KefTrade is still research and simulation only with respect to real capital: it does not trade live capital and does not support leverage, margin, shorting, or automatic live execution. It connects to an Alpaca **Paper** account (fake money, real broker API) for read-only synchronization, deterministic reconciliation, shadow execution, and — as of Phase 11 — actual Alpaca Paper order submission for a deployment that has been explicitly promoted via CLI.
 
 ## Current State
 
 KefTrade is currently in:
 
-**Phase 10 - Read-Only Alpaca Paper Foundation**
+**Phase 11 - Alpaca Paper Order Submission (enabled)**
 
-The research platform has completed the Phase 9 research campaigns that produced elite candidates and candidate-linked simulation deployments. Phase 10 has started only as a read-only Alpaca Paper foundation. The current implementation allows KefTrade to observe a paper account, reconcile external broker state, and run shadow execution for approved elite deployments without submitting orders.
+The research platform completed the Phase 9 research campaigns that produced elite candidates and candidate-linked simulation deployments, then the Phase 10 read-only Alpaca Paper foundation (sync, reconciliation, shadow execution). `BROKER_ORDER_SUBMISSION_ENABLED` and `EXTERNAL_PAPER_EXECUTION_ENABLED` are now both `true` in production and in local `.env`, so the platform is structurally capable of routing real orders to Alpaca's **paper** endpoint (`paper-api.alpaca.markets` — fake money, never the live-trading endpoint).
+
+Order submission still requires two things per deployment before anything is actually sent to Alpaca:
+1. An explicit CLI promotion (`enable-paper-execution`) moving that deployment from `enabled_observe_only` to `enabled_execution`.
+2. A shadow decision for that deployment with `would_submit = TRUE` — i.e. the strategy's own signal, eligibility, and risk checks must actually want to enter a position.
 
 Current operating status:
 
@@ -28,12 +32,11 @@ Current operating status:
 - Paper-trading infrastructure is simulation-only and functional.
 - Alpaca Paper synchronization is functional in read-only mode.
 - Broker reconciliation is functional and deterministic over persisted snapshots.
-- One external paper deployment can run in `enabled_observe_only`.
-- Shadow execution can record what KefTrade would have done without broker mutation.
-- Broker order submission is disabled by feature flags, adapter behavior, and database constraints.
+- Broker order submission is **enabled** by feature flags in production; no deployment has yet been promoted to `enabled_execution`, and no deployment has yet produced a `would_submit = TRUE` shadow decision, so no order has been submitted to Alpaca yet.
+- Shadow execution continues to record what KefTrade would have done, now feeding directly into real submission once a deployment is promoted.
 - Historical campaign evidence is not a substitute for prospective observe-only or paper evidence.
 
-Phase 10 first pass stops at observe-only shadow execution. Broker order submission remains out of scope.
+Phase 10's observe-only boundary has been lifted; broker order submission (to Alpaca Paper, fake money) is now in scope and enabled. Real-money live trading remains out of scope (see Phase 11 vs. Phase 12 distinction below).
 
 ## Product Phases
 
@@ -103,11 +106,11 @@ Phase 9.12 adds:
 - Scheduler-driven forward scans.
 - Deployment health diagnostics.
 
-### Current - Phase 10: Read-Only Alpaca Paper Foundation
+### Complete - Phase 10: Read-Only Alpaca Paper Foundation
 
-Phase 10 connects KefTrade to an external Alpaca Paper account in read-only mode.
+Phase 10 connected KefTrade to an external Alpaca Paper account in read-only mode.
 
-The current Phase 10 scope includes:
+The Phase 10 scope included:
 
 - Read-only Alpaca Paper adapter.
 - Immutable raw broker evidence ingestion.
@@ -121,53 +124,60 @@ The current Phase 10 scope includes:
 - Read-only broker APIs and Mission Control visibility.
 - Audited VPS CLI controls for enable, reapprove, halt, resume, disable, sync, and reconcile.
 
-The first pass highest reachable state is:
+The Phase 10 highest reachable state was:
 
 ```text
 enabled_observe_only
 ```
 
-The following remain disabled:
+### Current - Phase 11: Alpaca Paper Order Submission
+
+Phase 11 lifts the observe-only boundary for **Alpaca Paper** (still fake money, real broker API). Both submission flags are enabled:
 
 ```env
-BROKER_ORDER_SUBMISSION_ENABLED=false
-EXTERNAL_PAPER_EXECUTION_ENABLED=false
+BROKER_ORDER_SUBMISSION_ENABLED=true
+EXTERNAL_PAPER_EXECUTION_ENABLED=true
 ```
 
-KefTrade cannot submit Alpaca Paper orders in the current implementation.
+This flips `alpaca_paper.py`'s `submit_order`/`cancel_order` and `external_execution.py`'s `submit_approved_paper_order` from `BrokerMutationDisabled` to live, on the already-implemented order-submission and reconciliation pipeline. It does **not** by itself cause anything to trade:
 
-### Future - Phase 11: Optional Live Trading
+- A deployment must still be explicitly promoted from `enabled_observe_only` to `enabled_execution` via the CLI (`enable-paper-execution`), which itself requires a frozen deployment configuration, an open execution epoch, and at least one prior `would_submit = TRUE` shadow decision on record for that deployment.
+- Even once promoted, an order is only ever submitted when a future shadow cycle produces another `would_submit = TRUE` decision for that specific deployment — i.e. the strategy's own signal, eligibility, and risk checks must actually want to enter.
+- Sell/short order paths remain rejected regardless of flags (long-only guard, `elite_portfolio_activation` and DB triggers).
 
-Live trading is not part of the current platform. It should only be considered after robust research evidence, forward-validation evidence, safety controls, auditability, and execution boundaries are deliberately designed and reviewed.
+### Future - Phase 12: Optional Live Trading
+
+Live trading with real capital is not part of the current platform and is a distinct, much larger decision from Phase 11's Alpaca Paper submission above. It should only be considered after robust research evidence, forward-validation evidence, safety controls, auditability, and execution boundaries are deliberately designed and reviewed.
 
 ## Research and Safety Guardrails
 
 KefTrade currently does not implement:
 
-- Live trading.
-- Broker order routing.
+- Live trading with real capital.
 - Real-money execution.
 - Margin.
 - Leverage.
-- Shorting.
-- Automatic live execution.
+- Shorting (long-only on every external path).
+- Automatic live execution against real capital.
 - Buy or sell recommendations.
 - Validation shortcuts.
 - Threshold weakening to force promotion.
 
+As of Phase 11, KefTrade **does** implement broker order routing to Alpaca **Paper** (fake money) for a deployment that has been explicitly promoted to `enabled_execution` via CLI. This is distinct from the items above, all of which concern real capital.
+
 Any strategy that has not passed the required gates remains research evidence only.
 
-Historical backtest evidence does not unlock broker execution by itself. Phase 10 observe-only requires elite candidate lineage, a frozen deployment configuration, clean broker reconciliation, compatible adapter metadata, and explicit CLI approval.
+Historical backtest evidence does not unlock broker execution by itself. Reaching `enabled_execution` requires elite candidate lineage, a frozen deployment configuration, clean broker reconciliation, compatible adapter metadata, explicit CLI approval, and a prior `would_submit = TRUE` shadow decision.
 
 Broker safety boundaries:
 
-- Only Alpaca Paper is supported.
+- Only Alpaca Paper is supported (`ALPACA_TRADING_BASE_URL=https://paper-api.alpaca.markets`, never the live-trading endpoint).
 - Broker sync may call Alpaca.
 - Reconciliation never calls Alpaca; it reads persisted snapshots.
 - Raw broker payloads are immutable evidence.
-- Browser-accessible broker endpoints are read-only.
-- The adapter raises `BrokerMutationDisabled` for order submission.
-- `enabled_execution` is prohibited while execution flags are disabled.
+- Browser-accessible broker endpoints are read-only (no HTTP-triggerable submission surface exists; only the CLI and the background worker cycle can submit).
+- The adapter raises `BrokerMutationDisabled` for order submission whenever either flag is off (both are currently on in production).
+- `enabled_execution` is only reachable through the explicit CLI promotion described above, never automatically.
 - Automatic resume is not allowed.
 
 ## What KefTrade Does Today
@@ -356,9 +366,9 @@ If eligible forward evidence is empty, the platform should report:
 - Eligible forward profit: unavailable
 - Phase 10 evidence: not started
 
-## External Paper Observe-Only
+## External Paper Observe-Only and Order Submission
 
-Phase 10 external paper support is observe-only.
+Phase 10 external paper support was observe-only. As of Phase 11, a deployment explicitly promoted via CLI can reach `enabled_execution` and have real orders submitted to Alpaca Paper.
 
 Broker data flow:
 
@@ -502,20 +512,20 @@ docker exec keftrade-postgres psql -U keftrade -d keftrade -c "select state, use
 - Equity research provider: `yfinance_research`
 - Default crypto symbol/timeframe: `BTCUSDT` / `4h`
 - Current primary elite research asset/timeframe: `AAPL` / `1h`
-- Phase 10 broker provider: `alpaca`
-- Phase 10 broker environment: `paper`
-- Phase 10 highest reachable external state: `enabled_observe_only`
+- Phase 10/11 broker provider: `alpaca`
+- Phase 10/11 broker environment: `paper`
+- Phase 11 highest reachable external state: `enabled_execution` (structurally reachable; no deployment has been promoted yet)
 
-## Production Phase 10 Operations
+## Production Phase 11 Operations
 
-Required first-pass production feature flags:
+Current production feature flags:
 
 ```env
 BROKER_SYNC_ENABLED=true
 BROKER_RECONCILIATION_ENABLED=true
 BROKER_SHADOW_EXECUTION_ENABLED=true
-BROKER_ORDER_SUBMISSION_ENABLED=false
-EXTERNAL_PAPER_EXECUTION_ENABLED=false
+BROKER_ORDER_SUBMISSION_ENABLED=true
+EXTERNAL_PAPER_EXECUTION_ENABLED=true
 ```
 
 Useful VPS commands:
@@ -544,7 +554,13 @@ docker compose -f docker-compose.prod.yml exec -T api \
   --confirm-deployment-id <deployment_id>
 ```
 
-Do not enable broker order submission in the current phase.
+Promote an observe-only deployment to live Alpaca Paper order submission (requires a prior `would_submit = TRUE` shadow decision for that deployment):
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T api \
+  python -m app.cli.deployments enable-paper-execution <deployment_id> \
+  --confirm-deployment-id <deployment_id>
+```
 
 ## Operational Notes
 
@@ -552,7 +568,7 @@ Do not enable broker order submission in the current phase.
 - Do not change strategies or parameters during forward validation.
 - Do not mix legacy simulation profit with eligible candidate-linked forward performance.
 - Do not classify evidence-rejected research jobs as operational failures.
-- Keep broker order submission and live-trading code disabled unless a future phase explicitly changes that boundary.
+- Broker order submission is enabled for Alpaca Paper (fake money); real-money live-trading code remains disabled and out of scope unless a future phase explicitly changes that boundary.
 - Use aggregate read models for UI pages that need multi-account paper state.
 - Use internal API/container calls for heavy administrative refreshes if nginx returns a proxy timeout.
 
@@ -587,8 +603,8 @@ Recent work added and fixed:
 
 Near-term engineering priorities:
 
-- Continue collecting observe-only shadow evidence for elite deployments.
-- Keep Alpaca Paper order submission disabled until shadow evidence, risk decisions, and reconciliation behavior are reviewed.
+- Continue collecting observe-only shadow evidence for elite deployments not yet promoted to `enabled_execution`.
+- Alpaca Paper order submission is enabled (Phase 11); promote individual deployments deliberately, one at a time, only after reviewing their shadow evidence, risk decisions, and reconciliation history.
 - Preserve deterministic campaign behavior.
 - Keep Simple Mode and Advanced Mode aligned to the same authoritative data.
 - Expand aggregate read models where UI pages need multi-table state.
