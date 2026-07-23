@@ -42,3 +42,26 @@ def test_negative_edge_and_noisy_families_are_legacy() -> None:
 def test_classification_is_deterministic() -> None:
     values = stats(median_profit_factor=1.23, avg_trades=17)
     assert classify_family(values) == classify_family(values)
+
+
+def test_low_timeframes_are_supported_but_not_default() -> None:
+    """15m/30m must be usable when asked for, without changing defaults."""
+    from app.services.research_campaigns import (
+        DEFAULT_CAMPAIGN_TIMEFRAMES,
+        HIGH_FREQUENCY_TIMEFRAMES,
+        SUPPORTED_CAMPAIGN_TIMEFRAMES,
+    )
+
+    assert DEFAULT_CAMPAIGN_TIMEFRAMES == ("1h", "4h", "1d")
+    for timeframe in ("15m", "30m"):
+        assert timeframe in SUPPORTED_CAMPAIGN_TIMEFRAMES
+        assert timeframe not in DEFAULT_CAMPAIGN_TIMEFRAMES
+    assert set(DEFAULT_CAMPAIGN_TIMEFRAMES).issubset(set(SUPPORTED_CAMPAIGN_TIMEFRAMES))
+    assert set(HIGH_FREQUENCY_TIMEFRAMES).issubset(set(SUPPORTED_CAMPAIGN_TIMEFRAMES))
+
+
+def test_explicit_low_timeframes_are_no_longer_stripped() -> None:
+    from app.services.research_campaigns import strongest_quality_timeframes
+
+    assert strongest_quality_timeframes([], [], ["15m", "30m"]) == ["15m", "30m"]
+    assert strongest_quality_timeframes([], [], ["15m", "bogus"]) == ["15m"]

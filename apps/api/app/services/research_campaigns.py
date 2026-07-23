@@ -50,6 +50,12 @@ SINGLE_ASSET_GENERALIZATION_CAMPAIGN_VERSION = "phase_9_10_single_asset_generali
 STRATEGY_REDESIGN_CAMPAIGN_VERSION = "phase_9_11_strategy_redesign_v1"
 VOLATILITY_ADAPTIVE_RELATIVE_STRENGTH_CAMPAIGN_VERSION = "phase_9_12_volatility_adaptive_relative_strength_v1"
 DEFAULT_CAMPAIGN_TIMEFRAMES = ("1h", "4h", "1d")
+# Timeframes a campaign MAY use when explicitly requested. Kept separate from
+# the defaults above: 1h/4h/1d give only ~500-250 decision points per year, so
+# no strategy on them can exceed ~10 trades/year regardless of its entry logic.
+# 15m/30m are supported by the Alpaca adapter and are the only lever that can
+# produce genuinely higher-frequency candidates. Defaults are unchanged.
+SUPPORTED_CAMPAIGN_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d")
 WORKER_VERSION = "campaign_worker_v1"
 DEFAULT_BATCH_SIZE = 1000
 MIN_CAMPAIGN_CANDLES = 120
@@ -768,6 +774,92 @@ def create_hidden_gem_recovery_campaign(
     }
 
 
+HIGH_FREQUENCY_TIMEFRAMES = ("15m", "30m")
+SHORT_HOLD_EXIT_BLOCKS = {"time_exit_12", "fixed_rr_15", "atr_stop_20"}
+
+
+def create_high_frequency_campaign(
+    conn: psycopg.Connection,
+    *,
+    name: str | None = None,
+    max_candidates: int = 120,
+    asset_limit: int = 10,
+    timeframes: list[str] | None = None,
+) -> dict[str, Any]:
+    """Research strategies that act often enough to be a useful bot.
+
+    Every existing elite trades ~10/year because 1h/4h/1d bars offer only
+    ~500-250 decision points annually -- a ceiling no entry structure can beat
+    (measured: the best entry block averages 10 trades/year, the worst 4.9).
+    This campaign moves to 15m/30m bars, where ~9,800/4,900 bars per year make
+    50+ trades/year reachable, and prefers short-hold exits so positions close
+    in hours rather than the current 155-409 hour averages.
+
+    No validation threshold is weakened; this changes only where we look.
+    Legacy families are excluded by the family registry as usual.
+    """
+    ensure_campaign_tables(conn)
+    seed_default_universes(conn)
+    selected_timeframes = [tf for tf in (timeframes or HIGH_FREQUENCY_TIMEFRAMES) if tf in SUPPORTED_CAMPAIGN_TIMEFRAMES]
+    if not selected_timeframes:
+        raise ValueError(f"high-frequency campaigns require timeframes from {SUPPORTED_CAMPAIGN_TIMEFRAMES}")
+    universe = get_universe(conn, "research_core_ten")
+    assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
+
+    pool = generate_balanced_discovery_candidates(max_candidates=max_candidates * 8)
+    short_hold = [c for c in pool if str(c.blocks.get("exit") or "") in SHORT_HOLD_EXIT_BLOCKS]
+    ordered = short_hold or pool
+    candidates = dedupe_candidates_by_execution_key(ordered, max_candidates)
+    candidates, legacy_metrics = exclude_legacy_family_candidates(conn, candidates, {})
+    if not candidates:
+        raise ValueError("no non-legacy candidates available for a high-frequency campaign")
+
+    entry_mix = dict(sorted(Counter(str(c.blocks.get("entry") or "unknown") for c in candidates).items()))
+    exit_mix = dict(sorted(Counter(str(c.blocks.get("exit") or "unknown") for c in candidates).items()))
+    campaign_key = research_campaign_key("research_core_ten", assets, selected_timeframes, len(candidates), search_mode="high_frequency")
+    controls = Jsonb({
+        "asset_limit": asset_limit,
+        "timeframes": selected_timeframes,
+        "campaign_version": CAMPAIGN_VERSION,
+        "candidate_generation": "high_frequency_v1",
+        "candidate_generation_mix": {
+            "mode": "high_frequency_low_timeframe",
+            "entry_mix": entry_mix,
+            "exit_mix": exit_mix,
+            "short_hold_exits_preferred": sorted(SHORT_HOLD_EXIT_BLOCKS),
+            "policy": "low-timeframe bars raise the annual decision count; short-hold exits close positions in hours. Validation thresholds unchanged.",
+            **legacy_metrics,
+        },
+        "research_execution": {"search_mode": "full", "stage": "full", "full_candidate_budget": len(candidates), "scout_candidate_ids": [], "expanded_routes": [], "expansion_jobs_created": 0},
+        "validation_policy": "All existing trade-count, quality, walk-forward, and cross-market gates remain unchanged.",
+    })
+    row = conn.execute(
+        """
+        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, generator_version, simulation_only)
+        VALUES (%s, %s, 'research_core_ten', 'queued', %s, %s, %s, %s, 'high_frequency_v1', TRUE)
+        ON CONFLICT(campaign_key) DO UPDATE SET updated_at = NOW()
+        RETURNING *
+        """,
+        (campaign_key, name or "High-frequency research: low-timeframe, short-hold strategies", len(candidates), controls, Jsonb(DEFAULT_SCHEDULING_CONFIG), SAFETY_STATEMENT),
+    ).fetchone()
+    campaign_id = int(row["id"])
+    created = queue_campaign_jobs(conn, campaign_id, candidates, assets, selected_timeframes)
+    update_campaign_counts(conn, campaign_id)
+    conn.commit()
+    log_event("High-frequency campaign created", campaign_id=campaign_id, candidates=len(candidates), timeframes=selected_timeframes, jobs=created)
+    return {
+        "campaign": jsonable(dict(row)),
+        "campaign_id": campaign_id,
+        "candidates_queued": len(candidates),
+        "jobs_created": created,
+        "assets": assets,
+        "timeframes": selected_timeframes,
+        "entry_mix": entry_mix,
+        "exit_mix": exit_mix,
+        "thresholds_weakened": False,
+    }
+
+
 def rank_candidates_with_learning(candidates: list[DiscoveryCandidate], guidance: dict[str, Any]) -> list[DiscoveryCandidate]:
     if not guidance.get("available"):
         return candidates
@@ -1438,7 +1530,7 @@ def strongest_quality_assets(jobs: list[dict[str, Any]], parents: list[dict[str,
 
 def strongest_quality_timeframes(jobs: list[dict[str, Any]], parents: list[dict[str, Any]], explicit: list[str] | None) -> list[str]:
     if explicit:
-        return [timeframe for timeframe in explicit if timeframe in DEFAULT_CAMPAIGN_TIMEFRAMES]
+        return [timeframe for timeframe in explicit if timeframe in SUPPORTED_CAMPAIGN_TIMEFRAMES]
     selected: list[str] = []
     for row in parents:
         append_unique(selected, str(row.get("timeframe", "")))
@@ -3425,7 +3517,7 @@ def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dic
         return readiness_block("blocked_data", "unsupported_symbol", "Symbol is not registered in the market-data universe.", retry_after_seconds=86400, job=job, symbol_row=None, preflight_status="unsupported")
     if symbol_row and symbol_row.get("is_active") is False:
         return readiness_block("blocked_data", "unsupported_symbol", "Asset is inactive or unsupported.", retry_after_seconds=86400, job=job, symbol_row=dict(symbol_row), preflight_status="unsupported")
-    if timeframe not in DEFAULT_CAMPAIGN_TIMEFRAMES:
+    if timeframe not in SUPPORTED_CAMPAIGN_TIMEFRAMES:
         return readiness_block("blocked_data", "unsupported_timeframe", f"Timeframe {timeframe} is not supported by campaign preflight.", retry_after_seconds=86400, job=job, symbol_row=dict(symbol_row), preflight_status="unsupported")
     row = conn.execute(
         """
@@ -3519,7 +3611,7 @@ def research_campaign_preflight(conn: psycopg.Connection, *, assets: list[str], 
             if not symbol_row or symbol_row.get("is_active") is False:
                 classification = "unsupported_symbol"
                 reason = "Symbol is not registered as an active market-data asset."
-            elif timeframe not in DEFAULT_CAMPAIGN_TIMEFRAMES:
+            elif timeframe not in SUPPORTED_CAMPAIGN_TIMEFRAMES:
                 classification = "unsupported_timeframe"
                 reason = f"Timeframe {timeframe} is not supported by campaign preflight."
             elif candle_count < MIN_CAMPAIGN_CANDLES:

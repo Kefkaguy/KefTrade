@@ -651,6 +651,18 @@ def family_registry_endpoint(
     return {"families": rows, "count": len(rows)}
 
 
+@router.post("/research/campaigns/high-frequency")
+def create_high_frequency_endpoint(
+    name: str | None = Query(None),
+    max_candidates: int = Query(120, ge=10, le=250),
+    timeframes: list[str] | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    from app.services.research_campaigns import create_high_frequency_campaign
+
+    return create_high_frequency_campaign(conn, name=name, max_candidates=max_candidates, timeframes=timeframes)
+
+
 @router.post("/research/campaigns/hidden-gem-recovery")
 def create_hidden_gem_recovery_endpoint(
     name: str | None = Query(None),
