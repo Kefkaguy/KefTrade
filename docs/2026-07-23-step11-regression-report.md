@@ -141,3 +141,43 @@ pre-existing local test-environment issue are recorded for awareness, not
 fixed, per instruction.
 
 **Awaiting approval before Step 12 (Intraday Research Lab).**
+
+---
+
+## Addendum — broker-worker healthcheck correction (2026-07-23, post-approval)
+
+Approved operational correction, applied after Step 11 was approved: the
+`production-broker-worker-1` healthcheck asserted
+`BROKER_ORDER_SUBMISSION_ENABLED`/`EXTERNAL_PAPER_EXECUTION_ENABLED` were both
+`false` (a Phase 10 assumption invalidated by the deliberate Phase 11 flag
+flip). Replaced with `app.workers.broker_worker_healthcheck`, which checks
+process/DB liveness, fresh `broker_sync_runs` cycles, and non-persistent
+failures — and never reads either execution flag (pinned by a test).
+
+**Change scope:** healthcheck only. No execution behavior, feature flag
+value, or broker capability was changed. Only `broker-worker` was rebuilt and
+recreated; `api`, `worker`, `postgres`, `nginx` were untouched (confirmed by
+unchanged `CreatedAt` timestamps).
+
+### Focused regression (post-deploy)
+
+| Check | Result |
+|---|---|
+| Docker health status | **healthy** (`docker compose ps` → `production-broker-worker-1 ... (healthy)`) |
+| Healthcheck script run manually inside the container | `HEALTHY: latest cycle status=complete age=7s`, exit 0 |
+| `/broker/status` | 200; `execution_enabled: false`, flags unchanged (`broker_order_submission_enabled: true`, `external_paper_execution_enabled: true`) |
+| `/broker/reconciliation` | 200 |
+| `/broker/execution-readiness` | 200 |
+| `/health` (api) | 200 |
+| `broker_sync_runs` — last 3 cycles | all `status=complete`, ~60s apart (poll interval), most recent 7s old at check time |
+| broker-worker logs (last 3 min) | no errors/exceptions/tracebacks |
+| Flags on disk unchanged | `BROKER_ORDER_SUBMISSION_ENABLED=true`, `EXTERNAL_PAPER_EXECUTION_ENABLED=true` — identical to before the fix |
+| Other containers unaffected | `api`, `worker`, `postgres`, `nginx` all show pre-existing `CreatedAt`; only `broker-worker` recreated |
+
+**Verdict: PASS.** Broker cycles continue completing normally; reconciliation
+stays clean; no capability or flag was touched. Committed separately (see git
+log) from the Step 11 regression pass.
+
+**Awaiting approval before Step 12 (Intraday Research Lab) — its architecture
+and implementation plan still require explicit sign-off before any work
+begins.**
