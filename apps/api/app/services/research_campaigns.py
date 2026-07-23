@@ -4764,6 +4764,34 @@ def get_campaign_intelligence(conn: psycopg.Connection, campaign_id: int, kind: 
     return {"campaign_id": campaign_id, kind.replace("-", "_"): analytics.get(key), "simulation_only": True}
 
 
+def trades_per_year_for_metrics(metrics: dict[str, Any]) -> float | None:
+    """Annualized trade count for one backtest, from its walk-forward span.
+
+    Returns None when the evaluated window is unknown, so callers can ignore
+    variants that cannot be annualized rather than treating them as zero.
+    """
+    walk_forward = dict(metrics.get("walk_forward") or {})
+    start = parse_timestamp(walk_forward.get("train_start") or walk_forward.get("validation_start"))
+    end = parse_timestamp(walk_forward.get("validation_end") or walk_forward.get("train_end"))
+    if start is None or end is None or end <= start:
+        return None
+    years = (end - start).total_seconds() / 31_557_600.0
+    if years <= 0:
+        return None
+    return round(finite_metric(metrics.get("number_of_trades")) / years, 4)
+
+
+def trade_frequency_class(trades_per_year: float) -> str:
+    """Human-facing bucket for how often a strategy actually acts."""
+    if trades_per_year >= 250:
+        return "daily"
+    if trades_per_year >= 50:
+        return "weekly"
+    if trades_per_year >= 12:
+        return "monthly"
+    return "rare"
+
+
 def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for job in jobs:
@@ -4782,6 +4810,7 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
         variant_expectancy = [finite_metric(metric.get("expectancy_per_trade")) for metric in metrics]
         variant_drawdown = [finite_metric(metric.get("max_drawdown")) for metric in metrics]
         variant_trades = [finite_metric(metric.get("number_of_trades")) for metric in metrics]
+        variant_trades_per_year = [value for value in (trades_per_year_for_metrics(metric) for metric in metrics) if value is not None]
         consistency_score = round(len(passed) / len(rows), 4) if rows else 0.0
         regime_counter: Counter[str] = Counter()
         for result in results:
@@ -4806,6 +4835,8 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
                 "median_expectancy": median(variant_expectancy),
                 "median_max_drawdown": median(variant_drawdown),
                 "median_variant_trade_count": int(median(variant_trades)),
+                "median_trades_per_year": median(variant_trades_per_year) if variant_trades_per_year else 0.0,
+                "trade_frequency_class": trade_frequency_class(median(variant_trades_per_year) if variant_trades_per_year else 0.0),
                 "variant_count": len(metrics),
                 "stability": consistency_score,
                 "assets_passed": len({row["symbol"] for row in passed}),
@@ -4862,6 +4893,27 @@ def passes_single_market_gate(summary: dict[str, Any]) -> bool:
     )
 
 
+def minimum_trades_per_year() -> float:
+    """Frequency floor for elite promotion.
+
+    Defaults to 0 (measure only). Research has always optimized for quality
+    and never for opportunity, which is why every survivor trades ~12x/year
+    and no deployment acts more than about monthly. Raising this makes
+    "signals often enough to be a useful bot" a first-class promotion
+    requirement. It is a floor -- raising it only ever removes candidates.
+    """
+    return max(0.0, float(getattr(settings, "elite_minimum_trades_per_year", 0) or 0))
+
+
+def frequency_failures(summary: dict[str, Any]) -> list[str]:
+    threshold = minimum_trades_per_year()
+    if threshold <= 0:
+        return []
+    if finite_metric(summary.get("median_trades_per_year")) < threshold:
+        return ["MEDIAN_TRADES_PER_YEAR"]
+    return []
+
+
 def median_consistency_failures(summary: dict[str, Any]) -> list[str]:
     """List which median-variant requirements a candidate fails (empty = passes)."""
     failures: list[str] = []
@@ -4882,6 +4934,7 @@ def cross_validation_failures(summary: dict[str, Any]) -> list[str]:
     if not passes_single_market_gate(summary):
         failures.append("AGGREGATE_GATE")
     failures.extend(median_consistency_failures(summary))
+    failures.extend(frequency_failures(summary))
     return failures
 
 

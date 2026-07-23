@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     broker_shadow_execution_enabled: bool = Field(default=True, validation_alias="BROKER_SHADOW_EXECUTION_ENABLED")
     broker_order_submission_enabled: bool = Field(default=False, validation_alias="BROKER_ORDER_SUBMISSION_ENABLED")
     external_paper_execution_enabled: bool = Field(default=False, validation_alias="EXTERNAL_PAPER_EXECUTION_ENABLED")
+    elite_minimum_trades_per_year: float = Field(default=0, validation_alias="ELITE_MINIMUM_TRADES_PER_YEAR")
     elite_portfolio_builder_enabled: bool = Field(default=True, validation_alias="ELITE_PORTFOLIO_BUILDER_ENABLED")
     elite_portfolio_activation_enabled: bool = Field(default=False, validation_alias="ELITE_PORTFOLIO_ACTIVATION_ENABLED")
     model_risk_enabled: bool = Field(default=True, validation_alias="MODEL_RISK_ENABLED")
