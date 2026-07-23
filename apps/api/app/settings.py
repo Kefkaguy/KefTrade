@@ -9,7 +9,6 @@ ROOT_DIR = Path(__file__).resolve().parents[3]
 class Settings(BaseSettings):
     environment: str = "development"
     log_level: str = "INFO"
-    diagnostic_logging: bool = True
     redis_url: str | None = Field(default=None, validation_alias="REDIS_URL")
     cache_key_prefix: str = Field(default="keftrade", validation_alias="KEFTRADE_CACHE_KEY_PREFIX")
     database_url: str = "postgresql://keftrade:keftrade@127.0.0.1:5432/keftrade"
@@ -50,7 +49,6 @@ class Settings(BaseSettings):
     broker_weekly_loss_limit_pct: float = Field(default=0.05, validation_alias="KEFTRADE_WEEKLY_LOSS_LIMIT_PCT")
     broker_max_open_positions: int = Field(default=2, validation_alias="KEFTRADE_MAX_OPEN_POSITIONS")
     broker_max_open_orders: int = Field(default=2, validation_alias="KEFTRADE_MAX_OPEN_ORDERS")
-    broker_raw_snapshot_retention_days: int = Field(default=30, validation_alias="BROKER_RAW_SNAPSHOT_RETENTION_DAYS")
     broker_worker_poll_seconds: int = Field(default=60, validation_alias="BROKER_WORKER_POLL_SECONDS")
     paper_scan_max_candle_age_hours: int = 96
     max_campaign_workers: int | None = Field(default=None, validation_alias="KEFTRADE_MAX_CAMPAIGN_WORKERS")
