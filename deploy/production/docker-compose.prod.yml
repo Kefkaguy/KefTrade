@@ -144,11 +144,14 @@ services:
         condition: service_completed_successfully
     command: ["python", "-m", "app.workers.broker_runner"]
     healthcheck:
-      test: ["CMD", "python", "-c", "import os; assert os.environ.get('DATABASE_URL'); assert os.environ.get('BROKER_ORDER_SUBMISSION_ENABLED','false').lower() == 'false'; assert os.environ.get('EXTERNAL_PAPER_EXECUTION_ENABLED','false').lower() == 'false'"]
+      # See apps/api/app/workers/broker_worker_healthcheck.py for what this
+      # checks (liveness + fresh cycles) and, in its module docstring, why the
+      # old flag-value assertion was replaced.
+      test: ["CMD", "python", "-m", "app.workers.broker_worker_healthcheck"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 30s
+      start_period: 45s
     logging:
       driver: json-file
       options:
