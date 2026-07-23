@@ -30,7 +30,15 @@ ALTER TABLE research_campaign_jobs ADD CONSTRAINT research_campaign_jobs_failure
             'worker_timeout',
             'unknown_error',
             'rate_limit',
-            'budget_exhausted'
+            'budget_exhausted',
+            -- data-readiness block reasons (see migration 043); listed here too
+            -- because the migrate job re-applies this file on every deploy.
+            'missing_dataset',
+            'insufficient_historical_depth',
+            'unsupported_symbol',
+            'unsupported_timeframe',
+            'feature_generation_failure',
+            'blocked_terminal'
         )
     );
 

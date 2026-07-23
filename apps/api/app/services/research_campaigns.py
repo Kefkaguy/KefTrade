@@ -4595,6 +4595,8 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
         UPDATE research_campaigns
         SET status = 'completed',
             completed_at = NOW(),
+            finalized_at = COALESCE(finalized_at, NOW()),
+            execution_status = 'idle',
             queued_jobs = %s,
             completed_jobs = %s,
             failed_jobs = %s,
@@ -6590,18 +6592,19 @@ def list_research_campaigns(conn: psycopg.Connection, *, limit: int = 50) -> dic
             COUNT(j.id) FILTER (WHERE j.status = 'queued') AS queued_jobs,
             COUNT(j.id) FILTER (WHERE j.status = 'running') AS running_jobs,
             COUNT(j.id) FILTER (WHERE j.status = 'blocked_data') AS blocked_jobs,
+            COUNT(j.id) FILTER (WHERE j.status = 'blocked_terminal') AS terminal_blocked_jobs,
             COUNT(j.id) FILTER (WHERE j.status = 'deferred_rate_limit') AS deferred_jobs,
-            COUNT(j.id) FILTER (WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')) AS terminal_jobs,
+            COUNT(j.id) FILTER (WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled', 'blocked_terminal')) AS terminal_jobs,
             COUNT(j.id) FILTER (
-                WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')
+                WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled', 'blocked_terminal')
                   AND j.updated_at >= NOW() - INTERVAL '15 minutes'
             ) AS recent_terminal_jobs,
             COUNT(j.id) FILTER (
-                WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')
+                WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled', 'blocked_terminal')
                   AND j.updated_at >= NOW() - INTERVAL '5 minutes'
             ) AS terminal_jobs_5m,
             COUNT(j.id) FILTER (
-                WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled')
+                WHERE j.status IN ('completed', 'promoted', 'rejected', 'failed', 'canceled', 'blocked_terminal')
                   AND j.updated_at >= NOW() - INTERVAL '15 minutes'
             ) AS terminal_jobs_15m,
             AVG(j.execution_runtime_ms) FILTER (WHERE j.execution_runtime_ms IS NOT NULL) AS average_profiled_runtime_ms,

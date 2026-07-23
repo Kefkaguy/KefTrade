@@ -1282,6 +1282,7 @@ export type ResearchCampaignListRow = {
   queued_jobs: number;
   running_jobs: number;
   blocked_jobs: number;
+  terminal_blocked_jobs?: number;
   deferred_jobs: number;
   terminal_jobs: number;
   promoted_jobs: number;

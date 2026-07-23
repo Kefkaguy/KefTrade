@@ -227,7 +227,10 @@ export function CampaignActivity({ enabled = true }: { enabled?: boolean }) {
                 <div className="campaignProgress">
                   <div><span>{campaign.terminal_jobs.toLocaleString()} of {campaign.total_jobs.toLocaleString()} jobs</span><strong>{progress}%</strong></div>
                   <span className="campaignProgressTrack"><motion.i initial={false} animate={{ width: `${progress}%` }} transition={{ duration: reduceMotion ? 0 : 0.45 }} /></span>
-                  <small>{campaign.queued_jobs.toLocaleString()} queued · {campaign.blocked_jobs.toLocaleString()} blocked</small>
+                  <small>
+                    {campaign.queued_jobs.toLocaleString()} queued · {campaign.blocked_jobs.toLocaleString()} blocked
+                    {(campaign.terminal_blocked_jobs ?? 0) > 0 ? ` · ${(campaign.terminal_blocked_jobs ?? 0).toLocaleString()} unrecoverable` : ""}
+                  </small>
                 </div>
                 <div className="campaignTiming">
                   {eta ? <strong title={eta.title}>{eta.label}</strong> : null}
