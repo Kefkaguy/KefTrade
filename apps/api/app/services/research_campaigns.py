@@ -867,7 +867,10 @@ def create_high_frequency_campaign(
 
     entry_mix = dict(sorted(Counter(str(c.blocks.get("entry") or "unknown") for c in candidates).items()))
     exit_mix = dict(sorted(Counter(str(c.blocks.get("exit") or "unknown") for c in candidates).items()))
-    campaign_key = research_campaign_key("research_core_ten", assets, selected_timeframes, len(candidates), search_mode="high_frequency")
+    campaign_key = research_campaign_key(
+        "research_core_ten", assets, selected_timeframes, len(candidates),
+        search_mode="high_frequency", variant="timeframe_scaled_v2",
+    )
     controls = Jsonb({
         "asset_limit": asset_limit,
         "timeframes": selected_timeframes,
@@ -7982,10 +7985,15 @@ def research_campaign_key(
     *,
     search_mode: str = "full",
     dataset_id: int | None = None,
+    variant: str | None = None,
 ) -> str:
     mode_suffix = "" if search_mode == "full" else f"|{search_mode}_v1"
     dataset_suffix = "" if dataset_id is None else f"|dataset:{dataset_id}|portfolio_evidence_v1"
-    raw = f"{CAMPAIGN_VERSION}|{universe_key}|{','.join(assets)}|{','.join(timeframes)}|{max_candidates}{mode_suffix}{dataset_suffix}"
+    # A generator variant (e.g. timeframe-scaled thresholds) changes the
+    # research question even when universe/assets/timeframes match, so it must
+    # not collide with an earlier campaign via ON CONFLICT(campaign_key).
+    variant_suffix = "" if not variant else f"|variant:{variant}"
+    raw = f"{CAMPAIGN_VERSION}|{universe_key}|{','.join(assets)}|{','.join(timeframes)}|{max_candidates}{mode_suffix}{dataset_suffix}{variant_suffix}"
     return sha256(raw.encode("utf-8")).hexdigest()
 
 

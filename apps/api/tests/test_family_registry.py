@@ -99,3 +99,14 @@ def test_reference_timeframe_is_unchanged_and_scaling_is_opt_in() -> None:
     assert apply_timeframe_scaling(make(dict(authored)), "15m").parameters == authored
     opted = apply_timeframe_scaling(make({**authored, "timeframe_scaled_thresholds": True}), "15m")
     assert opted.parameters["returns_5_min"] == 0.003
+
+
+def test_campaign_variant_prevents_key_collision() -> None:
+    """A different generator variant must not reuse an earlier campaign's row."""
+    from app.services.research_campaigns import research_campaign_key
+
+    base = research_campaign_key("u", ["AAPL"], ["15m"], 69, search_mode="high_frequency")
+    scaled = research_campaign_key("u", ["AAPL"], ["15m"], 69, search_mode="high_frequency", variant="timeframe_scaled_v2")
+    assert base != scaled
+    # Same inputs still deduplicate as before.
+    assert scaled == research_campaign_key("u", ["AAPL"], ["15m"], 69, search_mode="high_frequency", variant="timeframe_scaled_v2")
