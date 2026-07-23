@@ -294,3 +294,37 @@ def test_normalized_broker_metrics_are_json_serializable() -> None:
     order = normalize_order({"id": "order-1", "symbol": "AAPL", "side": "buy", "qty": "1", "filled_qty": "0"})
     assert '"cash":"100000.00"' in canonical_json(account)
     assert '"requested_quantity":"1"' in canonical_json(order)
+
+
+def test_observe_only_onboarding_survives_phase11_execution_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Observe-only must stay available once paper execution is enabled.
+
+    Observe-only records decisions and submits nothing (submission requires
+    state == 'enabled_execution', which only enable_paper_execution sets), so
+    it must not be gated on the execution flags being OFF -- only on the two
+    flags agreeing with each other.
+    """
+    from app.services.external_execution import assert_observe_only_allowed
+
+    monkeypatch.setattr(settings, "broker_order_submission_enabled", True)
+    monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
+    assert_observe_only_allowed()
+
+    monkeypatch.setattr(settings, "broker_order_submission_enabled", False)
+    monkeypatch.setattr(settings, "external_paper_execution_enabled", False)
+    assert_observe_only_allowed()
+
+    monkeypatch.setattr(settings, "broker_order_submission_enabled", True)
+    monkeypatch.setattr(settings, "external_paper_execution_enabled", False)
+    with pytest.raises(RuntimeError, match="together"):
+        assert_observe_only_allowed()
+
+
+def test_observe_only_approval_never_sets_execution_state() -> None:
+    """The observe-only path may only ever write 'enabled_observe_only'."""
+    source = (ROOT / "services" / "external_execution.py").read_text(encoding="utf-8")
+    start = source.index("def enable_observe_only(")
+    end = source.index("def disable_external_deployment(")
+    body = source[start:end]
+    assert "state='enabled_observe_only'" in body
+    assert "enabled_execution" not in body

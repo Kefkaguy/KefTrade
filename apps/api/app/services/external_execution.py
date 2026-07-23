@@ -82,7 +82,7 @@ def persist_policy(conn: psycopg.Connection, table: str, version: str, policy: d
 
 
 def enable_observe_only(conn: psycopg.Connection, internal_deployment_id: int, *, operator: str, reapprove: bool = False) -> dict[str, Any]:
-    assert_execution_disabled()
+    assert_observe_only_allowed()
     trace_id = uuid4()
     audit(conn, trace_id, "reapprove_external_paper" if reapprove else "enable_external_paper", operator, "before", details={"internal_deployment_id": internal_deployment_id})
     conn.commit()
@@ -153,7 +153,7 @@ def disable_external_deployment(conn: psycopg.Connection, external_deployment_id
 
 
 def resume_observe_only(conn: psycopg.Connection, external_deployment_id: int, *, operator: str) -> dict[str, Any]:
-    assert_execution_disabled()
+    assert_observe_only_allowed()
     row = conn.execute("SELECT * FROM external_paper_deployments WHERE id=%s FOR UPDATE", (external_deployment_id,)).fetchone()
     if not row:
         raise ValueError("external deployment not found")
@@ -551,6 +551,21 @@ def check(code: str, passed: bool) -> dict[str, Any]:
 def assert_execution_disabled() -> None:
     if settings.broker_order_submission_enabled or settings.external_paper_execution_enabled:
         raise RuntimeError("broker execution flags must remain disabled during Phase 10 first pass")
+
+
+def assert_observe_only_allowed() -> None:
+    """Gate for approving/resuming an OBSERVE-ONLY deployment.
+
+    Observe-only records what a strategy would do and submits nothing: the
+    submission path requires state == 'enabled_execution', which only
+    `enable_paper_execution` can set. So observe-only must stay available in
+    Phase 11 (execution flags on) -- it only requires that the two execution
+    flags agree, never that they are off. Requiring them off here was a Phase
+    10 leftover that made it impossible to onboard any new deployment once
+    paper execution was enabled.
+    """
+    if not execution_mode_coherent("enabled_observe_only"):
+        raise RuntimeError("broker order submission and external paper execution flags must be enabled or disabled together")
 
 
 def execution_mode_coherent(state: str) -> bool:
