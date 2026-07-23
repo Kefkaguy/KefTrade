@@ -10,8 +10,12 @@ ALTER TABLE research_campaign_jobs
     ADD COLUMN IF NOT EXISTS blocked_reason TEXT,
     ADD COLUMN IF NOT EXISTS execution_runtime_ms INTEGER;
 
+-- 'blocked_terminal' (added in migration 040) is included here so that this
+-- migration, which the migrate job re-applies on every deploy, stays
+-- consistent with the current status set and does not fail against rows that
+-- already carry the terminal status.
 ALTER TABLE research_campaign_jobs ADD CONSTRAINT research_campaign_jobs_status_check
-    CHECK (status IN ('queued', 'running', 'completed', 'rejected', 'promoted', 'failed', 'canceled', 'blocked_data', 'deferred_rate_limit', 'retrying'));
+    CHECK (status IN ('queued', 'running', 'completed', 'rejected', 'promoted', 'failed', 'canceled', 'blocked_data', 'blocked_terminal', 'deferred_rate_limit', 'retrying'));
 
 ALTER TABLE research_campaign_jobs DROP CONSTRAINT IF EXISTS research_campaign_jobs_failure_classification_check;
 ALTER TABLE research_campaign_jobs ADD CONSTRAINT research_campaign_jobs_failure_classification_check
