@@ -1580,6 +1580,49 @@ export type EliteCorrelationEvidenceBackfill = {
   constraints_relaxed: 0;
 };
 
+export type FamilyRegistryRow = {
+  family_id: string;
+  classification: string;
+  status: "active" | "legacy";
+  jobs: number;
+  candidates: number;
+  promoted_jobs: number;
+  elites: number;
+  median_profit_factor: number | null;
+  avg_win_rate: number | null;
+  avg_drawdown: number | null;
+  avg_trades: number | null;
+  avg_holding_hours: number | null;
+  reason: string | null;
+};
+
+export function getFamilyRegistry(status?: "active" | "legacy") {
+  const query = status ? `?status=${status}` : "";
+  return request<{ families: FamilyRegistryRow[]; count: number }>(`/research/families/registry${query}`, { cache: "no-store", timeoutMs: 60000 });
+}
+
+export function refreshFamilyRegistry() {
+  return request<{ families: number; active: number; legacy: number; by_classification: Record<string, number>; evidence_deleted: boolean }>(
+    "/research/families/refresh-registry",
+    { method: "POST", timeoutMs: 120000 }
+  );
+}
+
+export function launchHighFrequencyCampaign(maxCandidates = 120) {
+  return request<Record<string, any>>(`/research/campaigns/high-frequency?max_candidates=${maxCandidates}&timeframes=15m`, { method: "POST", timeoutMs: 120000 });
+}
+
+export function launchHiddenGemRecovery(maxFamilies = 27) {
+  return request<Record<string, any>>(`/research/campaigns/hidden-gem-recovery?max_families=${maxFamilies}`, { method: "POST", timeoutMs: 120000 });
+}
+
+export function reevaluateElites() {
+  return request<{ evaluated: number; retained_count: number; demoted_count: number; rule_version: string }>(
+    "/research/elite-candidates/reevaluate",
+    { method: "POST", timeoutMs: 120000 }
+  );
+}
+
 export function backfillElitePortfolioEvidence(limit = 20) {
   return request<EliteCorrelationEvidenceBackfill>(`/research/elite-portfolios/evidence/backfill?limit=${limit}`, { method: "POST", timeoutMs: 120000 });
 }
