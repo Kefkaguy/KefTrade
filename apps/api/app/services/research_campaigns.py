@@ -6598,7 +6598,7 @@ def repair_campaign(
                 claimed_at = NULL,
                 lease_expires_at = NULL,
                 heartbeat_at = NULL,
-                recovery_classification = 'stale_lease_released',
+                recovery_classification = 'recovered_stale_lease',
                 recovered_at = NOW(),
                 recovery_worker_id = %s,
                 updated_at = NOW()

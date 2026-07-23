@@ -133,3 +133,23 @@ def test_plan_is_deterministic_across_repeated_calls() -> None:
     first = plan(jobs, campaign_status="completed")
     second = plan(jobs, campaign_status="completed")
     assert first == second
+
+
+def test_repair_uses_only_allowed_recovery_classifications() -> None:
+    """The DB CHECK constraint permits a fixed set; repair must stay inside it."""
+    import pathlib
+    import re
+
+    allowed = {
+        "recovered_stale_lease",
+        "actual_worker_execution_timeout",
+        "provider_timeout",
+        "database_timeout",
+        "permanent_job_failure",
+    }
+    source = pathlib.Path(__file__).resolve().parents[1].joinpath("app", "services", "research_campaigns.py").read_text(encoding="utf-8")
+    start = source.index("def repair_campaign(")
+    body = source[start:start + 6000]
+    written = set(re.findall(r"recovery_classification = '([a-z_]+)'", body))
+    assert written, "repair_campaign should set a recovery_classification"
+    assert written <= allowed, f"disallowed recovery_classification(s): {written - allowed}"
