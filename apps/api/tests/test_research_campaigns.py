@@ -1270,8 +1270,9 @@ def test_persist_intraday_job_trades_builds_one_row_per_trade_with_correct_value
     assert "INSERT INTO research_campaign_trades" in conn.inserted_sql
     assert conn.inserted_sql.count("(%s") == 2
     params = conn.inserted_params
-    assert len(params) == 2 * 35
-    first_row = params[:35]
+    row_width = 43  # 35 Phase 12.4 columns + dataset_split + 7 pre-entry feature columns (Phase 12.5)
+    assert len(params) == 2 * row_width
+    first_row = params[:row_width]
     assert first_row[0] == 42  # job_id
     assert first_row[1] == 48  # campaign_id
     assert first_row[2] == "session_momentum_007"
@@ -1283,12 +1284,15 @@ def test_persist_intraday_job_trades_builds_one_row_per_trade_with_correct_value
     assert first_row[10] == Decimal("95")  # exit_price
     assert first_row[15] == Decimal("-100")  # gross_pnl
     assert first_row[16] == Decimal("3.9")  # fees
-    assert first_row[-3] == "unknown"  # market_regime, no context_by_time provided
-    assert first_row[-2] == "unknown"  # volatility_regime
-    assert first_row[-1] == "2026-03"  # month_key from entry_time
+    assert first_row[-11] == "unknown"  # market_regime, no context_by_time provided
+    assert first_row[-10] == "unknown"  # volatility_regime
+    assert first_row[-9] == "2026-03"  # month_key from entry_time
+    assert first_row[-8] is None  # dataset_split, no validation_start provided
+    assert first_row[-4] is None  # pre_entry_vwap_distance: TradeInsertConn returns no intraday_features rows
+    assert first_row[-1] == 30 / 390  # pre_entry_session_progress: computed from already-present trade fields, no candles needed
 
-    second_row = params[35:]
-    assert second_row[-1] == "2026-04"
+    second_row = params[row_width:]
+    assert second_row[-9] == "2026-04"
 
 
 def test_persist_intraday_job_trades_tags_regime_from_context_by_time() -> None:
@@ -1310,8 +1314,8 @@ def test_persist_intraday_job_trades_tags_regime_from_context_by_time() -> None:
     )
 
     params = conn.inserted_params
-    assert params[-3] == "bull_trend"
-    assert params[-2] == "high_volatility"
+    assert params[-11] == "bull_trend"
+    assert params[-10] == "high_volatility"
 
 
 def test_research_campaign_key_changes_with_campaign_label_variant() -> None:

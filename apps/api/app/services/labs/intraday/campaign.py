@@ -143,7 +143,9 @@ def _create_intraday_campaign(
     timeframes: list[str] | None,
     asset_limit: int,
     campaign_label: str | None = None,
+    hypothesis_version_id: int | None = None,
 ) -> dict[str, Any]:
+    from app.services.labs.intraday.dataset_snapshot import record_intraday_dataset_snapshot
     from app.services.research_campaigns import (
         CAMPAIGN_VERSION,
         DEFAULT_SCHEDULING_CONFIG,
@@ -167,6 +169,16 @@ def _create_intraday_campaign(
     assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
     if not candidates:
         raise ValueError(f"no {strategy_family_label} candidates generated")
+
+    # Phase 12.5 Step 2: every intraday campaign gets its own immutable,
+    # content-hashed dataset snapshot (candles + intraday_features) the
+    # moment it's created -- no more relying on live tables that can drift
+    # between when a campaign is created and when its jobs actually run
+    # (exactly the ambiguity Phase 12.4 had to caveat manually when comparing
+    # Campaign 50 against Campaign 47). Idempotent by content hash: relaunching
+    # against unchanged underlying data reuses the same dataset_id.
+    dataset = record_intraday_dataset_snapshot(conn, assets=assets, timeframes=selected_timeframes, mode="rolling")
+    dataset_id = int(dataset["id"])
 
     # campaign_label lets a caller relaunch the exact same family/asset/
     # timeframe/candidate-count combination under a distinct campaign_key --
@@ -196,8 +208,11 @@ def _create_intraday_campaign(
     )
     row = conn.execute(
         """
-        INSERT INTO research_campaigns(campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config, safety_statement, generator_version, simulation_only)
-        VALUES (%s, %s, 'research_core_ten', 'queued', %s, %s, %s, %s, %s, TRUE)
+        INSERT INTO research_campaigns(
+            campaign_key, name, universe_key, status, requested_candidates, controls, scheduling_config,
+            safety_statement, generator_version, dataset_id, dataset_mode, hypothesis_version_id, simulation_only
+        )
+        VALUES (%s, %s, 'research_core_ten', 'queued', %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
         ON CONFLICT(campaign_key) DO UPDATE SET updated_at = NOW()
         RETURNING *
         """,
@@ -209,10 +224,17 @@ def _create_intraday_campaign(
             Jsonb(DEFAULT_SCHEDULING_CONFIG),
             SAFETY_STATEMENT,
             architecture,
+            dataset_id,
+            "rolling",
+            hypothesis_version_id,
         ),
     ).fetchone()
     campaign_id = int(row["id"])
     created = queue_campaign_jobs(conn, campaign_id, candidates, assets, selected_timeframes)
+    conn.execute(
+        "UPDATE research_campaign_jobs SET dataset_id = %s WHERE campaign_id = %s AND dataset_id IS NULL",
+        (dataset_id, campaign_id),
+    )
     update_campaign_counts(conn, campaign_id)
     conn.commit()
     return {
@@ -222,6 +244,8 @@ def _create_intraday_campaign(
         "jobs_created": created,
         "assets": assets,
         "timeframes": selected_timeframes,
+        "dataset_id": dataset_id,
+        "dataset": dataset,
     }
 
 

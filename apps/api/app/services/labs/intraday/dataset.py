@@ -197,12 +197,24 @@ def load_intraday_backtest_dataset(
     *,
     candle_limit: int | None = None,
     feature_limit: int | None = None,
+    dataset_id: int | None = None,
 ) -> dict[str, Any]:
     if timeframe not in SUPPORTED_INTRADAY_TIMEFRAMES:
         raise IntradayDatasetError(
             f"Unsupported intraday timeframe {timeframe!r} for {symbol}. "
             f"Supported: {SUPPORTED_INTRADAY_TIMEFRAMES}."
         )
+    if dataset_id is not None:
+        # Phase 12.5: read from the frozen, content-hashed snapshot instead of
+        # the live tables, mirroring how load_frozen_campaign_dataset already
+        # does this for swing research. Never falls back to live data on a
+        # miss -- an empty frozen dataset is a real error, not silently
+        # "upgraded" to live candles.
+        from app.services.labs.intraday.dataset_snapshot import load_snapshot_candles, load_snapshot_intraday_features
+
+        candles = load_snapshot_candles(conn, dataset_id, symbol, timeframe)
+        features = load_snapshot_intraday_features(conn, dataset_id, symbol, timeframe)
+        return build_intraday_backtest_dataset(candles, features, symbol=symbol, timeframe=timeframe)
     candles = load_candles(conn, symbol, timeframe, limit=candle_limit)
     features = load_intraday_features(conn, symbol, timeframe, limit=feature_limit)
     return build_intraday_backtest_dataset(candles, features, symbol=symbol, timeframe=timeframe)

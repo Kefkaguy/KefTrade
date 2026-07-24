@@ -1679,6 +1679,9 @@ def append_hypothesis_version(
     test_summary: dict[str, Any],
     supporting_evidence: list[str] | None = None,
     contradictory_evidence: list[str] | None = None,
+    required_conditions: str | None = None,
+    invalidation_conditions: str | None = None,
+    success_criteria: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if status not in {"proposed", "testing", "supported", "weak", "rejected", "retired"}:
         raise ValueError(f"unsupported hypothesis status {status}")
@@ -1689,8 +1692,9 @@ def append_hypothesis_version(
             hypothesis_key, version, parent_hypothesis_id, scope_type, scope_ref, strategy_family,
             title, observation, hypothesis, expected_behavior, relevant_regimes, confidence_score,
             evidence_window, creation_source, status, supporting_evidence, contradictory_evidence,
-            test_summary, calculation_version, simulation_only
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
+            test_summary, calculation_version, required_conditions, invalidation_conditions,
+            success_criteria, simulation_only
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
         RETURNING *
         """,
         (
@@ -1703,6 +1707,9 @@ def append_hypothesis_version(
             Jsonb(list(supporting_evidence if supporting_evidence is not None else hypothesis.get("supporting_evidence") or [])),
             Jsonb(list(contradictory_evidence if contradictory_evidence is not None else hypothesis.get("contradictory_evidence") or [])),
             Jsonb(test_summary), HYPOTHESIS_VERSION,
+            required_conditions if required_conditions is not None else hypothesis.get("required_conditions"),
+            invalidation_conditions if invalidation_conditions is not None else hypothesis.get("invalidation_conditions"),
+            Jsonb(success_criteria if success_criteria is not None else dict(hypothesis.get("success_criteria") or {})) if (success_criteria is not None or hypothesis.get("success_criteria")) else None,
         ),
     ).fetchone()
     return jsonable(dict(row))

@@ -17,6 +17,7 @@ from app.services.labs.intraday.dataset import (
     build_intraday_backtest_dataset,
     build_session_end_index,
     entry_is_within_session_cutoff,
+    load_intraday_backtest_dataset,
     minimum_entry_lookahead_minutes,
 )
 from app.settings import settings
@@ -162,3 +163,57 @@ def test_entry_cutoff_false_when_too_close_to_session_end() -> None:
 
 def test_entry_cutoff_false_when_minutes_to_close_missing() -> None:
     assert entry_is_within_session_cutoff({}, timeframe="30m") is False
+
+
+class FakeFrozenDatasetConn:
+    """Phase 12.5: records which table load_intraday_backtest_dataset reads
+    from when a dataset_id is supplied -- must be the frozen snapshot tables,
+    never the live candles/intraday_features tables."""
+
+    def __init__(self, candles, features):
+        self._candles = candles
+        self._features = features
+        self.queried_tables: list[str] = []
+
+    def execute(self, query, params=None):
+        if "research_dataset_candles" in query:
+            self.queried_tables.append("research_dataset_candles")
+            return _Result(self._candles)
+        if "research_dataset_intraday_features" in query:
+            self.queried_tables.append("research_dataset_intraday_features")
+            return _Result(self._features)
+        if " FROM candles" in query:
+            self.queried_tables.append("candles")
+            return _Result(self._candles)
+        if " FROM intraday_features" in query:
+            self.queried_tables.append("intraday_features")
+            return _Result(self._features)
+        raise AssertionError(f"unexpected query: {query}")
+
+
+class _Result:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def fetchall(self):
+        return self.rows
+
+
+def test_load_intraday_backtest_dataset_reads_frozen_tables_when_dataset_id_given() -> None:
+    candles, features = make_dataset(sessions=20, bars_per_session=13)
+    conn = FakeFrozenDatasetConn(candles, features)
+
+    result = load_intraday_backtest_dataset(conn, "TEST", "30m", dataset_id=7)
+
+    assert conn.queried_tables == ["research_dataset_candles", "research_dataset_intraday_features"]
+    assert result["symbol"] == "TEST"
+    assert len(result["rows"]) == len(candles)
+
+
+def test_load_intraday_backtest_dataset_reads_live_tables_when_no_dataset_id() -> None:
+    candles, features = make_dataset(sessions=20, bars_per_session=13)
+    conn = FakeFrozenDatasetConn(candles, features)
+
+    load_intraday_backtest_dataset(conn, "TEST", "30m")
+
+    assert conn.queried_tables == ["candles", "intraday_features"]

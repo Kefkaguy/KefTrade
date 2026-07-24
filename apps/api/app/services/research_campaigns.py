@@ -3055,6 +3055,9 @@ def run_research_campaign_batch(
             from app.services.labs.intraday.families.registry import is_intraday_lab_candidate
 
             if trades and is_intraday_lab_candidate(job["candidate"]):
+                walk_forward = (result.get("metrics") or {}).get("walk_forward") or {}
+                validation_start_raw = walk_forward.get("validation_start") if walk_forward.get("enabled") else None
+                validation_start = datetime.fromisoformat(validation_start_raw) if validation_start_raw else None
                 persist_intraday_job_trades(
                     conn,
                     job_id=int(job["id"]),
@@ -3064,6 +3067,8 @@ def run_research_campaign_batch(
                     symbol=str(job["symbol"]),
                     timeframe=str(job["timeframe"]),
                     trades=trades,
+                    validation_start=validation_start,
+                    dataset_id=result.get("dataset_id"),
                 )
             profile["queue_operations_ms"] = round(queue_claim_ms / max(1, len(jobs)), 3)
             write_started = time.perf_counter()
@@ -3356,6 +3361,8 @@ def persist_intraday_job_trades(
     timeframe: str,
     trades: list[dict[str, Any]],
     context_by_time: dict[Any, dict[str, Any]] | None = None,
+    validation_start: Any | None = None,
+    dataset_id: int | None = None,
 ) -> int:
     """Phase 12.4 evidence capture: trades computed by run_backtest() are
     otherwise discarded once evaluate_candidate() finishes scoring the job
@@ -3371,14 +3378,39 @@ def persist_intraday_job_trades(
     at 15m/30m granularity -- every trade's regime tags below will read
     "unknown" until that separate gap is closed. Documented in the Phase 12.4
     data-availability appendix rather than silently fabricated.
+
+    `validation_start` (Phase 12.5 Step 2) is the job's own
+    `metrics.walk_forward.validation_start`, already computed and stored by
+    the unmodified `run_backtest()` -- used only to *label* each trade
+    'train' or 'validation' by comparing its entry_time, not to change which
+    trades exist. Since `run_backtest()` today only ever scans for entries at
+    or after that boundary, every real trade currently labels 'validation';
+    the 'train' bucket stays empty until a future step explicitly changes
+    which rows the backtester is willing to scan (see the Phase 12.5
+    architecture proposal, section 2.2). No fabricated 'train' trades are
+    ever created here.
+
+    `dataset_id` (Phase 12.5 Step 2), when the campaign has one, is used only
+    to source the pre-entry feature lookup from the frozen snapshot instead
+    of live tables -- see `pre_entry_features.compute_pre_entry_features_for_trades`.
     """
 
     if not trades:
         return 0
     context_by_time = context_by_time or {}
+
+    from app.services.labs.intraday.pre_entry_features import compute_pre_entry_features_for_trades
+
+    pre_entry_features = compute_pre_entry_features_for_trades(
+        conn, symbol=symbol, timeframe=timeframe, trades=trades, dataset_id=dataset_id
+    )
+
     rows = []
-    for trade in trades:
+    for trade, features in zip(trades, pre_entry_features):
         context = context_by_time.get(trade["entry_time"], {})
+        dataset_split = None
+        if validation_start is not None:
+            dataset_split = "train" if trade["entry_time"] < validation_start else "validation"
         rows.append(
             (
                 job_id,
@@ -3416,6 +3448,14 @@ def persist_intraday_job_trades(
                 context.get("trend_regime", "unknown"),
                 context.get("volatility_regime", "unknown"),
                 month_key(trade["entry_time"]),
+                dataset_split,
+                features["pre_entry_return_1"],
+                features["pre_entry_return_5"],
+                features["pre_entry_atr_relative_move"],
+                features["pre_entry_vwap_distance"],
+                features["pre_entry_trend_slope"],
+                features["pre_entry_volume_acceleration"],
+                features["pre_entry_session_progress"],
             )
         )
     columns = (
@@ -3424,7 +3464,9 @@ def persist_intraday_job_trades(
         "gross_pnl, fees, slippage_cost, net_pnl, pnl_pct, exit_reason, holding_period_hours, "
         "mfe_amount, mae_amount, mfe_r, mae_r, bars_to_mfe, bars_to_mae, "
         "entry_minutes_from_open, entry_minutes_to_close, entry_session_relative_volume, entry_gap_percent, "
-        "market_regime, volatility_regime, month_key"
+        "market_regime, volatility_regime, month_key, dataset_split, "
+        "pre_entry_return_1, pre_entry_return_5, pre_entry_atr_relative_move, pre_entry_vwap_distance, "
+        "pre_entry_trend_slope, pre_entry_volume_acceleration, pre_entry_session_progress"
     )
     placeholders = ", ".join(f"({', '.join(['%s'] * len(rows[0]))})" for _ in rows)
     flattened = [value for row in rows for value in row]
@@ -3456,8 +3498,9 @@ def run_intraday_campaign_job(
     # already threads timeframe-derived values into swing candidates.
     candidate = dataclass_replace(candidate, parameters={**candidate.parameters, "timeframe": timeframe})
 
+    dataset_id = int(job["dataset_id"]) if job.get("dataset_id") is not None else None
     dataset_started = time.perf_counter()
-    dataset = load_intraday_backtest_dataset(conn, symbol, timeframe)
+    dataset = load_intraday_backtest_dataset(conn, symbol, timeframe, dataset_id=dataset_id)
     data_loading_ms = round((time.perf_counter() - dataset_started) * 1000, 3)
 
     simulation_started = time.perf_counter()
@@ -3478,7 +3521,7 @@ def run_intraday_campaign_job(
     }
     from app.services.research_architecture import validation_gate_diagnostics
 
-    result = {**row, "symbol": symbol, "timeframe": timeframe, "campaign_version": CAMPAIGN_VERSION, "dataset_id": None}
+    result = {**row, "symbol": symbol, "timeframe": timeframe, "campaign_version": CAMPAIGN_VERSION, "dataset_id": dataset_id}
     result["gate_diagnostics"] = validation_gate_diagnostics(result)
     return result
 
