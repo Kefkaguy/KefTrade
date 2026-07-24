@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from app.services.strategy import StrategyFn, trend_pullback_decision
+from app.services.strategy import StrategyFn, get_execution_constraints, reset_strategy_state, trend_pullback_decision
 from app.services.strategy_diagnostics import enrich_decision
 
 SAME_CANDLE_EXIT_POLICY = "stop_first"
@@ -34,8 +34,35 @@ def run_backtest(
     params: dict[str, Any],
     strategy_decide: StrategyFn = trend_pullback_decision,
     market_arrays: dict[str, np.ndarray] | None = None,
+    session_end_index: list[int] | None = None,
 ) -> dict[str, Any]:
+    # Reset happens before anything else touches the strategy, so a fresh
+    # state is guaranteed even if the same strategy object is reused across
+    # symbols/parameter combinations/campaign jobs/reruns. Plain (stateless)
+    # strategy functions have no `reset` attribute, so this is a no-op for
+    # every existing swing strategy -- see `reset_strategy_state`.
+    reset_strategy_state(strategy_decide)
+    constraints = get_execution_constraints(strategy_decide)
+    if constraints.flat_by_session_close and session_end_index is None:
+        raise ValueError(
+            "Strategy declares execution_constraints.flat_by_session_close=True but no "
+            "session_end_index was provided. Use the intraday dataset loader, which "
+            "computes this from intraday_features session metadata; it cannot be "
+            "honored on a plain candles/features dataset with no session boundaries."
+        )
+
     rows = combine_candles_features(candles, features)
+    if session_end_index is not None and len(session_end_index) != len(rows):
+        raise ValueError(
+            f"session_end_index has {len(session_end_index)} entries but combining candles "
+            f"and features produced {len(rows)} rows -- they must correspond 1:1."
+        )
+    # Only actually applied to the exit scan when the strategy requires it: a
+    # session_end_index passed in for an unrelated (non-flat) strategy stays
+    # inert, so forced-flat is always driven by the strategy's own declared
+    # constraint, never by whatever the caller happened to pass in.
+    effective_session_end_index = session_end_index if constraints.flat_by_session_close else None
+
     candle_rows = [row["candle"] for row in rows]
     arrays = market_arrays if market_arrays is not None and len(market_arrays["low"]) == len(rows) else build_market_arrays(rows)
     train_rows, validation_rows = walk_forward_split(rows, float(params["walk_forward_train_ratio"]))
@@ -102,6 +129,7 @@ def run_backtest(
             take_profit=effective_take_profit,
             max_holding_bars=int(params.get("max_holding_bars") or 0),
             direction=direction,
+            session_end_index=effective_session_end_index,
         )
         exit_candle = rows[exit_index]["candle"]
         if exit_reason.startswith("stop_loss"):
@@ -109,6 +137,11 @@ def run_backtest(
         elif exit_reason == "take_profit":
             exit_price = effective_take_profit * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
         else:
+            # Covers both the pre-existing "time_exit"/"end_of_data" reasons
+            # and the new "session_close" reason: all three are a forced exit
+            # at the exit candle's close, with the same slippage treatment --
+            # session_close is not a special case here, it's just another
+            # value this already-generic branch handles.
             exit_price = Decimal(exit_candle["close"]) * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
 
         entry_fee = entry_price * quantity * fee_rate
@@ -189,6 +222,7 @@ def count_setup_opportunities(
     params: dict[str, Any],
     strategy_decide: StrategyFn,
 ) -> dict[str, Any]:
+    reset_strategy_state(strategy_decide)
     rows = combine_candles_features(candles, features)
     candle_rows = [row["candle"] for row in rows]
     train_rows, validation_rows = walk_forward_split(rows, float(params["walk_forward_train_ratio"]))
@@ -226,9 +260,21 @@ def find_exit_index(
     take_profit: Decimal,
     max_holding_bars: int,
     direction: str = "long",
+    session_end_index: list[int] | None = None,
 ) -> tuple[int, str]:
     final_index = len(rows) - 1
-    search_end = min(final_index, start_index + max_holding_bars) if max_holding_bars > 0 else final_index
+    time_bound = min(final_index, start_index + max_holding_bars) if max_holding_bars > 0 else final_index
+    # `session_end_index[start_index]` is the last row index that belongs to
+    # the entry bar's own trading session (see `build_session_end_index` in
+    # the intraday dataset loader). When absent (every swing call site,
+    # unchanged), session_bound == final_index, i.e. no additional cap --
+    # bit-for-bit identical to the pre-existing behavior.
+    session_bound = session_end_index[start_index] if session_end_index is not None else final_index
+    # Whichever cap is tighter wins the search window. A stop/target touch
+    # found only in the *next* session's bars is structurally unreachable
+    # here: the numpy slice below never extends past `search_end`, so the
+    # exit scan cannot cross a session boundary even by accident.
+    search_end = min(time_bound, session_bound)
     lows = arrays["low"][start_index : search_end + 1]
     highs = arrays["high"][start_index : search_end + 1]
     hit_offsets = (
@@ -245,6 +291,14 @@ def find_exit_index(
             return index, "stop_loss" if not target_touched else f"stop_loss_{SAME_CANDLE_EXIT_POLICY}"
         if target_touched:
             return index, "take_profit"
+    # No stop/target touch before the search window closed: report which
+    # constraint forced the exit. A structural session boundary always takes
+    # priority over a plain time-based cap when both bind at the same index
+    # -- even when the session's last bar happens to also be the dataset's
+    # last row, since the exit is still "forced flat by session rule", not
+    # "ran out of data to check further".
+    if session_end_index is not None and search_end == session_bound:
+        return search_end, "session_close"
     if max_holding_bars > 0 and search_end < final_index:
         return search_end, "time_exit"
     return final_index, "end_of_data"

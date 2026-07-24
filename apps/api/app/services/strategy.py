@@ -1,11 +1,79 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any, Literal
+from typing import Any, Literal, Protocol, runtime_checkable
 
 
 SignalName = Literal["setup", "watchlist", "avoid"]
 StrategyFn = Callable[[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any]], "StrategyDecision"]
+
+
+@dataclass(frozen=True)
+class ExecutionConstraints:
+    """Structural, non-negotiable simulator behavior a strategy requires.
+
+    Distinct from `parameters` (research/optimization knobs a campaign is
+    free to tune): these are safety invariants the simulator itself enforces
+    and that campaign generation must never be able to turn off. A strategy
+    declares them via its `execution_constraints` attribute; the simulator
+    reads that attribute, it never infers constraints from strategy identity.
+    """
+
+    flat_by_session_close: bool = False
+
+
+DEFAULT_EXECUTION_CONSTRAINTS = ExecutionConstraints()
+
+
+@runtime_checkable
+class StrategyProtocol(Protocol):
+    """The one simulator-facing calling convention for every strategy.
+
+    Plain functions (all existing swing strategies) satisfy this protocol
+    structurally without any change: they simply have no `execution_constraints`
+    attribute and no `reset` method, and the simulator treats both as absent
+    -> defaults. A stateful intraday strategy is a callable *instance* that
+    additionally exposes `execution_constraints` and `reset()`; its `__call__`
+    signature is identical to a plain strategy function's, so the simulator
+    never branches on which kind of strategy it has -- it just calls it.
+    """
+
+    execution_constraints: ExecutionConstraints
+
+    def reset(self) -> None: ...
+
+    def __call__(
+        self,
+        candle: dict[str, Any],
+        feature: dict[str, Any],
+        recent_candles: list[dict[str, Any]],
+        params: dict[str, Any],
+    ) -> "StrategyDecision": ...
+
+
+def get_execution_constraints(strategy_decide: StrategyFn) -> ExecutionConstraints:
+    """Reads a strategy's execution constraints, defaulting when absent.
+
+    A plain function (every existing swing strategy) has no
+    `execution_constraints` attribute at all, so this returns the all-False
+    default -- exactly today's behavior, unchanged.
+    """
+    return getattr(strategy_decide, "execution_constraints", DEFAULT_EXECUTION_CONSTRAINTS)
+
+
+def reset_strategy_state(strategy_decide: StrategyFn) -> None:
+    """Clears a stateful strategy's internal state before a run.
+
+    The simulator calls this once at the start of every `run_backtest`/
+    `count_setup_opportunities` call -- never mid-run -- so a fresh state is
+    guaranteed for every backtest run, every symbol, every parameter
+    combination, every campaign job, and every deterministic rerun, even if
+    the same strategy object instance is reused across those calls. Plain
+    functions have no `reset` attribute, so this is a no-op for them.
+    """
+    reset = getattr(strategy_decide, "reset", None)
+    if callable(reset):
+        reset()
 
 
 @dataclass(frozen=True)
