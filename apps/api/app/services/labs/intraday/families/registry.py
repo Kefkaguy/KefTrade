@@ -168,6 +168,7 @@ def create_intraday_campaign(
     asset_limit: int = 10,
     timeframes: list[str] | None = None,
     max_candidates_per_family: int = 8,
+    campaign_label: str | None = None,
 ) -> dict[str, Any]:
     """Launch a campaign against one, several, or all Intraday Lab families.
 
@@ -207,6 +208,7 @@ def create_intraday_campaign(
         supported_timeframes=combined_supported_timeframes,
         timeframes=timeframes,
         asset_limit=asset_limit,
+        campaign_label=campaign_label,
     )
 
 

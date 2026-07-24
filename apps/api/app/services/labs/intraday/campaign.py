@@ -142,6 +142,7 @@ def _create_intraday_campaign(
     supported_timeframes: tuple[str, ...],
     timeframes: list[str] | None,
     asset_limit: int,
+    campaign_label: str | None = None,
 ) -> dict[str, Any]:
     from app.services.research_campaigns import (
         CAMPAIGN_VERSION,
@@ -167,13 +168,21 @@ def _create_intraday_campaign(
     if not candidates:
         raise ValueError(f"no {strategy_family_label} candidates generated")
 
+    # campaign_label lets a caller relaunch the exact same family/asset/
+    # timeframe/candidate-count combination under a distinct campaign_key --
+    # e.g. Phase 12.4's trade-evidence re-run of the Phase 12.3 pilot
+    # families -- without colliding via ON CONFLICT(campaign_key) with an
+    # already-archived campaign (research_campaign_key's own docstring notes
+    # exactly this: a variant that changes the research question must not
+    # collide with an earlier campaign).
+    variant = architecture if not campaign_label else f"{architecture}|{campaign_label}"
     campaign_key = research_campaign_key(
         "research_core_ten",
         assets,
         selected_timeframes,
         len(candidates),
         search_mode=architecture,
-        variant=architecture,
+        variant=variant,
     )
     controls = Jsonb(
         {

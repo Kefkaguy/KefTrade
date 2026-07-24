@@ -1312,3 +1312,28 @@ def test_persist_intraday_job_trades_tags_regime_from_context_by_time() -> None:
     params = conn.inserted_params
     assert params[-3] == "bull_trend"
     assert params[-2] == "high_volatility"
+
+
+def test_research_campaign_key_changes_with_campaign_label_variant() -> None:
+    """create_intraday_campaign's campaign_label folds into the variant
+    passed to research_campaign_key -- this is exactly what let Phase 12.4
+    relaunch the same 6 families/assets/timeframes as Campaign 47 under a new
+    campaign_id instead of silently hitting Campaign 47's own
+    ON CONFLICT(campaign_key) DO UPDATE and returning that already-archived
+    campaign untouched (which is what happened on the first, unlabeled
+    attempt)."""
+    from app.services.research_campaigns import research_campaign_key
+
+    base_key = research_campaign_key(
+        "research_core_ten", ["AMD", "SPY"], ["15m", "30m"], 48, search_mode="multi_family:gap_fill_v1", variant="multi_family:gap_fill_v1"
+    )
+    labeled_key = research_campaign_key(
+        "research_core_ten",
+        ["AMD", "SPY"],
+        ["15m", "30m"],
+        48,
+        search_mode="multi_family:gap_fill_v1",
+        variant="multi_family:gap_fill_v1|phase_12_4_trade_evidence_v1",
+    )
+
+    assert base_key != labeled_key

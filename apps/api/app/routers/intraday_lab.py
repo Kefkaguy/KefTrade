@@ -21,6 +21,7 @@ def create_intraday_campaign_endpoint(
     asset_limit: int = Query(10, ge=1, le=100),
     timeframes: list[str] | None = Query(None),
     max_candidates_per_family: int = Query(8, ge=1, le=64),
+    campaign_label: str | None = Query(None, description="Optional label distinguishing this run from an earlier campaign over the same families/assets/timeframes (e.g. a versioned re-run)."),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     from app.services.labs.intraday.families.registry import create_intraday_campaign
@@ -33,6 +34,7 @@ def create_intraday_campaign_endpoint(
             asset_limit=asset_limit,
             timeframes=timeframes,
             max_candidates_per_family=max_candidates_per_family,
+            campaign_label=campaign_label,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
