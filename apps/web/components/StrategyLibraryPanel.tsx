@@ -77,74 +77,77 @@ export function StrategyLibraryPanel() {
   const activeCount = active?.length ?? 0;
 
   return (
-    <section className="strategyLibrary" aria-labelledby="strategy-library-title">
-      <header className="strategyLibraryHeader">
-        <div>
-          <span className="eyebrow"><Layers size={13} /> Strategy library</span>
-          <h2 id="strategy-library-title">What research is allowed to spend compute on</h2>
-          <p>Every strategy family is classified from its own evidence. Only productive families stay active; the rest are archived — their evidence is preserved, but no new campaign tests them.</p>
-        </div>
-        <div className="strategyLibrarySummary">
-          <span><strong>{activeCount}</strong> active</span>
-          <span className="muted"><strong>{legacyCount ?? "—"}</strong> archived</span>
-          <button className="campaignIconButton" type="button" onClick={() => void run("refresh", refreshFamilyRegistry, (r) => `Re-audited ${r.families} families: ${r.active} active, ${r.legacy} archived.`)} disabled={Boolean(busy)} title="Re-audit every family from evidence" aria-label="Refresh strategy library">
-            <RefreshCw size={15} className={busy === "refresh" ? "isSpinning" : undefined} />
-          </button>
-        </div>
-      </header>
+    <>
+    <div>Hello, Strategy Library!</div>
+    </>
+    // <section className="strategyLibrary" aria-labelledby="strategy-library-title">
+    //   <header className="strategyLibraryHeader">
+    //     <div>
+    //       <span className="eyebrow"><Layers size={13} /> Strategy library</span>
+    //       <h2 id="strategy-library-title">What research is allowed to spend compute on</h2>
+    //       <p>Every strategy family is classified from its own evidence. Only productive families stay active; the rest are archived — their evidence is preserved, but no new campaign tests them.</p>
+    //     </div>
+    //     <div className="strategyLibrarySummary">
+    //       <span><strong>{activeCount}</strong> active</span>
+    //       <span className="muted"><strong>{legacyCount ?? "—"}</strong> archived</span>
+    //       <button className="campaignIconButton" type="button" onClick={() => void run("refresh", refreshFamilyRegistry, (r) => `Re-audited ${r.families} families: ${r.active} active, ${r.legacy} archived.`)} disabled={Boolean(busy)} title="Re-audit every family from evidence" aria-label="Refresh strategy library">
+    //         <RefreshCw size={15} className={busy === "refresh" ? "isSpinning" : undefined} />
+    //       </button>
+    //     </div>
+    //   </header>
 
-      {error ? <div className="strategyLibraryError" role="alert">{error}</div> : null}
-      {notice ? <div className="strategyLibraryNotice">{notice}</div> : null}
+    //   {error ? <div className="strategyLibraryError" role="alert">{error}</div> : null}
+    //   {notice ? <div className="strategyLibraryNotice">{notice}</div> : null}
 
-      <div className="strategyLaunchRow">
-        <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => void run("hf", () => launchHighFrequencyCampaign(120), (r) => `High-frequency campaign #${r.campaign_id} queued (${r.jobs_created} jobs on ${(r.timeframes || []).join(", ")}).`)}>
-          <Zap size={15} /> {busy === "hf" ? "Launching…" : "New: high-frequency campaign"}
-        </button>
-        <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => void run("gem", () => launchHiddenGemRecovery(27), (r) => `Hidden-gem recovery #${r.campaign_id} queued across ${(r.families || []).length} families.`)}>
-          <Sparkles size={15} /> {busy === "gem" ? "Launching…" : "New: hidden-gem recovery"}
-        </button>
-      </div>
+    //   <div className="strategyLaunchRow">
+    //     <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => void run("hf", () => launchHighFrequencyCampaign(120), (r) => `High-frequency campaign #${r.campaign_id} queued (${r.jobs_created} jobs on ${(r.timeframes || []).join(", ")}).`)}>
+    //       <Zap size={15} /> {busy === "hf" ? "Launching…" : "New: high-frequency campaign"}
+    //     </button>
+    //     <button className="button secondary" type="button" disabled={Boolean(busy)} onClick={() => void run("gem", () => launchHiddenGemRecovery(27), (r) => `Hidden-gem recovery #${r.campaign_id} queued across ${(r.families || []).length} families.`)}>
+    //       <Sparkles size={15} /> {busy === "gem" ? "Launching…" : "New: hidden-gem recovery"}
+    //     </button>
+    //   </div>
 
-      <div className="strategyFamilyTable" role="table" aria-label="Active strategy families">
-        <div role="row" className="strategyFamilyHead">
-          <span role="columnheader">Family</span>
-          <span role="columnheader">Class</span>
-          <span role="columnheader">Med PF</span>
-          <span role="columnheader">Trades</span>
-          <span role="columnheader">Elites</span>
-        </div>
-        {active === null ? <div className="strategyFamilyEmpty">Loading families…</div> : null}
-        {active && active.length === 0 ? <div className="strategyFamilyEmpty">No active families. Run a re-audit after your next campaign.</div> : null}
-        {(active ?? []).map((row) => (
-          <div role="row" key={row.family_id} className={`strategyFamilyRow ${tone(row)}`}>
-            <span role="cell" className="mono">{row.family_id}</span>
-            <span role="cell"><em className={`familyTag ${tone(row)}`}>{shortClass(row.classification)}</em></span>
-            <span role="cell" className="mono">{num(row.median_profit_factor)}</span>
-            <span role="cell" className="mono">{num(row.avg_trades, 0)}</span>
-            <span role="cell" className="mono">{row.elites}</span>
-          </div>
-        ))}
-      </div>
+    //   <div className="strategyFamilyTable" role="table" aria-label="Active strategy families">
+    //     <div role="row" className="strategyFamilyHead">
+    //       <span role="columnheader">Family</span>
+    //       <span role="columnheader">Class</span>
+    //       <span role="columnheader">Med PF</span>
+    //       <span role="columnheader">Trades</span>
+    //       <span role="columnheader">Elites</span>
+    //     </div>
+    //     {active === null ? <div className="strategyFamilyEmpty">Loading families…</div> : null}
+    //     {active && active.length === 0 ? <div className="strategyFamilyEmpty">No active families. Run a re-audit after your next campaign.</div> : null}
+    //     {(active ?? []).map((row) => (
+    //       <div role="row" key={row.family_id} className={`strategyFamilyRow ${tone(row)}`}>
+    //         <span role="cell" className="mono">{row.family_id}</span>
+    //         <span role="cell"><em className={`familyTag ${tone(row)}`}>{shortClass(row.classification)}</em></span>
+    //         <span role="cell" className="mono">{num(row.median_profit_factor)}</span>
+    //         <span role="cell" className="mono">{num(row.avg_trades, 0)}</span>
+    //         <span role="cell" className="mono">{row.elites}</span>
+    //       </div>
+    //     ))}
+    //   </div>
 
-      <div className="strategyLegacy">
-        <button type="button" className="strategyLegacyToggle" onClick={() => setShowLegacy((prev) => !prev)} aria-expanded={showLegacy}>
-          <Archive size={14} /> {showLegacy ? "Hide" : "Show"} {legacyCount ?? 0} archived families
-        </button>
-        {showLegacy ? (
-          <div className="strategyFamilyTable legacy" role="table" aria-label="Archived strategy families">
-            {(legacyRows ?? []).slice(0, 40).map((row) => (
-              <div role="row" key={row.family_id} className="strategyFamilyRow muted">
-                <span role="cell" className="mono">{row.family_id}</span>
-                <span role="cell"><em className="familyTag muted">{shortClass(row.classification)}</em></span>
-                <span role="cell" className="mono">{num(row.median_profit_factor)}</span>
-                <span role="cell" className="mono">{num(row.avg_trades, 0)}</span>
-                <span role="cell" className="mono">{row.elites}</span>
-              </div>
-            ))}
-            {(legacyRows?.length ?? 0) > 40 ? <div className="strategyFamilyEmpty">Showing 40 of {legacyCount}. All evidence is preserved and queryable.</div> : null}
-          </div>
-        ) : null}
-      </div>
-    </section>
+    //   <div className="strategyLegacy">
+    //     <button type="button" className="strategyLegacyToggle" onClick={() => setShowLegacy((prev) => !prev)} aria-expanded={showLegacy}>
+    //       <Archive size={14} /> {showLegacy ? "Hide" : "Show"} {legacyCount ?? 0} archived families
+    //     </button>
+    //     {showLegacy ? (
+    //       <div className="strategyFamilyTable legacy" role="table" aria-label="Archived strategy families">
+    //         {(legacyRows ?? []).slice(0, 40).map((row) => (
+    //           <div role="row" key={row.family_id} className="strategyFamilyRow muted">
+    //             <span role="cell" className="mono">{row.family_id}</span>
+    //             <span role="cell"><em className="familyTag muted">{shortClass(row.classification)}</em></span>
+    //             <span role="cell" className="mono">{num(row.median_profit_factor)}</span>
+    //             <span role="cell" className="mono">{num(row.avg_trades, 0)}</span>
+    //             <span role="cell" className="mono">{row.elites}</span>
+    //           </div>
+    //         ))}
+    //         {(legacyRows?.length ?? 0) > 40 ? <div className="strategyFamilyEmpty">Showing 40 of {legacyCount}. All evidence is preserved and queryable.</div> : null}
+    //       </div>
+    //     ) : null}
+    //   </div>
+    // </section>
   );
 }
