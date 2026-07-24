@@ -51,6 +51,42 @@ def create_intraday_campaign_endpoint(
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+@router.get("/research/strategy-dna")
+def list_strategy_dna_endpoint(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    """Phase 13.1: latest DNA row per family, plus the behavioral-similarity
+    matrix. Behavioral similarity is deliberately separate from parameter
+    similarity (`candidate_parameter_distance`) -- two families can share a
+    parameter shape without behaving alike, and vice versa."""
+    from app.services.strategy_dna import DNA_SCHEMA_VERSION, dna_similarity_matrix, list_strategy_dna
+
+    records = list_strategy_dna(conn)
+    return {
+        "dna_schema_version": DNA_SCHEMA_VERSION,
+        "families": records,
+        "behavioral_similarity": dna_similarity_matrix(conn) if records else [],
+    }
+
+
+@router.get("/research/strategy-dna/{family_architecture}")
+def get_strategy_dna_endpoint(family_architecture: str, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    from app.services.strategy_dna import get_strategy_dna
+
+    record = get_strategy_dna(conn, family_architecture)
+    if not record:
+        raise HTTPException(status_code=404, detail=f"No Strategy DNA recorded for {family_architecture!r}")
+    return record
+
+
+@router.post("/research/strategy-dna/backfill")
+def backfill_strategy_dna_endpoint(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    """Append-only and idempotent: writes a DNA row for any registered family
+    that lacks one at the current schema version. Never updates or deletes an
+    existing row, and never touches campaign/job/candidate evidence."""
+    from app.services.strategy_dna import backfill_strategy_dna
+
+    return backfill_strategy_dna(conn)
+
+
 @router.post("/research/intraday/specialists")
 def create_specialist_thread_endpoint(
     payload: dict[str, Any] = Body(...),
