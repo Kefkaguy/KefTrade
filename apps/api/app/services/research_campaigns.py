@@ -3331,12 +3331,69 @@ def fail_or_retry_claimed_job(conn: psycopg.Connection, job: dict[str, Any], err
     )
 
 
+def run_intraday_campaign_job(
+    conn: psycopg.Connection,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    """Sibling to `run_campaign_job` for intraday (candles + intraday_features)
+    candidates -- e.g. Opening-Range Breakout v1. Never touched by, and never
+    touches, the swing `load_campaign_dataset` path; kept as a separate
+    function rather than more branches threaded through `run_campaign_job`
+    so the swing path's behavior is trivially unaffected by this addition.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    from app.services.labs.intraday.dataset import load_intraday_backtest_dataset
+
+    symbol = job["symbol"]
+    timeframe = job["timeframe"]
+    candidate = candidate_from_payload(job["candidate"])
+    # DiscoveryCandidate has no timeframe field of its own (a candidate is
+    # timeframe-agnostic research metadata); ORB's entry-cutoff calculation is
+    # timeframe-aware, so the job's own timeframe is threaded into the
+    # candidate's parameters here, the same way `apply_timeframe_scaling`
+    # already threads timeframe-derived values into swing candidates.
+    candidate = dataclass_replace(candidate, parameters={**candidate.parameters, "timeframe": timeframe})
+
+    dataset_started = time.perf_counter()
+    dataset = load_intraday_backtest_dataset(conn, symbol, timeframe)
+    data_loading_ms = round((time.perf_counter() - dataset_started) * 1000, 3)
+
+    simulation_started = time.perf_counter()
+    row = evaluate_candidate(
+        candidate,
+        dataset["candles"],
+        dataset["features"],
+        {},
+        market_arrays=dataset["market_arrays"],
+        session_end_index=dataset["session_end_index"],
+    )
+    row["execution_profile"] = {
+        "data_loading_ms": data_loading_ms,
+        "indicator_calculation_ms": 0,
+        "simulation_ms": round((time.perf_counter() - simulation_started) * 1000, 3),
+        "dataset_cache_hit": False,
+        "intraday_coverage": dataset["coverage"],
+    }
+    from app.services.research_architecture import validation_gate_diagnostics
+
+    result = {**row, "symbol": symbol, "timeframe": timeframe, "campaign_version": CAMPAIGN_VERSION, "dataset_id": None}
+    result["gate_diagnostics"] = validation_gate_diagnostics(result)
+    return result
+
+
 def run_campaign_job(
     conn: psycopg.Connection,
     job: dict[str, Any],
 ) -> dict[str, Any]:
     symbol = job["symbol"]
     timeframe = job["timeframe"]
+
+    from app.services.labs.intraday.campaign import is_opening_range_breakout_candidate
+
+    if is_opening_range_breakout_candidate(job["candidate"]):
+        return run_intraday_campaign_job(conn, job)
+
     candidate = candidate_from_payload(job["candidate"])
     candidate = apply_timeframe_scaling(candidate, timeframe)
     needs_enriched_context = (
@@ -3590,10 +3647,18 @@ def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dic
     freshness = data_freshness(latest, timeframe, (symbol_row or {}).get("asset_class"))
     if freshness["stale"]:
         return readiness_block("blocked_data", "stale_data", freshness["reason"], retry_after_seconds=1800, job=job, symbol_row=dict(symbol_row), candle_count=candle_count, latest_candle_timestamp=latest, freshness=freshness)
+    from app.services.labs.intraday.campaign import is_opening_range_breakout_candidate
+
+    # ORB (and any future intraday-lab) candidates are computed from
+    # intraday_features, never the swing features table -- checking the
+    # swing table here would report "feature_generation_failure" forever for
+    # otherwise-ready intraday jobs, since intraday_features rows never land
+    # in `features`.
+    feature_table = "intraday_features" if is_opening_range_breakout_candidate(job.get("candidate") or {}) else "features"
     features = conn.execute(
-        """
+        f"""
         SELECT COUNT(*) AS feature_count
-        FROM features
+        FROM {feature_table}
         WHERE symbol = %s AND timeframe = %s
         """,
         (symbol, timeframe),

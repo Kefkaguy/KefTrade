@@ -13,6 +13,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.backtester import count_setup_opportunities, run_backtest
 from app.services.features import load_candles
+from app.services.labs.intraday.strategy import OPENING_RANGE_BREAKOUT_ARCHITECTURE, OpeningRangeBreakoutStrategy
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.strategy import BASE_PARAMETERS, StrategyDecision, StrategyDefinition
 from app.services.strategy_families import (
@@ -387,6 +388,24 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
 
 
 def make_strategy_definition(candidate: DiscoveryCandidate) -> StrategyDefinition:
+    if candidate.parameters.get("strategy_architecture") == OPENING_RANGE_BREAKOUT_ARCHITECTURE:
+        timeframe = str(candidate.parameters.get("timeframe") or "30m")
+        strategy = OpeningRangeBreakoutStrategy(candidate.parameters, timeframe=timeframe)
+        return StrategyDefinition(
+            name="opening_range_breakout",
+            version=candidate.candidate_id,
+            description="Opening-Range Breakout v1: direction-aware breakout of the settled opening range with relative-volume confirmation and structural flat-by-session-close.",
+            parameters=candidate.parameters,
+            entry_rules=[
+                f"Entry block: {candidate.blocks.get('entry', 'opening_range_breakout')}.",
+                "No setup before the opening range window settles.",
+                "Breakout must clear the configured buffer beyond the settled opening-range high/low.",
+                "Relative-volume confirmation required when configured.",
+            ],
+            exit_rules=[f"Exit block: {candidate.blocks.get('exit', 'orb_session_close_forced')}.", "Structural flat-by-session-close; no overnight positions."],
+            supported_market_regimes=["bull_trend", "bear_trend", "sideways", "high_volatility", "low_volatility", "normal_volatility"],
+            decide=strategy,
+        )
     if candidate.parameters.get("strategy_architecture") == PHASE_2_FAMILY_VERSION:
         spec = strategy_family_spec(str(candidate.parameters.get("phase2_strategy_family")))
         return StrategyDefinition(
@@ -752,6 +771,7 @@ def evaluate_candidate(
     features: list[dict[str, Any]],
     context_by_time: dict[Any, dict[str, Any]],
     market_arrays: dict[str, Any] | None = None,
+    session_end_index: list[int] | None = None,
 ) -> dict[str, Any]:
     strategy = make_strategy_definition(candidate)
     frequency_screen = None
@@ -775,7 +795,7 @@ def evaluate_candidate(
             "trades": [],
         }
     else:
-        result = run_backtest(candles, features, strategy.parameters, strategy.decide, market_arrays=market_arrays)
+        result = run_backtest(candles, features, strategy.parameters, strategy.decide, market_arrays=market_arrays, session_end_index=session_end_index)
     metrics = dict(result["metrics"])
     trades = result.get("trades", [])
     by_year = compare_by_year(trades)
