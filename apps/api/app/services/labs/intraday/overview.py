@@ -72,7 +72,12 @@ INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
         "version": "v1",
         "status": "archived",
         "reason": "No measurable edge after costs",
-        "summary": None,  # filled in once the pilot's failure analysis is written
+        "summary": (
+            "1,542 trades across 80 jobs, avg profit factor 0.46. Gross P&L -13,354 before costs, "
+            "-33,684 after -- fees/slippage added 20,330 in additional loss. Session-close exits "
+            "(61% of trades) dominate, the same forced-flat mechanism ORB showed weak realized "
+            "continuation with. 0 promotions through the unmodified elite gate."
+        ),
         "supported_timeframes": SUPPORTED_VWAP_REVERSION_TIMEFRAMES,
     },
     {
