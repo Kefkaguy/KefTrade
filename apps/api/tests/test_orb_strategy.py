@@ -393,6 +393,26 @@ def test_fees_and_slippage_change_pnl() -> None:
 # --- 15: deterministic reruns are identical.
 
 
+def test_produces_trades_on_a_realistic_scale_dataset_above_the_walk_forward_threshold() -> None:
+    # Regression guard for a real defect the production pilot caught: every
+    # unit test above deliberately keeps len(rows) < 80 to sidestep
+    # run_backtest's walk-forward split. Real datasets have thousands of
+    # rows, and DEFAULT_ORB_PARAMETERS' walk_forward_train_ratio must leave a
+    # validation window large enough for the >=50-bar warmup to actually
+    # reach live bars -- a ratio of 1.0 previously left a 1-bar window and
+    # silently produced zero trades on every real job.
+    sessions = [session_bar_specs(date(2026, 1, 2) + timedelta(days=day), 20) for day in range(20)]
+    specs = [bar for session in sessions for bar in session]  # 400 bars, comfortably over 80
+    breakout_index = 15 * 20 + 5  # well inside the validation window regardless of split ratio
+    sustain_close_from(specs, breakout_index, Decimal("110"))
+    params = make_params(direction="long", maximum_entries_per_session=1)
+
+    _, _, result, _ = run_orb(specs, params)
+
+    assert result["metrics"]["walk_forward"]["enabled"] is True
+    assert len(result["trades"]) >= 1
+
+
 def test_deterministic_reruns_produce_identical_trades() -> None:
     specs = session_bar_specs(date(2026, 1, 2), 70)
     sustain_close_from(specs, 55, Decimal("110"))

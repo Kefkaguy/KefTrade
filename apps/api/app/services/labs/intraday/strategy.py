@@ -56,7 +56,16 @@ DEFAULT_ORB_PARAMETERS: dict[str, Any] = {
     "slippage_rate": Decimal("0.0005"),
     "risk_per_trade": Decimal("0.01"),
     "initial_equity": Decimal("10000"),
-    "walk_forward_train_ratio": 1.0,
+    # NOT 1.0: run_backtest's walk-forward split only skips entirely when
+    # len(rows) < 80 (true for every unit-test fixture in this module, which
+    # is why this bug was invisible there). On real production datasets
+    # (thousands of rows), a ratio of 1.0 makes split_index == len(rows) - 1,
+    # leaving a 1-bar validation window and i = max(start_index, 50) landing
+    # past the end of that window -- the loop body never executes and every
+    # job silently produces zero trades. Confirmed via the Step 2B pilot:
+    # all 80 jobs came back with number_of_trades == 0 until this was fixed
+    # to match the existing swing convention (BASE_PARAMETERS).
+    "walk_forward_train_ratio": 0.7,
     "max_holding_bars": 0,
     "risk_reward": Decimal("1.5"),
 }
