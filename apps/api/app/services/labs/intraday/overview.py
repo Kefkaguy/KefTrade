@@ -75,7 +75,32 @@ _ARCHIVED_SUMMARIES: dict[str, dict[str, str]] = {
 }
 
 
-def _architecture_job_totals(conn: psycopg.Connection, architecture: str) -> dict[str, Any] | None:
+def _latest_campaign_id_for_architecture(conn: psycopg.Connection, architecture: str) -> int | None:
+    """A family can accumulate more than one campaign over time -- e.g. Phase
+    12.4 relaunched the same 6 Phase 12.3 families under a new campaign_id
+    (see campaign_label) once trade-level evidence capture existed. Summing
+    every campaign's jobs together would double-count the same underlying
+    candidates/trades across two runs of an unchanged strategy. Every
+    aggregate query below is therefore scoped to the single most recent
+    campaign that has evidence for this architecture, exactly like
+    _CORRECTED_RUN_FILTER already excludes one bad historical run -- this is
+    the same "don't blend runs" principle, generalized to any number of
+    campaigns per architecture, not specific to any one family."""
+
+    row = conn.execute(
+        f"""
+        SELECT max(campaign_id) AS campaign_id
+        FROM research_campaign_jobs
+        WHERE candidate->'parameters'->>'strategy_architecture' = %s
+          AND status <> 'queued'
+          AND {_CORRECTED_RUN_FILTER}
+        """,
+        (architecture,),
+    ).fetchone()
+    return int(row["campaign_id"]) if row and row["campaign_id"] is not None else None
+
+
+def _architecture_job_totals(conn: psycopg.Connection, architecture: str, campaign_id: int) -> dict[str, Any] | None:
     row = conn.execute(
         f"""
         SELECT
@@ -85,36 +110,26 @@ def _architecture_job_totals(conn: psycopg.Connection, architecture: str) -> dic
             count(*) FILTER (WHERE status = 'promoted') AS promoted
         FROM research_campaign_jobs
         WHERE candidate->'parameters'->>'strategy_architecture' = %s
+          AND campaign_id = %s
           AND status <> 'queued'
           AND {_CORRECTED_RUN_FILTER}
         """,
-        (architecture,),
+        (architecture, campaign_id),
     ).fetchone()
     if not row or not row["jobs"]:
         return None
     return dict(row)
 
 
-def _architecture_latest_campaign(conn: psycopg.Connection, architecture: str) -> dict[str, Any] | None:
+def _architecture_latest_campaign(conn: psycopg.Connection, architecture: str, campaign_id: int) -> dict[str, Any] | None:
     row = conn.execute(
-        f"""
-        SELECT c.id, c.name, c.status
-        FROM research_campaigns c
-        WHERE c.id IN (
-            SELECT DISTINCT campaign_id
-            FROM research_campaign_jobs
-            WHERE candidate->'parameters'->>'strategy_architecture' = %s
-              AND {_CORRECTED_RUN_FILTER}
-        )
-        ORDER BY c.id DESC
-        LIMIT 1
-        """,
-        (architecture,),
+        "SELECT id, name, status FROM research_campaigns WHERE id = %s",
+        (campaign_id,),
     ).fetchone()
     return dict(row) if row else None
 
 
-def _architecture_timeframe_breakdown(conn: psycopg.Connection, architecture: str, supported_timeframes: tuple[str, ...]) -> list[dict[str, Any]]:
+def _architecture_timeframe_breakdown(conn: psycopg.Connection, architecture: str, supported_timeframes: tuple[str, ...], campaign_id: int) -> list[dict[str, Any]]:
     rows = conn.execute(
         f"""
         SELECT
@@ -125,12 +140,13 @@ def _architecture_timeframe_breakdown(conn: psycopg.Connection, architecture: st
             avg((result->'metrics'->>'expectancy_per_trade')::float) AS avg_expectancy
         FROM research_campaign_jobs
         WHERE candidate->'parameters'->>'strategy_architecture' = %s
+          AND campaign_id = %s
           AND status <> 'queued'
           AND {_CORRECTED_RUN_FILTER}
         GROUP BY timeframe
         ORDER BY timeframe
         """,
-        (architecture,),
+        (architecture, campaign_id),
     ).fetchall()
     by_timeframe = {row["timeframe"]: dict(row) for row in rows}
 
@@ -141,6 +157,7 @@ def _architecture_timeframe_breakdown(conn: psycopg.Connection, architecture: st
             SELECT timeframe, jsonb_array_elements_text(failure_reasons) AS reason
             FROM research_campaign_jobs
             WHERE candidate->'parameters'->>'strategy_architecture' = %s
+              AND campaign_id = %s
               AND status <> 'queued'
               AND {_CORRECTED_RUN_FILTER}
         ) exploded
@@ -148,7 +165,7 @@ def _architecture_timeframe_breakdown(conn: psycopg.Connection, architecture: st
         GROUP BY timeframe, reason
         ORDER BY timeframe, occurrences DESC
         """,
-        (architecture, list(_CATEGORICAL_FAILURE_CODES)),
+        (architecture, campaign_id, list(_CATEGORICAL_FAILURE_CODES)),
     ).fetchall()
     reasons_by_timeframe: dict[str, list[dict[str, Any]]] = {}
     for row in reason_rows:
@@ -173,7 +190,7 @@ def _architecture_timeframe_breakdown(conn: psycopg.Connection, architecture: st
     return result
 
 
-def _architecture_sample_jobs(conn: psycopg.Connection, architecture: str, *, limit: int = 12) -> list[dict[str, Any]]:
+def _architecture_sample_jobs(conn: psycopg.Connection, architecture: str, campaign_id: int, *, limit: int = 12) -> list[dict[str, Any]]:
     rows = conn.execute(
         f"""
         SELECT
@@ -189,12 +206,13 @@ def _architecture_sample_jobs(conn: psycopg.Connection, architecture: str, *, li
             failure_reasons
         FROM research_campaign_jobs
         WHERE candidate->'parameters'->>'strategy_architecture' = %s
+          AND campaign_id = %s
           AND status <> 'queued'
           AND {_CORRECTED_RUN_FILTER}
         ORDER BY symbol, timeframe, direction
         LIMIT %s
         """,
-        (architecture, limit),
+        (architecture, campaign_id, limit),
     ).fetchall()
     samples = []
     for row in rows:
@@ -215,10 +233,13 @@ def _architecture_sample_jobs(conn: psycopg.Connection, architecture: str, *, li
 
 
 def _architecture_detail(conn: psycopg.Connection, architecture: str, supported_timeframes: tuple[str, ...]) -> dict[str, Any] | None:
-    totals = _architecture_job_totals(conn, architecture)
+    campaign_id = _latest_campaign_id_for_architecture(conn, architecture)
+    if campaign_id is None:
+        return None
+    totals = _architecture_job_totals(conn, architecture, campaign_id)
     if not totals:
         return None
-    latest_campaign = _architecture_latest_campaign(conn, architecture)
+    latest_campaign = _architecture_latest_campaign(conn, architecture, campaign_id)
     return {
         "campaigns": totals["campaigns"],
         "jobs": totals["jobs"],
@@ -237,8 +258,8 @@ def _architecture_detail(conn: psycopg.Connection, architecture: str, supported_
             if latest_campaign
             else None
         ),
-        "timeframe_breakdown": _architecture_timeframe_breakdown(conn, architecture, supported_timeframes),
-        "sample_jobs": _architecture_sample_jobs(conn, architecture),
+        "timeframe_breakdown": _architecture_timeframe_breakdown(conn, architecture, supported_timeframes, campaign_id),
+        "sample_jobs": _architecture_sample_jobs(conn, architecture, campaign_id),
     }
 
 

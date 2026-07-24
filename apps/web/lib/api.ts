@@ -1677,6 +1677,99 @@ export function createIntradayCampaign(options: {
   return request<Record<string, any>>(`/research/intraday/campaigns?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
 
+export type Phase124GroupMetrics = {
+  trade_count: number;
+  gross_profit: number;
+  gross_loss: number;
+  gross_pnl: number;
+  fees: number;
+  slippage_cost: number;
+  total_transaction_costs: number;
+  net_pnl: number;
+  gross_profit_factor: number | null;
+  net_profit_factor: number | null;
+  gross_expectancy: number;
+  net_expectancy: number;
+  win_rate: number;
+  average_win: number;
+  average_loss: number;
+  payoff_ratio: number | null;
+  median_trade_return_pct: number;
+};
+
+export type Phase124Performance = Phase124GroupMetrics & {
+  total_jobs: number;
+  median_job_profit_factor: number | null;
+  median_job_expectancy: number | null;
+  cost_impact_pct_of_gross_expectancy: number | null;
+  verdict: string;
+};
+
+export type Phase124ExitRow = Phase124GroupMetrics & {
+  exit_reason: string;
+  pct_of_trades: number;
+  average_holding_period_hours: number;
+  median_holding_period_hours: number;
+  average_mfe: number | null;
+  median_mfe: number | null;
+  average_mae: number | null;
+  median_mae: number | null;
+  average_remaining_session_minutes_at_entry: number | null;
+};
+
+export type Phase124SubgroupRow = Phase124GroupMetrics & {
+  key: string;
+  meets_minimum_evidence: boolean;
+  stability_notes: string[];
+};
+
+export type Phase124FamilyReport = {
+  architecture: string;
+  family_name: string;
+  performance_decomposition: Phase124Performance;
+  exit_reason_breakdown: Phase124ExitRow[];
+  entry_quality_analysis: Record<string, any>;
+  cost_and_position_sizing_analysis: Record<string, any>;
+  stability_analysis: {
+    campaign_level_dominance: Record<string, any>;
+    by_symbol: Phase124SubgroupRow[];
+    by_direction: Phase124SubgroupRow[];
+    by_timeframe: Phase124SubgroupRow[];
+    by_month: Phase124SubgroupRow[];
+    by_exit_reason: Phase124SubgroupRow[];
+    by_candidate_parameter_set: Phase124SubgroupRow[];
+    by_relative_volume_bucket: Phase124SubgroupRow[];
+    by_market_regime: { rows: Array<{ key: string } & Phase124GroupMetrics>; insufficient_evidence: string };
+  };
+  failure_classifications: Array<{ classification: string; evidence: Record<string, any> }>;
+  research_allocation: {
+    family: string;
+    decision: "retain_for_focused_investigation" | "redesign_as_separately_versioned_hypothesis" | "gather_more_evidence" | "archive";
+    primary_evidence: Record<string, any>;
+    principal_failure_mechanism: string[];
+    strongest_subgroup: string | null;
+    weakest_subgroup: string | null;
+    evidence_stability: "stable" | "not_stable";
+    recommended_research_budget: string;
+    permitted_next_action: string;
+    prohibited_next_action: string;
+  };
+};
+
+export type Phase124Report = {
+  campaign_id: number;
+  minimum_evidence_rules: Record<string, number>;
+  entry_time_buckets: string[];
+  relative_volume_buckets: string[];
+  data_availability: Record<string, string>;
+  families: Phase124FamilyReport[];
+  amd_30m_session_momentum_investigation: Record<string, any>;
+};
+
+export function getPhase124Analysis(campaignId: number) {
+  return request<Phase124Report>(`/research/intraday/phase-12-4?campaign_id=${campaignId}`, { cache: "no-store", timeoutMs: 30000 });
+}
+
 export function refreshFamilyRegistry() {
   return request<{ families: number; active: number; legacy: number; by_classification: Record<string, number>; evidence_deleted: boolean }>(
     "/research/families/refresh-registry",

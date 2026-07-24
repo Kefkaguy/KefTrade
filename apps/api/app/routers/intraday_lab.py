@@ -5,6 +5,7 @@ import psycopg
 
 from app.db import get_connection
 from app.services.labs.intraday.overview import intraday_lab_overview
+from app.services.labs.intraday.phase_analysis import phase_12_4_report
 
 router = APIRouter(tags=["intraday-lab"])
 
@@ -12,6 +13,14 @@ router = APIRouter(tags=["intraday-lab"])
 @router.get("/research/intraday/overview")
 def get_intraday_lab_overview(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     return intraday_lab_overview(conn)
+
+
+@router.get("/research/intraday/phase-12-4")
+def get_phase_12_4_analysis(
+    campaign_id: int = Query(..., description="The Phase 12.4 trade-evidence campaign id to analyze (not Campaign 47 itself, which has no trade-level rows)."),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return phase_12_4_report(conn, campaign_id)
 
 
 @router.post("/research/intraday/campaigns")
