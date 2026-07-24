@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Archive, CheckCircle2, Circle, Rocket, ShieldAlert, TrendingUp } from "lucide-react";
 import { createIntradayCampaign, getIntradayLabOverview, type IntradayLabOverview, type IntradaySampleJob, type IntradayStrategyRosterEntry } from "@/lib/api";
 import { Card, DataTable, EmptyState, PageTitle } from "@/components/ResearchUI";
+import { Phase124Panel } from "@/components/Phase124Panel";
 
 const REASON_LABELS: Record<string, string> = {
   weak_profit_factor: "Weak profit factor",
@@ -57,6 +58,16 @@ export function IntradayResearchLab() {
   const archivedStrategies = (overview?.strategies ?? []).filter((s) => s.status === "archived");
   const plannedStrategies = (overview?.strategies ?? []).filter((s) => s.status === "planned");
   const testedStrategies = (overview?.strategies ?? []).filter((s) => s.pilot);
+  const phase124FamilyIds = new Set([
+    "gap_fill_v1",
+    "session_momentum_v1",
+    "intraday_trend_pullback_v1",
+    "ema_trend_continuation_v1",
+    "opening_fade_v1",
+    "vwap_trend_continuation_v1"
+  ]);
+  const phase124CampaignId =
+    (overview?.strategies ?? []).find((s) => phase124FamilyIds.has(s.id) && s.pilot)?.pilot?.campaign_id ?? null;
 
   return (
     <div className="pageContainer">
@@ -132,6 +143,8 @@ export function IntradayResearchLab() {
       {testedStrategies.map((strategy) => (
         <FamilyResearchDetail key={strategy.id} strategy={strategy} />
       ))}
+
+      <Phase124Panel campaignId={phase124CampaignId} />
 
       <Card title="Research archive" eyebrow="Preserved, not deleted">
         <p className="intradayArchiveIntro">
