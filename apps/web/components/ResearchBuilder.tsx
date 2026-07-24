@@ -19,12 +19,15 @@ import {
   TrendingUp
 } from "lucide-react";
 import {
+  ALL_RESEARCH_TIMEFRAMES,
   buildResearchSelection,
   CRYPTO_RESEARCH_ASSETS,
   FALLBACK_RESEARCH_ASSETS,
   MAX_TARGETED_CANDIDATES,
   MAX_PROFILE_ASSETS,
   RESEARCH_SCOPES,
+  RESEARCH_TIMEFRAMES,
+  RESEARCH_TIMEFRAME_LABELS,
   STRATEGY_FAMILIES,
   VALIDATION_METHODS,
   type ResearchAsset,
@@ -91,6 +94,7 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
   const [evidenceAllocation, setEvidenceAllocation] = useState(DEFAULT_EVIDENCE_ALLOCATION);
   const [stockCatalog, setStockCatalog] = useState<ResearchAsset[]>(fallbackStocks);
   const [assetIds, setAssetIds] = useState<ResearchAssetId[]>(["TSLA", "NVDA", "AAPL", "MSFT", "AMD", "META", "GOOGL", "AMZN", "SPY", "QQQ"]);
+  const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>([...RESEARCH_TIMEFRAMES]);
   const [learningSummary, setLearningSummary] = useState<ResearchLearningSummary | null>(null);
   const [commandCenter, setCommandCenter] = useState<ResearchCommandCenter | null>(null);
   const [profileAssetId, setProfileAssetId] = useState<ResearchAssetId | null>(null);
@@ -118,9 +122,9 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
       evidenceAllocationPct: universeMode === "established" ? evidenceAllocation : undefined,
       guidanceSnapshotKey: universeMode === "established" ? evidenceGuidance.snapshotKey : undefined,
       establishedStrategyFamilies: universeMode === "established" ? evidenceGuidance.strategyFamilies : undefined,
-      timeframes: universeMode === "established" && evidenceGuidance.timeframes.length ? evidenceGuidance.timeframes : undefined
+      timeframes: universeMode === "established" && evidenceGuidance.timeframes.length ? evidenceGuidance.timeframes : selectedTimeframes
     }),
-    [evidenceAllocation, evidenceGuidance, scopeId, selectedAssets, universeMode]
+    [evidenceAllocation, evidenceGuidance, scopeId, selectedAssets, selectedTimeframes, universeMode]
   );
   const selectedStockCount = selectedAssets.filter((asset) => asset.market !== "Crypto").length;
   const readyStockCatalog = useMemo(() => stockCatalog.filter(isResearchReadyStock), [stockCatalog]);
@@ -238,6 +242,14 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
     const count = boundedStockCount(rawCount, learnedPool.length);
     setAssetIds(learnedPool.slice(0, count).map((asset) => asset.id));
     setScopeId("custom");
+  }
+
+  function toggleTimeframe(timeframe: string) {
+    setSelectedTimeframes((prev) => {
+      const exists = prev.includes(timeframe);
+      if (exists && prev.length === 1) return prev;
+      return exists ? prev.filter((tf) => tf !== timeframe) : [...prev, timeframe];
+    });
   }
 
   function chooseUniverseMode(nextMode: "random" | "established") {
@@ -450,6 +462,40 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
             {universeMode === "established" && profileAsset && profileEvidence ? (
               <ResearchAssetProfile asset={profileAsset} evidence={profileEvidence} onClose={() => setProfileAssetId(null)} />
             ) : null}
+          </div>
+
+          <div className="builderStep">
+            <div className="builderStepHeading">
+              <span>03</span>
+              <div><strong>Timeframes</strong><small>Choose which bar sizes to research. Run 15m-only, 30m-only, swing timeframes, or any combination.</small></div>
+            </div>
+            <div className="timeframeSelector" role="group" aria-label="Timeframes">
+              {ALL_RESEARCH_TIMEFRAMES.map((timeframe) => {
+                const selected = selectedTimeframes.includes(timeframe);
+                const intraday = timeframe === "15m" || timeframe === "30m";
+                return (
+                  <button
+                    key={timeframe}
+                    type="button"
+                    className={`timeframeOption ${selected ? "selected" : ""}`}
+                    aria-pressed={selected}
+                    disabled={universeMode === "established"}
+                    onClick={() => toggleTimeframe(timeframe)}
+                  >
+                    <span>{selected ? <Check size={13} /> : null}</span>
+                    <strong>{timeframe}</strong>
+                    <small>{RESEARCH_TIMEFRAME_LABELS[timeframe] ?? timeframe}{intraday ? " · intraday" : ""}</small>
+                  </button>
+                );
+              })}
+            </div>
+            <small className="assetCountHelp">
+              {universeMode === "established"
+                ? "Established Evidence chooses timeframes from the persisted learning ranking."
+                : selectedTimeframes.length === 1
+                  ? `Runs ${selectedTimeframes[0]}-only. Every candidate is evaluated on that timeframe alone.`
+                  : `Runs on ${selectedTimeframes.join(", ")}. Each candidate is evaluated on every selected timeframe.`}
+            </small>
           </div>
 
           <div className="builderPromise">

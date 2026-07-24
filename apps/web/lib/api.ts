@@ -1601,6 +1601,64 @@ export function getFamilyRegistry(status?: "active" | "legacy") {
   return request<{ families: FamilyRegistryRow[]; count: number }>(`/research/families/registry${query}`, { cache: "no-store", timeoutMs: 60000 });
 }
 
+export type IntradayStrategyRosterEntry = {
+  id: string;
+  name: string;
+  version: string | null;
+  status: "archived" | "planned" | "active";
+  reason: string | null;
+  summary: string | null;
+  jobs?: number;
+  trades?: number;
+  campaigns?: number;
+  promoted?: number;
+};
+
+export type IntradayTimeframeBreakdown = {
+  timeframe: string;
+  jobs: number;
+  trades: number;
+  avg_profit_factor: number | null;
+  avg_expectancy: number | null;
+  primary_rejection_reasons: Array<{ reason: string; occurrences: number }>;
+  status: "archived" | "not_started";
+};
+
+export type IntradaySampleJob = {
+  symbol: string;
+  timeframe: string;
+  direction: string | null;
+  buffer_level: string | null;
+  status: string;
+  validation_score: number | null;
+  trades: number | null;
+  profit_factor: number | null;
+  expectancy: number | null;
+  failure_reasons: string[];
+};
+
+export type IntradayLabOverview = {
+  infrastructure_status: string;
+  timeframes_supported: string[];
+  strategies: IntradayStrategyRosterEntry[];
+  timeframe_breakdown: IntradayTimeframeBreakdown[];
+  pilot: {
+    campaign_id: number;
+    name: string;
+    status: string;
+    jobs: number;
+    trades: number;
+    promoted: number;
+    outcome: string;
+  } | null;
+  sample_jobs: IntradaySampleJob[];
+  forward_validation_note: string;
+};
+
+export function getIntradayLabOverview() {
+  return request<IntradayLabOverview>("/research/intraday/overview", { cache: "no-store", timeoutMs: 30000 });
+}
+
 export function refreshFamilyRegistry() {
   return request<{ families: number; active: number; legacy: number; by_classification: Record<string, number>; evidence_deleted: boolean }>(
     "/research/families/refresh-registry",
@@ -1608,8 +1666,10 @@ export function refreshFamilyRegistry() {
   );
 }
 
-export function launchHighFrequencyCampaign(maxCandidates = 120) {
-  return request<Record<string, any>>(`/research/campaigns/high-frequency?max_candidates=${maxCandidates}&timeframes=15m`, { method: "POST", timeoutMs: 120000 });
+export function launchHighFrequencyCampaign(maxCandidates = 120, timeframes: string[] = ["15m", "30m"]) {
+  const params = new URLSearchParams({ max_candidates: String(maxCandidates) });
+  for (const timeframe of timeframes) params.append("timeframes", timeframe);
+  return request<Record<string, any>>(`/research/campaigns/high-frequency?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
 
 export function launchHiddenGemRecovery(maxFamilies = 27) {

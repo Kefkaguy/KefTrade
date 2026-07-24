@@ -539,6 +539,16 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .assetEvidenceDetails { display: grid; gap: 2px; margin-top: 8px; }
 .assetEvidenceDetails b { color: var(--accent); font-size: 8px; letter-spacing: 0; }
 .assetEvidenceDetails em { display: block; overflow: hidden; color: var(--muted); font-size: 7px; font-style: normal; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+
+.timeframeSelector { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.timeframeOption { display: grid; min-height: 76px; align-content: center; justify-items: center; gap: 3px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); color: var(--muted); cursor: pointer; text-align: center; transition: border-color .2s ease, background .2s ease, color .2s ease, box-shadow .2s ease; }
+.timeframeOption:hover { border-color: var(--accent-2); color: var(--ink); }
+.timeframeOption.selected { border-color: color-mix(in srgb, var(--accent) 58%, var(--line)); background: var(--accent-soft); color: var(--accent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent); }
+.timeframeOption:disabled { cursor: not-allowed; opacity: .46; }
+.timeframeOption span { display: block; min-height: 13px; color: var(--accent); }
+.timeframeOption strong { font: 700 17px var(--font-mono); }
+.timeframeOption small { color: var(--muted); font-size: 8px; }
+.timeframeOption.selected small { color: var(--muted-accent); }
 .assetSearchEmpty { padding: 24px 0; text-align: center; font-size: 10px; }
 .researchAssetProfile { display: grid; gap: 14px; margin-top: 14px; padding: 16px; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line)); border-radius: var(--radius-small); background: color-mix(in srgb, var(--panel-soft) 70%, var(--bg)); }
 .researchAssetProfileHeader { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
@@ -1404,3 +1414,81 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .strategyLegacyToggle { display: inline-flex; align-items: center; gap: 7px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--bg); color: var(--muted); font: 8px var(--font-mono); cursor: pointer; }
 .strategyLegacyToggle:hover { color: var(--fg); }
 .strategyFamilyTable.legacy { margin-top: 12px; opacity: 0.82; }
+
+/* Intraday Research Lab */
+.intradayStatusRow { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; }
+.intradayStatusBadge { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; border: 1px solid var(--line); border-radius: 999px; font: 650 10px var(--font-mono); }
+.intradayStatusBadge.complete { border-color: color-mix(in srgb, var(--success) 40%, var(--line)); background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); }
+.intradayTimeframePills { display: flex; gap: 8px; }
+.intradayPill { display: inline-flex; align-items: center; min-height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-soft); color: var(--muted-accent); font: 650 10px var(--font-mono); }
+
+.intradayStrategyGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.intradayStrategyCard { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); }
+.intradayStrategyCard.archived { border-color: color-mix(in srgb, var(--warning) 30%, var(--line)); }
+.intradayStrategyCard header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.intradayStrategyCard header strong { font-size: 13px; }
+.intradayStrategyReason { color: var(--ink); font-size: 11px; font-weight: 650; }
+.intradayStrategySummary { color: var(--muted); font-size: 10px; line-height: 1.6; }
+.intradayStrategyStats { display: flex; flex-wrap: wrap; gap: 10px; padding-top: 8px; border-top: 1px solid var(--line); color: var(--muted-accent); font: 650 9px var(--font-mono); }
+.intradayStrategyPlaceholder { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; }
+
+.intradayPilotMetrics { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.intradayPilotNote { display: flex; align-items: center; gap: 8px; margin-top: 16px; color: var(--muted); font-size: 10px; }
+.intradayPilotNote svg { color: var(--accent-2); }
+
+.intradayTimeframeTabs { display: flex; gap: 10px; }
+.intradayTimeframeTab { display: grid; min-width: 110px; gap: 4px; padding: 12px 16px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); color: var(--muted); cursor: pointer; text-align: left; transition: border-color .18s ease, color .18s ease, background .18s ease; }
+.intradayTimeframeTab:hover { border-color: var(--accent-2); color: var(--ink); }
+.intradayTimeframeTab.selected { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); color: var(--accent); }
+.intradayTimeframeTab strong { font: 700 15px var(--font-mono); }
+.intradayTimeframeTab span { font-size: 9px; }
+.intradayTimeframeDetail { margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
+.intradayTimeframeDetailGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.intradayTimeframeDetailGrid > div span { display: block; color: var(--muted); font: 650 8px var(--font-mono); text-transform: uppercase; }
+.intradayTimeframeDetailGrid > div strong { display: block; margin-top: 6px; font-size: 13px; }
+.intradayRejectionReasons { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.intradayRejectionReasons > span { color: var(--muted); font: 650 8px var(--font-mono); text-transform: uppercase; }
+.intradayRejectionReasons ul { display: grid; gap: 6px; margin: 10px 0 0; padding: 0; list-style: none; }
+.intradayRejectionReasons li { display: flex; align-items: center; justify-content: space-between; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); font-size: 10px; }
+.intradayRejectionReasons li em { color: var(--muted); font-style: normal; font-family: var(--font-mono); }
+
+.intradayArchiveIntro { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; color: var(--muted); font-size: 10px; }
+.intradayArchiveIntro svg { color: var(--accent-2); }
+.strategyFamilyTable.threeCol .strategyFamilyHead, .strategyFamilyTable.threeCol .strategyFamilyRow { grid-template-columns: minmax(0, 1.2fr) 0.7fr minmax(0, 2.4fr); }
+
+.intradayCandidateList { display: grid; gap: 8px; }
+.intradayCandidateRow { border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); overflow: hidden; }
+.intradayCandidateRow.open { border-color: var(--accent-2); }
+.intradayCandidateSummary { display: grid; width: 100%; grid-template-columns: 0.8fr 0.6fr 0.6fr 0.6fr auto; align-items: center; gap: 10px; padding: 11px 14px; background: transparent; color: var(--ink); cursor: pointer; text-align: left; font-size: 10px; }
+.intradayCandidateSummary:hover { background: var(--panel); }
+.intradayCandidateDetail { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding: 4px 14px 16px; border-top: 1px solid var(--line); }
+.intradayCandidateDetail > div span { display: block; color: var(--muted); font: 650 8px var(--font-mono); text-transform: uppercase; }
+.intradayCandidateDetail > div strong { display: block; margin-top: 5px; font-size: 11px; }
+.intradayCandidateDetail .capitalize { text-transform: capitalize; }
+.intradayCandidateWhy { grid-column: 1 / -1; }
+.intradayCandidateWhy ul { display: grid; gap: 4px; margin: 8px 0 0; padding: 0; list-style: none; }
+.intradayCandidateWhy li { padding: 7px 10px; border-left: 2px solid var(--accent-2); background: var(--panel); color: var(--muted-accent); font-size: 9.5px; }
+
+.intradayHonestyBanner { display: flex; align-items: center; gap: 10px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius); background: color-mix(in srgb, var(--panel) 76%, transparent); color: var(--muted-accent); font-size: 11px; }
+.intradayHonestyBanner svg { color: var(--accent-2); }
+
+@media (max-width: 900px) {
+  .intradayStrategyGrid { grid-template-columns: 1fr; }
+  .intradayTimeframeDetailGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .intradayCandidateDetail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+.intradayTeaser { display: grid; gap: 16px; padding: 22px 26px; border: 1px solid color-mix(in srgb, var(--accent-2) 34%, var(--line)); border-radius: var(--radius); background: linear-gradient(150deg, color-mix(in srgb, var(--panel) 88%, transparent), color-mix(in srgb, var(--bg-secondary) 92%, transparent)); box-shadow: var(--shadow-soft); transition: border-color .2s ease, transform .2s ease; }
+.intradayTeaser:hover { border-color: var(--accent); transform: translateY(-2px); }
+.intradayTeaserHeader { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.intradayTeaserHeader .eyebrow { display: inline-flex; align-items: center; gap: 7px; }
+.intradayTeaserBadge { display: inline-flex; align-items: center; padding: 5px 11px; border: 1px solid color-mix(in srgb, var(--success) 40%, var(--line)); border-radius: 999px; background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); font: 650 8px var(--font-mono); text-transform: uppercase; }
+.intradayTeaserBody { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 16px; }
+.intradayTeaserStrategies { display: flex; flex-wrap: wrap; gap: 8px; }
+.intradayTeaserStrategy { padding: 6px 11px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-soft); color: var(--muted); font-size: 9px; }
+.intradayTeaserStrategy.archived { border-color: color-mix(in srgb, var(--warning) 32%, var(--line)); color: var(--muted-accent); }
+.intradayTeaserStats { display: flex; flex-wrap: wrap; gap: 16px; color: var(--muted); font-size: 10px; }
+.intradayTeaserStats strong { color: var(--ink); font-family: var(--font-mono); }
+.intradayTeaserStats .warn { display: inline-flex; align-items: center; gap: 5px; color: var(--accent-2); }
+.intradayTeaserLink { display: inline-flex; align-items: center; gap: 7px; color: var(--muted-accent); font-size: 10px; font-weight: 700; }
+.intradayTeaser:hover .intradayTeaserLink { color: var(--accent); }

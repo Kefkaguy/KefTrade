@@ -10,6 +10,7 @@ import {
   Bot,
   BrainCircuit,
   CandlestickChart,
+  Clock,
   Command,
   FileText,
   FlaskConical,
@@ -38,6 +39,7 @@ type NavigationItem = {
 const primaryNavigation: NavigationItem[] = [
   { href: "/", label: "Home", icon: Grid2X2 },
   { href: "/research", label: "Research", icon: FlaskConical },
+  { href: "/intraday-research", label: "Intraday Lab", icon: Clock },
   { href: "/research-intelligence", label: "Candidates", icon: Trophy },
   { href: "/elite-builder", label: "Elite Builder", icon: BrainCircuit },
   { href: "/paper", label: "Forward validation", icon: CandlestickChart },

@@ -21,7 +21,7 @@ from app.observability import (
     reset_request_context,
     set_request_context,
 )
-from app.routers import alpha, backtests, broker, data, diagnostics, elite_portfolios, features, paper, regimes, research, research_copilot, research_intelligence, research_lab, risk, signals, symbols, validation
+from app.routers import alpha, backtests, broker, data, diagnostics, elite_portfolios, features, intraday_lab, paper, regimes, research, research_copilot, research_intelligence, research_lab, risk, signals, symbols, validation
 from app.settings import cors_origin_list, settings
 from app.services.paper_scheduler import start_scheduler, stop_scheduler
 from app.services.shared_cache import invalidate_summary_cache
@@ -120,6 +120,7 @@ app.include_router(backtests.router)
 app.include_router(research.router)
 app.include_router(elite_portfolios.router)
 app.include_router(research_lab.router)
+app.include_router(intraday_lab.router)
 app.include_router(research_intelligence.router)
 app.include_router(research_copilot.router)
 app.include_router(alpha.router)

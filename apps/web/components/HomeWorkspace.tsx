@@ -6,6 +6,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { ArrowDown, ArrowRight, Check, Search, ShieldCheck, Sparkles } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CampaignActivity } from "@/components/CampaignActivity";
+import { IntradayLabTeaser } from "@/components/IntradayLabTeaser";
 import { StrategyLibraryPanel } from "@/components/StrategyLibraryPanel";
 import { ResearchBuilder } from "@/components/ResearchBuilder";
 import { ResearchLaunchExperience, type ResearchLaunchPhase } from "@/components/ResearchLaunchExperience";
@@ -320,6 +321,10 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
           </article>
         ))}
       </motion.section>
+
+      <motion.div variants={reveal}>
+        <IntradayLabTeaser />
+      </motion.div>
 
       <CampaignActivity enabled />
 
