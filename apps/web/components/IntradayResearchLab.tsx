@@ -1,9 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Archive, CheckCircle2, Circle, ShieldAlert, TrendingUp } from "lucide-react";
-import { getIntradayLabOverview, type IntradayLabOverview, type IntradaySampleJob, type IntradayStrategyRosterEntry } from "@/lib/api";
-import { Card, EmptyState, PageTitle } from "@/components/ResearchUI";
+import { useEffect, useMemo, useState } from "react";
+import { Archive, CheckCircle2, Circle, Rocket, ShieldAlert, TrendingUp } from "lucide-react";
+import { createIntradayCampaign, getIntradayLabOverview, type IntradayLabOverview, type IntradaySampleJob, type IntradayStrategyRosterEntry } from "@/lib/api";
+import { Card, DataTable, EmptyState, PageTitle } from "@/components/ResearchUI";
 
 const REASON_LABELS: Record<string, string> = {
   weak_profit_factor: "Weak profit factor",
@@ -22,20 +22,32 @@ function num(value: number | null | undefined, digits = 2) {
   return value == null ? "—" : value.toFixed(digits);
 }
 
+function weightedAverage(breakdown: IntradayStrategyRosterEntry["timeframe_breakdown"], field: "avg_profit_factor" | "avg_expectancy") {
+  const rows = (breakdown ?? []).filter((row) => row[field] != null && row.trades > 0);
+  const totalTrades = rows.reduce((sum, row) => sum + row.trades, 0);
+  if (!totalTrades) return null;
+  const weighted = rows.reduce((sum, row) => sum + (row[field] as number) * row.trades, 0);
+  return weighted / totalTrades;
+}
+
 export function IntradayResearchLab() {
   const [overview, setOverview] = useState<IntradayLabOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const load = () => {
+    getIntradayLabOverview()
+      .then(setOverview)
+      .catch((reason) => setError(reason instanceof Error ? reason.message : "Could not load the Intraday Research Lab."));
+  };
 
   useEffect(() => {
     let active = true;
     getIntradayLabOverview()
       .then((result) => {
-        if (!active) return;
-        setOverview(result);
+        if (active) setOverview(result);
       })
       .catch((reason) => {
-        if (!active) return;
-        setError(reason instanceof Error ? reason.message : "Could not load the Intraday Research Lab.");
+        if (active) setError(reason instanceof Error ? reason.message : "Could not load the Intraday Research Lab.");
       });
     return () => {
       active = false;
@@ -44,7 +56,7 @@ export function IntradayResearchLab() {
 
   const archivedStrategies = (overview?.strategies ?? []).filter((s) => s.status === "archived");
   const plannedStrategies = (overview?.strategies ?? []).filter((s) => s.status === "planned");
-  const testedStrategies = (overview?.strategies ?? []).filter((s) => s.status !== "planned" && s.pilot);
+  const testedStrategies = (overview?.strategies ?? []).filter((s) => s.pilot);
 
   return (
     <div className="pageContainer">
@@ -72,7 +84,7 @@ export function IntradayResearchLab() {
             <article key={strategy.id} className={`intradayStrategyCard ${strategy.status}`}>
               <header>
                 <strong>{strategy.name}{strategy.version ? ` ${strategy.version}` : ""}</strong>
-                <em className={`familyTag ${strategy.status === "archived" ? "muted" : "warn"}`}>
+                <em className={`familyTag ${strategy.status === "archived" ? "muted" : strategy.status === "planned" ? "warn" : "good"}`}>
                   {strategy.status === "archived" ? "Archived" : strategy.status === "planned" ? "Planned" : "Active"}
                 </em>
               </header>
@@ -80,22 +92,42 @@ export function IntradayResearchLab() {
                 <>
                   <p className="intradayStrategyReason">{strategy.reason}</p>
                   {strategy.summary ? <p className="intradayStrategySummary">{strategy.summary}</p> : null}
-                  {strategy.jobs != null ? (
-                    <div className="intradayStrategyStats">
-                      <span>{strategy.campaigns ?? 0} campaign{(strategy.campaigns ?? 0) === 1 ? "" : "s"}</span>
-                      <span>{(strategy.trades ?? 0).toLocaleString()} trades</span>
-                      <span>{strategy.promoted ?? 0} promoted</span>
-                    </div>
-                  ) : null}
                 </>
-              ) : (
+              ) : strategy.status === "planned" ? (
                 <p className="intradayStrategyPlaceholder"><Circle size={12} /> Not started — no code, no evidence yet.</p>
+              ) : (
+                <p className="intradayStrategySummary">Implemented, awaiting or under research. No forward validation approved.</p>
               )}
+              {strategy.jobs != null ? (
+                <div className="intradayStrategyStats">
+                  <span>{strategy.campaigns ?? 0} campaign{(strategy.campaigns ?? 0) === 1 ? "" : "s"}</span>
+                  <span>{(strategy.trades ?? 0).toLocaleString()} trades</span>
+                  <span>{strategy.promoted ?? 0} promoted</span>
+                </div>
+              ) : null}
             </article>
           ))}
           {!overview ? <EmptyState title="Loading strategy roster" body="Reading the Intraday Lab overview." /> : null}
         </div>
       </Card>
+
+      <Card title="Compare families" eyebrow="All families, side by side">
+        <DataTable
+          columns={["Family", "Status", "Campaigns", "Trades", "Avg PF", "Avg expectancy", "Promoted", "Archive status"]}
+          rows={(overview?.strategies ?? []).map((strategy) => [
+            `${strategy.name}${strategy.version ? ` ${strategy.version}` : ""}`,
+            strategy.status === "archived" ? "Archived" : strategy.status === "planned" ? "Planned" : "Active",
+            strategy.campaigns ?? 0,
+            (strategy.trades ?? 0).toLocaleString(),
+            num(weightedAverage(strategy.timeframe_breakdown, "avg_profit_factor")),
+            num(weightedAverage(strategy.timeframe_breakdown, "avg_expectancy")),
+            strategy.promoted ?? 0,
+            strategy.status === "archived" ? "Archived (negative result)" : strategy.pilot ? "Has evidence" : "No evidence yet"
+          ])}
+        />
+      </Card>
+
+      <LaunchIntradayCampaign strategies={overview?.strategies ?? []} timeframesSupported={overview?.timeframes_supported ?? ["15m", "30m"]} onLaunched={load} />
 
       {testedStrategies.map((strategy) => (
         <FamilyResearchDetail key={strategy.id} strategy={strategy} />
@@ -125,6 +157,9 @@ export function IntradayResearchLab() {
               <span role="cell">Not implemented yet</span>
             </div>
           ))}
+          {!archivedStrategies.length && !plannedStrategies.length ? (
+            <div className="strategyFamilyEmpty">No archived or planned families yet.</div>
+          ) : null}
         </div>
       </Card>
 
@@ -133,6 +168,99 @@ export function IntradayResearchLab() {
         <span>{overview?.forward_validation_note ?? "Intraday research available. No validated intraday strategy currently approved for forward validation."}</span>
       </div>
     </div>
+  );
+}
+
+function LaunchIntradayCampaign({
+  strategies,
+  timeframesSupported,
+  onLaunched
+}: {
+  strategies: IntradayStrategyRosterEntry[];
+  timeframesSupported: string[];
+  onLaunched: () => void;
+}) {
+  const launchable = useMemo(() => strategies.filter((s) => s.status !== "planned"), [strategies]);
+  const [selectedFamilies, setSelectedFamilies] = useState<string[]>([]);
+  const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(timeframesSupported);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  function toggleFamily(id: string) {
+    setSelectedFamilies((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  }
+
+  function toggleTimeframe(tf: string) {
+    setSelectedTimeframes((prev) => {
+      const exists = prev.includes(tf);
+      if (exists && prev.length === 1) return prev;
+      return exists ? prev.filter((item) => item !== tf) : [...prev, tf];
+    });
+  }
+
+  async function launch() {
+    if (!selectedFamilies.length) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await createIntradayCampaign({ familyIds: selectedFamilies, timeframes: selectedTimeframes });
+      setNotice(`Campaign #${result.campaign_id} queued: ${result.jobs_created} jobs across ${(result.timeframes || []).join(", ")}, ${(result.assets || []).length} assets.`);
+      onLaunched();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not launch the campaign.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Card title="Launch an intraday campaign" eyebrow="One, several, or all families">
+      <p className="intradayStrategySummary">
+        Each selected family keeps its own candidates and is evaluated independently through the unmodified elite gate — evidence is never merged across families.
+      </p>
+      <div className="intradayFamilyToggleGrid">
+        {launchable.map((strategy) => {
+          const selected = selectedFamilies.includes(strategy.id);
+          return (
+            <button
+              key={strategy.id}
+              type="button"
+              className={`intradayFamilyToggle ${selected ? "selected" : ""}`}
+              aria-pressed={selected}
+              onClick={() => toggleFamily(strategy.id)}
+            >
+              <strong>{strategy.name}</strong>
+              <em className={`familyTag ${strategy.status === "archived" ? "muted" : "good"}`}>{strategy.status === "archived" ? "Archived" : "Active"}</em>
+            </button>
+          );
+        })}
+      </div>
+      <div className="intradayTimeframePills" style={{ marginTop: 16 }}>
+        {timeframesSupported.map((tf) => (
+          <button
+            key={tf}
+            type="button"
+            className={`intradayPill selectable ${selectedTimeframes.includes(tf) ? "selected" : ""}`}
+            onClick={() => toggleTimeframe(tf)}
+          >
+            {tf}
+          </button>
+        ))}
+      </div>
+      {error ? <div className="strategyLibraryError" role="alert" style={{ marginTop: 14 }}>{error}</div> : null}
+      {notice ? <div className="strategyLibraryNotice" style={{ marginTop: 14 }}>{notice}</div> : null}
+      <button
+        type="button"
+        className="button secondary"
+        style={{ marginTop: 16 }}
+        disabled={busy || !selectedFamilies.length}
+        onClick={() => void launch()}
+      >
+        <Rocket size={15} /> {busy ? "Launching…" : `Launch ${selectedFamilies.length || ""} famil${selectedFamilies.length === 1 ? "y" : "ies"}`}
+      </button>
+    </Card>
   );
 }
 
@@ -180,7 +308,7 @@ function FamilyResearchDetail({ strategy }: { strategy: IntradayStrategyRosterEn
             <div><span>Trades</span><strong>{selectedBreakdown.trades.toLocaleString()}</strong></div>
             <div><span>Avg profit factor</span><strong>{num(selectedBreakdown.avg_profit_factor)}</strong></div>
             <div><span>Avg expectancy</span><strong>{num(selectedBreakdown.avg_expectancy)}</strong></div>
-            <div><span>Status</span><strong>{selectedBreakdown.status === "archived" ? "Archived as negative evidence" : "Not started"}</strong></div>
+            <div><span>Status</span><strong>{selectedBreakdown.status === "has_evidence" ? "Has research evidence" : "Not started"}</strong></div>
           </div>
           {selectedBreakdown.primary_rejection_reasons.length ? (
             <div className="intradayRejectionReasons">

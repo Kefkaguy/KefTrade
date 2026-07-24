@@ -13,7 +13,6 @@ from psycopg.types.json import Jsonb
 
 from app.services.backtester import count_setup_opportunities, run_backtest
 from app.services.features import load_candles
-from app.services.labs.intraday.strategy import INTRADAY_STRATEGY_FACTORIES
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.strategy import BASE_PARAMETERS, StrategyDecision, StrategyDefinition
 from app.services.strategy_families import (
@@ -388,6 +387,13 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
 
 
 def make_strategy_definition(candidate: DiscoveryCandidate) -> StrategyDefinition:
+    # Deferred import: labs/intraday/families/registry.py imports
+    # labs/intraday/campaign.py, which imports DiscoveryCandidate/
+    # canonical_candidate_key from this module -- a module-level import
+    # here would be circular. By call time this module is fully
+    # initialized, so the deferred import is safe.
+    from app.services.labs.intraday.families.registry import INTRADAY_STRATEGY_FACTORIES
+
     architecture = candidate.parameters.get("strategy_architecture")
     # One registry lookup, not a per-family branch: every Intraday Lab family
     # (Opening-Range Breakout, VWAP Reversion, and any future one) registers

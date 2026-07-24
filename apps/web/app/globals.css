@@ -1421,6 +1421,15 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .intradayStatusBadge.complete { border-color: color-mix(in srgb, var(--success) 40%, var(--line)); background: color-mix(in srgb, var(--success) 12%, transparent); color: var(--success); }
 .intradayTimeframePills { display: flex; gap: 8px; }
 .intradayPill { display: inline-flex; align-items: center; min-height: 30px; padding: 0 12px; border: 1px solid var(--line); border-radius: 999px; background: var(--panel-soft); color: var(--muted-accent); font: 650 10px var(--font-mono); }
+.intradayPill.selectable { cursor: pointer; transition: border-color .18s ease, background .18s ease, color .18s ease; }
+.intradayPill.selectable:hover { border-color: var(--accent-2); }
+.intradayPill.selectable.selected { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); color: var(--accent); }
+
+.intradayFamilyToggleGrid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.intradayFamilyToggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; min-height: 52px; padding: 10px 14px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); color: var(--ink); cursor: pointer; text-align: left; transition: border-color .18s ease, background .18s ease; }
+.intradayFamilyToggle:hover { border-color: var(--accent-2); }
+.intradayFamilyToggle.selected { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); }
+.intradayFamilyToggle strong { font-size: 11px; }
 
 .intradayStrategyGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .intradayStrategyCard { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); }

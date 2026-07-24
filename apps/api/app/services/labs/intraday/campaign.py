@@ -10,10 +10,12 @@ This module calls back into `research_campaigns.py` for the shared campaign
 primitives (table setup, universe lookup, job queueing, campaign-key
 hashing) rather than duplicating them, matching the labs convention already
 used by `labs/intraday/features.py`. Every family (Opening-Range Breakout,
-VWAP Reversion, and any future one) shares one campaign-creation helper
-(`_create_intraday_campaign`) and one dispatch check
-(`is_intraday_lab_candidate`, keyed off `INTRADAY_STRATEGY_FACTORIES`) --
-adding a new family never means adding another branch here.
+VWAP Reversion, and any future one) shares one campaign-creation helper,
+`_create_intraday_campaign` -- adding a new family never means adding
+another branch here. The combined dispatch check across every family
+(`is_intraday_lab_candidate`) lives in `families/registry.py`, not here,
+since that module is the one that imports every family's candidate
+generator and would create an import cycle if this module depended on it.
 """
 
 from __future__ import annotations
@@ -28,7 +30,6 @@ from psycopg.types.json import Jsonb
 from app.services.labs.intraday.strategy import (
     DEFAULT_ORB_PARAMETERS,
     DEFAULT_VWAP_REVERSION_PARAMETERS,
-    INTRADAY_STRATEGY_FACTORIES,
     OPENING_RANGE_BREAKOUT_ARCHITECTURE,
     VWAP_REVERSION_ARCHITECTURE,
 )
@@ -255,14 +256,3 @@ def create_vwap_reversion_campaign(
     )
 
 
-def is_intraday_lab_candidate(candidate_payload: dict[str, Any]) -> bool:
-    """True when a raw (JSONB) candidate payload belongs to any Intraday Lab family.
-
-    Used at the two points that need to route intraday jobs differently
-    (`run_campaign_job`'s dataset selection, `data_readiness_for_job`'s
-    feature-coverage check) without branching on strategy identity anywhere
-    inside the simulator itself. Keyed off `INTRADAY_STRATEGY_FACTORIES`, so
-    a new family registering there is automatically covered here too.
-    """
-    parameters = candidate_payload.get("parameters") or {}
-    return parameters.get("strategy_architecture") in INTRADAY_STRATEGY_FACTORIES

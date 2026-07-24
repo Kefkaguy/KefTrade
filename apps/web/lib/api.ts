@@ -1608,7 +1608,7 @@ export type IntradayTimeframeBreakdown = {
   avg_profit_factor: number | null;
   avg_expectancy: number | null;
   primary_rejection_reasons: Array<{ reason: string; occurrences: number }>;
-  status: "archived" | "not_started";
+  status: "has_evidence" | "not_started";
 };
 
 export type IntradaySampleJob = {
@@ -1659,6 +1659,22 @@ export type IntradayLabOverview = {
 
 export function getIntradayLabOverview() {
   return request<IntradayLabOverview>("/research/intraday/overview", { cache: "no-store", timeoutMs: 30000 });
+}
+
+export function createIntradayCampaign(options: {
+  familyIds: string[];
+  name?: string;
+  assetLimit?: number;
+  timeframes?: string[];
+  maxCandidatesPerFamily?: number;
+}) {
+  const params = new URLSearchParams();
+  for (const familyId of options.familyIds) params.append("family_ids", familyId);
+  if (options.name) params.append("name", options.name);
+  params.append("asset_limit", String(options.assetLimit ?? 10));
+  params.append("max_candidates_per_family", String(options.maxCandidatesPerFamily ?? 8));
+  for (const timeframe of options.timeframes ?? []) params.append("timeframes", timeframe);
+  return request<Record<string, any>>(`/research/intraday/campaigns?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
 
 export function refreshFamilyRegistry() {

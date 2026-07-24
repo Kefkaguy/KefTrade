@@ -2,16 +2,17 @@
 
 Every number here is queried live from `research_campaign_jobs`/`research_campaigns`
 -- nothing about trade counts, profit factors, or rejection reasons is
-hardcoded. Only the strategy roster itself (which families exist, and their
-lifecycle status/reason) is a static, code-owned fact, since that reflects
-what has actually been implemented in this codebase, not something derivable
-from a database query.
+hardcoded. The strategy roster's identity/timeframes/status come from
+`families.registry.FAMILY_REGISTRY` (the single source of truth every other
+consumer already uses); only the archived-family narrative text
+(`_ARCHIVED_SUMMARIES` below) is hand-written, since that's a research
+conclusion, not something a query can produce.
 
-Generalized across every Intraday Lab family (Opening-Range Breakout, VWAP
-Reversion, and any future one): each roster entry with real code gets its
+Generalized across every Intraday Lab family: each roster entry gets its
 own campaigns/jobs/trades totals, timeframe breakdown, and sample rejected
 jobs, all computed by one set of architecture-parameterized queries -- no
-per-family SQL duplication.
+per-family SQL duplication, and no per-family branching when a new family
+is added to `FAMILY_REGISTRY`.
 """
 
 from __future__ import annotations
@@ -20,12 +21,8 @@ from typing import Any
 
 import psycopg
 
-from app.services.labs.intraday.campaign import (
-    OPENING_RANGE_BREAKOUT_ARCHITECTURE,
-    SUPPORTED_ORB_TIMEFRAMES,
-    SUPPORTED_VWAP_REVERSION_TIMEFRAMES,
-    VWAP_REVERSION_ARCHITECTURE,
-)
+from app.services.labs.intraday.campaign import OPENING_RANGE_BREAKOUT_ARCHITECTURE, VWAP_REVERSION_ARCHITECTURE
+from app.services.labs.intraday.families.registry import FAMILY_REGISTRY
 
 # Categorical failure codes only -- excludes the numeric-detail messages
 # (e.g. "Profit factor 0.55 must be >= 1.25.") that `finalize_research_campaign`
@@ -51,12 +48,13 @@ _CATEGORICAL_FAILURE_CODES = (
 # class of defect recurring silently in a future family.
 _CORRECTED_RUN_FILTER = "(candidate->'parameters'->>'walk_forward_train_ratio')::float = 0.7"
 
-INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
-    {
-        "id": OPENING_RANGE_BREAKOUT_ARCHITECTURE,
-        "name": "Opening Range Breakout",
-        "version": "v1",
-        "status": "archived",
+# Hand-written research narrative for families whose pilots have been run
+# and analyzed. A family present in FAMILY_REGISTRY but absent here (every
+# Phase 12.3 family, until its own pilot/analysis is written up) simply
+# shows its live query numbers with no reason/summary text yet -- not
+# hidden, not fabricated.
+_ARCHIVED_SUMMARIES: dict[str, dict[str, str]] = {
+    OPENING_RANGE_BREAKOUT_ARCHITECTURE: {
         "reason": "No measurable edge after costs",
         "summary": (
             "Session-close exits (76% of trades) averaged ~0% gross return before costs. "
@@ -64,13 +62,8 @@ INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
             "flipped 19.5% of gross winners into net losses. No subgroup showed repeatable "
             "positive evidence across enough symbols and periods."
         ),
-        "supported_timeframes": SUPPORTED_ORB_TIMEFRAMES,
     },
-    {
-        "id": VWAP_REVERSION_ARCHITECTURE,
-        "name": "VWAP Reversion",
-        "version": "v1",
-        "status": "archived",
+    VWAP_REVERSION_ARCHITECTURE: {
         "reason": "No measurable edge after costs",
         "summary": (
             "1,542 trades across 80 jobs, avg profit factor 0.46. Gross P&L -13,354 before costs, "
@@ -78,27 +71,8 @@ INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
             "(61% of trades) dominate, the same forced-flat mechanism ORB showed weak realized "
             "continuation with. 0 promotions through the unmodified elite gate."
         ),
-        "supported_timeframes": SUPPORTED_VWAP_REVERSION_TIMEFRAMES,
     },
-    {
-        "id": "gap_fill",
-        "name": "Gap Fill",
-        "version": None,
-        "status": "planned",
-        "reason": None,
-        "summary": None,
-        "supported_timeframes": (),
-    },
-    {
-        "id": "session_momentum",
-        "name": "Session Momentum",
-        "version": None,
-        "status": "planned",
-        "reason": None,
-        "summary": None,
-        "supported_timeframes": (),
-    },
-]
+}
 
 
 def _architecture_job_totals(conn: psycopg.Connection, architecture: str) -> dict[str, Any] | None:
@@ -193,7 +167,7 @@ def _architecture_timeframe_breakdown(conn: psycopg.Connection, architecture: st
                 "avg_profit_factor": round(totals["avg_profit_factor"], 3) if totals and totals["avg_profit_factor"] is not None else None,
                 "avg_expectancy": round(totals["avg_expectancy"], 2) if totals and totals["avg_expectancy"] is not None else None,
                 "primary_rejection_reasons": reasons_by_timeframe.get(timeframe, [])[:3],
-                "status": "archived" if totals else "not_started",
+                "status": "has_evidence" if totals else "not_started",
             }
         )
     return result
@@ -227,8 +201,15 @@ def _architecture_sample_jobs(conn: psycopg.Connection, architecture: str, *, li
         entry = dict(row)
         parameters = entry.pop("parameters") or {}
         # The one family-specific display field (ORB's breakout buffer, VWAP's
-        # deviation threshold) -- everything else in this row is generic.
-        entry["variant_parameter"] = parameters.get("breakout_buffer_atr") or parameters.get("entry_deviation_threshold")
+        # deviation threshold, etc.) -- everything else in this row is generic.
+        entry["variant_parameter"] = (
+            parameters.get("breakout_buffer_atr")
+            or parameters.get("entry_deviation_threshold")
+            or parameters.get("minimum_gap_threshold")
+            or parameters.get("momentum_threshold")
+            or parameters.get("pullback_depth_threshold")
+            or parameters.get("fade_buffer_atr")
+        )
         samples.append(entry)
     return samples
 
@@ -264,14 +245,20 @@ def _architecture_detail(conn: psycopg.Connection, architecture: str, supported_
 def intraday_lab_overview(conn: psycopg.Connection) -> dict[str, Any]:
     all_timeframes: set[str] = set()
     strategies = []
-    for entry in INTRADAY_STRATEGY_ROSTER:
-        row = dict(entry)
-        supported_timeframes = tuple(row.pop("supported_timeframes", ()))
-        all_timeframes.update(supported_timeframes)
-        if row["status"] != "planned" and supported_timeframes:
-            detail = _architecture_detail(conn, row["id"], supported_timeframes)
-            if detail:
-                row.update(detail)
+    for architecture, definition in FAMILY_REGISTRY.items():
+        all_timeframes.update(definition.supported_timeframes)
+        archived_meta = _ARCHIVED_SUMMARIES.get(architecture, {})
+        row: dict[str, Any] = {
+            "id": architecture,
+            "name": definition.name,
+            "version": "v1",
+            "status": definition.status,
+            "reason": archived_meta.get("reason"),
+            "summary": archived_meta.get("summary"),
+        }
+        detail = _architecture_detail(conn, architecture, definition.supported_timeframes)
+        if detail:
+            row.update(detail)
         strategies.append(row)
 
     return {
