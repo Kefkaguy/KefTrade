@@ -3389,9 +3389,9 @@ def run_campaign_job(
     symbol = job["symbol"]
     timeframe = job["timeframe"]
 
-    from app.services.labs.intraday.campaign import is_opening_range_breakout_candidate
+    from app.services.labs.intraday.campaign import is_intraday_lab_candidate
 
-    if is_opening_range_breakout_candidate(job["candidate"]):
+    if is_intraday_lab_candidate(job["candidate"]):
         return run_intraday_campaign_job(conn, job)
 
     candidate = candidate_from_payload(job["candidate"])
@@ -3647,14 +3647,14 @@ def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dic
     freshness = data_freshness(latest, timeframe, (symbol_row or {}).get("asset_class"))
     if freshness["stale"]:
         return readiness_block("blocked_data", "stale_data", freshness["reason"], retry_after_seconds=1800, job=job, symbol_row=dict(symbol_row), candle_count=candle_count, latest_candle_timestamp=latest, freshness=freshness)
-    from app.services.labs.intraday.campaign import is_opening_range_breakout_candidate
+    from app.services.labs.intraday.campaign import is_intraday_lab_candidate
 
     # ORB (and any future intraday-lab) candidates are computed from
     # intraday_features, never the swing features table -- checking the
     # swing table here would report "feature_generation_failure" forever for
     # otherwise-ready intraday jobs, since intraday_features rows never land
     # in `features`.
-    feature_table = "intraday_features" if is_opening_range_breakout_candidate(job.get("candidate") or {}) else "features"
+    feature_table = "intraday_features" if is_intraday_lab_candidate(job.get("candidate") or {}) else "features"
     features = conn.execute(
         f"""
         SELECT COUNT(*) AS feature_count

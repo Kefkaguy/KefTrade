@@ -13,7 +13,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.backtester import count_setup_opportunities, run_backtest
 from app.services.features import load_candles
-from app.services.labs.intraday.strategy import OPENING_RANGE_BREAKOUT_ARCHITECTURE, OpeningRangeBreakoutStrategy
+from app.services.labs.intraday.strategy import INTRADAY_STRATEGY_FACTORIES
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.strategy import BASE_PARAMETERS, StrategyDecision, StrategyDefinition
 from app.services.strategy_families import (
@@ -388,21 +388,25 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
 
 
 def make_strategy_definition(candidate: DiscoveryCandidate) -> StrategyDefinition:
-    if candidate.parameters.get("strategy_architecture") == OPENING_RANGE_BREAKOUT_ARCHITECTURE:
+    architecture = candidate.parameters.get("strategy_architecture")
+    # One registry lookup, not a per-family branch: every Intraday Lab family
+    # (Opening-Range Breakout, VWAP Reversion, and any future one) registers
+    # its strategy class in INTRADAY_STRATEGY_FACTORIES; adding a new family
+    # never requires touching this function.
+    intraday_strategy_cls = INTRADAY_STRATEGY_FACTORIES.get(architecture)
+    if intraday_strategy_cls is not None:
         timeframe = str(candidate.parameters.get("timeframe") or "30m")
-        strategy = OpeningRangeBreakoutStrategy(candidate.parameters, timeframe=timeframe)
+        strategy = intraday_strategy_cls(candidate.parameters, timeframe=timeframe)
         return StrategyDefinition(
-            name="opening_range_breakout",
+            name=str(architecture),
             version=candidate.candidate_id,
-            description="Opening-Range Breakout v1: direction-aware breakout of the settled opening range with relative-volume confirmation and structural flat-by-session-close.",
+            description=f"Intraday Lab strategy ({architecture}): structural flat-by-session-close, session-aware entry gates, generic simulator fills/fees/slippage.",
             parameters=candidate.parameters,
             entry_rules=[
-                f"Entry block: {candidate.blocks.get('entry', 'opening_range_breakout')}.",
-                "No setup before the opening range window settles.",
-                "Breakout must clear the configured buffer beyond the settled opening-range high/low.",
-                "Relative-volume confirmation required when configured.",
+                f"Entry block: {candidate.blocks.get('entry', str(architecture))}.",
+                "Session-aware gates (see the strategy's own decide() for the exact entry conditions).",
             ],
-            exit_rules=[f"Exit block: {candidate.blocks.get('exit', 'orb_session_close_forced')}.", "Structural flat-by-session-close; no overnight positions."],
+            exit_rules=[f"Exit block: {candidate.blocks.get('exit', 'session_close_forced')}.", "Structural flat-by-session-close; no overnight positions."],
             supported_market_regimes=["bull_trend", "bear_trend", "sideways", "high_volatility", "low_volatility", "normal_volatility"],
             decide=strategy,
         )

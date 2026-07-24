@@ -1601,19 +1601,6 @@ export function getFamilyRegistry(status?: "active" | "legacy") {
   return request<{ families: FamilyRegistryRow[]; count: number }>(`/research/families/registry${query}`, { cache: "no-store", timeoutMs: 60000 });
 }
 
-export type IntradayStrategyRosterEntry = {
-  id: string;
-  name: string;
-  version: string | null;
-  status: "archived" | "planned" | "active";
-  reason: string | null;
-  summary: string | null;
-  jobs?: number;
-  trades?: number;
-  campaigns?: number;
-  promoted?: number;
-};
-
 export type IntradayTimeframeBreakdown = {
   timeframe: string;
   jobs: number;
@@ -1628,7 +1615,7 @@ export type IntradaySampleJob = {
   symbol: string;
   timeframe: string;
   direction: string | null;
-  buffer_level: string | null;
+  variant_parameter: string | null;
   status: string;
   validation_score: number | null;
   trades: number | null;
@@ -1637,21 +1624,36 @@ export type IntradaySampleJob = {
   failure_reasons: string[];
 };
 
+export type IntradayPilotSummary = {
+  campaign_id: number;
+  name: string;
+  status: string;
+  jobs: number;
+  trades: number;
+  promoted: number;
+  outcome: string;
+};
+
+export type IntradayStrategyRosterEntry = {
+  id: string;
+  name: string;
+  version: string | null;
+  status: "archived" | "planned" | "active";
+  reason: string | null;
+  summary: string | null;
+  jobs?: number;
+  trades?: number;
+  campaigns?: number;
+  promoted?: number;
+  pilot?: IntradayPilotSummary | null;
+  timeframe_breakdown?: IntradayTimeframeBreakdown[];
+  sample_jobs?: IntradaySampleJob[];
+};
+
 export type IntradayLabOverview = {
   infrastructure_status: string;
   timeframes_supported: string[];
   strategies: IntradayStrategyRosterEntry[];
-  timeframe_breakdown: IntradayTimeframeBreakdown[];
-  pilot: {
-    campaign_id: number;
-    name: string;
-    status: string;
-    jobs: number;
-    trades: number;
-    promoted: number;
-    outcome: string;
-  } | null;
-  sample_jobs: IntradaySampleJob[];
   forward_validation_note: string;
 };
 

@@ -6,6 +6,12 @@ hardcoded. Only the strategy roster itself (which families exist, and their
 lifecycle status/reason) is a static, code-owned fact, since that reflects
 what has actually been implemented in this codebase, not something derivable
 from a database query.
+
+Generalized across every Intraday Lab family (Opening-Range Breakout, VWAP
+Reversion, and any future one): each roster entry with real code gets its
+own campaigns/jobs/trades totals, timeframe breakdown, and sample rejected
+jobs, all computed by one set of architecture-parameterized queries -- no
+per-family SQL duplication.
 """
 
 from __future__ import annotations
@@ -14,7 +20,12 @@ from typing import Any
 
 import psycopg
 
-from app.services.labs.intraday.campaign import OPENING_RANGE_BREAKOUT_ARCHITECTURE, SUPPORTED_ORB_TIMEFRAMES
+from app.services.labs.intraday.campaign import (
+    OPENING_RANGE_BREAKOUT_ARCHITECTURE,
+    SUPPORTED_ORB_TIMEFRAMES,
+    SUPPORTED_VWAP_REVERSION_TIMEFRAMES,
+    VWAP_REVERSION_ARCHITECTURE,
+)
 
 # Categorical failure codes only -- excludes the numeric-detail messages
 # (e.g. "Profit factor 0.55 must be >= 1.25.") that `finalize_research_campaign`
@@ -29,12 +40,15 @@ _CATEGORICAL_FAILURE_CODES = (
     "frequency_too_low",
 )
 
-# The first Campaign 44 run used walk_forward_train_ratio=1.0, a defect that
-# silently produced zero trades on every job (see
+# The first ORB Campaign 44 run used walk_forward_train_ratio=1.0, a defect
+# that silently produced zero trades on every job (see
 # docs/2026-07-23-phase12-step2b-orb-pilot.md). Those 80 jobs are kept in the
 # database (archive, don't erase) but must not be blended into the reported
 # pilot numbers alongside the corrected rerun (ratio=0.7) -- doing so dilutes
-# real profit-factor/expectancy figures with 80 rows of zero-trade noise.
+# real profit-factor/expectancy figures with zero-trade noise. Every
+# Intraday Lab family since has used 0.7 from the start, but this filter is
+# kept general (not ORB-specific) as a standing safeguard against the same
+# class of defect recurring silently in a future family.
 _CORRECTED_RUN_FILTER = "(candidate->'parameters'->>'walk_forward_train_ratio')::float = 0.7"
 
 INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
@@ -50,14 +64,16 @@ INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
             "flipped 19.5% of gross winners into net losses. No subgroup showed repeatable "
             "positive evidence across enough symbols and periods."
         ),
+        "supported_timeframes": SUPPORTED_ORB_TIMEFRAMES,
     },
     {
-        "id": "vwap_reversion",
+        "id": VWAP_REVERSION_ARCHITECTURE,
         "name": "VWAP Reversion",
-        "version": None,
-        "status": "planned",
-        "reason": None,
-        "summary": None,
+        "version": "v1",
+        "status": "archived",
+        "reason": "No measurable edge after costs",
+        "summary": None,  # filled in once the pilot's failure analysis is written
+        "supported_timeframes": SUPPORTED_VWAP_REVERSION_TIMEFRAMES,
     },
     {
         "id": "gap_fill",
@@ -66,6 +82,7 @@ INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
         "status": "planned",
         "reason": None,
         "summary": None,
+        "supported_timeframes": (),
     },
     {
         "id": "session_momentum",
@@ -74,11 +91,12 @@ INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
         "status": "planned",
         "reason": None,
         "summary": None,
+        "supported_timeframes": (),
     },
 ]
 
 
-def _orb_job_totals(conn: psycopg.Connection) -> dict[str, Any] | None:
+def _architecture_job_totals(conn: psycopg.Connection, architecture: str) -> dict[str, Any] | None:
     row = conn.execute(
         f"""
         SELECT
@@ -91,14 +109,14 @@ def _orb_job_totals(conn: psycopg.Connection) -> dict[str, Any] | None:
           AND status <> 'queued'
           AND {_CORRECTED_RUN_FILTER}
         """,
-        (OPENING_RANGE_BREAKOUT_ARCHITECTURE,),
+        (architecture,),
     ).fetchone()
     if not row or not row["jobs"]:
         return None
     return dict(row)
 
 
-def _orb_latest_campaign(conn: psycopg.Connection) -> dict[str, Any] | None:
+def _architecture_latest_campaign(conn: psycopg.Connection, architecture: str) -> dict[str, Any] | None:
     row = conn.execute(
         f"""
         SELECT c.id, c.name, c.status
@@ -112,12 +130,12 @@ def _orb_latest_campaign(conn: psycopg.Connection) -> dict[str, Any] | None:
         ORDER BY c.id DESC
         LIMIT 1
         """,
-        (OPENING_RANGE_BREAKOUT_ARCHITECTURE,),
+        (architecture,),
     ).fetchone()
     return dict(row) if row else None
 
 
-def _orb_timeframe_breakdown(conn: psycopg.Connection) -> list[dict[str, Any]]:
+def _architecture_timeframe_breakdown(conn: psycopg.Connection, architecture: str, supported_timeframes: tuple[str, ...]) -> list[dict[str, Any]]:
     rows = conn.execute(
         f"""
         SELECT
@@ -133,7 +151,7 @@ def _orb_timeframe_breakdown(conn: psycopg.Connection) -> list[dict[str, Any]]:
         GROUP BY timeframe
         ORDER BY timeframe
         """,
-        (OPENING_RANGE_BREAKOUT_ARCHITECTURE,),
+        (architecture,),
     ).fetchall()
     by_timeframe = {row["timeframe"]: dict(row) for row in rows}
 
@@ -151,7 +169,7 @@ def _orb_timeframe_breakdown(conn: psycopg.Connection) -> list[dict[str, Any]]:
         GROUP BY timeframe, reason
         ORDER BY timeframe, occurrences DESC
         """,
-        (OPENING_RANGE_BREAKOUT_ARCHITECTURE, list(_CATEGORICAL_FAILURE_CODES)),
+        (architecture, list(_CATEGORICAL_FAILURE_CODES)),
     ).fetchall()
     reasons_by_timeframe: dict[str, list[dict[str, Any]]] = {}
     for row in reason_rows:
@@ -160,7 +178,7 @@ def _orb_timeframe_breakdown(conn: psycopg.Connection) -> list[dict[str, Any]]:
         )
 
     result = []
-    for timeframe in SUPPORTED_ORB_TIMEFRAMES:
+    for timeframe in supported_timeframes:
         totals = by_timeframe.get(timeframe)
         result.append(
             {
@@ -176,14 +194,14 @@ def _orb_timeframe_breakdown(conn: psycopg.Connection) -> list[dict[str, Any]]:
     return result
 
 
-def _orb_sample_jobs(conn: psycopg.Connection, *, limit: int = 12) -> list[dict[str, Any]]:
+def _architecture_sample_jobs(conn: psycopg.Connection, architecture: str, *, limit: int = 12) -> list[dict[str, Any]]:
     rows = conn.execute(
         f"""
         SELECT
             symbol,
             timeframe,
             candidate->'parameters'->>'direction' AS direction,
-            candidate->'parameters'->>'breakout_buffer_atr' AS buffer_level,
+            candidate->'parameters' AS parameters,
             status,
             validation_score,
             (result->'metrics'->>'number_of_trades')::int AS trades,
@@ -194,38 +212,32 @@ def _orb_sample_jobs(conn: psycopg.Connection, *, limit: int = 12) -> list[dict[
         WHERE candidate->'parameters'->>'strategy_architecture' = %s
           AND status <> 'queued'
           AND {_CORRECTED_RUN_FILTER}
-        ORDER BY symbol, timeframe, direction, buffer_level
+        ORDER BY symbol, timeframe, direction
         LIMIT %s
         """,
-        (OPENING_RANGE_BREAKOUT_ARCHITECTURE, limit),
+        (architecture, limit),
     ).fetchall()
-    return [dict(row) for row in rows]
+    samples = []
+    for row in rows:
+        entry = dict(row)
+        parameters = entry.pop("parameters") or {}
+        # The one family-specific display field (ORB's breakout buffer, VWAP's
+        # deviation threshold) -- everything else in this row is generic.
+        entry["variant_parameter"] = parameters.get("breakout_buffer_atr") or parameters.get("entry_deviation_threshold")
+        samples.append(entry)
+    return samples
 
 
-def intraday_lab_overview(conn: psycopg.Connection) -> dict[str, Any]:
-    totals = _orb_job_totals(conn)
-    latest_campaign = _orb_latest_campaign(conn) if totals else None
-    timeframe_breakdown = _orb_timeframe_breakdown(conn) if totals else [
-        {"timeframe": tf, "jobs": 0, "trades": 0, "avg_profit_factor": None, "avg_expectancy": None, "primary_rejection_reasons": [], "status": "not_started"}
-        for tf in SUPPORTED_ORB_TIMEFRAMES
-    ]
-    sample_jobs = _orb_sample_jobs(conn) if totals else []
-
-    strategies = []
-    for entry in INTRADAY_STRATEGY_ROSTER:
-        row = dict(entry)
-        if entry["id"] == OPENING_RANGE_BREAKOUT_ARCHITECTURE and totals:
-            row["jobs"] = totals["jobs"]
-            row["trades"] = totals["trades"]
-            row["campaigns"] = totals["campaigns"]
-            row["promoted"] = totals["promoted"]
-        strategies.append(row)
-
+def _architecture_detail(conn: psycopg.Connection, architecture: str, supported_timeframes: tuple[str, ...]) -> dict[str, Any] | None:
+    totals = _architecture_job_totals(conn, architecture)
+    if not totals:
+        return None
+    latest_campaign = _architecture_latest_campaign(conn, architecture)
     return {
-        "infrastructure_status": "complete",
-        "timeframes_supported": list(SUPPORTED_ORB_TIMEFRAMES),
-        "strategies": strategies,
-        "timeframe_breakdown": timeframe_breakdown,
+        "campaigns": totals["campaigns"],
+        "jobs": totals["jobs"],
+        "trades": totals["trades"],
+        "promoted": totals["promoted"],
         "pilot": (
             {
                 "campaign_id": latest_campaign["id"],
@@ -234,11 +246,32 @@ def intraday_lab_overview(conn: psycopg.Connection) -> dict[str, Any]:
                 "jobs": totals["jobs"],
                 "trades": totals["trades"],
                 "promoted": totals["promoted"],
-                "outcome": "archived_negative_result",
+                "outcome": "archived_negative_result" if totals["promoted"] == 0 else "under_review",
             }
-            if totals and latest_campaign
+            if latest_campaign
             else None
         ),
-        "sample_jobs": sample_jobs,
+        "timeframe_breakdown": _architecture_timeframe_breakdown(conn, architecture, supported_timeframes),
+        "sample_jobs": _architecture_sample_jobs(conn, architecture),
+    }
+
+
+def intraday_lab_overview(conn: psycopg.Connection) -> dict[str, Any]:
+    all_timeframes: set[str] = set()
+    strategies = []
+    for entry in INTRADAY_STRATEGY_ROSTER:
+        row = dict(entry)
+        supported_timeframes = tuple(row.pop("supported_timeframes", ()))
+        all_timeframes.update(supported_timeframes)
+        if row["status"] != "planned" and supported_timeframes:
+            detail = _architecture_detail(conn, row["id"], supported_timeframes)
+            if detail:
+                row.update(detail)
+        strategies.append(row)
+
+    return {
+        "infrastructure_status": "complete",
+        "timeframes_supported": sorted(all_timeframes),
+        "strategies": strategies,
         "forward_validation_note": "Intraday research available. No validated intraday strategy currently approved for forward validation.",
     }

@@ -1,8 +1,8 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Archive, CheckCircle2, Circle, Clock, ShieldAlert, TrendingUp } from "lucide-react";
-import { getIntradayLabOverview, type IntradayLabOverview, type IntradaySampleJob } from "@/lib/api";
+import { Archive, CheckCircle2, Circle, ShieldAlert, TrendingUp } from "lucide-react";
+import { getIntradayLabOverview, type IntradayLabOverview, type IntradaySampleJob, type IntradayStrategyRosterEntry } from "@/lib/api";
 import { Card, EmptyState, PageTitle } from "@/components/ResearchUI";
 
 const REASON_LABELS: Record<string, string> = {
@@ -25,7 +25,6 @@ function num(value: number | null | undefined, digits = 2) {
 export function IntradayResearchLab() {
   const [overview, setOverview] = useState<IntradayLabOverview | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [activeTimeframe, setActiveTimeframe] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -33,7 +32,6 @@ export function IntradayResearchLab() {
       .then((result) => {
         if (!active) return;
         setOverview(result);
-        setActiveTimeframe(result.timeframes_supported[0] ?? null);
       })
       .catch((reason) => {
         if (!active) return;
@@ -44,9 +42,9 @@ export function IntradayResearchLab() {
     };
   }, []);
 
-  const selectedBreakdown = overview?.timeframe_breakdown.find((row) => row.timeframe === activeTimeframe) ?? null;
   const archivedStrategies = (overview?.strategies ?? []).filter((s) => s.status === "archived");
   const plannedStrategies = (overview?.strategies ?? []).filter((s) => s.status === "planned");
+  const testedStrategies = (overview?.strategies ?? []).filter((s) => s.status !== "planned" && s.pilot);
 
   return (
     <div className="pageContainer">
@@ -99,60 +97,9 @@ export function IntradayResearchLab() {
         </div>
       </Card>
 
-      {overview?.pilot ? (
-        <Card title="Pilot results" eyebrow={`Campaign ${overview.pilot.campaign_id}`}>
-          <div className="metricGrid intradayPilotMetrics">
-            <div className="metricCard neutral"><span>Simulated trades</span><strong>{overview.pilot.trades.toLocaleString()}</strong></div>
-            <div className="metricCard neutral"><span>Jobs completed</span><strong>{overview.pilot.jobs.toLocaleString()}</strong></div>
-            <div className="metricCard neutral"><span>Promoted</span><strong>{overview.pilot.promoted}</strong></div>
-            <div className="metricCard warning"><span>Outcome</span><strong>Archived (negative)</strong></div>
-          </div>
-          <p className="intradayPilotNote"><ShieldAlert size={14} /> Simulation only. This campaign never placed a live or paper order.</p>
-        </Card>
-      ) : null}
-
-      <Card title="Timeframe intelligence" eyebrow="Click a timeframe">
-        <div className="intradayTimeframeTabs" role="tablist">
-          {(overview?.timeframe_breakdown ?? []).map((row) => (
-            <button
-              key={row.timeframe}
-              type="button"
-              role="tab"
-              aria-selected={activeTimeframe === row.timeframe}
-              className={`intradayTimeframeTab ${activeTimeframe === row.timeframe ? "selected" : ""}`}
-              onClick={() => setActiveTimeframe(row.timeframe)}
-            >
-              <strong>{row.timeframe}</strong>
-              <span>PF {num(row.avg_profit_factor, 2)}</span>
-            </button>
-          ))}
-        </div>
-
-        {selectedBreakdown ? (
-          <div className="intradayTimeframeDetail">
-            <div className="intradayTimeframeDetailGrid">
-              <div><span>Strategies tested</span><strong>{archivedStrategies.map((s) => `${s.name}${s.version ? ` ${s.version}` : ""}`).join(", ") || "None"}</strong></div>
-              <div><span>Jobs</span><strong>{selectedBreakdown.jobs.toLocaleString()}</strong></div>
-              <div><span>Trades</span><strong>{selectedBreakdown.trades.toLocaleString()}</strong></div>
-              <div><span>Avg profit factor</span><strong>{num(selectedBreakdown.avg_profit_factor)}</strong></div>
-              <div><span>Avg expectancy</span><strong>{num(selectedBreakdown.avg_expectancy)}</strong></div>
-              <div><span>Status</span><strong>{selectedBreakdown.status === "archived" ? "Archived as negative evidence" : "Not started"}</strong></div>
-            </div>
-            {selectedBreakdown.primary_rejection_reasons.length ? (
-              <div className="intradayRejectionReasons">
-                <span>Primary rejection reasons</span>
-                <ul>
-                  {selectedBreakdown.primary_rejection_reasons.map((reason) => (
-                    <li key={reason.reason}>{reasonLabel(reason.reason)} <em>{reason.occurrences}</em></li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </div>
-        ) : (
-          <EmptyState title="No timeframe data yet" body="Run an intraday campaign to populate this breakdown." />
-        )}
-      </Card>
+      {testedStrategies.map((strategy) => (
+        <FamilyResearchDetail key={strategy.id} strategy={strategy} />
+      ))}
 
       <Card title="Research archive" eyebrow="Preserved, not deleted">
         <p className="intradayArchiveIntro">
@@ -181,16 +128,6 @@ export function IntradayResearchLab() {
         </div>
       </Card>
 
-      {overview?.sample_jobs?.length ? (
-        <Card title="Rejected candidates" eyebrow="Sample from the archive">
-          <div className="intradayCandidateList">
-            {overview.sample_jobs.map((job, index) => (
-              <IntradayCandidateRow key={`${job.symbol}-${job.timeframe}-${job.direction}-${job.buffer_level}-${index}`} job={job} />
-            ))}
-          </div>
-        </Card>
-      ) : null}
-
       <div className="intradayHonestyBanner">
         <TrendingUp size={16} />
         <span>{overview?.forward_validation_note ?? "Intraday research available. No validated intraday strategy currently approved for forward validation."}</span>
@@ -199,7 +136,80 @@ export function IntradayResearchLab() {
   );
 }
 
-function IntradayCandidateRow({ job }: { job: IntradaySampleJob }) {
+function FamilyResearchDetail({ strategy }: { strategy: IntradayStrategyRosterEntry }) {
+  const breakdown = strategy.timeframe_breakdown ?? [];
+  const [activeTimeframe, setActiveTimeframe] = useState<string | null>(breakdown[0]?.timeframe ?? null);
+  const selectedBreakdown = breakdown.find((row) => row.timeframe === activeTimeframe) ?? breakdown[0] ?? null;
+
+  return (
+    <Card title={`${strategy.name}${strategy.version ? ` ${strategy.version}` : ""}`} eyebrow={strategy.pilot ? `Campaign ${strategy.pilot.campaign_id}` : "Pilot"}>
+      {strategy.pilot ? (
+        <>
+          <div className="metricGrid intradayPilotMetrics">
+            <div className="metricCard neutral"><span>Simulated trades</span><strong>{strategy.pilot.trades.toLocaleString()}</strong></div>
+            <div className="metricCard neutral"><span>Jobs completed</span><strong>{strategy.pilot.jobs.toLocaleString()}</strong></div>
+            <div className="metricCard neutral"><span>Promoted</span><strong>{strategy.pilot.promoted}</strong></div>
+            <div className="metricCard warning"><span>Outcome</span><strong>{strategy.pilot.outcome === "archived_negative_result" ? "Archived (negative)" : "Under review"}</strong></div>
+          </div>
+          <p className="intradayPilotNote"><ShieldAlert size={14} /> Simulation only. This campaign never placed a live or paper order.</p>
+        </>
+      ) : null}
+
+      {breakdown.length ? (
+        <div className="intradayTimeframeTabs" role="tablist" style={{ marginTop: 20 }}>
+          {breakdown.map((row) => (
+            <button
+              key={row.timeframe}
+              type="button"
+              role="tab"
+              aria-selected={activeTimeframe === row.timeframe}
+              className={`intradayTimeframeTab ${(activeTimeframe ?? breakdown[0]?.timeframe) === row.timeframe ? "selected" : ""}`}
+              onClick={() => setActiveTimeframe(row.timeframe)}
+            >
+              <strong>{row.timeframe}</strong>
+              <span>PF {num(row.avg_profit_factor, 2)}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+
+      {selectedBreakdown ? (
+        <div className="intradayTimeframeDetail">
+          <div className="intradayTimeframeDetailGrid">
+            <div><span>Jobs</span><strong>{selectedBreakdown.jobs.toLocaleString()}</strong></div>
+            <div><span>Trades</span><strong>{selectedBreakdown.trades.toLocaleString()}</strong></div>
+            <div><span>Avg profit factor</span><strong>{num(selectedBreakdown.avg_profit_factor)}</strong></div>
+            <div><span>Avg expectancy</span><strong>{num(selectedBreakdown.avg_expectancy)}</strong></div>
+            <div><span>Status</span><strong>{selectedBreakdown.status === "archived" ? "Archived as negative evidence" : "Not started"}</strong></div>
+          </div>
+          {selectedBreakdown.primary_rejection_reasons.length ? (
+            <div className="intradayRejectionReasons">
+              <span>Primary rejection reasons</span>
+              <ul>
+                {selectedBreakdown.primary_rejection_reasons.map((reason) => (
+                  <li key={reason.reason}>{reasonLabel(reason.reason)} <em>{reason.occurrences}</em></li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+
+      {strategy.sample_jobs?.length ? (
+        <div style={{ marginTop: 20 }}>
+          <span className="sectionLabel">Rejected candidates (sample from the archive)</span>
+          <div className="intradayCandidateList" style={{ marginTop: 10 }}>
+            {strategy.sample_jobs.map((job, index) => (
+              <IntradayCandidateRow key={`${job.symbol}-${job.timeframe}-${job.direction}-${index}`} familyName={strategy.name} job={job} />
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </Card>
+  );
+}
+
+function IntradayCandidateRow({ familyName, job }: { familyName: string; job: IntradaySampleJob }) {
   const [open, setOpen] = useState(false);
   return (
     <div className={`intradayCandidateRow ${open ? "open" : ""}`}>
@@ -212,10 +222,10 @@ function IntradayCandidateRow({ job }: { job: IntradaySampleJob }) {
       </button>
       {open ? (
         <div className="intradayCandidateDetail">
-          <div><span>Family</span><strong>Opening Range Breakout</strong></div>
+          <div><span>Family</span><strong>{familyName}</strong></div>
           <div><span>Timeframe</span><strong>{job.timeframe}</strong></div>
           <div><span>Direction</span><strong className="capitalize">{job.direction ?? "—"}</strong></div>
-          <div><span>Breakout buffer</span><strong>{job.buffer_level ?? "—"}</strong></div>
+          <div><span>Variant parameter</span><strong>{job.variant_parameter ?? "—"}</strong></div>
           <div><span>Trades</span><strong>{job.trades ?? 0}</strong></div>
           <div><span>Outcome</span><strong>Rejected</strong></div>
           <div className="intradayCandidateWhy">
