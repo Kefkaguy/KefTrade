@@ -12,7 +12,8 @@ imported unchanged from `labs/intraday/strategy.py` and `labs/intraday/campaign.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any, Callable
 
 from app.services.labs.intraday.campaign import (
@@ -151,6 +152,58 @@ FAMILY_REGISTRY: dict[str, IntradayFamilyDefinition] = {
         status="active",
     ),
 }
+
+
+def _register_strategy_engine_v2_families() -> None:
+    """Phase 13.3: fold the ten Strategy Engine V2 families into the same
+    registry the Phase 12 families use, so campaign creation, job dispatch,
+    and the overview endpoint all pick them up with no new branching.
+
+    The six Phase 12.3 v1 families keep their rows but move to `archived`:
+    Phase 12.4 concluded none of them had an edge, and the standing
+    instruction is to stop tuning them. Archiving preserves every historical
+    campaign, job, and trade -- it only stops new campaigns from targeting
+    them by default.
+    """
+
+    from app.services.labs.intraday.families.v2 import families as v2_module  # noqa: F401  (import registers)
+    from app.services.labs.intraday.families.v2.base import (
+        SUPPORTED_V2_TIMEFRAMES,
+        V2_BLOCKS,
+        V2_FAMILIES,
+        generate_v2_candidates,
+    )
+
+    for architecture in v2_module.V2_ARCHITECTURES:
+        strategy_cls = V2_FAMILIES[architecture]
+        FAMILY_REGISTRY[architecture] = IntradayFamilyDefinition(
+            architecture=architecture,
+            name=strategy_cls.hypothesis.title,
+            strategy_cls=strategy_cls,
+            blocks=V2_BLOCKS[architecture],
+            candidate_generator=partial(generate_v2_candidates, architecture),
+            supported_timeframes=SUPPORTED_V2_TIMEFRAMES,
+            status="active",
+        )
+
+    for architecture in PHASE_12_3_ARCHIVED_FAMILIES:
+        definition = FAMILY_REGISTRY.get(architecture)
+        if definition is not None and definition.status != "archived":
+            FAMILY_REGISTRY[architecture] = replace(definition, status="archived")
+
+
+# The six Phase 12.3 families, archived by Phase 13 after the Phase 12.4
+# failure analysis found no edge in any of them. Their evidence is retained.
+PHASE_12_3_ARCHIVED_FAMILIES: tuple[str, ...] = (
+    GAP_FILL_ARCHITECTURE,
+    SESSION_MOMENTUM_ARCHITECTURE,
+    INTRADAY_TREND_PULLBACK_ARCHITECTURE,
+    EMA_TREND_CONTINUATION_ARCHITECTURE,
+    OPENING_FADE_ARCHITECTURE,
+    VWAP_TREND_CONTINUATION_ARCHITECTURE,
+)
+
+_register_strategy_engine_v2_families()
 
 # Every consumer that needs "architecture marker -> strategy class" (the
 # simulator-facing factory dispatch in `make_strategy_definition`) reads

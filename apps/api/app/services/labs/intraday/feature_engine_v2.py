@@ -127,32 +127,55 @@ def _time_of_day(bar: dict[str, Any]) -> Any:
     return timestamp.time() if isinstance(timestamp, datetime) else None
 
 
+FEATURE_GROUPS = ("session", "vwap", "opening_range", "gap", "relative_volume", "volatility", "market_structure")
+
+
 def compute_v2_features(
     candle: dict[str, Any],
     feature: dict[str, Any],
     recent_candles: list[dict[str, Any]],
     *,
     config: FeatureEngineConfig = DEFAULT_CONFIG,
+    groups: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
-    """Return the full V2 feature dictionary for the current (signal) bar.
+    """Return the V2 feature dictionary for the current (signal) bar.
+
+    `groups` restricts computation to the named feature groups. This is a
+    pure performance control -- a group's values are identical whether or not
+    other groups were requested -- and it matters: the market-structure pivot
+    scan and the same-time-of-day baselines are the expensive passes, and
+    most families never read them. A family declares the groups it actually
+    uses, so a campaign never pays for features it ignores.
 
     Missing inputs yield None for the affected keys rather than a fabricated
     default -- a strategy that requires a feature must check for None, and a
     None here is honest evidence that the window was too short.
     """
 
+    selected = set(groups) if groups else set(FEATURE_GROUPS)
+    unknown = selected - set(FEATURE_GROUPS)
+    if unknown:
+        raise ValueError(f"Unknown feature group(s): {sorted(unknown)}. Known: {FEATURE_GROUPS}")
+
     bars = recent_candles[-config.lookback_bars :] if config.lookback_bars else list(recent_candles)
     if not bars:
         bars = [candle]
 
     result: dict[str, Any] = {"feature_engine_version": FEATURE_ENGINE_VERSION}
-    result.update(_session_features(candle, feature, bars, config))
-    result.update(_vwap_features(candle, feature, bars, config))
-    result.update(_opening_range_features(candle, feature, bars, config))
-    result.update(_gap_features(candle, feature, bars, config, result))
-    result.update(_relative_volume_features(candle, feature, bars, config))
-    result.update(_volatility_features(candle, feature, bars, config))
-    result.update(_market_structure_features(candle, feature, bars, config))
+    if "session" in selected:
+        result.update(_session_features(candle, feature, bars, config))
+    if "vwap" in selected:
+        result.update(_vwap_features(candle, feature, bars, config))
+    if "opening_range" in selected:
+        result.update(_opening_range_features(candle, feature, bars, config))
+    if "gap" in selected:
+        result.update(_gap_features(candle, feature, bars, config))
+    if "relative_volume" in selected:
+        result.update(_relative_volume_features(candle, feature, bars, config))
+    if "volatility" in selected:
+        result.update(_volatility_features(candle, feature, bars, config))
+    if "market_structure" in selected:
+        result.update(_market_structure_features(candle, feature, bars, config))
     return result
 
 
@@ -383,7 +406,7 @@ def _bars_after(session_bars: list[dict[str, Any]], window_minutes: int) -> list
 # Gap
 # ---------------------------------------------------------------------------
 
-def _gap_features(candle, feature, bars, config, computed: dict[str, Any]) -> dict[str, Any]:
+def _gap_features(candle, feature, bars, config) -> dict[str, Any]:
     gap_percent = _f(feature.get("gap_percent"))
     close = float(candle["close"])
     atr = _atr(bars, config.atr_period)
@@ -592,12 +615,27 @@ def _volatility_features(candle, feature, bars, config) -> dict[str, Any]:
         if baseline > 0:
             range_expansion_ratio = round(current_range / baseline, 8)
 
+    # Compression measured over the window ending BEFORE the current bar.
+    # A large expansion bar mechanically inflates ATR and the Bollinger
+    # stdev, destroying the very compression reading it is supposed to
+    # follow -- so "was this coiled before it moved?" can only be answered
+    # from the prior window. Strictly more backward-looking than the
+    # current-bar values, never less.
+    prior_squeeze_state = None
+    prior_compression_ratio = None
+    if len(bars) > 1:
+        prior = _volatility_compression_only(bars[:-1], config)
+        prior_squeeze_state = prior["squeeze_state"]
+        prior_compression_ratio = prior["atr_compression_ratio"]
+
     return {
         "atr": round(atr, 8) if atr is not None else None,
         "atr_percent_of_price": round(atr / close, 8) if (atr is not None and close > 0) else None,
         "bollinger_bandwidth": round(bollinger_bandwidth, 8) if bollinger_bandwidth is not None else None,
         "keltner_width": round(keltner_width, 8) if keltner_width is not None else None,
         "squeeze_state": squeeze_state,
+        "prior_squeeze_state": prior_squeeze_state,
+        "prior_atr_compression_ratio": prior_compression_ratio,
         "realized_volatility": round(realized_volatility, 8) if realized_volatility is not None else None,
         "realized_volatility_percentile": realized_volatility_percentile,
         "atr_compression_ratio": atr_compression_ratio,
@@ -605,6 +643,43 @@ def _volatility_features(candle, feature, bars, config) -> dict[str, Any]:
         "volatility_compression": volatility_compression,
         "range_expansion_ratio": range_expansion_ratio,
     }
+
+
+def _volatility_compression_only(bars, config) -> dict[str, Any]:
+    """Just the two compression readings, for the prior-window measurement.
+    Shares the exact formulas above so the prior and current values are
+    directly comparable."""
+    closes = _closes(bars)
+    atr = _atr(bars, config.atr_period)
+
+    bollinger_bandwidth = None
+    if len(closes) >= config.bollinger_period:
+        window = closes[-config.bollinger_period :]
+        mean = fmean(window)
+        deviation = pstdev(window) if len(window) > 1 else 0.0
+        if mean > 0:
+            bollinger_bandwidth = (2 * config.bollinger_stdev * deviation) / mean
+
+    keltner_width = None
+    if atr is not None and len(closes) >= config.keltner_period:
+        mean = fmean(closes[-config.keltner_period :])
+        if mean > 0:
+            keltner_width = (2 * config.keltner_atr_multiple * atr) / mean
+
+    squeeze_state = None
+    if bollinger_bandwidth is not None and keltner_width is not None:
+        squeeze_state = "in_squeeze" if bollinger_bandwidth < keltner_width else "no_squeeze"
+
+    compression_ratio = None
+    if atr is not None:
+        ranges = _true_ranges(bars)
+        span = min(len(ranges), config.volatility_compression_lookback)
+        if span >= config.atr_period * 2:
+            long_average = fmean(ranges[-span:])
+            if long_average > 0:
+                compression_ratio = round(atr / long_average, 8)
+
+    return {"squeeze_state": squeeze_state, "atr_compression_ratio": compression_ratio}
 
 
 # ---------------------------------------------------------------------------
