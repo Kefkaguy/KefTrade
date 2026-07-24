@@ -10,6 +10,13 @@ from app.services.strategy_diagnostics import enrich_decision
 
 SAME_CANDLE_EXIT_POLICY = "stop_first"
 
+# Phase 13.4 execution-semantics versions. The baseline is what every
+# pre-Phase-13 strategy ran under and still runs under; the absolute-targets
+# variant applies only to strategies that opt in via
+# ExecutionConstraints.honor_absolute_take_profit.
+EXECUTION_SEMANTICS_BASELINE = "backtest_execution_v1_r_multiple_targets"
+EXECUTION_SEMANTICS_ABSOLUTE_TARGETS = "backtest_execution_v2_absolute_targets"
+
 
 def combine_candles_features(candles: list[dict[str, Any]], features: list[dict[str, Any]]) -> list[dict[str, Any]]:
     feature_by_time = {row["timestamp"]: row for row in features}
@@ -108,11 +115,29 @@ def run_backtest(
             i += 1
             continue
         effective_risk_reward = decision.risk_reward if decision.risk_reward is not None else Decimal(str(params["risk_reward"]))
-        effective_take_profit = (
-            entry_price + (risk_per_unit * effective_risk_reward)
-            if direction == "long"
-            else entry_price - (risk_per_unit * effective_risk_reward)
-        )
+        if constraints.honor_absolute_take_profit and decision.take_profit is not None:
+            # Phase 13.4: the strategy named a literal target price (session
+            # VWAP, prior close, opposite range boundary). Honor it verbatim
+            # rather than overwriting it with an R-derived level.
+            effective_take_profit = decision.take_profit
+            target_distance = (
+                effective_take_profit - entry_price if direction == "long" else entry_price - effective_take_profit
+            )
+            if target_distance <= 0:
+                # Target is at or behind the entry -- the move already happened
+                # between signal and next-bar-open fill. Skip rather than
+                # invent a fill; a zero/negative-distance target is not a trade.
+                i += 1
+                continue
+            # Report the REALIZED reward:risk so metrics stay meaningful
+            # instead of echoing a ratio the target never had.
+            effective_risk_reward = target_distance / risk_per_unit
+        else:
+            effective_take_profit = (
+                entry_price + (risk_per_unit * effective_risk_reward)
+                if direction == "long"
+                else entry_price - (risk_per_unit * effective_risk_reward)
+            )
 
         max_risk = equity * risk_per_trade
         quantity = max_risk / risk_per_unit
@@ -232,6 +257,21 @@ def run_backtest(
 
     return {
         "metrics": metrics,
+        # Phase 13.4: names the exact fill/exit semantics this run used, so a
+        # stored result can never be silently reinterpreted under different
+        # assumptions later. Deliberately top-level rather than inside
+        # `metrics`, which is pinned byte-for-byte by the frozen baseline
+        # fixture and by historical stored results.
+        "execution_semantics": {
+            "version": (
+                EXECUTION_SEMANTICS_ABSOLUTE_TARGETS
+                if constraints.honor_absolute_take_profit
+                else EXECUTION_SEMANTICS_BASELINE
+            ),
+            "same_candle_exit_policy": SAME_CANDLE_EXIT_POLICY,
+            "absolute_take_profit_honored": bool(constraints.honor_absolute_take_profit),
+            "flat_by_session_close": bool(constraints.flat_by_session_close),
+        },
         "trades": trades,
         "equity_curve": build_equity_curve(realized_equity_points),
         "strategy_returns": build_marked_return_series(marked_equity_points),

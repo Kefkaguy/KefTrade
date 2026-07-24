@@ -21,6 +21,19 @@ class ExecutionConstraints:
 
     flat_by_session_close: bool = False
 
+    # Phase 13.4. When False (the default, and the behavior every strategy
+    # written before Phase 13 relies on), the simulator DISCARDS
+    # `StrategyDecision.take_profit` and derives the target from
+    # `entry_price +/- risk_per_unit * risk_reward`. That makes an absolute
+    # price target -- session VWAP, the prior session's close, the opposite
+    # opening-range boundary -- impossible to express.
+    #
+    # When True, the simulator honors `decision.take_profit` as a literal
+    # price. Opt-in per strategy and structural (never campaign-tunable), so
+    # existing strategies produce bit-identical results; the frozen fixture
+    # `tests/fixtures/long_backtest_baseline_v1.json` pins that.
+    honor_absolute_take_profit: bool = False
+
 
 DEFAULT_EXECUTION_CONSTRAINTS = ExecutionConstraints()
 
