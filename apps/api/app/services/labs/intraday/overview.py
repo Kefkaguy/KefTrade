@@ -29,6 +29,14 @@ _CATEGORICAL_FAILURE_CODES = (
     "frequency_too_low",
 )
 
+# The first Campaign 44 run used walk_forward_train_ratio=1.0, a defect that
+# silently produced zero trades on every job (see
+# docs/2026-07-23-phase12-step2b-orb-pilot.md). Those 80 jobs are kept in the
+# database (archive, don't erase) but must not be blended into the reported
+# pilot numbers alongside the corrected rerun (ratio=0.7) -- doing so dilutes
+# real profit-factor/expectancy figures with 80 rows of zero-trade noise.
+_CORRECTED_RUN_FILTER = "(candidate->'parameters'->>'walk_forward_train_ratio')::float = 0.7"
+
 INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
     {
         "id": OPENING_RANGE_BREAKOUT_ARCHITECTURE,
@@ -72,7 +80,7 @@ INTRADAY_STRATEGY_ROSTER: list[dict[str, Any]] = [
 
 def _orb_job_totals(conn: psycopg.Connection) -> dict[str, Any] | None:
     row = conn.execute(
-        """
+        f"""
         SELECT
             count(DISTINCT campaign_id) AS campaigns,
             count(*) AS jobs,
@@ -81,6 +89,7 @@ def _orb_job_totals(conn: psycopg.Connection) -> dict[str, Any] | None:
         FROM research_campaign_jobs
         WHERE candidate->'parameters'->>'strategy_architecture' = %s
           AND status <> 'queued'
+          AND {_CORRECTED_RUN_FILTER}
         """,
         (OPENING_RANGE_BREAKOUT_ARCHITECTURE,),
     ).fetchone()
@@ -91,13 +100,14 @@ def _orb_job_totals(conn: psycopg.Connection) -> dict[str, Any] | None:
 
 def _orb_latest_campaign(conn: psycopg.Connection) -> dict[str, Any] | None:
     row = conn.execute(
-        """
+        f"""
         SELECT c.id, c.name, c.status
         FROM research_campaigns c
         WHERE c.id IN (
             SELECT DISTINCT campaign_id
             FROM research_campaign_jobs
             WHERE candidate->'parameters'->>'strategy_architecture' = %s
+              AND {_CORRECTED_RUN_FILTER}
         )
         ORDER BY c.id DESC
         LIMIT 1
@@ -109,7 +119,7 @@ def _orb_latest_campaign(conn: psycopg.Connection) -> dict[str, Any] | None:
 
 def _orb_timeframe_breakdown(conn: psycopg.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
-        """
+        f"""
         SELECT
             timeframe,
             count(*) AS jobs,
@@ -119,6 +129,7 @@ def _orb_timeframe_breakdown(conn: psycopg.Connection) -> list[dict[str, Any]]:
         FROM research_campaign_jobs
         WHERE candidate->'parameters'->>'strategy_architecture' = %s
           AND status <> 'queued'
+          AND {_CORRECTED_RUN_FILTER}
         GROUP BY timeframe
         ORDER BY timeframe
         """,
@@ -127,13 +138,14 @@ def _orb_timeframe_breakdown(conn: psycopg.Connection) -> list[dict[str, Any]]:
     by_timeframe = {row["timeframe"]: dict(row) for row in rows}
 
     reason_rows = conn.execute(
-        """
+        f"""
         SELECT timeframe, reason, count(*) AS occurrences
         FROM (
             SELECT timeframe, jsonb_array_elements_text(failure_reasons) AS reason
             FROM research_campaign_jobs
             WHERE candidate->'parameters'->>'strategy_architecture' = %s
               AND status <> 'queued'
+              AND {_CORRECTED_RUN_FILTER}
         ) exploded
         WHERE reason = ANY(%s)
         GROUP BY timeframe, reason
@@ -166,7 +178,7 @@ def _orb_timeframe_breakdown(conn: psycopg.Connection) -> list[dict[str, Any]]:
 
 def _orb_sample_jobs(conn: psycopg.Connection, *, limit: int = 12) -> list[dict[str, Any]]:
     rows = conn.execute(
-        """
+        f"""
         SELECT
             symbol,
             timeframe,
@@ -181,6 +193,7 @@ def _orb_sample_jobs(conn: psycopg.Connection, *, limit: int = 12) -> list[dict[
         FROM research_campaign_jobs
         WHERE candidate->'parameters'->>'strategy_architecture' = %s
           AND status <> 'queued'
+          AND {_CORRECTED_RUN_FILTER}
         ORDER BY symbol, timeframe, direction, buffer_level
         LIMIT %s
         """,
