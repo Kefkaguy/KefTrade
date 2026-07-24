@@ -35,6 +35,17 @@ class Settings(BaseSettings):
     broker_order_submission_enabled: bool = Field(default=False, validation_alias="BROKER_ORDER_SUBMISSION_ENABLED")
     external_paper_execution_enabled: bool = Field(default=False, validation_alias="EXTERNAL_PAPER_EXECUTION_ENABLED")
     elite_minimum_trades_per_year: float = Field(default=0, validation_alias="ELITE_MINIMUM_TRADES_PER_YEAR")
+    # Phase 12 (Intraday Research Lab), Step 1. Only opening_range_minutes is
+    # consumed by Step 1's feature computation
+    # (app.services.labs.intraday.features). minimum_distinct_sessions and
+    # intraday_cost_multiplier are validation-rule thresholds intended for the
+    # Step 4 validation work (not yet implemented) -- they are defined here
+    # now, per the Step 1 requirements, so that phase's configuration path
+    # already exists and does not require another settings/migration change.
+    # Neither affects any computation yet.
+    intraday_opening_range_minutes: int = Field(default=30, validation_alias="INTRADAY_OPENING_RANGE_MINUTES")
+    intraday_minimum_distinct_sessions: int = Field(default=20, validation_alias="INTRADAY_MINIMUM_DISTINCT_SESSIONS")
+    intraday_cost_multiplier: float = Field(default=2.0, validation_alias="INTRADAY_COST_MULTIPLIER")
     elite_portfolio_builder_enabled: bool = Field(default=True, validation_alias="ELITE_PORTFOLIO_BUILDER_ENABLED")
     elite_portfolio_activation_enabled: bool = Field(default=False, validation_alias="ELITE_PORTFOLIO_ACTIVATION_ENABLED")
     model_risk_enabled: bool = Field(default=True, validation_alias="MODEL_RISK_ENABLED")

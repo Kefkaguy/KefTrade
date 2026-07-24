@@ -13,6 +13,7 @@ dependencies = [
   "pandas>=2.2.0",
   "numpy>=2.0.0",
   "yfinance>=0.2.50",
+  "pandas-market-calendars>=4.4.0",
 ]
 
 [project.optional-dependencies]
