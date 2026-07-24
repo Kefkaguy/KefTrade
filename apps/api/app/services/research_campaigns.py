@@ -19,7 +19,7 @@ from psycopg.types.json import Jsonb
 from app.observability import elapsed_ms, log_event, log_exception
 from app.settings import settings
 from app.services.evidence_alerts import create_evidence_alert
-from app.services.backtester import build_market_arrays, combine_candles_features
+from app.services.backtester import build_market_arrays, combine_candles_features, month_key
 from app.services.features import load_candles
 from app.services.regimes import load_regimes, sync_market_regimes
 from app.services.research_command_center_cache import clear_command_center_cache
@@ -3051,6 +3051,20 @@ def run_research_campaign_batch(
             runtime_ms = int((time.perf_counter() - started) * 1000)
             status = "promoted" if passes_single_market_validation(result) else "rejected"
             profile = dict(result.pop("execution_profile", {}))
+            trades = result.pop("trades", None)
+            from app.services.labs.intraday.families.registry import is_intraday_lab_candidate
+
+            if trades and is_intraday_lab_candidate(job["candidate"]):
+                persist_intraday_job_trades(
+                    conn,
+                    job_id=int(job["id"]),
+                    campaign_id=int(job["campaign_id"]),
+                    candidate_id=str(job["candidate_id"]),
+                    strategy_architecture=str(job["candidate"].get("parameters", {}).get("strategy_architecture")),
+                    symbol=str(job["symbol"]),
+                    timeframe=str(job["timeframe"]),
+                    trades=trades,
+                )
             profile["queue_operations_ms"] = round(queue_claim_ms / max(1, len(jobs)), 3)
             write_started = time.perf_counter()
             conn.execute(
@@ -3329,6 +3343,93 @@ def fail_or_retry_claimed_job(conn: psycopg.Connection, job: dict[str, Any], err
             job["id"],
         ),
     )
+
+
+def persist_intraday_job_trades(
+    conn: psycopg.Connection,
+    *,
+    job_id: int,
+    campaign_id: int,
+    candidate_id: str,
+    strategy_architecture: str,
+    symbol: str,
+    timeframe: str,
+    trades: list[dict[str, Any]],
+    context_by_time: dict[Any, dict[str, Any]] | None = None,
+) -> int:
+    """Phase 12.4 evidence capture: trades computed by run_backtest() are
+    otherwise discarded once evaluate_candidate() finishes scoring the job
+    (see the "trades" key comment in strategy_discovery.evaluate_candidate).
+    Only called for intraday-lab candidates in a Phase 12.4 re-run campaign --
+    Campaign 47 itself is never touched, since this only runs for jobs
+    processed after this function existed.
+
+    `context_by_time` is intentionally optional and defaults to {}: intraday
+    jobs currently pass an empty context (see run_intraday_campaign_job),
+    since market/volatility regime classification depends on swing `features`
+    columns (ema_50, returns_5, volatility_20) that have never been computed
+    at 15m/30m granularity -- every trade's regime tags below will read
+    "unknown" until that separate gap is closed. Documented in the Phase 12.4
+    data-availability appendix rather than silently fabricated.
+    """
+
+    if not trades:
+        return 0
+    context_by_time = context_by_time or {}
+    rows = []
+    for trade in trades:
+        context = context_by_time.get(trade["entry_time"], {})
+        rows.append(
+            (
+                job_id,
+                campaign_id,
+                candidate_id,
+                strategy_architecture,
+                symbol,
+                timeframe,
+                trade["side"],
+                trade["entry_time"],
+                trade["exit_time"],
+                trade["entry_price"],
+                trade["exit_price"],
+                trade["quantity"],
+                trade["stop_loss"],
+                trade["take_profit"],
+                trade["risk_per_unit"],
+                trade["gross_pnl"],
+                trade["fees"],
+                trade["slippage_cost"],
+                trade["pnl"],
+                float(trade["pnl_pct"]),
+                trade["exit_reason"],
+                trade["holding_period_hours"],
+                trade.get("mfe_amount"),
+                trade.get("mae_amount"),
+                trade.get("mfe_r"),
+                trade.get("mae_r"),
+                trade.get("bars_to_mfe"),
+                trade.get("bars_to_mae"),
+                trade.get("entry_minutes_from_open"),
+                trade.get("entry_minutes_to_close"),
+                trade.get("entry_session_relative_volume"),
+                trade.get("entry_gap_percent"),
+                context.get("trend_regime", "unknown"),
+                context.get("volatility_regime", "unknown"),
+                month_key(trade["entry_time"]),
+            )
+        )
+    columns = (
+        "job_id, campaign_id, candidate_id, strategy_architecture, symbol, timeframe, direction, "
+        "entry_time, exit_time, entry_price, exit_price, quantity, stop_loss, take_profit, risk_per_unit, "
+        "gross_pnl, fees, slippage_cost, net_pnl, pnl_pct, exit_reason, holding_period_hours, "
+        "mfe_amount, mae_amount, mfe_r, mae_r, bars_to_mfe, bars_to_mae, "
+        "entry_minutes_from_open, entry_minutes_to_close, entry_session_relative_volume, entry_gap_percent, "
+        "market_regime, volatility_regime, month_key"
+    )
+    placeholders = ", ".join(f"({', '.join(['%s'] * len(rows[0]))})" for _ in rows)
+    flattened = [value for row in rows for value in row]
+    conn.execute(f"INSERT INTO research_campaign_trades({columns}) VALUES {placeholders}", flattened)
+    return len(rows)
 
 
 def run_intraday_campaign_job(

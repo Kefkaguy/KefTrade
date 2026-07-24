@@ -268,3 +268,124 @@ def test_backtest_route_persists_strategy_parameter_snapshot(monkeypatch) -> Non
 
     assert result["id"] == 7
     assert fake_conn.backtest_params[4].obj == strategy_params
+
+
+def make_excursion_scenario() -> tuple[list[dict], list[dict]]:
+    """A hand-computable long trade: flat market, one setup at the walk-forward
+    validation window's first bar (index 70, matching every other test's
+    anomaly placement), a favorable run-up peaking at index 73, then a
+    stop-loss touch at index 74. Built specifically to let Phase 12.4's new
+    gross_pnl/fees/slippage_cost/mfe/mae/risk_per_unit trade fields be
+    verified against numbers computed by hand, independent of make_rows()'s
+    own index-70/71 anomaly used by the pre-existing tests above."""
+
+    candles, features = make_rows(100)
+    overrides = {
+        70: {"open": Decimal("100"), "high": Decimal("101"), "low": Decimal("99")},
+        71: {"open": Decimal("100"), "high": Decimal("101"), "low": Decimal("99")},
+        72: {"open": Decimal("100"), "high": Decimal("108"), "low": Decimal("99")},
+        73: {"open": Decimal("100"), "high": Decimal("112"), "low": Decimal("97")},
+        74: {"open": Decimal("100"), "high": Decimal("105"), "low": Decimal("94")},
+    }
+    for index, values in overrides.items():
+        candles[index].update({**values, "close": Decimal("100")})
+    features[71].update(
+        {
+            "minutes_from_open": 30,
+            "minutes_to_close": 360,
+            "session_relative_volume": Decimal("1.4"),
+            "gap_percent": Decimal("0.01"),
+        }
+    )
+    return candles, features
+
+
+def excursion_decide(candle, feature, recent_candles, params):
+    if candle["timestamp"] != EXCURSION_SIGNAL_TIMESTAMP[0]:
+        return StrategyDecision("avoid", None, None, None, None, ["wait"])
+    close = Decimal(candle["close"])
+    # take_profit is a placeholder: run_backtest only checks it for None-ness
+    # before recomputing the real target from risk_per_unit * decision.risk_reward.
+    return StrategyDecision("setup", (close, close), close - Decimal("5"), close + Decimal("100"), Decimal("3"), ["excursion test"])
+
+
+EXCURSION_SIGNAL_TIMESTAMP: list[datetime] = []
+
+
+def test_backtest_trade_captures_gross_pnl_fees_and_slippage_cost() -> None:
+    candles, features = make_excursion_scenario()
+    EXCURSION_SIGNAL_TIMESTAMP[:] = [candles[70]["timestamp"]]
+
+    result = run_backtest(candles, features, {**PARAMS, "fee_rate": 0.001, "slippage_rate": 0}, excursion_decide)
+
+    assert len(result["trades"]) == 1
+    trade = result["trades"][0]
+    assert trade["exit_reason"] == "stop_loss"
+    assert trade["entry_price"] == Decimal("100")
+    assert trade["exit_price"] == Decimal("95")
+    assert trade["quantity"] == Decimal("20")
+    assert trade["risk_per_unit"] == Decimal("5")
+    assert trade["gross_pnl"] == Decimal("-100")
+    assert trade["fees"] == Decimal("3.900")
+    assert trade["slippage_cost"] == Decimal("0")
+    assert trade["pnl"] == trade["gross_pnl"] - trade["fees"]
+
+
+def test_backtest_trade_captures_mfe_and_mae_between_entry_and_exit() -> None:
+    candles, features = make_excursion_scenario()
+    EXCURSION_SIGNAL_TIMESTAMP[:] = [candles[70]["timestamp"]]
+
+    result = run_backtest(candles, features, {**PARAMS, "fee_rate": 0, "slippage_rate": 0}, excursion_decide)
+
+    trade = result["trades"][0]
+    assert trade["mfe_amount"] == Decimal("240")
+    assert trade["mae_amount"] == Decimal("120")
+    assert trade["mfe_r"] == 2.4
+    assert trade["mae_r"] == 1.2
+    assert trade["bars_to_mfe"] == 2
+    assert trade["bars_to_mae"] == 3
+
+
+def test_backtest_trade_captures_entry_bar_session_feature_snapshot() -> None:
+    candles, features = make_excursion_scenario()
+    EXCURSION_SIGNAL_TIMESTAMP[:] = [candles[70]["timestamp"]]
+
+    result = run_backtest(candles, features, PARAMS, excursion_decide)
+
+    trade = result["trades"][0]
+    assert trade["entry_minutes_from_open"] == 30
+    assert trade["entry_minutes_to_close"] == 360
+    assert trade["entry_session_relative_volume"] == Decimal("1.4")
+    assert trade["entry_gap_percent"] == Decimal("0.01")
+
+
+def test_backtest_trade_omits_session_fields_when_dataset_has_none() -> None:
+    candles, features = make_rows(100)
+
+    result = run_backtest(candles, features, PARAMS)
+
+    assert result["trades"]
+    trade = result["trades"][0]
+    assert trade["entry_minutes_from_open"] is None
+    assert trade["entry_minutes_to_close"] is None
+    assert trade["entry_session_relative_volume"] is None
+    assert trade["entry_gap_percent"] is None
+
+
+def test_excursion_extremes_handles_short_direction() -> None:
+    from app.services.backtester import excursion_extremes
+    import numpy as np
+
+    arrays = {
+        "high": np.array([101.0, 103.0, 108.0, 106.0]),
+        "low": np.array([99.0, 95.0, 96.0, 90.0]),
+    }
+    mfe_price, mae_price, bars_to_mfe, bars_to_mae = excursion_extremes(
+        arrays, entry_index=0, exit_index=3, entry_price=Decimal("100"), direction="short"
+    )
+
+    # Short: favorable = entry - low, adverse = high - entry.
+    assert mfe_price == Decimal("10")  # low=90 at offset 3 -> 100-90
+    assert mae_price == Decimal("8")  # high=108 at offset 2 -> 108-100
+    assert bars_to_mfe == 3
+    assert bars_to_mae == 2

@@ -133,8 +133,10 @@ def run_backtest(
         )
         exit_candle = rows[exit_index]["candle"]
         if exit_reason.startswith("stop_loss"):
+            raw_exit_price = decision.stop_loss
             exit_price = decision.stop_loss * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
         elif exit_reason == "take_profit":
+            raw_exit_price = effective_take_profit
             exit_price = effective_take_profit * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
         else:
             # Covers both the pre-existing "time_exit"/"end_of_data" reasons
@@ -142,6 +144,7 @@ def run_backtest(
             # at the exit candle's close, with the same slippage treatment --
             # session_close is not a special case here, it's just another
             # value this already-generic branch handles.
+            raw_exit_price = Decimal(exit_candle["close"])
             exit_price = Decimal(exit_candle["close"]) * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
 
         entry_fee = entry_price * quantity * fee_rate
@@ -159,11 +162,19 @@ def run_backtest(
 
         gross_pnl = ((exit_price - entry_price) if direction == "long" else (entry_price - exit_price)) * quantity
         fees = (entry_price * quantity * fee_rate) + (exit_price * quantity * fee_rate)
+        raw_entry_price = Decimal(entry_candle["open"])
+        slippage_cost = (abs(entry_price - raw_entry_price) + abs(exit_price - raw_exit_price)) * quantity
         pnl = gross_pnl - fees
         equity += pnl
         equity_curve.append(equity)
         marked_equity_points[rows[exit_index]["candle"]["timestamp"]] = equity
         realized_equity_points.append({"timestamp": rows[exit_index]["candle"]["timestamp"], "equity": equity})
+        mfe_price, mae_price, bars_to_mfe, bars_to_mae = excursion_extremes(
+            arrays, entry_index=entry_index, exit_index=exit_index, entry_price=entry_price, direction=direction
+        )
+        mfe_amount = mfe_price * quantity
+        mae_amount = mae_price * quantity
+        entry_feature = rows[entry_index]["feature"]
         trades.append(
             {
                 "symbol": candle["symbol"],
@@ -175,10 +186,24 @@ def run_backtest(
                 "quantity": quantity,
                 "stop_loss": decision.stop_loss,
                 "take_profit": effective_take_profit,
+                "risk_per_unit": risk_per_unit,
+                "gross_pnl": gross_pnl,
+                "fees": fees,
+                "slippage_cost": slippage_cost,
                 "pnl": pnl,
                 "pnl_pct": pnl / initial_equity,
                 "exit_reason": exit_reason,
                 "holding_period_hours": (rows[exit_index]["candle"]["timestamp"] - entry_candle["timestamp"]).total_seconds() / 3600,
+                "mfe_amount": mfe_amount,
+                "mae_amount": mae_amount,
+                "mfe_r": float(mfe_price / risk_per_unit) if risk_per_unit != 0 else None,
+                "mae_r": float(mae_price / risk_per_unit) if risk_per_unit != 0 else None,
+                "bars_to_mfe": bars_to_mfe,
+                "bars_to_mae": bars_to_mae,
+                "entry_minutes_from_open": entry_feature.get("minutes_from_open"),
+                "entry_minutes_to_close": entry_feature.get("minutes_to_close"),
+                "entry_session_relative_volume": entry_feature.get("session_relative_volume"),
+                "entry_gap_percent": entry_feature.get("gap_percent"),
                 "entry_reason": decision.explanation,
                 "entry_candle": candle_snapshot(entry_candle),
                 "exit_candle": candle_snapshot(rows[exit_index]["candle"]),
@@ -302,6 +327,36 @@ def find_exit_index(
     if max_holding_bars > 0 and search_end < final_index:
         return search_end, "time_exit"
     return final_index, "end_of_data"
+
+
+def excursion_extremes(
+    arrays: dict[str, np.ndarray],
+    *,
+    entry_index: int,
+    exit_index: int,
+    entry_price: Decimal,
+    direction: str,
+) -> tuple[Decimal, Decimal, int, int]:
+    """Max favorable/adverse excursion (in price terms, not yet multiplied by
+    quantity) between entry and exit, inclusive of both bars. Uses the same
+    high/low arrays as `find_exit_index` so this never re-touches the raw
+    candle rows or the exit-scan logic itself -- purely an evidence capture
+    on top of an already-decided trade."""
+
+    highs = arrays["high"][entry_index : exit_index + 1]
+    lows = arrays["low"][entry_index : exit_index + 1]
+    entry_price_f = float(entry_price)
+    if direction == "long":
+        favorable = highs - entry_price_f
+        adverse = entry_price_f - lows
+    else:
+        favorable = entry_price_f - lows
+        adverse = highs - entry_price_f
+    mfe_offset = int(np.argmax(favorable))
+    mae_offset = int(np.argmax(adverse))
+    mfe_price = max(Decimal(str(favorable[mfe_offset])), Decimal("0"))
+    mae_price = max(Decimal(str(adverse[mae_offset])), Decimal("0"))
+    return mfe_price, mae_price, mfe_offset, mae_offset
 
 
 def mark_to_market_equity(

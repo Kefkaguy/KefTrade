@@ -845,6 +845,11 @@ def evaluate_candidate(
         "failure_reasons": failure_reasons,
         "explanation": explanation_for(candidate, status, failure_reasons),
         "simulation_only": True,
+        # Not written to the `result` jsonb column -- callers that persist
+        # trade-level evidence (see research_campaigns.persist_job_trades)
+        # pop this key off first. Kept here, rather than re-deriving trades
+        # from scratch, so a job only ever runs run_backtest() once.
+        "trades": trades,
     }
 
 

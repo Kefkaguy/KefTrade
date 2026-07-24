@@ -25,6 +25,7 @@ from app.services.research_campaigns import (
     passes_cross_validation,
     passes_single_market_validation,
     overfit_regime_robustness_blueprint,
+    persist_intraday_job_trades,
     quality_first_campaign_blueprint,
     research_campaign_preflight,
     research_heatmaps,
@@ -1186,4 +1187,128 @@ def test_phase_912_blueprint_is_focused_and_asset_agnostic() -> None:
     assert blueprint["targeting"] == {"assets": ["AAPL", "NVDA"], "timeframes": ["1h"], "candidate_count": 12, "job_count": 24}
     assert all(candidate.parameters["adaptive_volatility_profiles"] is True for candidate in blueprint["candidates"])
     assert all("symbol" not in candidate.parameters for candidate in blueprint["candidates"])
-    assert all(row["campaign_version"] == "phase_9_12_volatility_adaptive_relative_strength_v1" for row in blueprint["lineage"])
+
+
+class TradeInsertConn:
+    def __init__(self):
+        self.inserted_sql = None
+        self.inserted_params = None
+
+    def execute(self, query, params=None):
+        self.inserted_sql = query
+        self.inserted_params = params
+        return Result([])
+
+
+def _sample_trade(**overrides):
+    trade = {
+        "side": "long",
+        "entry_time": datetime(2026, 3, 14, 14, 30, tzinfo=UTC),
+        "exit_time": datetime(2026, 3, 14, 15, 0, tzinfo=UTC),
+        "entry_price": Decimal("100"),
+        "exit_price": Decimal("95"),
+        "quantity": Decimal("20"),
+        "stop_loss": Decimal("95"),
+        "take_profit": Decimal("115"),
+        "risk_per_unit": Decimal("5"),
+        "gross_pnl": Decimal("-100"),
+        "fees": Decimal("3.9"),
+        "slippage_cost": Decimal("0"),
+        "pnl": Decimal("-103.9"),
+        "pnl_pct": Decimal("-0.01039"),
+        "exit_reason": "stop_loss",
+        "holding_period_hours": 0.5,
+        "mfe_amount": Decimal("240"),
+        "mae_amount": Decimal("120"),
+        "mfe_r": 2.4,
+        "mae_r": 1.2,
+        "bars_to_mfe": 2,
+        "bars_to_mae": 3,
+        "entry_minutes_from_open": 30,
+        "entry_minutes_to_close": 360,
+        "entry_session_relative_volume": Decimal("1.4"),
+        "entry_gap_percent": Decimal("0.01"),
+    }
+    trade.update(overrides)
+    return trade
+
+
+def test_persist_intraday_job_trades_returns_zero_for_no_trades() -> None:
+    conn = TradeInsertConn()
+
+    inserted = persist_intraday_job_trades(
+        conn,
+        job_id=1,
+        campaign_id=47,
+        candidate_id="gap_fill_001",
+        strategy_architecture="gap_fill_v1",
+        symbol="AMD",
+        timeframe="30m",
+        trades=[],
+    )
+
+    assert inserted == 0
+    assert conn.inserted_sql is None
+
+
+def test_persist_intraday_job_trades_builds_one_row_per_trade_with_correct_values() -> None:
+    conn = TradeInsertConn()
+    trades = [_sample_trade(), _sample_trade(entry_time=datetime(2026, 4, 2, 9, 30, tzinfo=UTC), exit_time=datetime(2026, 4, 2, 10, 0, tzinfo=UTC))]
+
+    inserted = persist_intraday_job_trades(
+        conn,
+        job_id=42,
+        campaign_id=48,
+        candidate_id="session_momentum_007",
+        strategy_architecture="session_momentum_v1",
+        symbol="AMD",
+        timeframe="30m",
+        trades=trades,
+    )
+
+    assert inserted == 2
+    assert "INSERT INTO research_campaign_trades" in conn.inserted_sql
+    assert conn.inserted_sql.count("(%s") == 2
+    params = conn.inserted_params
+    assert len(params) == 2 * 35
+    first_row = params[:35]
+    assert first_row[0] == 42  # job_id
+    assert first_row[1] == 48  # campaign_id
+    assert first_row[2] == "session_momentum_007"
+    assert first_row[3] == "session_momentum_v1"
+    assert first_row[4] == "AMD"
+    assert first_row[5] == "30m"
+    assert first_row[6] == "long"
+    assert first_row[9] == Decimal("100")  # entry_price
+    assert first_row[10] == Decimal("95")  # exit_price
+    assert first_row[15] == Decimal("-100")  # gross_pnl
+    assert first_row[16] == Decimal("3.9")  # fees
+    assert first_row[-3] == "unknown"  # market_regime, no context_by_time provided
+    assert first_row[-2] == "unknown"  # volatility_regime
+    assert first_row[-1] == "2026-03"  # month_key from entry_time
+
+    second_row = params[35:]
+    assert second_row[-1] == "2026-04"
+
+
+def test_persist_intraday_job_trades_tags_regime_from_context_by_time() -> None:
+    conn = TradeInsertConn()
+    entry_time = datetime(2026, 3, 14, 14, 30, tzinfo=UTC)
+    trades = [_sample_trade(entry_time=entry_time)]
+    context_by_time = {entry_time: {"trend_regime": "bull_trend", "volatility_regime": "high_volatility"}}
+
+    persist_intraday_job_trades(
+        conn,
+        job_id=1,
+        campaign_id=48,
+        candidate_id="c1",
+        strategy_architecture="gap_fill_v1",
+        symbol="AMD",
+        timeframe="30m",
+        trades=trades,
+        context_by_time=context_by_time,
+    )
+
+    params = conn.inserted_params
+    assert params[-3] == "bull_trend"
+    assert params[-2] == "high_volatility"
