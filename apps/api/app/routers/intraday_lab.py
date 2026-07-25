@@ -51,6 +51,53 @@ def create_intraday_campaign_endpoint(
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+@router.get("/research/intraday/analytics/{campaign_id}")
+def get_campaign_analytics(campaign_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    """Phase 13.5: campaign analytics with explicit evidence tiers. Every
+    aggregate is computed from stored rows and carries its sample size; no
+    causal feature importance is claimed."""
+    from app.services.labs.intraday.strategy_analytics import campaign_analytics
+
+    return campaign_analytics(conn, campaign_id)
+
+
+@router.get("/research/intraday/evidence-report/{campaign_id}/{candidate_id}")
+def get_candidate_evidence_report(
+    campaign_id: int,
+    candidate_id: str,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Phase 13.9: a candidate's full evidence report, built only from stored
+    database rows and the family's declared hypothesis."""
+    from app.services.labs.intraday.strategy_analytics import candidate_evidence_report
+
+    report = candidate_evidence_report(conn, campaign_id, candidate_id)
+    if "error" in report:
+        raise HTTPException(status_code=404, detail=report["error"])
+    return report
+
+
+@router.get("/research/intraday/generator-plan")
+def get_generator_plan(
+    architectures: list[str] = Query(..., description="Family architectures to generate for."),
+    total_candidates: int = Query(40, ge=1, le=500),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Phase 13.6: preview what the evidence-guided generator would produce,
+    including why each candidate was chosen. Read-only -- creates nothing."""
+    from app.services.labs.intraday.evidence_guided_generator import generate_evidence_guided_candidates
+
+    try:
+        plan = generate_evidence_guided_candidates(
+            conn, architectures=architectures, total_candidates=total_candidates
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    return {key: value for key, value in plan.items() if key != "candidates"} | {
+        "candidate_count": len(plan["candidates"])
+    }
+
+
 @router.get("/research/strategy-dna")
 def list_strategy_dna_endpoint(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     """Phase 13.1: latest DNA row per family, plus the behavioral-similarity
