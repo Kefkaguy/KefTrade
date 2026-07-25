@@ -3533,8 +3533,11 @@ def run_campaign_job(
     symbol = job["symbol"]
     timeframe = job["timeframe"]
 
+    from app.services.labs.intraday.cross_sectional_dataset import is_cross_sectional_candidate
     from app.services.labs.intraday.families.registry import is_intraday_lab_candidate
 
+    if is_cross_sectional_candidate(job["candidate"]):
+        return run_cross_sectional_campaign_job(conn, job)
     if is_intraday_lab_candidate(job["candidate"]):
         return run_intraday_campaign_job(conn, job)
 
@@ -3572,6 +3575,66 @@ def run_campaign_job(
         "indicator_calculation_ms": 0 if cache_hit else dataset["indicator_calculation_ms"],
         "simulation_ms": round((time.perf_counter() - simulation_started) * 1000, 3),
         "dataset_cache_hit": cache_hit,
+    }
+    from app.services.research_architecture import validation_gate_diagnostics
+
+    result = {**row, "symbol": symbol, "timeframe": timeframe, "campaign_version": CAMPAIGN_VERSION, "dataset_id": dataset_id}
+    result["gate_diagnostics"] = validation_gate_diagnostics(result)
+    return result
+
+
+def run_cross_sectional_campaign_job(
+    conn: psycopg.Connection,
+    job: dict[str, Any],
+) -> dict[str, Any]:
+    """Sibling to `run_intraday_campaign_job` for families that rank a
+    symbol against the rest of the campaign's own universe (e.g. cross-
+    sectional momentum) rather than against its own history alone. Never
+    touched by, and never touches, the single-symbol intraday path --
+    dispatch happens once in `run_campaign_job`, before either sibling
+    runs, so neither path's behavior can be affected by the other existing.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    from app.services.labs.intraday.cross_sectional_dataset import load_cross_sectional_intraday_dataset
+
+    symbol = job["symbol"]
+    timeframe = job["timeframe"]
+    candidate = candidate_from_payload(job["candidate"])
+    candidate = dataclass_replace(candidate, parameters={**candidate.parameters, "timeframe": timeframe})
+
+    dataset_id = job.get("dataset_id")
+    if dataset_id is None:
+        raise ValueError(
+            "Cross-sectional candidates require an immutable dataset snapshot "
+            "(dataset_id) -- the ranking universe is read from that snapshot's "
+            "own manifest, so there is no live-data fallback."
+        )
+    dataset_id = int(dataset_id)
+
+    lookback_bars = int(candidate.parameters.get("cross_sectional_lookback_bars", 8))
+    dataset_started = time.perf_counter()
+    dataset = load_cross_sectional_intraday_dataset(
+        conn, symbol, timeframe, dataset_id=dataset_id, lookback_bars=lookback_bars
+    )
+    data_loading_ms = round((time.perf_counter() - dataset_started) * 1000, 3)
+
+    simulation_started = time.perf_counter()
+    row = evaluate_candidate(
+        candidate,
+        dataset["candles"],
+        dataset["features"],
+        {},
+        market_arrays=dataset["market_arrays"],
+        session_end_index=dataset["session_end_index"],
+    )
+    row["execution_profile"] = {
+        "data_loading_ms": data_loading_ms,
+        "indicator_calculation_ms": 0,
+        "simulation_ms": round((time.perf_counter() - simulation_started) * 1000, 3),
+        "dataset_cache_hit": False,
+        "intraday_coverage": dataset["coverage"],
+        "cross_sectional_universe": dataset["cross_sectional_universe"],
     }
     from app.services.research_architecture import validation_gate_diagnostics
 

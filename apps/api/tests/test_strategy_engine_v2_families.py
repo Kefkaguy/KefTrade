@@ -103,8 +103,8 @@ def run_family(architecture, bar_specs_by_session, param_overrides=None, *, time
 # Registry-level invariants (apply to all ten)
 # ---------------------------------------------------------------------------
 
-def test_all_ten_families_are_registered():
-    assert len(ARCHITECTURES) == 10
+def test_all_eleven_families_are_registered():
+    assert len(ARCHITECTURES) == 11
     assert set(ARCHITECTURES) == set(V2_FAMILIES)
 
 

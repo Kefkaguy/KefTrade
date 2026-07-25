@@ -47,6 +47,7 @@ VOCABULARY: dict[str, tuple[str, ...]] = {
         "compression_breakout", "time_of_day_entry", "structure_break",
         "structure_break_failure", "momentum_bar_continuation", "vwap_deviation_fade",
         "indicator_crossover", "opening_range_extension_fade", "trend_pullback",
+        "cross_sectional_rank_extreme",
     ),
     "confirmation_structure": (
         "relative_volume", "vwap_alignment", "closing_confirmation", "momentum_direction",

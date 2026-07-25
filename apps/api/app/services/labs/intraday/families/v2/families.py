@@ -1096,6 +1096,92 @@ register_v2_family(
 )
 
 
+# ===========================================================================
+# 11. Cross-Sectional Momentum v2
+# ===========================================================================
+
+class CrossSectionalMomentumV2(V2Strategy):
+    architecture = "cross_sectional_momentum_v2"
+    feature_groups = ("session",)
+    uses_absolute_targets = False
+    supports_short = True
+    hypothesis = HypothesisSpec(
+        title="Cross-Sectional Momentum v2",
+        market_behavior=(
+            "Every other family in this registry judges one symbol against its own history. "
+            "Cross-sectional momentum (Jegadeesh & Titman, 1993) judges a symbol against its "
+            "peers at the same moment: relative strength within a universe is a more replicated "
+            "market anomaly than any single-symbol technical pattern tested so far."
+        ),
+        hypothesis=(
+            "A symbol ranking in the extreme percentiles of trailing relative strength within its "
+            "own campaign universe continues to relatively out- or under-perform briefly."
+        ),
+        required_conditions=(
+            "At least 3 peer symbols have a computable trailing return at this bar (ranking "
+            "requires real breadth, not two symbols compared to each other).",
+            "This symbol's percentile rank is at or beyond the configured extreme threshold.",
+        ),
+        invalidation_conditions=(
+            "Rank reverts back toward the middle of the distribution.",
+            "Too few peers have computable trailing returns to rank meaningfully.",
+        ),
+        success_criteria={
+            "minimum_trades": 30,
+            "minimum_net_profit_factor": 1.2,
+            "minimum_net_expectancy": 0,
+            "minimum_symbols_with_positive_evidence": 2,
+            "notes": "Declared before any Phase 13 campaign ran.",
+        },
+    )
+
+    def evaluate(self, candle, feature, v2, params) -> EntryPlan | str:
+        percentile = feature.get("cross_sectional_momentum_percentile")
+        if percentile is None:
+            return "Cross-sectional ranking unavailable at this bar (fewer than 3 peers with a computable trailing return)."
+
+        upper = float(params.get("upper_percentile", 0.8))
+        lower = float(params.get("lower_percentile", 0.2))
+        low, high = float(candle["low"]), float(candle["high"])
+
+        if percentile >= upper:
+            return EntryPlan("long", _d(low), f"Cross-sectional percentile {percentile:.2f} at or above the {upper} strength threshold.")
+        if percentile <= lower:
+            return EntryPlan("short", _d(high), f"Cross-sectional percentile {percentile:.2f} at or below the {lower} weakness threshold.")
+        return f"Cross-sectional percentile {percentile:.2f} is not extreme (needs >= {upper} or <= {lower})."
+
+
+register_v2_family(
+    CrossSectionalMomentumV2,
+    dna={
+        **_INTRADAY_DNA_COMMON,
+        "family_architecture": "cross_sectional_momentum_v2",
+        "direction_support": ["long", "short"],
+        "entry_structure": "cross_sectional_rank_extreme",
+        "confirmation_structure": ["none"],
+        "exit_structure": ["fixed_r_multiple_target", "stop_loss", "session_close_forced"],
+        "holding_horizon_class": "intraday_hours",
+        "expected_frequency_class": "multiple_per_session",
+        "trend_dependency": "benefits_from_trend",
+        "volatility_dependency": "agnostic",
+        "volume_dependency": "agnostic",
+        "session_dependency": "any_session_time",
+        "gap_dependency": "agnostic",
+        "market_structure_dependency": "agnostic",
+        "behavior_class": "momentum",
+        "required_regime": ["any"],
+        "invalidation_regime": ["none_declared"],
+        "feature_dependencies": ["cross_sectional_momentum_percentile"],
+    },
+    parameter_grid={
+        "upper_percentile": (Decimal("0.7"), Decimal("0.8")),
+        "lower_percentile": (Decimal("0.2"), Decimal("0.3")),
+        "direction": ("long", "short"),
+    },
+    blocks={"entry": "cross_sectional_rank_extreme", "exit": "r_multiple_or_session_close"},
+)
+
+
 V2_ARCHITECTURES: tuple[str, ...] = (
     "opening_range_breakout_v2",
     "opening_range_fade_v2",
@@ -1107,4 +1193,5 @@ V2_ARCHITECTURES: tuple[str, ...] = (
     "volatility_squeeze_breakout_v2",
     "intraday_seasonality_v2",
     "market_structure_break_v2",
+    "cross_sectional_momentum_v2",
 )
