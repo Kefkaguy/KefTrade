@@ -1174,8 +1174,15 @@ register_v2_family(
         "feature_dependencies": ["cross_sectional_momentum_percentile"],
     },
     parameter_grid={
-        "upper_percentile": (Decimal("0.7"), Decimal("0.8")),
-        "lower_percentile": (Decimal("0.2"), Decimal("0.3")),
+        # Tightened from an earlier (0.7/0.8, 0.2/0.3) grid that traded the
+        # top/bottom ~30% of the universe and produced 500+ pooled trades at
+        # PF 0.07-0.19 -- research on transaction-cost drag and overtrading
+        # (see Phase 13.10 PF research) points at that volume itself being a
+        # likely cause: costs compound faster than a weak raw edge can beat
+        # them. This grid trades only the single most extreme symbol (~1 of
+        # 10) instead of the top/bottom third.
+        "upper_percentile": (Decimal("0.9"), Decimal("0.95")),
+        "lower_percentile": (Decimal("0.05"), Decimal("0.1")),
         "direction": ("long", "short"),
     },
     blocks={"entry": "cross_sectional_rank_extreme", "exit": "r_multiple_or_session_close"},
@@ -1264,8 +1271,15 @@ register_v2_family(
         "feature_dependencies": ["cross_sectional_momentum_percentile"],
     },
     parameter_grid={
-        "upper_percentile": (Decimal("0.7"), Decimal("0.8")),
-        "lower_percentile": (Decimal("0.2"), Decimal("0.3")),
+        # Tightened from an earlier (0.7/0.8, 0.2/0.3) grid that traded the
+        # top/bottom ~30% of the universe and produced 500+ pooled trades at
+        # PF 0.07-0.19 -- research on transaction-cost drag and overtrading
+        # (see Phase 13.10 PF research) points at that volume itself being a
+        # likely cause: costs compound faster than a weak raw edge can beat
+        # them. This grid trades only the single most extreme symbol (~1 of
+        # 10) instead of the top/bottom third.
+        "upper_percentile": (Decimal("0.9"), Decimal("0.95")),
+        "lower_percentile": (Decimal("0.05"), Decimal("0.1")),
         "direction": ("long", "short"),
     },
     blocks={"entry": "cross_sectional_rank_extreme_reversal", "exit": "r_multiple_or_session_close"},
