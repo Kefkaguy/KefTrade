@@ -24,7 +24,7 @@ from app.services.labs.intraday.cross_sectional import (
 # their own symbol's) to compute their signal. Checked by
 # run_campaign_job's dispatch BEFORE the ordinary intraday-lab check, so
 # every existing single-symbol family's dispatch is completely unaffected.
-CROSS_SECTIONAL_ARCHITECTURES = {"cross_sectional_momentum_v2"}
+CROSS_SECTIONAL_ARCHITECTURES = {"cross_sectional_momentum_v2", "cross_sectional_reversal_v2"}
 
 
 def is_cross_sectional_candidate(candidate_payload: dict[str, Any]) -> bool:

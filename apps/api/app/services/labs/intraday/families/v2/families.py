@@ -1182,6 +1182,96 @@ register_v2_family(
 )
 
 
+# ===========================================================================
+# 12. Cross-Sectional Reversal v2
+# ===========================================================================
+
+class CrossSectionalReversalV2(V2Strategy):
+    architecture = "cross_sectional_reversal_v2"
+    feature_groups = ("session",)
+    uses_absolute_targets = False
+    supports_short = True
+    hypothesis = HypothesisSpec(
+        title="Cross-Sectional Reversal v2",
+        market_behavior=(
+            "Classic cross-sectional momentum (Jegadeesh & Titman, 1993) is validated on "
+            "months-long formation and holding periods. At short horizons the documented effect "
+            "is the OPPOSITE -- short-term reversal (Jegadeesh, 1990): a symbol that has recently "
+            "outperformed its peers tends to give some of that back, and a recent relative laggard "
+            "tends to bounce, before any longer-horizon momentum has a chance to establish."
+        ),
+        hypothesis=(
+            "A symbol at the extreme weak end of its trailing cross-sectional rank bounces toward "
+            "its peers; a symbol at the extreme strong end pulls back toward its peers -- the "
+            "mirror image of CrossSectionalMomentumV2's entry logic, sharing the identical ranking "
+            "computation so the two hypotheses are tested on exactly the same evidence."
+        ),
+        required_conditions=(
+            "At least 3 peer symbols have a computable trailing return at this bar.",
+            "This symbol's percentile rank is at or beyond the configured extreme threshold.",
+        ),
+        invalidation_conditions=(
+            "The extreme rank persists or extends rather than reverting.",
+            "Too few peers have computable trailing returns to rank meaningfully.",
+        ),
+        success_criteria={
+            "minimum_trades": 30,
+            "minimum_net_profit_factor": 1.2,
+            "minimum_net_expectancy": 0,
+            "minimum_symbols_with_positive_evidence": 2,
+            "notes": "Declared before any Phase 13 campaign ran.",
+        },
+    )
+
+    def evaluate(self, candle, feature, v2, params) -> EntryPlan | str:
+        percentile = feature.get("cross_sectional_momentum_percentile")
+        if percentile is None:
+            return "Cross-sectional ranking unavailable at this bar (fewer than 3 peers with a computable trailing return)."
+
+        upper = float(params.get("upper_percentile", 0.8))
+        lower = float(params.get("lower_percentile", 0.2))
+        low, high = float(candle["low"]), float(candle["high"])
+
+        # Inverted from CrossSectionalMomentumV2: weakness is bought (bet on
+        # a bounce), strength is faded (bet on a pullback).
+        if percentile <= lower:
+            return EntryPlan("long", _d(low), f"Cross-sectional percentile {percentile:.2f} at or below the {lower} weakness threshold; betting on a short-term bounce.")
+        if percentile >= upper:
+            return EntryPlan("short", _d(high), f"Cross-sectional percentile {percentile:.2f} at or above the {upper} strength threshold; fading for a short-term pullback.")
+        return f"Cross-sectional percentile {percentile:.2f} is not extreme (needs >= {upper} or <= {lower})."
+
+
+register_v2_family(
+    CrossSectionalReversalV2,
+    dna={
+        **_INTRADAY_DNA_COMMON,
+        "family_architecture": "cross_sectional_reversal_v2",
+        "direction_support": ["long", "short"],
+        "entry_structure": "cross_sectional_rank_extreme",
+        "confirmation_structure": ["none"],
+        "exit_structure": ["fixed_r_multiple_target", "stop_loss", "session_close_forced"],
+        "holding_horizon_class": "intraday_hours",
+        "expected_frequency_class": "multiple_per_session",
+        "trend_dependency": "requires_range",
+        "volatility_dependency": "agnostic",
+        "volume_dependency": "agnostic",
+        "session_dependency": "any_session_time",
+        "gap_dependency": "agnostic",
+        "market_structure_dependency": "agnostic",
+        "behavior_class": "mean_reversion",
+        "required_regime": ["range_bound", "normal_volatility"],
+        "invalidation_regime": ["trending_up", "trending_down", "high_volatility"],
+        "feature_dependencies": ["cross_sectional_momentum_percentile"],
+    },
+    parameter_grid={
+        "upper_percentile": (Decimal("0.7"), Decimal("0.8")),
+        "lower_percentile": (Decimal("0.2"), Decimal("0.3")),
+        "direction": ("long", "short"),
+    },
+    blocks={"entry": "cross_sectional_rank_extreme_reversal", "exit": "r_multiple_or_session_close"},
+)
+
+
 V2_ARCHITECTURES: tuple[str, ...] = (
     "opening_range_breakout_v2",
     "opening_range_fade_v2",
@@ -1194,4 +1284,5 @@ V2_ARCHITECTURES: tuple[str, ...] = (
     "intraday_seasonality_v2",
     "market_structure_break_v2",
     "cross_sectional_momentum_v2",
+    "cross_sectional_reversal_v2",
 )
