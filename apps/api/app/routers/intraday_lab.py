@@ -212,3 +212,29 @@ def record_specialist_investigation_endpoint(
         )
     except (KeyError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.post("/research/intraday/campaigns/{campaign_id}/pooled-evidence")
+def compute_pooled_evidence_endpoint(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Pool every symbol's trades per canonical candidate in this campaign
+    and re-evaluate the unchanged elite gate over the combined evidence.
+    Additive: never touches elite_research_candidates or the per-symbol
+    gate. See app/services/labs/intraday/pooled_evidence.py."""
+    from app.services.labs.intraday.pooled_evidence import compute_pooled_candidate_evidence
+
+    evidence = compute_pooled_candidate_evidence(conn, campaign_id=campaign_id)
+    return {"campaign_id": campaign_id, "pooled_candidates": len(evidence), "evidence": evidence}
+
+
+@router.get("/research/intraday/campaigns/{campaign_id}/pooled-evidence")
+def list_pooled_evidence_endpoint(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    from app.services.labs.intraday.pooled_evidence import list_pooled_evidence
+
+    evidence = list_pooled_evidence(conn, campaign_id=campaign_id)
+    return {"campaign_id": campaign_id, "pooled_candidates": len(evidence), "evidence": evidence}
