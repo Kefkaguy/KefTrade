@@ -845,6 +845,12 @@ def evaluate_candidate(
         "failure_reasons": failure_reasons,
         "explanation": explanation_for(candidate, status, failure_reasons),
         "simulation_only": True,
+        # Phase 13.4 names the exact fill/exit semantics run_backtest() used;
+        # carried through here so it survives into the persisted campaign
+        # job result instead of being dropped at this dict boundary. Absent
+        # for the frequency-screen short-circuit branch above (no backtest
+        # ran), present whenever run_backtest() actually executed.
+        "execution_semantics": result.get("execution_semantics"),
         # Not written to the `result` jsonb column -- callers that persist
         # trade-level evidence (see research_campaigns.persist_job_trades)
         # pop this key off first. Kept here, rather than re-deriving trades
