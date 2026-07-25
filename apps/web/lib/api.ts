@@ -1766,6 +1766,72 @@ export type Phase124Report = {
   amd_30m_session_momentum_investigation: Record<string, any>;
 };
 
+export type StrategyDnaRecord = {
+  id: number;
+  family_architecture: string;
+  strategy_version: string;
+  dna_schema_version: number;
+  fingerprint: string;
+  dna: Record<string, any>;
+  superseded_by_id: number | null;
+  created_at: string;
+};
+
+export type StrategyDnaResponse = {
+  dna_schema_version: number;
+  families: StrategyDnaRecord[];
+  behavioral_similarity: Array<{ a: string; b: string; behavioral_similarity: number }>;
+};
+
+export type Phase13FamilyAnalytics = {
+  architecture: string;
+  jobs: number;
+  promoted_jobs: number;
+  promotion_rate: number;
+  symbols: number;
+  trades: number;
+  trades_per_job: number;
+  avg_profit_factor: number | null;
+  avg_expectancy: number | null;
+  avg_max_drawdown: number | null;
+  avg_total_return: number | null;
+  avg_holding_hours: number | null;
+  evidence_tier: "statistically_reliable" | "descriptive" | "exploratory" | "insufficient_sample";
+  failure_by_validation_rule: Array<{ validation_rule: string; occurrences: number }>;
+};
+
+export type Phase13CampaignAnalytics = {
+  analytics_version: string;
+  campaign_id: number;
+  evidence_tier_rules: Record<string, string>;
+  families: Phase13FamilyAnalytics[];
+  holding_period_distribution: Array<Record<string, any>>;
+  breakdowns: Record<string, Array<Record<string, any>>>;
+  candidate_buckets: {
+    profitable_but_under_evidenced: Array<Record<string, any>>;
+    frequent_but_unprofitable: Array<Record<string, any>>;
+    near_pass: Array<Record<string, any>>;
+  };
+  family_confidence_intervals: Array<Record<string, any>>;
+  dna_diversity: Record<string, any>;
+  causal_claims_disclaimer: string;
+};
+
+export function getStrategyDna() {
+  return request<StrategyDnaResponse>("/research/strategy-dna", { cache: "no-store", timeoutMs: 30000 });
+}
+
+export function getPhase13Analytics(campaignId: number) {
+  return request<Phase13CampaignAnalytics>(`/research/intraday/analytics/${campaignId}`, { cache: "no-store", timeoutMs: 60000 });
+}
+
+export function getCandidateEvidenceReport(campaignId: number, candidateId: string) {
+  return request<Record<string, any>>(
+    `/research/intraday/evidence-report/${campaignId}/${encodeURIComponent(candidateId)}`,
+    { cache: "no-store", timeoutMs: 30000 }
+  );
+}
+
 export function getPhase124Analysis(campaignId: number) {
   return request<Phase124Report>(`/research/intraday/phase-12-4?campaign_id=${campaignId}`, { cache: "no-store", timeoutMs: 30000 });
 }

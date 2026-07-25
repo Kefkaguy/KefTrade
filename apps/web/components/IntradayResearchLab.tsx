@@ -5,6 +5,7 @@ import { Archive, CheckCircle2, Circle, Rocket, ShieldAlert, TrendingUp } from "
 import { createIntradayCampaign, getIntradayLabOverview, type IntradayLabOverview, type IntradaySampleJob, type IntradayStrategyRosterEntry } from "@/lib/api";
 import { Card, DataTable, EmptyState, PageTitle } from "@/components/ResearchUI";
 import { Phase124Panel } from "@/components/Phase124Panel";
+import { StrategyIntelligencePanel } from "@/components/StrategyIntelligencePanel";
 
 const REASON_LABELS: Record<string, string> = {
   weak_profit_factor: "Weak profit factor",
@@ -145,6 +146,8 @@ export function IntradayResearchLab() {
       ))}
 
       <Phase124Panel campaignId={phase124CampaignId} />
+
+      <StrategyIntelligencePanel campaignId={phase124CampaignId} />
 
       <Card title="Research archive" eyebrow="Preserved, not deleted">
         <p className="intradayArchiveIntro">
