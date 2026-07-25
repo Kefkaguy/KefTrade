@@ -219,17 +219,37 @@ def test_opening_ranges_complete_at_their_configured_windows():
     bars = build_session_bars(sessions=5)
     session_start = len(bars) - BARS_PER_SESSION
 
-    # +2 bars = 60 minutes from open: 15m and 30m complete, 60m just completes.
+    # These bars are 30 minutes apart, so a 15-minute window has no bar
+    # boundary to resolve against -- it is permanently unmeasurable here,
+    # not merely slow to complete. Only or30/or60 can ever complete on
+    # this timeframe.
     at_60 = compute_at(bars, session_start + 2)
-    assert at_60["or15_complete"] is True
+    assert at_60["or15_complete"] is False
     assert at_60["or30_complete"] is True
     assert at_60["or60_complete"] is True
     assert at_60["or30_minutes_since_completion"] == 30
 
     at_30 = compute_at(bars, session_start + 1)
-    assert at_30["or15_complete"] is True
+    assert at_30["or15_complete"] is False
     assert at_30["or30_complete"] is True
     assert at_30["or60_complete"] is False
+
+
+def test_opening_range_narrower_than_bar_spacing_never_completes():
+    """A window finer than the timeframe's own bar spacing cannot alias onto
+    a coarser window's range -- see the sub_bar_resolution guard in
+    _opening_range_features. Regression for a real Phase 13.10 finding: on
+    30-minute bars, or15 and or30 previously produced byte-identical ranges,
+    making the opening_range_minutes parameter behaviorally inert."""
+    bars = build_session_bars(sessions=5)
+    session_start = len(bars) - BARS_PER_SESSION
+
+    for offset in range(BARS_PER_SESSION):
+        result = compute_at(bars, session_start + offset)
+        assert result["or15_complete"] is False
+        assert result["or15_high"] is None
+        assert result["or15_failed_breakout_up"] is False
+        assert result["or15_failed_breakout_down"] is False
 
 
 def test_opening_range_widths_and_breakout_direction_are_consistent():

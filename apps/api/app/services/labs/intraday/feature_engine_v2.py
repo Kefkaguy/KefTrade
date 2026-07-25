@@ -325,6 +325,7 @@ def _opening_range_features(candle, feature, bars, config) -> dict[str, Any]:
 
     current_session = _session_key(candle)
     session_bars = [bar for bar in bars if _session_key(bar) == current_session]
+    bar_minutes = _typical_bar_minutes(session_bars)
 
     result: dict[str, Any] = {
         "opening_range_high": stored_high,
@@ -337,10 +338,33 @@ def _opening_range_features(candle, feature, bars, config) -> dict[str, Any]:
     # own bars. A range is only "complete" once the clock has passed its
     # window -- an incomplete range reports complete=False and no levels, so a
     # strategy can never trade a range that has not finished forming.
+    #
+    # A window narrower than the timeframe's own bar spacing cannot be
+    # measured at all -- there is no bar boundary at that resolution. Without
+    # this guard such a window silently collapses onto the same single first
+    # bar as the next coarser window (e.g. a 15-minute range on 30-minute
+    # bars), making the two indistinguishable and the window parameter inert.
+    # Reported as permanently incomplete instead, so a strategy configured
+    # for it correctly refuses every bar rather than quietly duplicating a
+    # coarser window's signal.
     for window in SUPPORTED_OPENING_RANGE_MINUTES:
+        sub_bar_resolution = bar_minutes is not None and window < bar_minutes
         prefix = f"or{window}"
         window_bars = []
         elapsed_known = minutes_from_open is not None
+        if sub_bar_resolution:
+            result[f"{prefix}_complete"] = False
+            result[f"{prefix}_high"] = None
+            result[f"{prefix}_low"] = None
+            result[f"{prefix}_width"] = None
+            result[f"{prefix}_width_atr"] = None
+            result[f"{prefix}_volume"] = None
+            result[f"{prefix}_minutes_since_completion"] = None
+            result[f"{prefix}_breakout_distance"] = None
+            result[f"{prefix}_breakout_direction"] = None
+            result[f"{prefix}_failed_breakout_up"] = False
+            result[f"{prefix}_failed_breakout_down"] = False
+            continue
         for bar in session_bars:
             bar_minutes = _minutes_from_open_for(bar, session_bars)
             if bar_minutes is None or bar_minutes >= window:
@@ -379,6 +403,21 @@ def _opening_range_features(candle, feature, bars, config) -> dict[str, Any]:
             result[f"{prefix}_failed_breakout_up"] = False
             result[f"{prefix}_failed_breakout_down"] = False
     return result
+
+
+def _typical_bar_minutes(session_bars: list[dict[str, Any]]) -> int | None:
+    """The spacing between consecutive bars, from real timestamps rather
+    than an assumed timeframe string, so it reflects what the data can
+    actually resolve. Uses the first gap found scanning from the most
+    recent pair backward, skipping any zero-length gap from a duplicate
+    timestamp."""
+    for later, earlier in zip(reversed(session_bars), reversed(session_bars[:-1])):
+        a, b = earlier.get("timestamp"), later.get("timestamp")
+        if isinstance(a, datetime) and isinstance(b, datetime):
+            delta = int((b - a).total_seconds() // 60)
+            if delta > 0:
+                return delta
+    return None
 
 
 def _minutes_from_open_for(bar: dict[str, Any], session_bars: list[dict[str, Any]]) -> int | None:
