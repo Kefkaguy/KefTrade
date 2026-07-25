@@ -28,6 +28,7 @@ class FakeSpecialistConn:
         self.investigations: list[dict] = []
         self._next_thread_id = 1
         self._next_investigation_id = 1
+        self.dna_row = None
 
     def execute(self, query, params=None):
         params = params or ()
@@ -38,8 +39,16 @@ class FakeSpecialistConn:
         if stripped.startswith("SELECT id FROM research_specialist_threads WHERE thread_key"):
             thread = self.threads.get(params[0])
             return FakeResult({"id": thread["id"]} if thread else None)
+        if stripped.startswith("SELECT id, family_architecture"):
+            # Phase 13.7 DNA lookup during thread creation.
+            return FakeResult(self.dna_row)
         if stripped.startswith("INSERT INTO research_specialist_threads"):
-            thread_key, title, origin_campaign_id, origin_candidate_id, frozen_parameters, scope_symbols, scope_timeframe, scope_direction = params
+            (
+                thread_key, title, origin_campaign_id, origin_candidate_id, frozen_parameters,
+                scope_symbols, scope_timeframe, scope_direction,
+                hypothesis_version_id, strategy_version, strategy_architecture,
+                dna_fingerprint, dataset_snapshot_id,
+            ) = params
             row = {
                 "id": self._next_thread_id,
                 "thread_key": thread_key,
@@ -51,6 +60,11 @@ class FakeSpecialistConn:
                 "scope_timeframe": scope_timeframe,
                 "scope_direction": scope_direction,
                 "status": "active_research",
+                "hypothesis_version_id": hypothesis_version_id,
+                "strategy_version": strategy_version,
+                "strategy_architecture": strategy_architecture,
+                "dna_fingerprint": dna_fingerprint,
+                "dataset_snapshot_id": dataset_snapshot_id,
             }
             self._next_thread_id += 1
             self.threads[thread_key] = row
@@ -63,7 +77,7 @@ class FakeSpecialistConn:
             thread["status"] = status
             return FakeResult(dict(thread))
         if stripped.startswith("INSERT INTO research_specialist_investigations"):
-            thread_id, investigation_type, dataset_id, campaign_id, findings, conclusion = params
+            thread_id, investigation_type, dataset_id, campaign_id, findings, conclusion, question, evidence_tier = params
             row = {
                 "id": self._next_investigation_id,
                 "thread_id": thread_id,
@@ -72,6 +86,8 @@ class FakeSpecialistConn:
                 "campaign_id": campaign_id,
                 "findings": findings.obj,
                 "conclusion": conclusion,
+                "question": question,
+                "evidence_tier": evidence_tier,
             }
             self._next_investigation_id += 1
             self.investigations.append(row)
@@ -200,4 +216,107 @@ def test_valid_status_and_investigation_type_constants_match_migration_049():
         "cost_robustness",
         "stability_across_years",
         "similarity_to_declared_securities",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Phase 13.7: linkage to hypothesis / strategy version / DNA / dataset
+# ---------------------------------------------------------------------------
+
+def test_thread_records_explicit_research_object_linkage():
+    conn = FakeSpecialistConn()
+
+    thread = create_specialist_thread(
+        conn, thread_key="linked", title="Linked", origin_candidate_id="c1",
+        frozen_parameters={"a": 1}, scope_timeframe="30m", scope_direction="long",
+        hypothesis_version_id=11, strategy_version="v2",
+        strategy_architecture="gap_fill_v2", dna_fingerprint="abc123",
+        dataset_snapshot_id=42,
+    )
+
+    assert thread["hypothesis_version_id"] == 11
+    assert thread["strategy_version"] == "v2"
+    assert thread["strategy_architecture"] == "gap_fill_v2"
+    assert thread["dna_fingerprint"] == "abc123"
+    assert thread["dataset_snapshot_id"] == 42
+
+
+def test_dna_fingerprint_is_resolved_from_the_architecture_when_not_supplied():
+    """Linkage should be automatic rather than depending on a human pasting a
+    hash correctly."""
+    conn = FakeSpecialistConn()
+    conn.dna_row = {
+        "id": 1, "family_architecture": "gap_fill_v2", "strategy_version": "v2",
+        "dna_schema_version": 1, "fingerprint": "resolved_fingerprint",
+        "dna": {}, "superseded_by_id": None, "created_at": None,
+    }
+
+    thread = create_specialist_thread(
+        conn, thread_key="auto", title="Auto", origin_candidate_id="c1",
+        frozen_parameters={}, scope_timeframe="30m", scope_direction="long",
+        strategy_architecture="gap_fill_v2",
+    )
+
+    assert thread["dna_fingerprint"] == "resolved_fingerprint"
+    assert thread["strategy_version"] == "v2"
+
+
+def test_an_explicit_fingerprint_is_never_overwritten_by_lookup():
+    conn = FakeSpecialistConn()
+    conn.dna_row = {
+        "id": 1, "family_architecture": "gap_fill_v2", "strategy_version": "v2",
+        "dna_schema_version": 1, "fingerprint": "resolved_fingerprint",
+        "dna": {}, "superseded_by_id": None, "created_at": None,
+    }
+
+    thread = create_specialist_thread(
+        conn, thread_key="explicit", title="Explicit", origin_candidate_id="c1",
+        frozen_parameters={}, scope_timeframe="30m", scope_direction="long",
+        strategy_architecture="gap_fill_v2", dna_fingerprint="caller_supplied",
+    )
+
+    assert thread["dna_fingerprint"] == "caller_supplied"
+
+
+def test_investigations_can_name_the_question_they_answer():
+    conn = FakeSpecialistConn()
+    create_specialist_thread(
+        conn, thread_key="t1", title="T1", origin_candidate_id="c1",
+        frozen_parameters={}, scope_timeframe="30m", scope_direction="long",
+    )
+
+    row = record_specialist_investigation(
+        conn, thread_key="t1", investigation_type="symbol_concentration" if False else "unseen_holdout_performance",
+        findings={"net_profit_factor": 0.9}, question="symbol_concentration",
+        evidence_tier="descriptive",
+    )
+
+    assert row["question"] == "symbol_concentration"
+    assert row["evidence_tier"] == "descriptive"
+
+
+def test_unknown_investigation_question_is_rejected():
+    from app.services.labs.intraday.specialist import INVESTIGATION_QUESTIONS
+
+    conn = FakeSpecialistConn()
+    create_specialist_thread(
+        conn, thread_key="t1", title="T1", origin_candidate_id="c1",
+        frozen_parameters={}, scope_timeframe="30m", scope_direction="long",
+    )
+
+    with pytest.raises(ValueError, match="unknown question"):
+        record_specialist_investigation(
+            conn, thread_key="t1", investigation_type="cost_robustness",
+            findings={}, question="is_it_good",
+        )
+    assert "symbol_concentration" in INVESTIGATION_QUESTIONS
+
+
+def test_the_seven_required_investigation_questions_are_all_available():
+    from app.services.labs.intraday.specialist import INVESTIGATION_QUESTIONS
+
+    assert set(INVESTIGATION_QUESTIONS) == {
+        "why_did_this_work", "where_did_it_fail", "symbol_concentration",
+        "regime_dependence", "trade_concentration", "validation_persistence",
+        "operational_frequency",
     }

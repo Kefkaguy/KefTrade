@@ -28,6 +28,19 @@ VALID_INVESTIGATION_TYPES = (
     "similarity_to_declared_securities",
 )
 
+# Phase 13.7: the questions a specialist thread exists to answer. An
+# investigation names the question it addresses, so a thread's history reads
+# as an argument rather than a pile of numbers.
+INVESTIGATION_QUESTIONS = {
+    "why_did_this_work": "Why did this work?",
+    "where_did_it_fail": "Where did it fail?",
+    "symbol_concentration": "Was success concentrated in one symbol?",
+    "regime_dependence": "Was it dependent on one regime?",
+    "trade_concentration": "Is the result driven by a small number of trades?",
+    "validation_persistence": "Does the edge persist across validation windows?",
+    "operational_frequency": "Is the frequency operationally useful?",
+}
+
 
 def create_specialist_thread(
     conn: psycopg.Connection,
@@ -40,6 +53,11 @@ def create_specialist_thread(
     scope_direction: str,
     origin_campaign_id: int | None = None,
     scope_symbols: list[str] | None = None,
+    hypothesis_version_id: int | None = None,
+    strategy_version: str | None = None,
+    strategy_architecture: str | None = None,
+    dna_fingerprint: str | None = None,
+    dataset_snapshot_id: int | None = None,
 ) -> dict[str, Any]:
     """Freeze a narrow-but-real finding as a long-lived research object.
 
@@ -57,12 +75,25 @@ def create_specialist_thread(
     if row:
         return dict(row)
 
+    # Phase 13.7: resolve the DNA fingerprint from the architecture when the
+    # caller did not supply one, so linkage is automatic rather than relying
+    # on a human to paste a hash correctly.
+    if dna_fingerprint is None and strategy_architecture:
+        from app.services.strategy_dna import get_strategy_dna
+
+        record = get_strategy_dna(conn, strategy_architecture)
+        if record:
+            dna_fingerprint = record["fingerprint"]
+            strategy_version = strategy_version or record["strategy_version"]
+
     row = conn.execute(
         """
         INSERT INTO research_specialist_threads(
             thread_key, title, origin_campaign_id, origin_candidate_id, frozen_parameters,
-            scope_symbols, scope_timeframe, scope_direction
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            scope_symbols, scope_timeframe, scope_direction,
+            hypothesis_version_id, strategy_version, strategy_architecture,
+            dna_fingerprint, dataset_snapshot_id
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
         (
@@ -74,6 +105,11 @@ def create_specialist_thread(
             Jsonb(list(scope_symbols or [])),
             scope_timeframe,
             scope_direction,
+            hypothesis_version_id,
+            strategy_version,
+            strategy_architecture,
+            dna_fingerprint,
+            dataset_snapshot_id,
         ),
     ).fetchone()
     conn.commit()
@@ -102,6 +138,8 @@ def record_specialist_investigation(
     conclusion: str | None = None,
     dataset_id: int | None = None,
     campaign_id: int | None = None,
+    question: str | None = None,
+    evidence_tier: str | None = None,
 ) -> dict[str, Any]:
     """Append one immutable investigation row to a thread's lab notebook.
 
@@ -112,17 +150,24 @@ def record_specialist_investigation(
 
     if investigation_type not in VALID_INVESTIGATION_TYPES:
         raise ValueError(f"unsupported investigation_type {investigation_type!r}. Supported: {VALID_INVESTIGATION_TYPES}")
+    if question is not None and question not in INVESTIGATION_QUESTIONS:
+        raise ValueError(f"unknown question {question!r}. Supported: {sorted(INVESTIGATION_QUESTIONS)}")
     thread = conn.execute("SELECT id FROM research_specialist_threads WHERE thread_key = %s", (thread_key,)).fetchone()
     if not thread:
         raise ValueError(f"no specialist thread with thread_key {thread_key!r}")
 
     row = conn.execute(
         """
-        INSERT INTO research_specialist_investigations(thread_id, investigation_type, dataset_id, campaign_id, findings, conclusion)
-        VALUES (%s, %s, %s, %s, %s, %s)
+        INSERT INTO research_specialist_investigations(
+            thread_id, investigation_type, dataset_id, campaign_id, findings, conclusion, question, evidence_tier
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING *
         """,
-        (int(thread["id"]), investigation_type, dataset_id, campaign_id, Jsonb(findings), conclusion),
+        (
+            int(thread["id"]), investigation_type, dataset_id, campaign_id,
+            Jsonb(findings), conclusion, question, evidence_tier,
+        ),
     ).fetchone()
     conn.commit()
     return dict(row)

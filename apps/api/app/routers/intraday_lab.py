@@ -156,6 +156,11 @@ def create_specialist_thread_endpoint(
             scope_direction=payload["scope_direction"],
             origin_campaign_id=payload.get("origin_campaign_id"),
             scope_symbols=payload.get("scope_symbols"),
+            hypothesis_version_id=payload.get("hypothesis_version_id"),
+            strategy_version=payload.get("strategy_version"),
+            strategy_architecture=payload.get("strategy_architecture"),
+            dna_fingerprint=payload.get("dna_fingerprint"),
+            dataset_snapshot_id=payload.get("dataset_snapshot_id"),
         )
     except (KeyError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
@@ -202,6 +207,8 @@ def record_specialist_investigation_endpoint(
             conclusion=payload.get("conclusion"),
             dataset_id=payload.get("dataset_id"),
             campaign_id=payload.get("campaign_id"),
+            question=payload.get("question"),
+            evidence_tier=payload.get("evidence_tier"),
         )
     except (KeyError, ValueError) as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
