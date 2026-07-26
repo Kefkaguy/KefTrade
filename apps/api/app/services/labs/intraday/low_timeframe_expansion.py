@@ -241,7 +241,7 @@ def _load_parent_rows(conn: psycopg.Connection, *, row_limit: int, preferred_fam
             j.id AS job_id,
             j.campaign_id,
             j.candidate_id,
-            j.asset,
+            j.symbol AS asset,
             j.timeframe,
             j.status,
             j.strategy_family,
