@@ -59,12 +59,16 @@ def create_low_timeframe_expansion_campaign_endpoint(
     asset_limit: int = Query(8, ge=1, le=25),
     timeframes: list[str] | None = Query(None, description="Defaults to 30m. Pass 15m explicitly for the separate 15m lane."),
     preferred_family: str | None = Query("Momentum"),
+    auto_start: bool = Query(True, description="Start durable simulation workers after the campaign is queued."),
+    workers: int = Query(4, ge=1, le=8),
+    jobs_per_worker: int = Query(25, ge=1, le=100),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     from app.services.labs.intraday.low_timeframe_expansion import create_low_timeframe_expansion_campaign
+    from app.services.research_campaigns import run_parallel_campaign_batch
 
     try:
-        return create_low_timeframe_expansion_campaign(
+        result = create_low_timeframe_expansion_campaign(
             conn,
             name=name,
             parent_limit=parent_limit,
@@ -73,6 +77,14 @@ def create_low_timeframe_expansion_campaign_endpoint(
             timeframes=timeframes,
             preferred_family=preferred_family,
         )
+        if auto_start:
+            result["execution"] = run_parallel_campaign_batch(
+                conn,
+                campaign_id=int(result["campaign_id"]),
+                workers=workers,
+                jobs_per_worker=jobs_per_worker,
+            )
+        return result
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 

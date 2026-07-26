@@ -237,7 +237,8 @@ function LaunchIntradayCampaign({
     setNotice(null);
     try {
       const result = await launchLowTimeframeExpansion({ timeframes: ["30m"], preferredFamily: "Momentum" });
-      setNotice(`Near-pass expansion #${result.campaign_id} queued: ${result.jobs_created} jobs from ${result.parent_count} parent rows across ${(result.timeframes || []).join(", ")}.`);
+      const execution = result.execution ? ` Started ${result.execution.workers} worker${result.execution.workers === 1 ? "" : "s"}.` : "";
+      setNotice(`Near-pass expansion #${result.campaign_id} queued: ${result.jobs_created} jobs from ${result.parent_count} parent rows across ${(result.timeframes || []).join(", ")}.${execution}`);
       onLaunched();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not launch the low-timeframe expansion.");
