@@ -287,7 +287,7 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
             >
               <Sparkles size={19} /> Start Research Campaign <ArrowRight size={19} />
             </motion.button>
-            <Link className="heroEvidenceLink" href="/research-intelligence">Browse research evidence <ArrowRight size={15} /></Link>
+            <Link className="heroEvidenceLink" href="/elite-builder">Build elite portfolio <ArrowRight size={15} /></Link>
           </motion.div>
         </div>
 

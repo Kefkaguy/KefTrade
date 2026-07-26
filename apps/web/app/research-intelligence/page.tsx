@@ -1,5 +1,5 @@
-import { ResearchIntelligenceDashboard } from "@/components/ResearchIntelligenceDashboard";
+import { redirect } from "next/navigation";
 
 export default function ResearchIntelligencePage() {
-  return <ResearchIntelligenceDashboard />;
+  redirect("/elite-builder");
 }

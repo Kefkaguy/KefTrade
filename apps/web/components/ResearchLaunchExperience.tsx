@@ -119,13 +119,13 @@ export function ResearchLaunchExperience({
           >
             <span className="eliteIcon"><Trophy size={21} /></span>
             <div><span className="eyebrow">Forward-validated elite</span><strong>{eliteCandidates.length} validated {eliteCandidates.length === 1 ? "strategy" : "strategies"} found</strong><p>These candidates passed backtest gates and the required paper-forward evidence.</p></div>
-            <Link className="button secondary" href="/research-intelligence">Review evidence <ExternalLink size={15} /></Link>
+            <Link className="button secondary" href="/elite-builder">Review elite candidates <ExternalLink size={15} /></Link>
           </motion.div>
         ) : forwardCandidates.length > 0 ? (
           <motion.div className="eliteDiscovery" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
             <span className="eliteIcon"><Trophy size={21} /></span>
             <div><span className="eyebrow">Forward-validation candidates</span><strong>{forwardCandidates.length} strong backtest {forwardCandidates.length === 1 ? "candidate" : "candidates"}</strong><p>These strategies are promising, but they are not elite until paper evidence passes.</p></div>
-            <Link className="button secondary" href="/research-intelligence">Review evidence <ExternalLink size={15} /></Link>
+            <Link className="button secondary" href="/elite-builder">Review elite candidates <ExternalLink size={15} /></Link>
           </motion.div>
         ) : null}
       </AnimatePresence>

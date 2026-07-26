@@ -87,7 +87,7 @@ export default async function PaperDashboardPage() {
                   </article>;
                 })}
               </div>
-            ) : <div className="forwardEmptyState"><Radar size={24} /><EmptyState title="No candidates are collecting forward evidence" body="Elite deployments will appear here after deterministic promotion and candidate linkage." action={<Link className="button secondary" href="/research-intelligence">Review research candidates</Link>} /></div>}
+            ) : <div className="forwardEmptyState"><Radar size={24} /><EmptyState title="No candidates are collecting forward evidence" body="Elite deployments will appear here after deterministic promotion and candidate linkage." action={<Link className="button secondary" href="/elite-builder">Open Elite Builder</Link>} /></div>}
           </section>
 
           <details className="forwardLedger" open={candidateOrders.length > 0 || candidateFills.length > 0}>

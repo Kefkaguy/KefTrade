@@ -9,7 +9,6 @@ import {
   ArrowUpRight,
   Bot,
   BrainCircuit,
-  CandlestickChart,
   Clock,
   Command,
   FileText,
@@ -22,7 +21,6 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
-  Trophy,
   X
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -40,9 +38,7 @@ const primaryNavigation: NavigationItem[] = [
   { href: "/", label: "Home", icon: Grid2X2 },
   { href: "/research", label: "1h/4h Research", icon: FlaskConical },
   { href: "/intraday-research", label: "15m/30m Lab", icon: Clock },
-  { href: "/research-intelligence", label: "Candidates", icon: Trophy },
   { href: "/elite-builder", label: "Elite Builder", icon: BrainCircuit },
-  { href: "/paper", label: "Forward validation", icon: CandlestickChart },
   { href: "/reports", label: "Reports", icon: FileText },
   { href: "/mission-control", label: "Mission Control", icon: Radar },
   { href: "/diagnostics", label: "Diagnostics", icon: ScanSearch }
