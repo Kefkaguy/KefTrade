@@ -12,4 +12,4 @@ New campaigns use the reproducible research architecture: exact dataset snapshot
 KefTrade is still research and simulation only with respect to real capital: it does not trade live capital and does not support leverage, margin, shorting, or automatic live execution. It connects to an Alpaca **Paper** account (fake money, real broker API) for read-only synchronization, deterministic reconciliation, shadow execution, and — as of Phase 11 — actual Alpaca Paper order submission for a deployment that has been explicitly promoted via CLI.
 
 ## Current State
-# Everything from VPS will be deleted! The project had over 60 migrations. The project will continue to exist in "https://github.com/Kefkaguy/keftradev1"
+### Everything from VPS will be deleted! The project had over 60 migrations. The project will continue to exist in "https://github.com/Kefkaguy/keftradev1"
