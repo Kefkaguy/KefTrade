@@ -158,7 +158,22 @@ class V2Strategy:
         if minutes_to_close is None or minutes_to_close < required_minutes:
             return _avoid("Too close to session close for a safe next-bar-open entry.")
 
-        v2 = compute_v2_features(candle, feature, recent_candles, config=DEFAULT_CONFIG, groups=self.feature_groups)
+        # Feature Engine V2 is pure for a given row, bounded recent-window,
+        # and feature-group set. Campaigns run many parameter variants over
+        # the same immutable dataset, so recomputing these O(window) feature
+        # passes for every variant turns a 5k-row dataset into tens of seconds
+        # per job. Keep the cache on the mutable feature row: it is scoped to
+        # the in-memory dataset cache, never persisted, and is naturally
+        # discarded when the worker evicts that dataset.
+        cache_key = (
+            self.feature_groups,
+            min(len(recent_candles), DEFAULT_CONFIG.lookback_bars) if DEFAULT_CONFIG.lookback_bars else len(recent_candles),
+        )
+        feature_cache = feature.setdefault("_v2_feature_cache", {})
+        v2 = feature_cache.get(cache_key)
+        if v2 is None:
+            v2 = compute_v2_features(candle, feature, recent_candles, config=DEFAULT_CONFIG, groups=self.feature_groups)
+            feature_cache[cache_key] = v2
         outcome = self.evaluate(candle, feature, v2, params)
         if isinstance(outcome, str):
             return _avoid(outcome)
