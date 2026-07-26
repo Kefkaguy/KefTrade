@@ -107,8 +107,6 @@ export const RESEARCH_SCOPES: ResearchScope[] = [
 
 export const RESEARCH_TIMEFRAMES = ["1h", "4h"] as const;
 
-export const ALL_RESEARCH_TIMEFRAMES = ["15m", "30m", "1h", "4h"] as const;
-
 export const RESEARCH_TIMEFRAME_LABELS: Record<string, string> = {
   "15m": "15 minute",
   "30m": "30 minute",

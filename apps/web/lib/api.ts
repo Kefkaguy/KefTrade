@@ -1677,6 +1677,24 @@ export function createIntradayCampaign(options: {
   return request<Record<string, any>>(`/research/intraday/campaigns?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
 
+export function launchLowTimeframeExpansion(options: {
+  name?: string;
+  parentLimit?: number;
+  variantsPerParent?: number;
+  assetLimit?: number;
+  timeframes?: string[];
+  preferredFamily?: string;
+} = {}) {
+  const params = new URLSearchParams();
+  if (options.name) params.append("name", options.name);
+  params.append("parent_limit", String(options.parentLimit ?? 12));
+  params.append("variants_per_parent", String(options.variantsPerParent ?? 8));
+  params.append("asset_limit", String(options.assetLimit ?? 8));
+  params.append("preferred_family", options.preferredFamily ?? "Momentum");
+  for (const timeframe of options.timeframes ?? ["30m"]) params.append("timeframes", timeframe);
+  return request<Record<string, any>>(`/research/intraday/campaigns/low-timeframe-expansion?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
+}
+
 export type Phase124GroupMetrics = {
   trade_count: number;
   gross_profit: number;

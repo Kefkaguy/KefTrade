@@ -31,6 +31,7 @@ import { DataTable, EmptyState, MetricCard } from "@/components/ResearchUI";
 type SelectFilter = keyof Pick<ResearchCommandCenterFilters, "asset" | "assetClass" | "timeframe" | "strategyFamily" | "candidateState" | "validationRule" | "regime">;
 
 const EMPTY_FILTERS: ResearchCommandCenterFilters = {};
+const COMMAND_CENTER_REFRESH_MS = 30000;
 
 export function ResearchCommandCenterDashboard() {
   const reduceMotion = useReducedMotion();
@@ -51,20 +52,29 @@ export function ResearchCommandCenterDashboard() {
         if (!active) return;
         setData(next);
         setError("");
-        if (next.live_evidence) timer = window.setTimeout(() => void refresh(false), 5000);
+        if (next.live_evidence && document.visibilityState === "visible") {
+          timer = window.setTimeout(() => void refresh(false), COMMAND_CENTER_REFRESH_MS);
+        }
       } catch (reason) {
         if (!active) return;
         setError(reason instanceof Error ? reason.message : "Research command center unavailable.");
-        timer = window.setTimeout(() => void refresh(false), 5000);
+        if (document.visibilityState === "visible") {
+          timer = window.setTimeout(() => void refresh(false), COMMAND_CENTER_REFRESH_MS);
+        }
       } finally {
         if (active) setLoading(false);
       }
     };
 
     void refresh(true);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refresh(false);
+    };
+    document.addEventListener("visibilitychange", onVisible);
     return () => {
       active = false;
       if (timer !== undefined) window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [filterKey]);
 

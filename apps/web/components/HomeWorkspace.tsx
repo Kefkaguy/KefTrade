@@ -7,7 +7,6 @@ import { ArrowDown, ArrowRight, Check, Search, ShieldCheck, Sparkles } from "luc
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CampaignActivity } from "@/components/CampaignActivity";
 import { IntradayLabTeaser } from "@/components/IntradayLabTeaser";
-import { StrategyLibraryPanel } from "@/components/StrategyLibraryPanel";
 import { ResearchBuilder } from "@/components/ResearchBuilder";
 import { ResearchLaunchExperience, type ResearchLaunchPhase } from "@/components/ResearchLaunchExperience";
 import {
@@ -327,8 +326,6 @@ export function HomeWorkspace({ snapshot, error: serviceError }: HomeWorkspacePr
       </motion.div>
 
       <CampaignActivity enabled />
-
-      <StrategyLibraryPanel />
 
       {serviceError ? (
         <motion.div className="researchServiceNote" variants={reveal}>

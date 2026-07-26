@@ -144,6 +144,7 @@ def _create_intraday_campaign(
     asset_limit: int,
     campaign_label: str | None = None,
     hypothesis_version_id: int | None = None,
+    assets_override: list[str] | None = None,
 ) -> dict[str, Any]:
     from app.services.labs.intraday.dataset_snapshot import record_intraday_dataset_snapshot
     from app.services.research_campaigns import (
@@ -165,10 +166,24 @@ def _create_intraday_campaign(
     if not selected_timeframes:
         raise ValueError(f"{strategy_family_label} campaigns only support {supported_timeframes}")
 
-    universe = get_universe(conn, "research_core_ten")
-    assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
+    if assets_override is None:
+        universe = get_universe(conn, "research_core_ten")
+        assets = [str(asset).upper() for asset in (universe.get("assets") or [])][:asset_limit]
+    else:
+        assets = []
+        seen_assets: set[str] = set()
+        for asset in assets_override:
+            symbol = str(asset).upper().strip()
+            if not symbol or symbol in seen_assets:
+                continue
+            seen_assets.add(symbol)
+            assets.append(symbol)
+            if len(assets) >= asset_limit:
+                break
     if not candidates:
         raise ValueError(f"no {strategy_family_label} candidates generated")
+    if not assets:
+        raise ValueError(f"no assets selected for {strategy_family_label} campaign")
 
     # Phase 12.5 Step 2: every intraday campaign gets its own immutable,
     # content-hashed dataset snapshot (candles + intraday_features) the
@@ -287,5 +302,4 @@ def create_vwap_reversion_campaign(
         timeframes=timeframes,
         asset_limit=asset_limit,
     )
-
 

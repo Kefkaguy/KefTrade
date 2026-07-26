@@ -51,6 +51,32 @@ def create_intraday_campaign_endpoint(
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+@router.post("/research/intraday/campaigns/low-timeframe-expansion")
+def create_low_timeframe_expansion_campaign_endpoint(
+    name: str | None = Query(None),
+    parent_limit: int = Query(12, ge=1, le=50),
+    variants_per_parent: int = Query(8, ge=1, le=32),
+    asset_limit: int = Query(8, ge=1, le=25),
+    timeframes: list[str] | None = Query(None, description="Defaults to 30m. Pass 15m explicitly for the separate 15m lane."),
+    preferred_family: str | None = Query("Momentum"),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    from app.services.labs.intraday.low_timeframe_expansion import create_low_timeframe_expansion_campaign
+
+    try:
+        return create_low_timeframe_expansion_campaign(
+            conn,
+            name=name,
+            parent_limit=parent_limit,
+            variants_per_parent=variants_per_parent,
+            asset_limit=asset_limit,
+            timeframes=timeframes,
+            preferred_family=preferred_family,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
 @router.get("/research/intraday/analytics/{campaign_id}")
 def get_campaign_analytics(campaign_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     """Phase 13.5: campaign analytics with explicit evidence tiers. Every

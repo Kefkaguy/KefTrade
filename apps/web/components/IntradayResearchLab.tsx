@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Archive, CheckCircle2, Circle, Rocket, ShieldAlert, TrendingUp } from "lucide-react";
-import { createIntradayCampaign, getIntradayLabOverview, type IntradayLabOverview, type IntradaySampleJob, type IntradayStrategyRosterEntry } from "@/lib/api";
+import { createIntradayCampaign, getIntradayLabOverview, launchLowTimeframeExpansion, type IntradayLabOverview, type IntradaySampleJob, type IntradayStrategyRosterEntry } from "@/lib/api";
 import { Card, DataTable, EmptyState, PageTitle } from "@/components/ResearchUI";
 import { Phase124Panel } from "@/components/Phase124Panel";
 import { StrategyIntelligencePanel } from "@/components/StrategyIntelligencePanel";
@@ -231,11 +231,38 @@ function LaunchIntradayCampaign({
     }
   }
 
+  async function launchExpansion() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await launchLowTimeframeExpansion({ timeframes: ["30m"], preferredFamily: "Momentum" });
+      setNotice(`Near-pass expansion #${result.campaign_id} queued: ${result.jobs_created} jobs from ${result.parent_count} parent rows across ${(result.timeframes || []).join(", ")}.`);
+      onLaunched();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not launch the low-timeframe expansion.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <Card title="Launch an intraday campaign" eyebrow="One, several, or all families">
       <p className="intradayStrategySummary">
         Each selected family keeps its own candidates and is evaluated independently through the unmodified elite gate — evidence is never merged across families.
       </p>
+      <div className="intradayHonestyBanner" style={{ marginBottom: 16 }}>
+        <TrendingUp size={16} />
+        <span>Recommended next run: 30m Momentum near-pass expansion. It targets the current blocker: profitable low-timeframe candidates that need more trade count without losing edge.</span>
+      </div>
+      <button
+        type="button"
+        className="button"
+        disabled={busy}
+        onClick={() => void launchExpansion()}
+      >
+        <Rocket size={15} /> {busy ? "Launching..." : "Launch 30m near-pass expansion"}
+      </button>
       <div className="intradayFamilyToggleGrid">
         {launchable.map((strategy) => {
           const selected = selectedFamilies.includes(strategy.id);

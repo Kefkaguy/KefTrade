@@ -1,6 +1,7 @@
 "use client";
 
 import { motion, useReducedMotion } from "framer-motion";
+import Link from "next/link";
 import {
   ArrowRight,
   Bitcoin,
@@ -19,7 +20,6 @@ import {
   TrendingUp
 } from "lucide-react";
 import {
-  ALL_RESEARCH_TIMEFRAMES,
   buildResearchSelection,
   CRYPTO_RESEARCH_ASSETS,
   FALLBACK_RESEARCH_ASSETS,
@@ -467,12 +467,11 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
           <div className="builderStep">
             <div className="builderStepHeading">
               <span>03</span>
-              <div><strong>Timeframes</strong><small>Choose which bar sizes to research. Run 15m-only, 30m-only, swing timeframes, or any combination.</small></div>
+              <div><strong>Swing timeframes</strong><small>This builder launches 1h/4h research only. Use Intraday Lab for 15m/30m campaigns.</small></div>
             </div>
             <div className="timeframeSelector" role="group" aria-label="Timeframes">
-              {ALL_RESEARCH_TIMEFRAMES.map((timeframe) => {
+              {RESEARCH_TIMEFRAMES.map((timeframe) => {
                 const selected = selectedTimeframes.includes(timeframe);
-                const intraday = timeframe === "15m" || timeframe === "30m";
                 return (
                   <button
                     key={timeframe}
@@ -484,14 +483,17 @@ export function ResearchBuilder({ launching, onLaunch }: ResearchBuilderProps) {
                   >
                     <span>{selected ? <Check size={13} /> : null}</span>
                     <strong>{timeframe}</strong>
-                    <small>{RESEARCH_TIMEFRAME_LABELS[timeframe] ?? timeframe}{intraday ? " · intraday" : ""}</small>
+                    <small>{RESEARCH_TIMEFRAME_LABELS[timeframe] ?? timeframe}</small>
                   </button>
                 );
               })}
             </div>
+            <Link className="button secondary compact" href="/intraday-research" style={{ marginTop: 12 }}>
+              Open 15m/30m Intraday Lab <ArrowRight size={14} />
+            </Link>
             <small className="assetCountHelp">
               {universeMode === "established"
-                ? "Established Evidence chooses timeframes from the persisted learning ranking."
+                ? "Established Evidence chooses swing timeframes from the persisted learning ranking."
                 : selectedTimeframes.length === 1
                   ? `Runs ${selectedTimeframes[0]}-only. Every candidate is evaluated on that timeframe alone.`
                   : `Runs on ${selectedTimeframes.join(", ")}. Each candidate is evaluated on every selected timeframe.`}

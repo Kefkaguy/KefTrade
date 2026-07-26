@@ -38,8 +38,8 @@ type NavigationItem = {
 
 const primaryNavigation: NavigationItem[] = [
   { href: "/", label: "Home", icon: Grid2X2 },
-  { href: "/research", label: "Research", icon: FlaskConical },
-  { href: "/intraday-research", label: "Intraday Lab", icon: Clock },
+  { href: "/research", label: "1h/4h Research", icon: FlaskConical },
+  { href: "/intraday-research", label: "15m/30m Lab", icon: Clock },
   { href: "/research-intelligence", label: "Candidates", icon: Trophy },
   { href: "/elite-builder", label: "Elite Builder", icon: BrainCircuit },
   { href: "/paper", label: "Forward validation", icon: CandlestickChart },
@@ -52,7 +52,8 @@ const workspaceGroups: Array<{ label: string; items: NavigationItem[] }> = [
   {
     label: "Research",
     items: [
-      { href: "/research", label: "Campaigns", detail: "Launch and monitor research campaigns", icon: FlaskConical },
+      { href: "/research", label: "Swing campaigns", detail: "Launch and monitor 1h/4h research", icon: FlaskConical },
+      { href: "/intraday-research", label: "Intraday campaigns", detail: "Launch and inspect 15m/30m research", icon: Clock },
       { href: "/experiments", label: "Experiments", detail: "Inspect active jobs and evidence", icon: BrainCircuit },
       { href: "/validation", label: "Validation", detail: "Review promotion gates", icon: ShieldCheck },
       { href: "/elite-builder", label: "Elite portfolio builder", detail: "Construct constrained diversified portfolios", icon: BrainCircuit },
