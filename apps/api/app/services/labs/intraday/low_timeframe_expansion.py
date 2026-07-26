@@ -10,8 +10,10 @@ into a bounded parent-child campaign around the strongest observed regions.
 from __future__ import annotations
 
 from dataclasses import asdict
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, Iterable
+from uuid import uuid4
 
 import psycopg
 
@@ -306,7 +308,11 @@ def create_low_timeframe_expansion_campaign(
         supported_timeframes=SUPPORTED_LOW_TIMEFRAMES,
         timeframes=blueprint["timeframes"],
         asset_limit=asset_limit,
-        campaign_label=f"{LOW_TIMEFRAME_EXPANSION_VERSION}_{len(blueprint['parents'])}p_{len(blueprint['candidates'])}c",
+        campaign_label=(
+            f"{LOW_TIMEFRAME_EXPANSION_VERSION}_{len(blueprint['parents'])}p_"
+            f"{len(blueprint['candidates'])}c_"
+            f"{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}_{uuid4().hex[:8]}"
+        ),
         assets_override=blueprint["assets"],
     )
     result["parent_count"] = len(blueprint["parents"])

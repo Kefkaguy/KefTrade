@@ -77,13 +77,19 @@ def create_low_timeframe_expansion_campaign_endpoint(
             timeframes=timeframes,
             preferred_family=preferred_family,
         )
-        if auto_start:
+        campaign_status = str((result.get("campaign") or {}).get("status") or "")
+        if auto_start and campaign_status in {"queued", "running", "failed"}:
             result["execution"] = run_parallel_campaign_batch(
                 conn,
                 campaign_id=int(result["campaign_id"]),
                 workers=workers,
                 jobs_per_worker=jobs_per_worker,
             )
+        elif auto_start:
+            result["execution"] = {
+                "skipped": True,
+                "reason": f"Campaign is {campaign_status or 'unknown'} and cannot be started.",
+            }
         return result
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
