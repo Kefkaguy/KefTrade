@@ -7,7 +7,6 @@ import {
   BarChart3,
   Check,
   CircleGauge,
-  GitBranch,
   Layers3,
   LoaderCircle,
   LockKeyhole,
@@ -37,9 +36,9 @@ import {
 type Phase = "configure" | "preview" | "saved" | "approved" | "activated";
 
 const steps = [
-  ["01", "Scope"],
-  ["02", "Constraints"],
-  ["03", "Review"],
+  ["01", "Import champions"],
+  ["02", "Validate evidence"],
+  ["03", "Build portfolio"],
   ["04", "Activate"]
 ] as const;
 
@@ -52,6 +51,7 @@ export function ElitePortfolioBuilder() {
   const [phase, setPhase] = useState<Phase>("configure");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -86,6 +86,11 @@ export function ElitePortfolioBuilder() {
   const analytics = (result?.analytics ?? result?.portfolio_analytics ?? {}) as Record<string, any>;
   const members = result?.members ?? (result?.selected ?? []).map((candidateKey, index) => ({ id: index, candidate_id: candidateKey }));
   const activeStep = phase === "configure" ? 0 : phase === "preview" ? 2 : phase === "saved" ? 2 : 3;
+  const nextAction = championStatus?.eligible_promoted_jobs
+    ? "Import champions"
+    : championStatus?.research_champions
+      ? "Validate champions"
+      : "Open portfolio builder";
   const twoTimeframeWarning = configuration?.timeframes.length === 2
     ? "With exactly two timeframes, the exact 50% cap requires an even-sized portfolio split equally between them."
     : null;
@@ -151,14 +156,16 @@ export function ElitePortfolioBuilder() {
     <div className="eliteBuilder">
       <header className="eliteBuilderHero">
         <div>
-          <span className="eyebrow">Diversified research portfolios</span>
-          <h1>Build the strongest feasible set.<br /><em>Never weaken the evidence.</em></h1>
+          <span className="eyebrow">Elite graduation workflow</span>
+          <h1>Turn research winners into elites.<br /><em>One gate at a time.</em></h1>
+          <p className="elitePrimaryLead">Start by importing deduped research champions. Final portfolio construction only uses candidates that later pass validation.</p>
           <p>Combine elite strategy-market variants under immutable quality, diversity, correlation, and safety constraints. An infeasible result is evidence—not an error.</p>
         </div>
         <div className="eliteSolverSeal">
-          <GitBranch size={22} />
-          <span>Solver version</span>
-          <strong>{options.solver_version}</strong>
+          <Sparkles size={22} />
+          <span>Next action</span>
+          <strong>{nextAction}</strong>
+          <small className="eliteActionHint">Use the highlighted step below. Portfolio solver controls stay hidden until you explicitly open the advanced builder.</small>
           <small>Deterministic · no random seed · zero automatic relaxation</small>
         </div>
       </header>
@@ -170,6 +177,8 @@ export function ElitePortfolioBuilder() {
       {error ? <div className="eliteNotice error"><AlertTriangle size={17} /><span><strong>Action stopped</strong>{error}</span></div> : null}
       {twoTimeframeWarning ? <div className="eliteNotice"><AlertTriangle size={17} /><span><strong>Two-timeframe arithmetic</strong>{twoTimeframeWarning}</span></div> : null}
 
+      <EliteWorkflowGuide status={championStatus} finalCandidateCount={options.candidate_count} />
+
       <ResearchChampionIntake
         status={championStatus}
         result={championImport}
@@ -177,7 +186,18 @@ export function ElitePortfolioBuilder() {
         onImport={importChampions}
       />
 
-      <div className="eliteBuilderGrid">
+      <section className="eliteAdvancedToggle">
+        <div>
+          <span className="eyebrow">Advanced</span>
+          <h2>Portfolio builder is step 3</h2>
+          <p>Open this only when you want to preview a portfolio from final elites. Research champions do not enter this solver until they validate.</p>
+        </div>
+        <button type="button" className="button secondary" onClick={() => setShowAdvanced((value) => !value)}>
+          {showAdvanced ? "Hide portfolio builder" : "Open portfolio builder"}
+        </button>
+      </section>
+
+      {showAdvanced ? <div className="eliteBuilderGrid">
         <main>
           <section className="elitePanel">
             <header><div><span className="eyebrow">01 · Research scope</span><h2>Choose the evidence pool</h2></div><Layers3 size={20} /></header>
@@ -259,7 +279,7 @@ export function ElitePortfolioBuilder() {
             {result ? <button className="eliteTextButton" disabled={Boolean(busy)} onClick={() => run("refresh", () => previewElitePortfolio(configuration), "preview")}><RefreshCw size={14} />Recalculate from current evidence</button> : null}
           </section>
         </aside>
-      </div>
+      </div> : null}
     </div>
   );
 
@@ -270,6 +290,31 @@ export function ElitePortfolioBuilder() {
   function constraint(key: string, value: number) {
     setConfiguration({ ...configuration!, constraints: { ...configuration!.constraints, [key]: value } });
   }
+}
+
+function EliteWorkflowGuide({ status, finalCandidateCount }: { status: ResearchChampionStatus | null; finalCandidateCount: number }) {
+  const backlog = status?.eligible_promoted_jobs ?? 0;
+  const champions = status?.research_champions ?? 0;
+  const finalElites = status?.final_elites ?? finalCandidateCount;
+  return (
+    <section className="eliteWorkflowGuide" aria-label="Elite graduation workflow">
+      <div className={backlog > 0 ? "active" : "done"}>
+        <span>01</span>
+        <strong>Import research champions</strong>
+        <p>{backlog > 0 ? `${backlog.toLocaleString()} promoted jobs are waiting. Import 25 deduped champions first.` : "No promoted-job backlog is waiting."}</p>
+      </div>
+      <div className={champions > 0 ? "active" : ""}>
+        <span>02</span>
+        <strong>Validate champions</strong>
+        <p>{champions > 0 ? `${champions.toLocaleString()} research champion${champions === 1 ? "" : "s"} need forward/cross-asset evidence.` : "Imported champions will wait for validation here."}</p>
+      </div>
+      <div className={finalElites > 0 ? "active" : ""}>
+        <span>03</span>
+        <strong>Build final portfolio</strong>
+        <p>{finalElites.toLocaleString()} final elite candidate row{finalElites === 1 ? "" : "s"} are available to the solver today.</p>
+      </div>
+    </section>
+  );
 }
 
 function PortfolioReview({ result, analytics, members }: { result: ElitePortfolioResult; analytics: Record<string, any>; members: Array<Record<string, any>> }) {
@@ -366,11 +411,11 @@ function ResearchChampionIntake({
   return (
     <section className="eliteChampionIntake">
       <div>
-        <span className="eyebrow">Research champion intake</span>
-        <h2>Graduate promoted jobs without weakening elite rules</h2>
+        <span className="eyebrow">Step 1</span>
+        <h2>Do this now: import research champions</h2>
         <p>
-          This imports a capped, deduped champion set from promoted research jobs. They enter as
-          <strong> research_champion</strong>, not final deployable elites, and must collect forward/cross-asset evidence before portfolio activation.
+          This takes the best promoted research jobs, removes near-duplicates, and saves only a capped champion set.
+          They are review candidates, not live-trading elites.
         </p>
       </div>
       <div className="eliteChampionMetrics">
@@ -386,7 +431,7 @@ function ResearchChampionIntake({
         </div>
       ) : null}
       <button className="button" disabled={busy || !status?.eligible_promoted_jobs} onClick={onImport}>
-        <Sparkles size={16} />{busy ? "Importing champions..." : "Import 25 research champions"}
+        <Sparkles size={16} />{busy ? "Importing champions..." : "Do this now: import 25 champions"}
       </button>
     </section>
   );
