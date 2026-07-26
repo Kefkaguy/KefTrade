@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import psycopg
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.db import get_connection
@@ -20,6 +20,7 @@ from app.services.elite_portfolio_repository import (
     recalculate_run,
 )
 from app.services.elite_portfolio_activation import PortfolioActivationError, activate_internal
+from app.services.research_champion_import import import_research_champions, research_champion_status
 from app.settings import settings
 
 
@@ -50,6 +51,30 @@ class ActivationRequest(BaseModel):
 def get_options(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     _require_builder()
     return options(conn)
+
+
+@router.get("/research-champions/status")
+def get_research_champion_status(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    _require_builder()
+    return research_champion_status(conn)
+
+
+@router.post("/research-champions/import")
+def import_research_champions_endpoint(
+    max_champions: int = Query(25, ge=1, le=100),
+    min_profit_factor: float = Query(1.25, ge=1.0, le=10.0),
+    min_trades: int = Query(30, ge=1, le=1000),
+    max_drawdown: float = Query(0.12, ge=0.0, le=1.0),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    _require_builder()
+    return import_research_champions(
+        conn,
+        max_champions=max_champions,
+        min_profit_factor=min_profit_factor,
+        min_trades=min_trades,
+        max_drawdown=max_drawdown,
+    )
 
 
 @router.post("/preview")

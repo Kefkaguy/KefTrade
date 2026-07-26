@@ -1231,6 +1231,13 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .eliteNotice { display: flex; align-items: flex-start; gap: 12px; margin-top: 22px; padding: 14px 16px; border-left: 2px solid var(--warning); background: var(--panel-soft); color: var(--muted); font-size: 9px; line-height: 1.6; }
 .eliteNotice strong { display: block; margin-bottom: 2px; color: var(--ink); }
 .eliteNotice.error { border-left-color: var(--error); }
+.eliteChampionIntake { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(360px, .8fr) auto; align-items: center; gap: 22px; margin-top: 28px; padding: 22px; border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--line)); border-radius: var(--radius); background: linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 54%, transparent), var(--panel-soft)); }
+.eliteChampionIntake h2 { margin-top: 6px; font-size: 20px; }
+.eliteChampionIntake p { margin-top: 9px; color: var(--muted); font-size: 10px; line-height: 1.65; }
+.eliteChampionMetrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-block: 1px solid var(--line); }
+.eliteChampionMetrics .eliteMetric { padding: 11px 10px; }
+.eliteChampionResult { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; }
+.eliteChampionResult strong { color: var(--success); font-family: var(--font-mono); }
 .eliteBuilderGrid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; gap: 70px; padding-top: 56px; }
 .elitePanel { padding: 0 0 58px; border-bottom: 1px solid var(--line); }
 .elitePanel + .elitePanel { padding-top: 58px; }

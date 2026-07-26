@@ -23,11 +23,15 @@ import {
   backfillElitePortfolioEvidence,
   createElitePortfolio,
   getElitePortfolioOptions,
+  getResearchChampionStatus,
+  importResearchChampions,
   previewElitePortfolio,
   type ElitePortfolioConfiguration,
   type ElitePortfolioHardRule,
   type ElitePortfolioOptions,
-  type ElitePortfolioResult
+  type ElitePortfolioResult,
+  type ResearchChampionImportResult,
+  type ResearchChampionStatus
 } from "@/lib/api";
 
 type Phase = "configure" | "preview" | "saved" | "approved" | "activated";
@@ -43,6 +47,8 @@ export function ElitePortfolioBuilder() {
   const [options, setOptions] = useState<ElitePortfolioOptions | null>(null);
   const [configuration, setConfiguration] = useState<ElitePortfolioConfiguration | null>(null);
   const [result, setResult] = useState<ElitePortfolioResult | null>(null);
+  const [championStatus, setChampionStatus] = useState<ResearchChampionStatus | null>(null);
+  const [championImport, setChampionImport] = useState<ResearchChampionImportResult | null>(null);
   const [phase, setPhase] = useState<Phase>("configure");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -65,6 +71,14 @@ export function ElitePortfolioBuilder() {
         });
       })
       .catch((reason) => { if (mounted) setError(message(reason)); });
+    return () => { mounted = false; };
+  }, []);
+
+  useEffect(() => {
+    let mounted = true;
+    getResearchChampionStatus()
+      .then((next) => { if (mounted) setChampionStatus(next); })
+      .catch(() => { /* The builder can still function without the intake summary. */ });
     return () => { mounted = false; };
   }, []);
 
@@ -108,6 +122,22 @@ export function ElitePortfolioBuilder() {
     }
   }
 
+  async function importChampions() {
+    setBusy("champions");
+    setError(null);
+    try {
+      const imported = await importResearchChampions({ maxChampions: 25, minProfitFactor: 1.25, minTrades: 30, maxDrawdown: 0.12 });
+      setChampionImport(imported);
+      setChampionStatus(imported.status);
+      const nextOptions = await getElitePortfolioOptions();
+      setOptions(nextOptions);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   if (!options || !configuration) {
     return (
       <section className="eliteBuilderLoading">
@@ -139,6 +169,13 @@ export function ElitePortfolioBuilder() {
 
       {error ? <div className="eliteNotice error"><AlertTriangle size={17} /><span><strong>Action stopped</strong>{error}</span></div> : null}
       {twoTimeframeWarning ? <div className="eliteNotice"><AlertTriangle size={17} /><span><strong>Two-timeframe arithmetic</strong>{twoTimeframeWarning}</span></div> : null}
+
+      <ResearchChampionIntake
+        status={championStatus}
+        result={championImport}
+        busy={busy === "champions"}
+        onImport={importChampions}
+      />
 
       <div className="eliteBuilderGrid">
         <main>
@@ -311,6 +348,46 @@ function PortfolioReview({ result, analytics, members }: { result: ElitePortfoli
         </div>
       ) : null}
       {members.length ? <div className="eliteMembers"><h3>Selected members</h3>{members.map((row, index) => <article key={`${row.candidate_id}-${row.symbol ?? "variant"}-${row.timeframe ?? "all"}`}><span>{String(index + 1).padStart(2, "0")}</span><div><strong>{row.symbol ? `${row.symbol} · ${row.timeframe}` : row.candidate_id}</strong><small>{row.strategy_family ?? row.strategy_direction ?? "Selected strategy variant"}</small></div><em>{title(row.execution_capability ?? "selected")}</em></article>)}</div> : null}
+    </section>
+  );
+}
+
+function ResearchChampionIntake({
+  status,
+  result,
+  busy,
+  onImport
+}: {
+  status: ResearchChampionStatus | null;
+  result: ResearchChampionImportResult | null;
+  busy: boolean;
+  onImport: () => void;
+}) {
+  return (
+    <section className="eliteChampionIntake">
+      <div>
+        <span className="eyebrow">Research champion intake</span>
+        <h2>Graduate promoted jobs without weakening elite rules</h2>
+        <p>
+          This imports a capped, deduped champion set from promoted research jobs. They enter as
+          <strong> research_champion</strong>, not final deployable elites, and must collect forward/cross-asset evidence before portfolio activation.
+        </p>
+      </div>
+      <div className="eliteChampionMetrics">
+        <Metric label="Eligible backlog" value={status?.eligible_promoted_jobs ?? "—"} />
+        <Metric label="Imported champions" value={status?.research_champions ?? "—"} />
+        <Metric label="Final elites" value={status?.final_elites ?? "—"} />
+        <Metric label="Symbols" value={status?.symbols ?? "—"} />
+      </div>
+      {result ? (
+        <div className="eliteChampionResult">
+          <strong>{result.imported} champions imported</strong>
+          <span>{result.dedupe_clusters_seen} dedupe clusters examined · {result.final_elites_created} final elites created · thresholds weakened: {String(result.thresholds_weakened)}</span>
+        </div>
+      ) : null}
+      <button className="button" disabled={busy || !status?.eligible_promoted_jobs} onClick={onImport}>
+        <Sparkles size={16} />{busy ? "Importing champions..." : "Import 25 research champions"}
+      </button>
     </section>
   );
 }

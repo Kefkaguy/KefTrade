@@ -1579,6 +1579,44 @@ export function getElitePortfolioOptions() {
   return request<ElitePortfolioOptions>("/research/elite-portfolios/options", { cache: "no-store", timeoutMs: 60000 });
 }
 
+export type ResearchChampionStatus = {
+  eligible_promoted_jobs: number;
+  symbols: number;
+  timeframes: number;
+  families: number;
+  research_champions: number;
+  final_elites: number;
+  awaiting_forward_sample: number;
+  promotion_rule_version: string;
+};
+
+export type ResearchChampionImportResult = {
+  imported: number;
+  examined: number;
+  dedupe_clusters_seen: number;
+  max_champions: number;
+  promotion_rule_version: string;
+  promotion_state: "research_champion";
+  final_elites_created: 0;
+  thresholds_weakened: false;
+  champions: Array<Record<string, any>>;
+  status: ResearchChampionStatus;
+};
+
+export function getResearchChampionStatus() {
+  return request<ResearchChampionStatus>("/research/elite-portfolios/research-champions/status", { cache: "no-store", timeoutMs: 60000 });
+}
+
+export function importResearchChampions(options: { maxChampions?: number; minProfitFactor?: number; minTrades?: number; maxDrawdown?: number } = {}) {
+  const params = new URLSearchParams({
+    max_champions: String(options.maxChampions ?? 25),
+    min_profit_factor: String(options.minProfitFactor ?? 1.25),
+    min_trades: String(options.minTrades ?? 30),
+    max_drawdown: String(options.maxDrawdown ?? 0.12)
+  });
+  return request<ResearchChampionImportResult>(`/research/elite-portfolios/research-champions/import?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
+}
+
 export function previewElitePortfolio(configuration: ElitePortfolioConfiguration) {
   return request<ElitePortfolioResult>("/research/elite-portfolios/preview", { method: "POST", body: JSON.stringify(configuration), timeoutMs: 60000 });
 }
