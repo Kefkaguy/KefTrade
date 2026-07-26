@@ -3499,8 +3499,21 @@ def run_intraday_campaign_job(
     candidate = dataclass_replace(candidate, parameters={**candidate.parameters, "timeframe": timeframe})
 
     dataset_id = int(job["dataset_id"]) if job.get("dataset_id") is not None else None
+    provided_cache = job.get("_dataset_cache")
+    cache = provided_cache if isinstance(provided_cache, dict) else {}
+    cache_key = ("intraday", dataset_id, str(symbol), str(timeframe))
     dataset_started = time.perf_counter()
-    dataset = load_intraday_backtest_dataset(conn, symbol, timeframe, dataset_id=dataset_id)
+    dataset = cache.get(cache_key)
+    cache_hit = dataset is not None
+    if cache_hit and provided_cache is cache:
+        cache.pop(cache_key)
+        cache[cache_key] = dataset
+    if dataset is None:
+        dataset = load_intraday_backtest_dataset(conn, symbol, timeframe, dataset_id=dataset_id)
+        cache_limit = max(1, int(settings.campaign_dataset_cache_entries or 8))
+        while len(cache) >= cache_limit:
+            cache.pop(next(iter(cache)))
+        cache[cache_key] = dataset
     data_loading_ms = round((time.perf_counter() - dataset_started) * 1000, 3)
 
     simulation_started = time.perf_counter()
@@ -3511,12 +3524,14 @@ def run_intraday_campaign_job(
         {},
         market_arrays=dataset["market_arrays"],
         session_end_index=dataset["session_end_index"],
+        persist_bar_series=False,
     )
     row["execution_profile"] = {
-        "data_loading_ms": data_loading_ms,
+        "data_loading_ms": 0 if cache_hit else data_loading_ms,
         "indicator_calculation_ms": 0,
         "simulation_ms": round((time.perf_counter() - simulation_started) * 1000, 3),
-        "dataset_cache_hit": False,
+        "dataset_cache_hit": cache_hit,
+        "bar_series_omitted": True,
         "intraday_coverage": dataset["coverage"],
     }
     from app.services.research_architecture import validation_gate_diagnostics
@@ -3613,10 +3628,23 @@ def run_cross_sectional_campaign_job(
     dataset_id = int(dataset_id)
 
     lookback_bars = int(candidate.parameters.get("cross_sectional_lookback_bars", 8))
+    provided_cache = job.get("_dataset_cache")
+    cache = provided_cache if isinstance(provided_cache, dict) else {}
+    cache_key = ("cross_sectional_intraday", dataset_id, str(symbol), str(timeframe), lookback_bars)
     dataset_started = time.perf_counter()
-    dataset = load_cross_sectional_intraday_dataset(
-        conn, symbol, timeframe, dataset_id=dataset_id, lookback_bars=lookback_bars
-    )
+    dataset = cache.get(cache_key)
+    cache_hit = dataset is not None
+    if cache_hit and provided_cache is cache:
+        cache.pop(cache_key)
+        cache[cache_key] = dataset
+    if dataset is None:
+        dataset = load_cross_sectional_intraday_dataset(
+            conn, symbol, timeframe, dataset_id=dataset_id, lookback_bars=lookback_bars
+        )
+        cache_limit = max(1, int(settings.campaign_dataset_cache_entries or 8))
+        while len(cache) >= cache_limit:
+            cache.pop(next(iter(cache)))
+        cache[cache_key] = dataset
     data_loading_ms = round((time.perf_counter() - dataset_started) * 1000, 3)
 
     simulation_started = time.perf_counter()
@@ -3627,12 +3655,14 @@ def run_cross_sectional_campaign_job(
         {},
         market_arrays=dataset["market_arrays"],
         session_end_index=dataset["session_end_index"],
+        persist_bar_series=False,
     )
     row["execution_profile"] = {
-        "data_loading_ms": data_loading_ms,
+        "data_loading_ms": 0 if cache_hit else data_loading_ms,
         "indicator_calculation_ms": 0,
         "simulation_ms": round((time.perf_counter() - simulation_started) * 1000, 3),
-        "dataset_cache_hit": False,
+        "dataset_cache_hit": cache_hit,
+        "bar_series_omitted": True,
         "intraday_coverage": dataset["coverage"],
         "cross_sectional_universe": dataset["cross_sectional_universe"],
     }

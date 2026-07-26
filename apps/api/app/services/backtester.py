@@ -42,6 +42,7 @@ def run_backtest(
     strategy_decide: StrategyFn = trend_pullback_decision,
     market_arrays: dict[str, np.ndarray] | None = None,
     session_end_index: list[int] | None = None,
+    persist_bar_series: bool = True,
 ) -> dict[str, Any]:
     # Reset happens before anything else touches the strategy, so a fresh
     # state is guaranteed even if the same strategy object is reused across
@@ -142,10 +143,11 @@ def run_backtest(
         max_risk = equity * risk_per_trade
         quantity = max_risk / risk_per_unit
         entry_index = i + entry_offset
-        for flat_index in range(mark_cursor, entry_index):
-            timestamp = rows[flat_index]["candle"]["timestamp"]
-            marked_equity_points[timestamp] = equity
-            signal_exposure_points[timestamp] = 0
+        if persist_bar_series:
+            for flat_index in range(mark_cursor, entry_index):
+                timestamp = rows[flat_index]["candle"]["timestamp"]
+                marked_equity_points[timestamp] = equity
+                signal_exposure_points[timestamp] = 0
         exit_index, exit_reason = find_exit_index(
             rows,
             arrays,
@@ -173,32 +175,37 @@ def run_backtest(
             exit_price = Decimal(exit_candle["close"]) * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
 
         entry_fee = entry_price * quantity * fee_rate
-        for mark_index in range(entry_index, exit_index + 1):
-            mark_price = exit_price if mark_index == exit_index else Decimal(rows[mark_index]["candle"]["close"])
-            marked_equity = mark_to_market_equity(equity, entry_price, mark_price, quantity, direction=direction) - entry_fee
-            equity_curve.append(marked_equity)
-            timestamp = rows[mark_index]["candle"]["timestamp"]
-            marked_equity_points[timestamp] = marked_equity
-            signal_exposure_points[timestamp] = 1 if direction == "long" else -1
+        if persist_bar_series:
+            for mark_index in range(entry_index, exit_index + 1):
+                mark_price = exit_price if mark_index == exit_index else Decimal(rows[mark_index]["candle"]["close"])
+                marked_equity = mark_to_market_equity(equity, entry_price, mark_price, quantity, direction=direction) - entry_fee
+                equity_curve.append(marked_equity)
+                timestamp = rows[mark_index]["candle"]["timestamp"]
+                marked_equity_points[timestamp] = marked_equity
+                signal_exposure_points[timestamp] = 1 if direction == "long" else -1
 
         if exit_price is None:
             i += 1
             continue
 
+        equity_before_trade = equity
         gross_pnl = ((exit_price - entry_price) if direction == "long" else (entry_price - exit_price)) * quantity
         fees = (entry_price * quantity * fee_rate) + (exit_price * quantity * fee_rate)
         raw_entry_price = Decimal(entry_candle["open"])
         slippage_cost = (abs(entry_price - raw_entry_price) + abs(exit_price - raw_exit_price)) * quantity
         pnl = gross_pnl - fees
         equity += pnl
-        equity_curve.append(equity)
-        marked_equity_points[rows[exit_index]["candle"]["timestamp"]] = equity
+        if persist_bar_series:
+            marked_equity_points[rows[exit_index]["candle"]["timestamp"]] = equity
         realized_equity_points.append({"timestamp": rows[exit_index]["candle"]["timestamp"], "equity": equity})
         mfe_price, mae_price, bars_to_mfe, bars_to_mae = excursion_extremes(
             arrays, entry_index=entry_index, exit_index=exit_index, entry_price=entry_price, direction=direction
         )
         mfe_amount = mfe_price * quantity
         mae_amount = mae_price * quantity
+        if not persist_bar_series:
+            equity_curve.append(equity_before_trade - entry_fee - mae_amount)
+        equity_curve.append(equity)
         entry_feature = rows[entry_index]["feature"]
         trades.append(
             {
@@ -238,10 +245,11 @@ def run_backtest(
         mark_cursor = exit_index + 1
         i = max(exit_index + 1, i + entry_cooldown_bars + 1)
 
-    for flat_index in range(mark_cursor, len(rows)):
-        timestamp = rows[flat_index]["candle"]["timestamp"]
-        marked_equity_points[timestamp] = equity
-        signal_exposure_points[timestamp] = 0
+    if persist_bar_series:
+        for flat_index in range(mark_cursor, len(rows)):
+            timestamp = rows[flat_index]["candle"]["timestamp"]
+            marked_equity_points[timestamp] = equity
+            signal_exposure_points[timestamp] = 0
 
     metrics = calculate_metrics(initial_equity, equity, trades, equity_curve)
     if train_rows and validation_rows:
@@ -274,10 +282,11 @@ def run_backtest(
         },
         "trades": trades,
         "equity_curve": build_equity_curve(realized_equity_points),
-        "strategy_returns": build_marked_return_series(marked_equity_points),
-        "signal_exposure": {timestamp.isoformat(): exposure for timestamp, exposure in sorted(signal_exposure_points.items())},
+        "strategy_returns": build_marked_return_series(marked_equity_points) if persist_bar_series else {},
+        "signal_exposure": {timestamp.isoformat(): exposure for timestamp, exposure in sorted(signal_exposure_points.items())} if persist_bar_series else {},
         "drawdown_curve": build_drawdown_curve(realized_equity_points),
         "equity_curve_summary": summarize_equity_curve(equity_curve),
+        "bar_series_omitted": not persist_bar_series,
     }
 
 

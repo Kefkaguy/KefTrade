@@ -782,6 +782,7 @@ def evaluate_candidate(
     context_by_time: dict[Any, dict[str, Any]],
     market_arrays: dict[str, Any] | None = None,
     session_end_index: list[int] | None = None,
+    persist_bar_series: bool = True,
 ) -> dict[str, Any]:
     strategy = make_strategy_definition(candidate)
     frequency_screen = None
@@ -805,7 +806,15 @@ def evaluate_candidate(
             "trades": [],
         }
     else:
-        result = run_backtest(candles, features, strategy.parameters, strategy.decide, market_arrays=market_arrays, session_end_index=session_end_index)
+        result = run_backtest(
+            candles,
+            features,
+            strategy.parameters,
+            strategy.decide,
+            market_arrays=market_arrays,
+            session_end_index=session_end_index,
+            persist_bar_series=persist_bar_series,
+        )
     metrics = dict(result["metrics"])
     trades = result.get("trades", [])
     by_year = compare_by_year(trades)
@@ -838,6 +847,7 @@ def evaluate_candidate(
             "frequency": "bar",
             "maximum_persisted_observations": 500,
             "observation_count": len(strategy_returns),
+            "bar_series_omitted": bool(result.get("bar_series_omitted")),
         },
         "paper_readiness": readiness,
         "research_score": research_score,
