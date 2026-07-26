@@ -236,7 +236,15 @@ function LaunchIntradayCampaign({
     setError(null);
     setNotice(null);
     try {
-      const result = await launchLowTimeframeExpansion({ timeframes: ["30m"], preferredFamily: "Momentum" });
+      const result = await launchLowTimeframeExpansion({
+        timeframes: ["30m"],
+        preferredFamily: "Momentum",
+        parentLimit: 64,
+        variantsPerParent: 12,
+        assetLimit: 4,
+        workers: 4,
+        jobsPerWorker: 50,
+      });
       const execution = result.execution ? ` Started ${result.execution.workers} worker${result.execution.workers === 1 ? "" : "s"}.` : "";
       setNotice(`Near-pass expansion #${result.campaign_id} queued: ${result.jobs_created} jobs from ${result.parent_count} parent rows across ${(result.timeframes || []).join(", ")}.${execution}`);
       onLaunched();
@@ -254,7 +262,7 @@ function LaunchIntradayCampaign({
       </p>
       <div className="intradayHonestyBanner" style={{ marginBottom: 16 }}>
         <TrendingUp size={16} />
-        <span>Recommended next run: 30m Momentum near-pass expansion. It targets the current blocker: profitable low-timeframe candidates that need more trade count without losing edge.</span>
+        <span>Recommended next run: large 30m Momentum near-pass expansion. It targets the current blocker with 64 parent rows, 12 variants per parent, and up to 4 source assets.</span>
       </div>
       <button
         type="button"
@@ -262,7 +270,7 @@ function LaunchIntradayCampaign({
         disabled={busy}
         onClick={() => void launchExpansion()}
       >
-        <Rocket size={15} /> {busy ? "Launching..." : "Launch 30m near-pass expansion"}
+        <Rocket size={15} /> {busy ? "Launching..." : "Launch large 30m near-pass expansion"}
       </button>
       <div className="intradayFamilyToggleGrid">
         {launchable.map((strategy) => {

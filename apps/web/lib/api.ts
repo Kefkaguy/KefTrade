@@ -1698,13 +1698,17 @@ export function launchLowTimeframeExpansion(options: {
   assetLimit?: number;
   timeframes?: string[];
   preferredFamily?: string;
+  workers?: number;
+  jobsPerWorker?: number;
 } = {}) {
   const params = new URLSearchParams();
   if (options.name) params.append("name", options.name);
-  params.append("parent_limit", String(options.parentLimit ?? 12));
-  params.append("variants_per_parent", String(options.variantsPerParent ?? 8));
-  params.append("asset_limit", String(options.assetLimit ?? 8));
+  params.append("parent_limit", String(options.parentLimit ?? 64));
+  params.append("variants_per_parent", String(options.variantsPerParent ?? 12));
+  params.append("asset_limit", String(options.assetLimit ?? 4));
   params.append("preferred_family", options.preferredFamily ?? "Momentum");
+  params.append("workers", String(options.workers ?? 4));
+  params.append("jobs_per_worker", String(options.jobsPerWorker ?? 50));
   for (const timeframe of options.timeframes ?? ["30m"]) params.append("timeframes", timeframe);
   return request<Record<string, any>>(`/research/intraday/campaigns/low-timeframe-expansion?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }

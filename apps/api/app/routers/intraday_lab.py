@@ -54,9 +54,9 @@ def create_intraday_campaign_endpoint(
 @router.post("/research/intraday/campaigns/low-timeframe-expansion")
 def create_low_timeframe_expansion_campaign_endpoint(
     name: str | None = Query(None),
-    parent_limit: int = Query(12, ge=1, le=50),
-    variants_per_parent: int = Query(8, ge=1, le=32),
-    asset_limit: int = Query(8, ge=1, le=25),
+    parent_limit: int = Query(12, ge=1, le=200),
+    variants_per_parent: int = Query(8, ge=1, le=64),
+    asset_limit: int = Query(8, ge=1, le=50),
     timeframes: list[str] | None = Query(None, description="Defaults to 30m. Pass 15m explicitly for the separate 15m lane."),
     preferred_family: str | None = Query("Momentum"),
     auto_start: bool = Query(True, description="Start durable simulation workers after the campaign is queued."),
