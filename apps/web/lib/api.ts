@@ -1491,17 +1491,19 @@ async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
   const { timeoutMs = 3500, revalidateSeconds, ...fetchOptions } = options ?? {};
   const startedAt = now();
   const method = fetchOptions.method ?? "GET";
+  const resolvedCacheMode = fetchOptions.cache ?? cacheMode(path, method);
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
   let responseLogged = false;
   try {
     logFrontendDiagnostic("Fetch request sent", { method, path, timeoutMs });
     const response = await fetch(`${API_URL}${path}`, {
       ...fetchOptions,
-      cache: fetchOptions.cache ?? cacheMode(path, method),
-      ...(method === "GET" && cacheMode(path, method) === "force-cache" ? { next: { revalidate: revalidateSeconds ?? 60 } } : {}),
+      cache: resolvedCacheMode,
+      ...(method === "GET" && resolvedCacheMode === "force-cache" ? { next: { revalidate: revalidateSeconds ?? 60 } } : {}),
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
+        ...(method === "GET" && resolvedCacheMode === "no-store" ? { "Cache-Control": "no-cache", "Pragma": "no-cache" } : {}),
         ...(fetchOptions.headers ?? {})
       }
     });
@@ -1537,7 +1539,19 @@ async function request<T>(path: string, options?: ApiRequestInit): Promise<T> {
 
 function cacheMode(path: string, method: string): RequestCache {
   if (method !== "GET") return "no-store";
-  const critical = ["/broker/", "/portfolio/readiness", "/execution-attempts", "/reconciliation", "/approvals", "/halts"];
+  const critical = [
+    "/broker/",
+    "/portfolio/readiness",
+    "/execution-attempts",
+    "/reconciliation",
+    "/approvals",
+    "/halts",
+    "/research/campaigns",
+    "/research/campaign-workers",
+    "/research/command-center",
+    "/research/intraday/",
+    "/research/elite-portfolios"
+  ];
   return critical.some((token) => path.includes(token)) ? "no-store" : "force-cache";
 }
 
@@ -2214,11 +2228,11 @@ export function runResearchCampaignBatch(campaignId: number, batchSize = 50) {
 }
 
 export function getResearchCampaign(campaignId: number) {
-  return request<ResearchCampaignStatus>(`/research/campaigns/${campaignId}`, { timeoutMs: 60000 });
+  return request<ResearchCampaignStatus>(`/research/campaigns/${campaignId}`, { cache: "no-store", timeoutMs: 60000 });
 }
 
 export function getResearchCampaigns(limit = 50) {
-  return request<ResearchCampaignList>(`/research/campaigns?limit=${limit}`, { timeoutMs: 60000 });
+  return request<ResearchCampaignList>(`/research/campaigns?limit=${limit}`, { cache: "no-store", timeoutMs: 60000 });
 }
 
 export function controlResearchCampaign(campaignId: number, action: "pause" | "resume") {
@@ -2243,7 +2257,7 @@ export function deleteResearchCampaign(campaignId: number, force = false) {
 }
 
 export function getResearchCampaignProfile(campaignId: number) {
-  return request<ResearchCampaignProfile>(`/research/campaigns/${campaignId}/profile`, { timeoutMs: 60000 });
+  return request<ResearchCampaignProfile>(`/research/campaigns/${campaignId}/profile`, { cache: "no-store", timeoutMs: 60000 });
 }
 
 export function runParallelResearchCampaign(campaignId: number, workers = 4, jobsPerWorker = 25) {

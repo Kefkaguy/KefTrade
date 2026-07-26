@@ -1,7 +1,7 @@
 from typing import Any
 import time
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 import psycopg
 
@@ -552,17 +552,14 @@ def create_large_scale_research_campaign(
 
 @router.get("/research/campaigns")
 def get_research_campaigns(
+    response: Response,
     limit: int = Query(50, ge=1, le=200),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
-    from app.services.shared_cache import get_json, set_json
-    key = f"summary:research-campaigns:{limit}"
-    cached = get_json(key)
-    if cached is not None:
-        return cached
-    result = list_research_campaigns(conn, limit=limit)
-    set_json(key, result, 60)
-    return result
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return list_research_campaigns(conn, limit=limit)
 
 
 @router.post("/research/campaigns/preflight")
@@ -820,8 +817,12 @@ def run_large_scale_research_campaign_parallel_batch(
 @router.get("/research/campaigns/{campaign_id}")
 def get_large_scale_research_campaign(
     campaign_id: int,
+    response: Response,
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     return campaign_status(conn, campaign_id)
 
 
@@ -836,8 +837,12 @@ def get_large_scale_research_campaign_analytics(
 @router.get("/research/campaigns/{campaign_id}/profile")
 def get_large_scale_research_campaign_profile(
     campaign_id: int,
+    response: Response,
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
     try:
         return get_campaign_performance_profile(conn, campaign_id)
     except ValueError as error:
