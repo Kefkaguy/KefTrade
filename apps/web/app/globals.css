@@ -1431,9 +1431,29 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .intradayFamilyToggle.selected { border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); background: var(--accent-soft); }
 .intradayFamilyToggle strong { font-size: 11px; }
 
+.intradayLaunchPrimary { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin: 18px 0 16px; padding: 18px; border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line)); border-radius: var(--radius); background: linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 58%, transparent), var(--panel-soft)); }
+.intradayLaunchPrimary > div { display: grid; gap: 6px; min-width: 0; }
+.intradayLaunchPrimary strong { font-size: 14px; color: var(--ink); }
+.intradayLaunchPrimary span { color: var(--muted); font-size: 10px; line-height: 1.55; }
+
+.intradayLaneGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.intradayLaneCard { display: grid; gap: 16px; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); }
+.intradayLaneCard header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.intradayLaneCard header strong { font: 750 18px var(--font-mono); color: var(--ink); }
+.intradayLaneMetrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
+.intradayLaneMetrics div { padding: 10px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel); }
+.intradayLaneMetrics span { display: block; color: var(--muted); font: 650 7.5px var(--font-mono); text-transform: uppercase; }
+.intradayLaneMetrics strong { display: block; margin-top: 6px; font: 750 13px var(--font-mono); color: var(--ink); }
+.intradayLeaderList { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.intradayLeaderList li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border: 1px solid var(--line); border-radius: var(--radius-small); color: var(--muted); font-size: 10px; }
+.intradayLeaderList strong { color: var(--success); font-family: var(--font-mono); }
+
 .intradayStrategyGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.intradayStrategyGrid.compact { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .intradayStrategyCard { display: grid; gap: 10px; padding: 16px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); }
 .intradayStrategyCard.archived { border-color: color-mix(in srgb, var(--warning) 30%, var(--line)); }
+.intradayStrategyCard.promoted { border-color: color-mix(in srgb, var(--success) 42%, var(--line)); }
+.intradayStrategyCard.near { border-color: color-mix(in srgb, var(--accent-2) 34%, var(--line)); }
 .intradayStrategyCard header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .intradayStrategyCard header strong { font-size: 13px; }
 .intradayStrategyReason { color: var(--ink); font-size: 11px; font-weight: 650; }
@@ -1480,9 +1500,16 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 
 .intradayHonestyBanner { display: flex; align-items: center; gap: 10px; padding: 16px 18px; border: 1px solid var(--line); border-radius: var(--radius); background: color-mix(in srgb, var(--panel) 76%, transparent); color: var(--muted-accent); font-size: 11px; }
 .intradayHonestyBanner svg { color: var(--accent-2); }
+.intradayDeepDive { margin-top: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
+.intradayDeepDive > summary { cursor: pointer; padding: 16px 18px; color: var(--muted-accent); font: 700 10px var(--font-mono); text-transform: uppercase; letter-spacing: .04em; }
+.intradayDeepDiveBody { display: grid; gap: 18px; padding: 0 18px 18px; }
 
 @media (max-width: 900px) {
+  .intradayLaunchPrimary { align-items: stretch; flex-direction: column; }
+  .intradayLaneGrid { grid-template-columns: 1fr; }
+  .intradayLaneMetrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .intradayStrategyGrid { grid-template-columns: 1fr; }
+  .intradayStrategyGrid.compact { grid-template-columns: 1fr; }
   .intradayTimeframeDetailGrid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .intradayCandidateDetail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }

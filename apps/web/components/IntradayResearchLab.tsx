@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Archive, CheckCircle2, Circle, Rocket, ShieldAlert, TrendingUp } from "lucide-react";
 import { createIntradayCampaign, getIntradayLabOverview, launchLowTimeframeExpansion, type IntradayLabOverview, type IntradaySampleJob, type IntradayStrategyRosterEntry } from "@/lib/api";
-import { Card, DataTable, EmptyState, PageTitle } from "@/components/ResearchUI";
+import { Card, EmptyState, PageTitle } from "@/components/ResearchUI";
 import { Phase124Panel } from "@/components/Phase124Panel";
 import { StrategyIntelligencePanel } from "@/components/StrategyIntelligencePanel";
 
@@ -30,6 +30,40 @@ function weightedAverage(breakdown: IntradayStrategyRosterEntry["timeframe_break
   if (!totalTrades) return null;
   const weighted = rows.reduce((sum, row) => sum + (row[field] as number) * row.trades, 0);
   return weighted / totalTrades;
+}
+
+function timeframeSummary(strategies: IntradayStrategyRosterEntry[], timeframe: string) {
+  const rows = strategies.flatMap((strategy) =>
+    (strategy.timeframe_breakdown ?? [])
+      .filter((row) => row.timeframe === timeframe)
+      .map((row) => ({ strategy, row }))
+  );
+  const jobs = rows.reduce((sum, item) => sum + item.row.jobs, 0);
+  const trades = rows.reduce((sum, item) => sum + item.row.trades, 0);
+  const promotedFamilies = rows.filter((item) => (item.strategy.promoted ?? 0) > 0 && item.row.jobs > 0).length;
+  const activeFamilies = rows.filter((item) => item.row.status === "has_evidence" && item.row.jobs > 0).length;
+  const totalTrades = rows.reduce((sum, item) => sum + item.row.trades, 0);
+  const avgProfitFactor = totalTrades
+    ? rows.reduce((sum, item) => sum + (item.row.avg_profit_factor ?? 0) * item.row.trades, 0) / totalTrades
+    : null;
+  const avgExpectancy = totalTrades
+    ? rows.reduce((sum, item) => sum + (item.row.avg_expectancy ?? 0) * item.row.trades, 0) / totalTrades
+    : null;
+  const leaders = rows
+    .filter((item) => item.row.jobs > 0)
+    .sort((a, b) => ((b.strategy.promoted ?? 0) - (a.strategy.promoted ?? 0)) || ((b.row.avg_profit_factor ?? 0) - (a.row.avg_profit_factor ?? 0)))
+    .slice(0, 4);
+  return { timeframe, jobs, trades, promotedFamilies, activeFamilies, avgProfitFactor, avgExpectancy, leaders };
+}
+
+function strategySignal(strategy: IntradayStrategyRosterEntry) {
+  const promoted = strategy.promoted ?? 0;
+  const trades = strategy.trades ?? 0;
+  const avgProfitFactor = weightedAverage(strategy.timeframe_breakdown, "avg_profit_factor");
+  if (promoted > 0) return "promoted";
+  if (trades > 0 && avgProfitFactor != null && avgProfitFactor >= 1) return "near";
+  if (strategy.status === "archived") return "archived";
+  return "quiet";
 }
 
 export function IntradayResearchLab() {
@@ -59,6 +93,12 @@ export function IntradayResearchLab() {
   const archivedStrategies = (overview?.strategies ?? []).filter((s) => s.status === "archived");
   const plannedStrategies = (overview?.strategies ?? []).filter((s) => s.status === "planned");
   const testedStrategies = (overview?.strategies ?? []).filter((s) => s.pilot);
+  const strategies = overview?.strategies ?? [];
+  const timeframeLanes = (overview?.timeframes_supported ?? ["15m", "30m"]).map((tf) => timeframeSummary(strategies, tf));
+  const materialStrategies = strategies
+    .filter((strategy) => (strategy.jobs ?? 0) > 0)
+    .sort((a, b) => ((b.promoted ?? 0) - (a.promoted ?? 0)) || ((b.trades ?? 0) - (a.trades ?? 0)))
+    .slice(0, 8);
   const phase124FamilyIds = new Set([
     "gap_fill_v1",
     "session_momentum_v1",
@@ -90,10 +130,45 @@ export function IntradayResearchLab() {
 
       {error ? <div className="strategyLibraryError" role="alert">{error}</div> : null}
 
-      <Card title="Strategy families" eyebrow="Lifecycle status">
-        <div className="intradayStrategyGrid">
-          {(overview?.strategies ?? []).map((strategy) => (
-            <article key={strategy.id} className={`intradayStrategyCard ${strategy.status}`}>
+      <Card title="15m / 30m evidence lanes" eyebrow="What matters now">
+        <div className="intradayLaneGrid">
+          {timeframeLanes.map((lane) => (
+            <article key={lane.timeframe} className="intradayLaneCard">
+              <header>
+                <strong>{lane.timeframe}</strong>
+                <em className={`familyTag ${lane.promotedFamilies > 0 ? "good" : lane.jobs > 0 ? "warn" : "muted"}`}>
+                  {lane.promotedFamilies > 0 ? `${lane.promotedFamilies} signal families` : lane.jobs > 0 ? "Needs edge" : "No evidence"}
+                </em>
+              </header>
+              <div className="intradayLaneMetrics">
+                <div><span>Jobs</span><strong>{lane.jobs.toLocaleString()}</strong></div>
+                <div><span>Trades</span><strong>{lane.trades.toLocaleString()}</strong></div>
+                <div><span>Avg PF</span><strong>{num(lane.avgProfitFactor)}</strong></div>
+                <div><span>Expectancy</span><strong>{num(lane.avgExpectancy)}</strong></div>
+              </div>
+              {lane.leaders.length ? (
+                <ul className="intradayLeaderList">
+                  {lane.leaders.map(({ strategy, row }) => (
+                    <li key={`${lane.timeframe}-${strategy.id}`}>
+                      <span>{strategy.name}</span>
+                      <strong>{strategy.promoted ?? 0} promoted</strong>
+                    </li>
+                  ))}
+                </ul>
+              ) : <p className="intradayStrategySummary">No jobs recorded on this lane yet.</p>}
+            </article>
+          ))}
+        </div>
+      </Card>
+
+      <LaunchIntradayCampaign strategies={strategies} timeframesSupported={overview?.timeframes_supported ?? ["15m", "30m"]} onLaunched={load} />
+
+      <Card title="Highest-signal families" eyebrow="Compact view">
+        <div className="intradayStrategyGrid compact">
+          {materialStrategies.map((strategy) => {
+            const signal = strategySignal(strategy);
+            return (
+            <article key={strategy.id} className={`intradayStrategyCard ${strategy.status} ${signal}`}>
               <header>
                 <strong>{strategy.name}{strategy.version ? ` ${strategy.version}` : ""}</strong>
                 <em className={`familyTag ${strategy.status === "archived" ? "muted" : strategy.status === "planned" ? "warn" : "good"}`}>
@@ -118,36 +193,28 @@ export function IntradayResearchLab() {
                 </div>
               ) : null}
             </article>
-          ))}
+            );
+          })}
           {!overview ? <EmptyState title="Loading strategy roster" body="Reading the Intraday Lab overview." /> : null}
         </div>
       </Card>
 
-      <Card title="Compare families" eyebrow="All families, side by side">
-        <DataTable
-          columns={["Family", "Status", "Campaigns", "Trades", "Avg PF", "Avg expectancy", "Promoted", "Archive status"]}
-          rows={(overview?.strategies ?? []).map((strategy) => [
-            `${strategy.name}${strategy.version ? ` ${strategy.version}` : ""}`,
-            strategy.status === "archived" ? "Archived" : strategy.status === "planned" ? "Planned" : "Active",
-            strategy.campaigns ?? 0,
-            (strategy.trades ?? 0).toLocaleString(),
-            num(weightedAverage(strategy.timeframe_breakdown, "avg_profit_factor")),
-            num(weightedAverage(strategy.timeframe_breakdown, "avg_expectancy")),
-            strategy.promoted ?? 0,
-            strategy.status === "archived" ? "Archived (negative result)" : strategy.pilot ? "Has evidence" : "No evidence yet"
-          ])}
-        />
-      </Card>
+      <details className="intradayDeepDive">
+        <summary>Show detailed family diagnostics</summary>
+        <div className="intradayDeepDiveBody">
+          {testedStrategies.map((strategy) => (
+            <FamilyResearchDetail key={strategy.id} strategy={strategy} />
+          ))}
+        </div>
+      </details>
 
-      <LaunchIntradayCampaign strategies={overview?.strategies ?? []} timeframesSupported={overview?.timeframes_supported ?? ["15m", "30m"]} onLaunched={load} />
-
-      {testedStrategies.map((strategy) => (
-        <FamilyResearchDetail key={strategy.id} strategy={strategy} />
-      ))}
-
-      <Phase124Panel campaignId={phase124CampaignId} />
-
-      <StrategyIntelligencePanel campaignId={phase124CampaignId} />
+      <details className="intradayDeepDive">
+        <summary>Show legacy Phase 12.4 / strategy intelligence panels</summary>
+        <div className="intradayDeepDiveBody">
+          <Phase124Panel campaignId={phase124CampaignId} />
+          <StrategyIntelligencePanel campaignId={phase124CampaignId} />
+        </div>
+      </details>
 
       <Card title="Research archive" eyebrow="Preserved, not deleted">
         <p className="intradayArchiveIntro">
@@ -197,6 +264,7 @@ function LaunchIntradayCampaign({
   onLaunched: () => void;
 }) {
   const launchable = useMemo(() => strategies.filter((s) => s.status !== "planned"), [strategies]);
+  const activeFamilyIds = useMemo(() => strategies.filter((s) => s.status === "active").map((strategy) => strategy.id), [strategies]);
   const [selectedFamilies, setSelectedFamilies] = useState<string[]>([]);
   const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(timeframesSupported);
   const [busy, setBusy] = useState(false);
@@ -231,6 +299,28 @@ function LaunchIntradayCampaign({
     }
   }
 
+  async function launchBroadScreen() {
+    if (!activeFamilyIds.length) return;
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await createIntradayCampaign({
+        familyIds: activeFamilyIds,
+        timeframes: ["15m", "30m"],
+        assetLimit: 10,
+        maxCandidatesPerFamily: 12,
+        name: "Broad 15m/30m family screen"
+      });
+      setNotice(`Broad 15m/30m screen #${result.campaign_id} queued: ${result.jobs_created} jobs across ${(result.timeframes || []).join(", ")}, ${(result.assets || []).length} assets, ${activeFamilyIds.length} active families.`);
+      onLaunched();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not launch the broad 15m/30m screen.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function launchExpansion() {
     setBusy(true);
     setError(null);
@@ -256,21 +346,35 @@ function LaunchIntradayCampaign({
   }
 
   return (
-    <Card title="Launch an intraday campaign" eyebrow="One, several, or all families">
+    <Card title="Launch 15m / 30m research" eyebrow="Broad screen first, exploit winners second">
       <p className="intradayStrategySummary">
         Each selected family keeps its own candidates and is evaluated independently through the unmodified elite gate — evidence is never merged across families.
       </p>
+      <div className="intradayLaunchPrimary">
+        <div>
+          <strong>Broad 15m/30m family screen</strong>
+          <span>{activeFamilyIds.length} active families x 10 assets x 2 timeframes x 12 variants per family. The elite gate stays unchanged.</span>
+        </div>
+        <button
+          type="button"
+          className="button"
+          disabled={busy || !activeFamilyIds.length}
+          onClick={() => void launchBroadScreen()}
+        >
+          <Rocket size={15} /> {busy ? "Launching..." : "Run broad 15m/30m screen"}
+        </button>
+      </div>
       <div className="intradayHonestyBanner" style={{ marginBottom: 16 }}>
         <TrendingUp size={16} />
         <span>Recommended next run: large 30m Momentum near-pass expansion. It targets the current blocker with 64 parent rows, 12 variants per parent, and up to 4 source assets.</span>
       </div>
       <button
         type="button"
-        className="button"
+        className="button secondary"
         disabled={busy}
         onClick={() => void launchExpansion()}
       >
-        <Rocket size={15} /> {busy ? "Launching..." : "Launch large 30m near-pass expansion"}
+        <Rocket size={15} /> {busy ? "Launching..." : "Launch focused AMD/Momentum expansion"}
       </button>
       <div className="intradayFamilyToggleGrid">
         {launchable.map((strategy) => {
