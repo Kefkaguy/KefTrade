@@ -3496,7 +3496,16 @@ def run_intraday_campaign_job(
     # timeframe-aware, so the job's own timeframe is threaded into the
     # candidate's parameters here, the same way `apply_timeframe_scaling`
     # already threads timeframe-derived values into swing candidates.
-    candidate = dataclass_replace(candidate, parameters={**candidate.parameters, "timeframe": timeframe})
+    from app.services.labs.intraday.feature_engine_v2 import DEFAULT_CONFIG
+
+    candidate = dataclass_replace(
+        candidate,
+        parameters={
+            **candidate.parameters,
+            "timeframe": timeframe,
+            "recent_candle_window_bars": int(candidate.parameters.get("recent_candle_window_bars") or DEFAULT_CONFIG.lookback_bars),
+        },
+    )
 
     dataset_id = int(job["dataset_id"]) if job.get("dataset_id") is not None else None
     provided_cache = job.get("_dataset_cache")
@@ -3616,7 +3625,16 @@ def run_cross_sectional_campaign_job(
     symbol = job["symbol"]
     timeframe = job["timeframe"]
     candidate = candidate_from_payload(job["candidate"])
-    candidate = dataclass_replace(candidate, parameters={**candidate.parameters, "timeframe": timeframe})
+    from app.services.labs.intraday.feature_engine_v2 import DEFAULT_CONFIG
+
+    candidate = dataclass_replace(
+        candidate,
+        parameters={
+            **candidate.parameters,
+            "timeframe": timeframe,
+            "recent_candle_window_bars": int(candidate.parameters.get("recent_candle_window_bars") or DEFAULT_CONFIG.lookback_bars),
+        },
+    )
 
     dataset_id = job.get("dataset_id")
     if dataset_id is None:

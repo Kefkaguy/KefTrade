@@ -226,6 +226,7 @@ BASE_V2_PARAMETERS: dict[str, Any] = {
     "initial_equity": Decimal("10000"),
     "walk_forward_train_ratio": 0.7,
     "max_holding_bars": 0,
+    "recent_candle_window_bars": DEFAULT_CONFIG.lookback_bars,
     "reward_risk_multiple": Decimal("1.5"),
     "risk_reward": Decimal("1.5"),
     "direction": "long",
