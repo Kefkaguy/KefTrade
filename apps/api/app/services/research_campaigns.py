@@ -300,6 +300,32 @@ def _ensure_campaign_tables(conn: psycopg.Connection) -> None:
             ADD COLUMN IF NOT EXISTS drift_status TEXT NOT NULL DEFAULT 'normal'
         """
     )
+    conn.execute(
+        """
+        ALTER TABLE elite_research_candidates
+            ADD COLUMN IF NOT EXISTS promotion_state TEXT NOT NULL DEFAULT 'elite',
+            ADD COLUMN IF NOT EXISTS promotion_rule_version TEXT,
+            ADD COLUMN IF NOT EXISTS median_profit_factor DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS median_expectancy DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS median_max_drawdown DOUBLE PRECISION,
+            ADD COLUMN IF NOT EXISTS median_variant_trade_count INTEGER,
+            ADD COLUMN IF NOT EXISTS demotion_reason TEXT,
+            ADD COLUMN IF NOT EXISTS reevaluated_at TIMESTAMPTZ
+        """
+    )
+    conn.execute(
+        """
+        ALTER TABLE elite_research_candidates
+            DROP CONSTRAINT IF EXISTS elite_research_candidates_promotion_state_check
+        """
+    )
+    conn.execute(
+        """
+        ALTER TABLE elite_research_candidates
+            ADD CONSTRAINT elite_research_candidates_promotion_state_check
+            CHECK (promotion_state IN ('elite', 'demoted', 'research_champion'))
+        """
+    )
     ensure_worker_tables(conn)
 
 

@@ -166,6 +166,9 @@ def import_research_champions(
     min_trades: int = 30,
     max_drawdown: float = 0.12,
 ) -> dict[str, Any]:
+    from app.services.research_campaigns import ensure_campaign_tables
+
+    ensure_campaign_tables(conn)
     bounded = max(1, min(int(max_champions), 100))
     candidates = _load_promoted_jobs(
         conn,
