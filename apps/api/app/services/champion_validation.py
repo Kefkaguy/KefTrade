@@ -1530,9 +1530,8 @@ def run_champion_validation(
             + ", ".join(weakened)
             + ". Tighten them or change the shipped defaults deliberately."
         )
-
     states = (
-        ["pending_validation", "needs_more_data", "failed_validation", "validating"]
+        ["pending_validation", "needs_more_data", "failed_validation"]
         if revalidate
         else ["pending_validation", "needs_more_data"]
     )
@@ -1557,15 +1556,14 @@ def run_champion_validation(
     budget_exhausted = False
 
     for raw in rows:
-        # Checked before starting a champion, never mid-champion: a partially
-        # measured champion has no verdict to record, so abandoning one would
-        # only waste the backtests already run.
         if outcomes and budget and (time.perf_counter() - batch_started) >= budget:
             budget_exhausted = True
             break
+
         champion = dict(raw)
         started = time.perf_counter()
-        conn.execute(
+
+        claimed = conn.execute(
             """
             UPDATE elite_research_candidates
             SET validation_state = 'validating',
@@ -1573,9 +1571,21 @@ def run_champion_validation(
                 validation_protocol_version = %s,
                 validation_started_at = NOW()
             WHERE id = %s
+            AND promotion_state = 'research_champion'
+            AND validation_state = ANY(%s)
+            RETURNING id
             """,
-            (CHAMPION_VALIDATION_PROTOCOL_VERSION, champion["id"]),
-        )
+            (
+                CHAMPION_VALIDATION_PROTOCOL_VERSION,
+                champion["id"],
+                states,
+            ),
+        ).fetchone()
+
+        if not claimed:
+            conn.rollback()
+            continue
+
         conn.commit()
         try:
             measurements = measure_champion(
