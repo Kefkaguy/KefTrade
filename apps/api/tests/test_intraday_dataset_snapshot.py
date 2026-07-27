@@ -24,6 +24,7 @@ class FakeSnapshotConn:
         self._next_id = 1
         self.candle_inserts = 0
         self.feature_inserts = 0
+        self.split_timestamp_queries = 0
         self.committed = False
 
     def execute(self, query, params=None):
@@ -64,6 +65,12 @@ class FakeSnapshotConn:
         if stripped.startswith("INSERT INTO research_dataset_intraday_features"):
             self.feature_inserts += 1
             return FakeResult(None)
+        # Phase E: splits are fixed at snapshot time, before any research has
+        # run against the data. This fake returns too few timestamps to split,
+        # which exercises the "cannot split" path without a split table.
+        if stripped.startswith("SELECT DISTINCT timestamp FROM research_dataset_candles"):
+            self.split_timestamp_queries += 1
+            return FakeResult([])
         raise AssertionError(f"unexpected query: {query}")
 
     def commit(self):

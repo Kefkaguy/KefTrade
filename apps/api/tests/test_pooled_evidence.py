@@ -272,7 +272,7 @@ class FakeHoldoutConn:
         if stripped.startswith("SELECT id, symbol, candidate->>'candidate_id'"):
             return FakeResult(self.jobs)
         if stripped.startswith("SELECT job_id, symbol, net_pnl"):
-            assert "dataset_split = 'validation'" in query, "holdout must read only the validation split"
+            assert "dataset_split" in query, "holdout must be able to tell the two splits apart"
             job_ids = params[0]
             return FakeResult([row for job_id in job_ids for row in self.holdout_trades_by_job_id.get(job_id, [])])
         if stripped.startswith("INSERT INTO research_candidate_stage_evidence"):
@@ -312,21 +312,30 @@ def holdout_job(job_id, symbol, candidate_id, *, max_drawdown=0.05, architecture
     }
 
 
-def holdout_trade(job_id, symbol, net_pnl, pnl_pct=0.01, holding_period_hours=2.0):
+def holdout_trade(job_id, symbol, net_pnl, pnl_pct=0.01, holding_period_hours=2.0, split="validation"):
     return {
         "job_id": job_id,
         "symbol": symbol,
         "net_pnl": Decimal(str(net_pnl)),
         "pnl_pct": pnl_pct,
         "holding_period_hours": holding_period_hours,
+        "dataset_split": split,
     }
 
 
-def strong_holdout(job_id, symbol, count=12):
-    """A clearly profitable holdout sample for this job/symbol."""
-    return [holdout_trade(job_id, symbol, 120) for _ in range(count - 3)] + [
+def strong_holdout(job_id, symbol, count=12, *, with_training=True):
+    """A clearly profitable holdout sample, preceded by training-window trades.
+
+    `with_training=True` models the split the system was *believed* to
+    produce. Real stored trades carry no 'train' rows at all -- see
+    `test_a_holdout_that_is_the_whole_sample_confirms_nothing`.
+    """
+    trades = [holdout_trade(job_id, symbol, 120) for _ in range(count - 3)] + [
         holdout_trade(job_id, symbol, -50) for _ in range(3)
     ]
+    if with_training:
+        trades = [holdout_trade(job_id, symbol, 10, split="train") for _ in range(6)] + trades
+    return trades
 
 
 def test_a_candidate_with_no_holdout_trades_is_never_confirmed():
@@ -340,6 +349,31 @@ def test_a_candidate_with_no_holdout_trades_is_never_confirmed():
 
     assert results[0]["confirmed"] is False
     assert results[0]["unconfirmed_reason"] == "NO_HOLDOUT_TRADES"
+    assert conn.inserted == {}
+
+
+def test_a_holdout_that_is_the_whole_sample_confirms_nothing():
+    """The Phase A finding, encoded. `run_backtest` trades only its validation
+    window, so real stored trades carry no 'train' rows -- the "holdout" is
+    then the exact set the pooled gate already scored, and confirming against
+    it would be comparing a set with itself."""
+    pooled = [{"candidate_id": "candA", "promoted": True}]
+    jobs = [holdout_job(1, "NVDA", "candA"), holdout_job(2, "TSLA", "candA")]
+    conn = FakeHoldoutConn(
+        pooled,
+        jobs,
+        {
+            1: strong_holdout(1, "NVDA", with_training=False),
+            2: strong_holdout(2, "TSLA", with_training=False),
+        },
+    )
+
+    results = compute_holdout_confirmation(conn, campaign_id=101)
+
+    assert results[0]["confirmed"] is False
+    assert results[0]["is_independent_sample"] is False
+    assert results[0]["unconfirmed_reason"] == "HOLDOUT_NOT_INDEPENDENT"
+    assert "research_splits" in results[0]["remedy"]
     assert conn.inserted == {}
 
 
@@ -361,8 +395,8 @@ def test_a_candidate_that_fails_the_gate_out_of_sample_is_not_confirmed():
     pooled = [{"candidate_id": "candA", "promoted": True}]
     jobs = [holdout_job(1, "NVDA", "candA"), holdout_job(2, "TSLA", "candA")]
     losing = {
-        1: [holdout_trade(1, "NVDA", -40) for _ in range(12)],
-        2: [holdout_trade(2, "TSLA", -40) for _ in range(12)],
+        1: [holdout_trade(1, "NVDA", 10, split="train")] + [holdout_trade(1, "NVDA", -40) for _ in range(12)],
+        2: [holdout_trade(2, "TSLA", 10, split="train")] + [holdout_trade(2, "TSLA", -40) for _ in range(12)],
     }
     conn = FakeHoldoutConn(pooled, jobs, losing)
 

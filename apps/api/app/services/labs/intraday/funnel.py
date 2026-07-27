@@ -148,11 +148,71 @@ def rank_campaign_families(conn: psycopg.Connection, campaign_id: int) -> list[d
     )
 
 
+def screen_campaign_families(conn: psycopg.Connection, campaign_id: int) -> list[dict[str, Any]]:
+    """The screen that decides expansions: response-surface structure first.
+
+    `rank_campaign_families` above ranks by family-wide averages, which is a
+    useful description but a poor decision rule -- a broad grid's mean mostly
+    reports how wide the grid was, and it buries a small stable region under
+    the losing variants a search is supposed to contain. This function defers
+    the promising/not decision to `response_surface`, which asks whether a
+    connected plateau of neighboring positive variants exists across more
+    than one symbol without the result resting on one symbol, a few trades,
+    or one month.
+
+    Families with no stored trade-level evidence keep their average-based
+    verdict, since a response surface cannot be computed without trades.
+    """
+    from app.services.labs.intraday.response_surface import (
+        analyze_family_response_surface,
+        load_campaign_family_trades,
+    )
+
+    ranked = rank_campaign_families(conn, campaign_id)
+    trades_by_family, parameters_by_candidate = load_campaign_family_trades(conn, campaign_id)
+
+    screened: list[dict[str, Any]] = []
+    for row in ranked:
+        architecture = str(row.get("architecture") or "")
+        trades = trades_by_family.get(architecture)
+        if not trades:
+            screened.append({**row, "screen_basis": "family_averages_no_trade_evidence"})
+            continue
+        surface = analyze_family_response_surface(
+            trades, parameters_by_candidate, architecture=architecture
+        )
+        # Registry status is a policy decision (archived families are not
+        # expanded regardless of what their surface looks like), so it still
+        # applies on top of the structural verdict.
+        policy_reasons = [
+            reason for reason in row["exclusion_reasons"] if reason in {"ARCHIVED_FAMILY", "UNKNOWN_FAMILY"}
+        ]
+        reasons = policy_reasons + surface["exclusion_reasons"]
+        screened.append(
+            {
+                **row,
+                "screen_basis": "response_surface",
+                "promising": not reasons,
+                "exclusion_reasons": reasons,
+                "response_surface": {
+                    key: value
+                    for key, value in surface.items()
+                    if key not in {"variants", "symbols"}
+                },
+            }
+        )
+    return sorted(
+        screened,
+        key=lambda item: (item["promising"], item["screen_score"], item["trades"]),
+        reverse=True,
+    )
+
+
 def campaign_funnel_report(conn: psycopg.Connection, campaign_id: int) -> dict[str, Any]:
     """Family ranking plus the explicit statement that a broad screen is not
     expected to yield elites -- so an empty elite count is not read as
     failure when the screen actually did its job."""
-    ranked = rank_campaign_families(conn, campaign_id)
+    ranked = screen_campaign_families(conn, campaign_id)
     promising = [row for row in ranked if row["promising"]]
     return {
         "campaign_id": campaign_id,
@@ -196,7 +256,7 @@ def create_focused_expansion_campaign(
     """
     from app.services.labs.intraday.families.registry import create_intraday_campaign
 
-    ranked = rank_campaign_families(conn, source_campaign_id)
+    ranked = screen_campaign_families(conn, source_campaign_id)
     if not ranked:
         raise ValueError(f"campaign {source_campaign_id} has no completed jobs to screen")
 

@@ -1944,6 +1944,116 @@ export function getIntradayLabOverview() {
   return request<IntradayLabOverview>("/research/intraday/overview", { cache: "no-store", timeoutMs: 30000 });
 }
 
+export type IntradayCampaignPlan = {
+  plan_version: string;
+  active_family_count: number;
+  active_families: { architecture: string; name: string; status: string; supported_timeframes: string[] }[];
+  asset_count: number;
+  assets: string[];
+  timeframes_supported: string[];
+  timeframes_selected: string[];
+  variants_per_family: number;
+  candidates_after_dedupe: number;
+  estimated_jobs: number;
+  protocol: {
+    split_protocol_version: string;
+    elite_gate_version: string;
+    cost_model: { version: string; fee_rate_per_leg: number; slippage_rate_per_leg: number; round_trip_rate: number };
+    simulator_audit: { audit_version: string; simulator_sound: boolean; defects: string[]; economics_findings: string[] };
+  };
+  blockers: { code: string; detail: string }[];
+  warnings: { code: string; detail: string }[];
+  can_launch: boolean;
+  evidence_policy: string;
+};
+
+/** Resolved server-side. Never recompute the job count in the frontend. */
+export function getIntradayCampaignPlan(options: { timeframes: string[]; assetLimit?: number; variantsPerFamily?: number }) {
+  const params = new URLSearchParams();
+  for (const timeframe of options.timeframes) params.append("timeframes", timeframe);
+  params.append("asset_limit", String(options.assetLimit ?? 10));
+  params.append("variants_per_family", String(options.variantsPerFamily ?? 12));
+  return request<IntradayCampaignPlan>(`/research/intraday/campaign-plan?${params.toString()}`, {
+    cache: "no-store",
+    timeoutMs: 30000
+  });
+}
+
+export type IntradayBroadScreenResult = Record<string, any> & { plan: IntradayCampaignPlan };
+
+/** Families are resolved server-side from the registry, never sent by the client. */
+export function launchIntradayBroadScreen(options: {
+  timeframes: string[];
+  assetLimit?: number;
+  variantsPerFamily?: number;
+  name?: string;
+}) {
+  const params = new URLSearchParams();
+  for (const timeframe of options.timeframes) params.append("timeframes", timeframe);
+  params.append("asset_limit", String(options.assetLimit ?? 10));
+  params.append("variants_per_family", String(options.variantsPerFamily ?? 12));
+  if (options.name) params.append("name", options.name);
+  return request<IntradayBroadScreenResult>(`/research/intraday/campaigns/broad-screen?${params.toString()}`, {
+    method: "POST",
+    timeoutMs: 120000
+  });
+}
+
+export type IntradayFamilyDiagnostic = {
+  architecture: string;
+  failure_reason: string | null;
+  recommendation: string | null;
+  buried: boolean;
+};
+
+/** Phase F diagnostic state per family. Returns null when unavailable. */
+export async function getIntradayFamilyDiagnostics(campaignId: number | null): Promise<IntradayFamilyDiagnostic[] | null> {
+  if (campaignId == null) return null;
+  try {
+    const report = await request<Record<string, any>>(`/research/intraday/campaigns/${campaignId}/diagnostics`, {
+      cache: "no-store",
+      timeoutMs: 60000
+    });
+    return (report.families ?? []).map((family: any) => ({
+      architecture: family.architecture,
+      failure_reason: family.diagnosis?.failure_reason ?? null,
+      recommendation: family.next_experiment?.recommendation ?? null,
+      buried: false
+    }));
+  } catch {
+    return null;
+  }
+}
+
+export type IntradayExpansionRecommendation = {
+  available: boolean;
+  reason: string | null;
+  families: { architecture: string; family_name: string | null; screen_score: number }[];
+};
+
+/** The backend's current near-pass recommendation; null when it has none. */
+export async function getIntradayExpansionRecommendation(campaignId: number | null): Promise<IntradayExpansionRecommendation | null> {
+  if (campaignId == null) return null;
+  try {
+    const report = await request<Record<string, any>>(`/research/intraday/campaigns/${campaignId}/family-ranking`, {
+      cache: "no-store",
+      timeoutMs: 60000
+    });
+    const promising = (report.families ?? []).filter((family: any) => family.promising);
+    return {
+      available: promising.length > 0,
+      reason: report.next_step ?? null,
+      families: promising.slice(0, 3).map((family: any) => ({
+        architecture: family.architecture,
+        family_name: family.family_name ?? null,
+        screen_score: family.screen_score ?? 0
+      }))
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function createIntradayCampaign(options: {
   familyIds: string[];
   name?: string;

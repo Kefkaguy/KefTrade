@@ -182,8 +182,31 @@ def record_intraday_dataset_snapshot(
             """,
             (dataset_id, item["symbol"], item["timeframe"], item["window_start"], item["window_end"]),
         )
+    _ensure_nested_splits(conn, dataset_id)
     conn.commit()
     return jsonable(dict(row))
+
+
+def _ensure_nested_splits(conn: psycopg.Connection, dataset_id: int) -> None:
+    """Fix the discovery/validation/confirmation boundaries at snapshot time.
+
+    Deliberately at creation, before any research has run against the data:
+    boundaries chosen later -- once results are known -- could be nudged until
+    the confirmation window cooperated. Written once and never moved (see
+    `persist_dataset_splits`). Failure to split is not fatal to snapshotting;
+    a dataset without splits simply cannot be used for confirmation, which the
+    protocol reports rather than silently working around.
+    """
+    from app.services.research_splits import compute_nested_splits, persist_dataset_splits
+
+    rows = conn.execute(
+        "SELECT DISTINCT timestamp FROM research_dataset_candles WHERE dataset_id = %s ORDER BY timestamp",
+        (dataset_id,),
+    ).fetchall()
+    timestamps = [row["timestamp"] for row in rows]
+    if len(timestamps) < 3:
+        return
+    persist_dataset_splits(conn, dataset_id=dataset_id, splits=compute_nested_splits(timestamps))
 
 
 def load_snapshot_intraday_features(conn: psycopg.Connection, dataset_id: int, symbol: str, timeframe: str) -> list[dict[str, Any]]:

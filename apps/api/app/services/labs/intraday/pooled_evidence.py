@@ -217,32 +217,39 @@ def _trade_count_by_symbol(trade_rows: list[dict[str, Any]]) -> dict[str, int]:
 
 
 def compute_holdout_confirmation(conn: psycopg.Connection, *, campaign_id: int) -> list[dict[str, Any]]:
-    """Re-run the SAME elite gate over ONLY each pooled candidate's untouched
-    validation split, and record `cluster_elite` for the ones that survive.
+    """Confirm pooled candidates on trades the pooled pass did not already use.
 
-    Pooling (above) buys a candidate statistical breadth, but breadth alone
-    cannot tell you whether an edge was fitted to the data it was found in.
-    Every intraday job already stores its own walk-forward boundary, and
-    `persist_intraday_job_trades` tags each trade `dataset_split = 'train'`
-    or `'validation'` from it -- so a genuine out-of-sample check is already
-    sitting in `research_campaign_trades` and has never been used as a gate.
+    **Phase A correction.** This function was written believing that
+    `persist_intraday_job_trades`' `dataset_split` tag produced two
+    independent samples. The simulator audit disproved that: `run_backtest`
+    skips its training window and trades only the validation portion, so every
+    stored trade is tagged `'validation'` and none is tagged `'train'`. Under
+    that condition the "holdout" is the *entire* traded sample -- byte for byte
+    the same trades the pooled gate already scored -- and re-running the gate
+    on it confirms nothing.
 
-    This is strictly ADDITIVE and strictly HARDER: a candidate reaches
-    `cluster_elite` only if it passed the pooled gate AND passes that same
-    unchanged gate again on validation-split trades alone. No threshold is
-    lowered anywhere; this can only ever remove candidates.
+    So independence is now checked rather than assumed. When a candidate has
+    no `'train'`-tagged trades at all, the split is degenerate and the
+    candidate is NOT confirmed, with reason `HOLDOUT_NOT_INDEPENDENT`. That
+    deliberately leaves `cluster_elite` unpopulated for such campaigns, which
+    is the honest state: no genuine out-of-sample evidence exists in stored
+    trades, and inventing a confirmation from a set compared with itself would
+    be worse than having none.
 
-    Three honesty constraints, all explicit in the returned rows:
-      * A candidate with no validation-split trades is NOT confirmed. Absence
-        of a holdout sample is never treated as passing it.
+    Genuine confirmation lives in `app/services/research_splits.py`, which
+    holds a locked window out of research entirely and permits exactly one run
+    per frozen candidate.
+
+    Where independence does hold, this stays strictly ADDITIVE and strictly
+    HARDER: a candidate reaches `cluster_elite` only if it passed the pooled
+    gate AND passes that same unchanged gate again on holdout trades alone.
+    Two further constraints, both explicit in the returned rows:
       * The holdout must itself clear `MINIMUM_CONTRIBUTING_SYMBOLS` distinct
         symbols -- a confirmation resting on one symbol is not cross-sectional.
       * Drawdown still comes from each contributing job's own full-period
-        figure (the same limitation the pooled path documents: per-job
-        simulations cannot be blended into one equity curve). That number
-        covers train+validation, so it is at least as large as a
-        validation-only drawdown would be -- it makes this check harder to
-        pass, never easier, which is the acceptable direction for a bias.
+        figure (the same limitation the pooled path documents). That number
+        covers the whole run, so it is at least as large as a holdout-only
+        drawdown would be -- it makes this check harder to pass, never easier.
 
     Idempotent by `evidence_key`, exactly like the pooled pass.
     """
@@ -299,17 +306,19 @@ def compute_holdout_confirmation(conn: psycopg.Connection, *, campaign_id: int) 
             continue
 
         job_ids = [job["id"] for job in candidate_jobs]
-        trade_rows = list(
+        all_trade_rows = list(
             conn.execute(
                 """
-                SELECT job_id, symbol, net_pnl, pnl_pct, holding_period_hours
+                SELECT job_id, symbol, net_pnl, pnl_pct, holding_period_hours, dataset_split
                 FROM research_campaign_trades
-                WHERE job_id = ANY(%s) AND dataset_split = 'validation'
+                WHERE job_id = ANY(%s)
                 ORDER BY entry_time ASC
                 """,
                 (job_ids,),
             ).fetchall()
         )
+        trade_rows = [row for row in all_trade_rows if row["dataset_split"] == "validation"]
+        training_rows = [row for row in all_trade_rows if row["dataset_split"] == "train"]
         if not trade_rows:
             # Either walk-forward never ran for these jobs (no split boundary
             # to tag trades with) or every trade fell in the training window.
@@ -317,6 +326,20 @@ def compute_holdout_confirmation(conn: psycopg.Connection, *, campaign_id: int) 
             evaluation["unconfirmed_reason"] = "NO_HOLDOUT_TRADES"
             results.append(evaluation)
             continue
+        if not training_rows:
+            # Degenerate split: the "holdout" is the whole traded sample, i.e.
+            # exactly the trades the pooled gate already scored. Confirming
+            # against it would be comparing a set with itself.
+            evaluation["is_independent_sample"] = False
+            evaluation["holdout_trade_count"] = len(trade_rows)
+            evaluation["unconfirmed_reason"] = "HOLDOUT_NOT_INDEPENDENT"
+            evaluation["remedy"] = (
+                "No trade is tagged 'train', so this split cannot confirm anything. Use the locked "
+                "confirmation protocol in app/services/research_splits.py."
+            )
+            results.append(evaluation)
+            continue
+        evaluation["is_independent_sample"] = True
 
         holdout_symbols = sorted({row["symbol"] for row in trade_rows})
         evaluation["holdout_trade_count"] = len(trade_rows)

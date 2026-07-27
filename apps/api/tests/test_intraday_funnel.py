@@ -11,6 +11,7 @@ from app.services.labs.intraday.funnel import (
     campaign_funnel_report,
     create_focused_expansion_campaign,
     rank_campaign_families,
+    screen_campaign_families,
 )
 
 ACTIVE_FAMILY = next(arch for arch, d in FAMILY_REGISTRY.items() if d.status == "active")
@@ -51,12 +52,22 @@ def family_row(
 
 @pytest.fixture
 def fake_analytics(monkeypatch):
-    """Patch the shared analytics primitive the ranking is built on."""
+    """Patch the two stored-evidence loaders the screen is built on.
 
-    def install(rows):
+    With no trade-level evidence supplied, `screen_campaign_families` falls
+    back to the average-based verdict, so these tests exercise the ranking
+    rules in isolation. Pass `trades_by_family` to exercise the
+    response-surface path instead.
+    """
+
+    def install(rows, trades_by_family=None, parameters_by_candidate=None):
         monkeypatch.setattr(
             "app.services.labs.intraday.strategy_analytics.campaign_family_analytics",
             lambda conn, campaign_id: list(rows),
+        )
+        monkeypatch.setattr(
+            "app.services.labs.intraday.response_surface.load_campaign_family_trades",
+            lambda conn, campaign_id: (dict(trades_by_family or {}), dict(parameters_by_candidate or {})),
         )
 
     return install
@@ -179,6 +190,98 @@ def test_trade_starved_families_rank_below_equally_profitable_frequent_ones(fake
     ranked = rank_campaign_families(None, 101)
 
     assert ranked[0]["architecture"] == OTHER_ACTIVE_FAMILY
+
+
+# ---------------------------------------------------------------------------
+# The screen that actually decides expansions
+# ---------------------------------------------------------------------------
+
+def _trade(candidate_id, symbol, gross, month="2026-01"):
+    return {
+        "candidate_id": candidate_id,
+        "symbol": symbol,
+        "month_key": month,
+        "gross_pnl": gross,
+        "fees": 0.0,
+        "slippage_cost": 0.0,
+    }
+
+
+def test_a_family_with_healthy_averages_but_no_stable_region_is_rejected(fake_analytics):
+    """The upgrade over average-based screening: one lucky variant can carry
+    a family's mean, but it is not a region and must not buy compute."""
+    trades = [_trade("winner", symbol, 50.0) for symbol in ("NVDA", "TSLA") for _ in range(15)]
+    trades += [_trade(loser, "NVDA", -5.0) for loser in ("l1", "l2", "l3") for _ in range(10)]
+    parameters = {
+        "winner": {"threshold": 1, "window": 5},
+        "l1": {"threshold": 20, "window": 40},
+        "l2": {"threshold": 21, "window": 41},
+        "l3": {"threshold": 22, "window": 42},
+    }
+    fake_analytics(
+        [family_row(ACTIVE_FAMILY)],
+        trades_by_family={ACTIVE_FAMILY: trades},
+        parameters_by_candidate=parameters,
+    )
+
+    screened = screen_campaign_families(None, 101)
+
+    assert screened[0]["screen_basis"] == "response_surface"
+    assert screened[0]["promising"] is False
+    assert "NO_STABLE_PARAMETER_REGION" in screened[0]["exclusion_reasons"]
+
+
+def test_a_family_with_a_genuine_plateau_passes_the_screen(fake_analytics):
+    trades = []
+    parameters = {}
+    for index, candidate in enumerate(("c1", "c2", "c3")):
+        parameters[candidate] = {"threshold": index, "window": 5}
+        for symbol in ("NVDA", "TSLA"):
+            for month in ("2026-01", "2026-02"):
+                trades += [_trade(candidate, symbol, 30.0, month) for _ in range(4)]
+                trades.append(_trade(candidate, symbol, -10.0, month))
+    fake_analytics(
+        [family_row(ACTIVE_FAMILY)],
+        trades_by_family={ACTIVE_FAMILY: trades},
+        parameters_by_candidate=parameters,
+    )
+
+    screened = screen_campaign_families(None, 101)
+
+    assert screened[0]["promising"] is True, screened[0]["exclusion_reasons"]
+    assert screened[0]["response_surface"]["stable_region"]["size"] == 3
+
+
+def test_archived_families_stay_excluded_even_with_a_perfect_surface(fake_analytics):
+    """Registry status is policy, not structure: a sound response surface
+    does not reopen a family the team decided to stop tuning."""
+    trades = []
+    parameters = {}
+    for index, candidate in enumerate(("c1", "c2", "c3")):
+        parameters[candidate] = {"threshold": index, "window": 5}
+        for symbol in ("NVDA", "TSLA"):
+            for month in ("2026-01", "2026-02"):
+                trades += [_trade(candidate, symbol, 30.0, month) for _ in range(4)]
+                trades.append(_trade(candidate, symbol, -10.0, month))
+    fake_analytics(
+        [family_row(ARCHIVED_FAMILY)],
+        trades_by_family={ARCHIVED_FAMILY: trades},
+        parameters_by_candidate=parameters,
+    )
+
+    screened = screen_campaign_families(None, 101)
+
+    assert screened[0]["promising"] is False
+    assert "ARCHIVED_FAMILY" in screened[0]["exclusion_reasons"]
+
+
+def test_a_family_without_trade_evidence_keeps_its_average_based_verdict(fake_analytics):
+    fake_analytics([family_row(ACTIVE_FAMILY)])
+
+    screened = screen_campaign_families(None, 101)
+
+    assert screened[0]["screen_basis"] == "family_averages_no_trade_evidence"
+    assert screened[0]["promising"] is True
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,72 @@ def get_phase_12_4_analysis(
     return phase_12_4_report(conn, campaign_id)
 
 
+@router.get("/research/intraday/campaign-plan")
+def get_intraday_campaign_plan(
+    timeframes: list[str] | None = Query(None, description="Defaults to every supported timeframe."),
+    asset_limit: int = Query(10, ge=1, le=100),
+    variants_per_family: int = Query(12, ge=1, le=64),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Resolve a broad 15m/30m screen without running it.
+
+    The single source of truth for the launch preview: family count, assets,
+    timeframes, job count, protocol versions, and blockers. Job count comes
+    from the same deduplication the launcher applies, so the preview cannot
+    promise a number the launch contradicts."""
+    from app.services.labs.intraday.campaign_plan import build_campaign_plan
+
+    return build_campaign_plan(
+        conn,
+        timeframes=timeframes,
+        asset_limit=asset_limit,
+        variants_per_family=variants_per_family,
+    )
+
+
+@router.post("/research/intraday/campaigns/broad-screen")
+def launch_broad_screen(
+    timeframes: list[str] | None = Query(None, description="Defaults to every supported timeframe."),
+    asset_limit: int = Query(10, ge=1, le=100),
+    variants_per_family: int = Query(12, ge=1, le=64),
+    name: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Launch a broad screen over every ACTIVE family, resolved server-side.
+
+    The caller does not choose families: the registry decides, so an archived
+    family can never be screened by a stale frontend list. Refuses to launch
+    while the plan reports a blocker."""
+    from app.services.labs.intraday.campaign_plan import build_campaign_plan
+    from app.services.labs.intraday.families.registry import create_intraday_campaign
+
+    plan = build_campaign_plan(
+        conn,
+        timeframes=timeframes,
+        asset_limit=asset_limit,
+        variants_per_family=variants_per_family,
+    )
+    if plan["blockers"]:
+        raise HTTPException(
+            status_code=422,
+            detail="; ".join(f"{item['code']}: {item['detail']}" for item in plan["blockers"]),
+        )
+
+    try:
+        result = create_intraday_campaign(
+            conn,
+            family_ids=[family["architecture"] for family in plan["active_families"]],
+            name=name or f"Broad {'/'.join(plan['timeframes_selected'])} family screen",
+            asset_limit=asset_limit,
+            timeframes=plan["timeframes_selected"],
+            max_candidates_per_family=variants_per_family,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+    return {**result, "plan": plan}
+
+
 @router.post("/research/intraday/campaigns")
 def create_intraday_campaign_endpoint(
     family_ids: list[str] = Query(..., description="One or more Intraday Lab family architecture ids to launch together."),
@@ -296,6 +362,178 @@ def get_campaign_family_ranking(
     from app.services.labs.intraday.funnel import campaign_funnel_report
 
     return campaign_funnel_report(conn, campaign_id)
+
+
+@router.get("/research/intraday/campaigns/{campaign_id}/response-surface")
+def get_campaign_response_surface(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Per-family response-surface structure, scored under both the costs the
+    campaign ran with and a realistic-retail cost assumption.
+
+    Re-costing reuses the stored gross/fee/slippage split, so no simulation is
+    re-run. See app/services/labs/intraday/response_surface.py."""
+    from app.services.labs.intraday.response_surface import family_response_surface_report
+
+    return family_response_surface_report(conn, campaign_id)
+
+
+@router.get("/research/intraday/campaigns/{campaign_id}/cross-sectional-portfolio")
+def get_cross_sectional_portfolio_evaluation(
+    campaign_id: int,
+    timeframe: str | None = Query(None, description="Defaults to each configuration's own timeframe."),
+    holding_bars: int = Query(1, ge=1, le=64),
+    long_quantile: float = Query(0.2, gt=0, le=0.5),
+    short_quantile: float = Query(0.2, gt=0, le=0.5),
+    long_only: bool = Query(False),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Re-evaluate this campaign's cross-sectional families as one portfolio
+    process instead of independently-backtested symbols.
+
+    Read-only analysis: it never overwrites the stored per-symbol job results,
+    which were produced by a different process. See
+    app/services/labs/intraday/cross_sectional_portfolio.py."""
+    from app.services.labs.intraday.cross_sectional_portfolio import (
+        PortfolioConfig,
+        evaluate_cross_sectional_campaign,
+    )
+
+    try:
+        return evaluate_cross_sectional_campaign(
+            conn,
+            campaign_id,
+            timeframe=timeframe,
+            config=PortfolioConfig(
+                holding_bars=holding_bars,
+                long_quantile=long_quantile,
+                short_quantile=short_quantile,
+                long_only=long_only,
+            ),
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.get("/research/intraday/datasets/{dataset_id}/splits")
+def get_dataset_split_status(
+    dataset_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """The dataset's discovery/validation/confirmation boundaries and how much
+    statistical budget each phase has already spent."""
+    from app.services.research_splits import get_dataset_splits, split_usage_summary
+
+    splits = get_dataset_splits(conn, dataset_id)
+    return {
+        "dataset_id": dataset_id,
+        "splits": splits.as_dict() if splits else None,
+        "usage": split_usage_summary(conn, dataset_id),
+    }
+
+
+@router.get("/research/intraday/campaigns/{campaign_id}/multiple-testing")
+def get_multiple_testing_ledger(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """The honest trial count behind this campaign's best-looking result.
+
+    Feed `effective_trials` to null_models.deflated_sharpe_ratio -- a guessed
+    trial count defeats the estimator."""
+    from app.services.research_splits import multiple_testing_ledger
+
+    return multiple_testing_ledger(conn, campaign_id)
+
+
+@router.get("/research/intraday/confirmations")
+def get_confirmation_status(
+    campaign_id: int | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Which frozen candidates have spent their single confirmation run."""
+    from app.services.research_splits import confirmation_status
+
+    return confirmation_status(conn, campaign_id=campaign_id)
+
+
+@router.get("/research/intraday/campaigns/{campaign_id}/quality-dashboard")
+def get_research_quality_dashboard(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Process health for this campaign: simulator audit, leakage checks,
+    multiple-testing burden, stable regions, loss diagnostics, confirmations.
+
+    Reports whether the research is trustworthy, not whether it made money."""
+    from app.services.research_quality_dashboard import research_quality_dashboard
+
+    try:
+        return research_quality_dashboard(conn, campaign_id)
+    except ValueError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.get("/research/intraday/campaigns/{campaign_id}/diagnostics")
+def get_campaign_diagnostics(
+    campaign_id: int,
+    persist: bool = Query(False, description="Record failed families in the research graveyard."),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Per-family loss decomposition, failure diagnosis, and the single causal
+    change to test next. See app/services/research_diagnostics.py."""
+    from app.services.research_diagnostics import campaign_diagnostics_report
+
+    return campaign_diagnostics_report(conn, campaign_id, persist=persist)
+
+
+@router.get("/research/intraday/graveyard")
+def get_research_graveyard(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    """Families that failed, why, and what was proposed next -- so the same
+    dead end is not rediscovered by a campaign that has forgotten it."""
+    from app.services.research_diagnostics import list_graveyard
+
+    entries = list_graveyard(conn)
+    return {"buried_families": len(entries), "entries": entries}
+
+
+@router.post("/research/intraday/campaigns/{campaign_id}/confirm")
+def confirm_frozen_candidate(
+    campaign_id: int,
+    candidate_id: str = Query(..., description="The frozen candidate to confirm."),
+    symbol: str = Query(...),
+    timeframe: str = Query(...),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Spend this candidate's single confirmation run against the locked window.
+
+    Irreversible: a candidate gets exactly one confirmation, pass or fail.
+    Changing its parameters creates a new hypothesis with its own slot; it
+    does not reopen this one."""
+    from app.services.research_splits import ConfirmationAlreadySpentError, freeze_and_confirm_candidate
+
+    try:
+        return freeze_and_confirm_candidate(
+            conn,
+            campaign_id=campaign_id,
+            candidate_id=candidate_id,
+            symbol=symbol,
+            timeframe=timeframe,
+        )
+    except ConfirmationAlreadySpentError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.get("/research/intraday/simulator-audit")
+def get_simulator_audit() -> dict[str, Any]:
+    """Phase A: verify the shared execution path against deterministic
+    synthetic series whose correct answer is known in advance."""
+    from app.services.simulator_audit import run_simulator_audit
+
+    return run_simulator_audit()
 
 
 @router.post("/research/intraday/campaigns/{campaign_id}/focused-expansion")

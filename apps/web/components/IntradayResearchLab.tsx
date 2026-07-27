@@ -2,7 +2,21 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Archive, CheckCircle2, Circle, Rocket, ShieldAlert, TrendingUp } from "lucide-react";
-import { createIntradayCampaign, getIntradayLabOverview, launchLowTimeframeExpansion, type IntradayLabOverview, type IntradaySampleJob, type IntradayStrategyRosterEntry } from "@/lib/api";
+import {
+  getIntradayCampaignPlan,
+  getIntradayExpansionRecommendation,
+  getIntradayFamilyDiagnostics,
+  getIntradayLabOverview,
+  launchIntradayBroadScreen,
+  launchLowTimeframeExpansion,
+  type IntradayBroadScreenResult,
+  type IntradayCampaignPlan,
+  type IntradayExpansionRecommendation,
+  type IntradayFamilyDiagnostic,
+  type IntradayLabOverview,
+  type IntradaySampleJob,
+  type IntradayStrategyRosterEntry
+} from "@/lib/api";
 import { Card, EmptyState, PageTitle } from "@/components/ResearchUI";
 import { Phase124Panel } from "@/components/Phase124Panel";
 import { StrategyIntelligencePanel } from "@/components/StrategyIntelligencePanel";
@@ -109,6 +123,12 @@ export function IntradayResearchLab() {
   ]);
   const phase124CampaignId =
     (overview?.strategies ?? []).find((s) => phase124FamilyIds.has(s.id) && s.pilot)?.pilot?.campaign_id ?? null;
+  // Most recent campaign with evidence: what the Phase F diagnostics and the
+  // expansion recommendation are read from.
+  const latestCampaignId = strategies.reduce<number | null>((latest, strategy) => {
+    const id = strategy.pilot?.campaign_id ?? null;
+    return id != null && (latest == null || id > latest) ? id : latest;
+  }, null);
 
   return (
     <div className="pageContainer">
@@ -161,9 +181,16 @@ export function IntradayResearchLab() {
         </div>
       </Card>
 
-      <LaunchIntradayCampaign strategies={strategies} timeframesSupported={overview?.timeframes_supported ?? ["15m", "30m"]} onLaunched={load} />
+      <LaunchIntradayCampaign
+        timeframesSupported={overview?.timeframes_supported ?? ["15m", "30m"]}
+        latestCampaignId={latestCampaignId}
+        onLaunched={load}
+      />
 
-      <Card title="Highest-signal families" eyebrow="Compact view">
+      <FamilyRoster strategies={materialStrategies} latestCampaignId={latestCampaignId} loading={!overview} />
+
+      <details className="intradayDeepDive">
+        <summary>Show highest-signal family cards</summary>
         <div className="intradayStrategyGrid compact">
           {materialStrategies.map((strategy) => {
             const signal = strategySignal(strategy);
@@ -197,7 +224,7 @@ export function IntradayResearchLab() {
           })}
           {!overview ? <EmptyState title="Loading strategy roster" body="Reading the Intraday Lab overview." /> : null}
         </div>
-      </Card>
+      </details>
 
       <details className="intradayDeepDive">
         <summary>Show detailed family diagnostics</summary>
@@ -254,169 +281,316 @@ export function IntradayResearchLab() {
   );
 }
 
-function LaunchIntradayCampaign({
+const DIAGNOSTIC_LABELS: Record<string, string> = {
+  NO_RAW_SIGNAL: "No raw signal",
+  COST_DESTROYED_SIGNAL: "Cost destroyed signal",
+  WRONG_EXIT_LOGIC: "Exit logic",
+  WRONG_DIRECTION: "Wrong direction",
+  POOR_REGIME_TARGETING: "Regime targeting",
+  ONE_SYMBOL_DEPENDENCE: "One-symbol dependence",
+  EXCESSIVE_TURNOVER: "Excessive turnover",
+  ENTRY_LATENCY_PROBLEM: "Entry latency",
+  PASSED_NO_FAILURE: "Ready for confirmation"
+};
+
+function diagnosticLabel(diagnostic: IntradayFamilyDiagnostic | undefined) {
+  if (!diagnostic) return null;
+  if (diagnostic.recommendation === "single_change_experiment") {
+    return `Mutation available — ${DIAGNOSTIC_LABELS[diagnostic.failure_reason ?? ""] ?? diagnostic.failure_reason}`;
+  }
+  if (diagnostic.recommendation === "advance_to_confirmation") return "Ready for confirmation";
+  if (diagnostic.recommendation === "retire") return "No raw signal — retire";
+  return DIAGNOSTIC_LABELS[diagnostic.failure_reason ?? ""] ?? null;
+}
+
+/** Secondary informational list: name, status, and Phase F state when known. */
+function FamilyRoster({
   strategies,
-  timeframesSupported,
-  onLaunched
+  latestCampaignId,
+  loading
 }: {
   strategies: IntradayStrategyRosterEntry[];
+  latestCampaignId: number | null;
+  loading: boolean;
+}) {
+  const [diagnostics, setDiagnostics] = useState<IntradayFamilyDiagnostic[] | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getIntradayFamilyDiagnostics(latestCampaignId).then((result) => {
+      if (active) setDiagnostics(result);
+    });
+    return () => {
+      active = false;
+    };
+  }, [latestCampaignId]);
+
+  const byArchitecture = useMemo(() => {
+    const map = new Map<string, IntradayFamilyDiagnostic>();
+    for (const row of diagnostics ?? []) map.set(row.architecture, row);
+    return map;
+  }, [diagnostics]);
+
+  return (
+    <Card title="Families" eyebrow="Registry status">
+      <div className="strategyFamilyTable legacy threeCol" role="table" aria-label="Intraday strategy families">
+        <div role="row" className="strategyFamilyHead">
+          <span role="columnheader">Family</span>
+          <span role="columnheader">Status</span>
+          <span role="columnheader">Diagnostic state</span>
+        </div>
+        {strategies.map((strategy) => {
+          const diagnostic = diagnosticLabel(byArchitecture.get(strategy.id));
+          return (
+            <div role="row" key={strategy.id} className={`strategyFamilyRow ${strategy.status === "archived" ? "muted" : ""}`}>
+              <span role="cell">{strategy.name}{strategy.version ? ` ${strategy.version}` : ""}</span>
+              <span role="cell">
+                <em className={`familyTag ${strategy.status === "archived" ? "muted" : "good"}`}>
+                  {strategy.status === "archived" ? "Archived" : "Active"}
+                </em>
+              </span>
+              <span role="cell">{diagnostic ?? "—"}</span>
+            </div>
+          );
+        })}
+        {loading ? <div className="strategyFamilyEmpty">Loading families…</div> : null}
+        {!loading && !strategies.length ? <div className="strategyFamilyEmpty">No families with evidence yet.</div> : null}
+      </div>
+    </Card>
+  );
+}
+
+function launchLabel(timeframes: string[]) {
+  if (!timeframes.length) return "Launch Research";
+  return `Launch ${timeframes.join(" / ")} Research`;
+}
+
+function LaunchIntradayCampaign({
+  timeframesSupported,
+  latestCampaignId,
+  onLaunched
+}: {
   timeframesSupported: string[];
+  latestCampaignId: number | null;
   onLaunched: () => void;
 }) {
-  const launchable = useMemo(() => strategies.filter((s) => s.status !== "planned"), [strategies]);
-  const activeFamilyIds = useMemo(() => strategies.filter((s) => s.status === "active").map((strategy) => strategy.id), [strategies]);
-  const [selectedFamilies, setSelectedFamilies] = useState<string[]>([]);
   const [selectedTimeframes, setSelectedTimeframes] = useState<string[]>(timeframesSupported);
+  const [plan, setPlan] = useState<IntradayCampaignPlan | null>(null);
+  const [planError, setPlanError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [launched, setLaunched] = useState<IntradayBroadScreenResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  function toggleFamily(id: string) {
-    setSelectedFamilies((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
-  }
+  // Keep the default in sync once the supported list arrives from the backend.
+  useEffect(() => {
+    setSelectedTimeframes(timeframesSupported);
+  }, [timeframesSupported.join(",")]);
+
+  // The plan is the single source of truth for every number shown below; the
+  // job count is never recomputed here.
+  useEffect(() => {
+    let active = true;
+    if (!selectedTimeframes.length) {
+      setPlan(null);
+      return;
+    }
+    getIntradayCampaignPlan({ timeframes: selectedTimeframes })
+      .then((result) => {
+        if (active) {
+          setPlan(result);
+          setPlanError(null);
+        }
+      })
+      .catch((reason) => {
+        if (active) {
+          setPlan(null);
+          setPlanError(reason instanceof Error ? reason.message : "Could not load the campaign plan.");
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [selectedTimeframes.join(",")]);
 
   function toggleTimeframe(tf: string) {
-    setSelectedTimeframes((prev) => {
-      const exists = prev.includes(tf);
-      if (exists && prev.length === 1) return prev;
-      return exists ? prev.filter((item) => item !== tf) : [...prev, tf];
-    });
+    setSelectedTimeframes((prev) => (prev.includes(tf) ? prev.filter((item) => item !== tf) : [...prev, tf]));
   }
 
   async function launch() {
-    if (!selectedFamilies.length) return;
+    if (busy || !selectedTimeframes.length || (plan && !plan.can_launch)) return;
     setBusy(true);
     setError(null);
-    setNotice(null);
+    setLaunched(null);
     try {
-      const result = await createIntradayCampaign({ familyIds: selectedFamilies, timeframes: selectedTimeframes });
-      setNotice(`Campaign #${result.campaign_id} queued: ${result.jobs_created} jobs across ${(result.timeframes || []).join(", ")}, ${(result.assets || []).length} assets.`);
+      const result = await launchIntradayBroadScreen({ timeframes: selectedTimeframes });
+      setLaunched(result);
       onLaunched();
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not launch the campaign.");
+      setError(reason instanceof Error ? reason.message : "Could not launch the research campaign.");
     } finally {
       setBusy(false);
     }
   }
 
-  async function launchBroadScreen() {
-    if (!activeFamilyIds.length) return;
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await createIntradayCampaign({
-        familyIds: activeFamilyIds,
-        timeframes: ["15m", "30m"],
-        assetLimit: 10,
-        maxCandidatesPerFamily: 12,
-        name: "Broad 15m/30m family screen"
-      });
-      setNotice(`Broad 15m/30m screen #${result.campaign_id} queued: ${result.jobs_created} jobs across ${(result.timeframes || []).join(", ")}, ${(result.assets || []).length} assets, ${activeFamilyIds.length} active families.`);
-      onLaunched();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not launch the broad 15m/30m screen.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function launchExpansion() {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const result = await launchLowTimeframeExpansion({
-        timeframes: ["30m"],
-        preferredFamily: "Momentum",
-        parentLimit: 64,
-        variantsPerParent: 12,
-        assetLimit: 4,
-        workers: 4,
-        jobsPerWorker: 50,
-      });
-      const execution = result.execution ? ` Started ${result.execution.workers} worker${result.execution.workers === 1 ? "" : "s"}.` : "";
-      setNotice(`Near-pass expansion #${result.campaign_id} queued: ${result.jobs_created} jobs from ${result.parent_count} parent rows across ${(result.timeframes || []).join(", ")}.${execution}`);
-      onLaunched();
-    } catch (reason) {
-      setError(reason instanceof Error ? reason.message : "Could not launch the low-timeframe expansion.");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const blocked = Boolean(plan && !plan.can_launch);
+  const disabled = busy || !selectedTimeframes.length || blocked;
 
   return (
-    <Card title="Launch 15m / 30m research" eyebrow="Broad screen first, exploit winners second">
+    <Card title="Launch 15m / 30m Research" eyebrow="Broad screen first, exploit winners second">
       <p className="intradayStrategySummary">
-        Each selected family keeps its own candidates and is evaluated independently through the unmodified elite gate — evidence is never merged across families.
+        {plan?.evidence_policy ??
+          "Each family keeps its own candidates and is evaluated independently through the unmodified elite gate — evidence is never merged across families."}
       </p>
-      <div className="intradayLaunchPrimary">
-        <div>
-          <strong>Broad 15m/30m family screen</strong>
-          <span>{activeFamilyIds.length} active families x 10 assets x 2 timeframes x 12 variants per family. The elite gate stays unchanged.</span>
-        </div>
-        <button
-          type="button"
-          className="button"
-          disabled={busy || !activeFamilyIds.length}
-          onClick={() => void launchBroadScreen()}
-        >
-          <Rocket size={15} /> {busy ? "Launching..." : "Run broad 15m/30m screen"}
-        </button>
-      </div>
-      <div className="intradayHonestyBanner" style={{ marginBottom: 16 }}>
-        <TrendingUp size={16} />
-        <span>Recommended next run: large 30m Momentum near-pass expansion. It targets the current blocker with 64 parent rows, 12 variants per parent, and up to 4 source assets.</span>
-      </div>
-      <button
-        type="button"
-        className="button secondary"
-        disabled={busy}
-        onClick={() => void launchExpansion()}
-      >
-        <Rocket size={15} /> {busy ? "Launching..." : "Launch focused AMD/Momentum expansion"}
-      </button>
-      <div className="intradayFamilyToggleGrid">
-        {launchable.map((strategy) => {
-          const selected = selectedFamilies.includes(strategy.id);
-          return (
-            <button
-              key={strategy.id}
-              type="button"
-              className={`intradayFamilyToggle ${selected ? "selected" : ""}`}
-              aria-pressed={selected}
-              onClick={() => toggleFamily(strategy.id)}
-            >
-              <strong>{strategy.name}</strong>
-              <em className={`familyTag ${strategy.status === "archived" ? "muted" : "good"}`}>{strategy.status === "archived" ? "Archived" : "Active"}</em>
-            </button>
-          );
-        })}
-      </div>
-      <div className="intradayTimeframePills" style={{ marginTop: 16 }}>
+
+      <div className="intradayTimeframePills" style={{ marginTop: 4 }}>
         {timeframesSupported.map((tf) => (
           <button
             key={tf}
             type="button"
             className={`intradayPill selectable ${selectedTimeframes.includes(tf) ? "selected" : ""}`}
+            aria-pressed={selectedTimeframes.includes(tf)}
             onClick={() => toggleTimeframe(tf)}
           >
             {tf}
           </button>
         ))}
       </div>
-      {error ? <div className="strategyLibraryError" role="alert" style={{ marginTop: 14 }}>{error}</div> : null}
-      {notice ? <div className="strategyLibraryNotice" style={{ marginTop: 14 }}>{notice}</div> : null}
+
+      {!selectedTimeframes.length ? (
+        <p className="intradayStrategyPlaceholder" style={{ marginTop: 12 }}>
+          <Circle size={12} /> Select at least one timeframe to launch.
+        </p>
+      ) : null}
+
+      {plan ? (
+        <div className="intradayTimeframeDetailGrid" style={{ marginTop: 16 }}>
+          <div><span>Active families</span><strong>{plan.active_family_count}</strong></div>
+          <div><span>Assets</span><strong>{plan.asset_count}</strong></div>
+          <div><span>Timeframes</span><strong>{plan.timeframes_selected.join(", ") || "—"}</strong></div>
+          <div><span>Variants per family</span><strong>{plan.variants_per_family}</strong></div>
+          <div><span>Estimated jobs</span><strong>{plan.estimated_jobs.toLocaleString()}</strong></div>
+          <div><span>Split protocol</span><strong className="mono">{plan.protocol.split_protocol_version}</strong></div>
+          <div><span>Elite gate</span><strong className="mono">{plan.protocol.elite_gate_version}</strong></div>
+          <div><span>Cost model</span><strong className="mono">{plan.protocol.cost_model.version}</strong></div>
+        </div>
+      ) : null}
+
+      {planError ? <div className="strategyLibraryError" role="alert" style={{ marginTop: 14 }}>{planError}</div> : null}
+
+      {plan?.blockers.length ? (
+        <div className="strategyLibraryError" role="alert" style={{ marginTop: 14 }}>
+          <strong>Launch blocked</strong>
+          <ul>
+            {plan.blockers.map((item) => (
+              <li key={item.code}>{item.detail}</li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {plan?.warnings.length ? (
+        <div className="intradayHonestyBanner" style={{ marginTop: 14 }}>
+          <ShieldAlert size={16} />
+          <span>{plan.warnings.map((item) => item.detail).join(" ")}</span>
+        </div>
+      ) : null}
+
       <button
         type="button"
-        className="button secondary"
+        className="button"
         style={{ marginTop: 16 }}
-        disabled={busy || !selectedFamilies.length}
+        disabled={disabled}
         onClick={() => void launch()}
       >
-        <Rocket size={15} /> {busy ? "Launching…" : `Launch ${selectedFamilies.length || ""} famil${selectedFamilies.length === 1 ? "y" : "ies"}`}
+        <Rocket size={15} /> {busy ? "Launching…" : launchLabel(selectedTimeframes)}
       </button>
+
+      {error ? <div className="strategyLibraryError" role="alert" style={{ marginTop: 14 }}>{error}</div> : null}
+
+      {launched ? (
+        <div className="strategyLibraryNotice" style={{ marginTop: 14 }}>
+          <strong>Campaign #{launched.campaign_id} — {launched.campaign?.name ?? "Broad screen"}</strong>
+          <ul>
+            <li>{launched.plan.active_family_count} families included</li>
+            <li>Timeframes: {(launched.timeframes ?? []).join(", ")}</li>
+            <li>{(launched.jobs_created ?? 0).toLocaleString()} jobs inserted</li>
+            <li>Status: {launched.campaign?.status ?? "queued"}</li>
+          </ul>
+        </div>
+      ) : null}
+
+      <FocusedExpansion campaignId={latestCampaignId} busy={busy} onLaunched={onLaunched} />
     </Card>
+  );
+}
+
+function FocusedExpansion({
+  campaignId,
+  busy,
+  onLaunched
+}: {
+  campaignId: number | null;
+  busy: boolean;
+  onLaunched: () => void;
+}) {
+  const [recommendation, setRecommendation] = useState<IntradayExpansionRecommendation | null>(null);
+  const [running, setRunning] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    getIntradayExpansionRecommendation(campaignId).then((result) => {
+      if (active) setRecommendation(result);
+    });
+    return () => {
+      active = false;
+    };
+  }, [campaignId]);
+
+  async function launchExpansion() {
+    if (running || busy) return;
+    setRunning(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const result = await launchLowTimeframeExpansion({});
+      setNotice(`Expansion #${result.campaign_id} queued: ${result.jobs_created} jobs from ${result.parent_count} parent rows.`);
+      onLaunched();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Could not launch the focused expansion.");
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const hasRecommendation = Boolean(recommendation?.available);
+
+  return (
+    <details className="intradayDeepDive" style={{ marginTop: 20 }}>
+      <summary>Focused expansion (secondary)</summary>
+      <div className="intradayDeepDiveBody">
+        {hasRecommendation ? (
+          <p className="intradayStrategySummary">
+            Backend recommends expanding: {recommendation!.families.map((f) => f.family_name ?? f.architecture).join(", ")}.
+          </p>
+        ) : (
+          <p className="intradayStrategyPlaceholder">
+            <Circle size={12} /> No defensible expansion recommendation from the backend right now.
+          </p>
+        )}
+        <button
+          type="button"
+          className="button secondary"
+          disabled={running || busy}
+          onClick={() => void launchExpansion()}
+        >
+          <Rocket size={15} /> {running ? "Launching…" : "Launch near-pass expansion"}
+        </button>
+        {error ? <div className="strategyLibraryError" role="alert" style={{ marginTop: 12 }}>{error}</div> : null}
+        {notice ? <div className="strategyLibraryNotice" style={{ marginTop: 12 }}>{notice}</div> : null}
+      </div>
+    </details>
   );
 }
 
