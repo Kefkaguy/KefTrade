@@ -5126,6 +5126,16 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
         from app.services.research_architecture import finalize_architecture_campaign
 
         analytics = finalize_architecture_campaign(conn, campaign_id, summaries=summaries, analytics=analytics)
+    from app.services.labs.intraday.families.registry import is_intraday_lab_candidate
+
+    if any(is_intraday_lab_candidate(job.get("candidate") or {}) for job in jobs):
+        from app.services.labs.intraday.pooled_evidence import compute_pooled_candidate_evidence
+
+        pooled_evidence = compute_pooled_candidate_evidence(conn, campaign_id=campaign_id)
+        analytics["pooled_cross_sectional_evidence"] = {
+            "pooled_candidates": len(pooled_evidence),
+            "calculation_version": "pooled_cross_sectional_evidence_v1",
+        }
     from app.services.automated_scientific_reporting import generate_automated_scientific_report
 
     scientific_report = generate_automated_scientific_report(conn, campaign_id, analytics=analytics)
