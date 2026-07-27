@@ -1719,3 +1719,27 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .eliteActivationResults div { display: flex; justify-content: space-between; gap: 12px; font-size: 9px; }
 .eliteActivationResults span { color: var(--muted); }
 .eliteActivationResults strong { color: var(--ink); font-family: var(--font-mono); }
+
+/* Paper Lab warning notice variant + Step 04 mode badge + bulk actions */
+.eliteValidationNotice.warning { border-color: color-mix(in srgb, var(--warning) 55%, var(--line)); }
+.eliteValidationNotice.warning svg { color: var(--warning); }
+
+.eliteModeBadge { display: inline-block; margin-top: 8px; padding: 4px 11px; border: 1px solid var(--line); border-radius: 99px; font: 650 8px var(--font-mono); text-transform: uppercase; letter-spacing: .07em; }
+.eliteModeBadge.diversified { border-color: color-mix(in srgb, var(--success) 50%, var(--line)); color: var(--success); }
+.eliteModeBadge.single { border-color: color-mix(in srgb, var(--warning) 50%, var(--line)); color: var(--warning); }
+.eliteModeBadge.lab { border-color: color-mix(in srgb, var(--error) 50%, var(--line)); color: var(--error); }
+
+.eliteBulkActions { display: grid; gap: 14px; padding: 18px; border: 1px solid color-mix(in srgb, var(--warning) 30%, var(--line)); border-radius: var(--radius-small); background: var(--panel-soft); }
+.eliteBulkActions > div:first-child strong { display: block; color: var(--ink); font-size: 12px; }
+.eliteBulkActions > div:first-child span { display: block; margin-top: 6px; max-width: 72ch; color: var(--muted); font-size: 9px; line-height: 1.6; }
+.eliteBulkButtons { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 14px; }
+.eliteBulkResult { margin: 0; color: var(--muted-accent); font-size: 9px; line-height: 1.55; }
+
+/* Paper Lab preview panel in Step 03 */
+.elitePaperLab { margin-top: 22px; padding: 22px; border: 1px solid color-mix(in srgb, var(--error) 30%, var(--line)); border-radius: var(--radius); background: linear-gradient(135deg, color-mix(in srgb, var(--error) 8%, transparent), var(--panel)); }
+.elitePaperLab > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.elitePaperLab > header h2 { margin-top: 7px; font-size: 21px; }
+.elitePaperLab > header p { margin-top: 9px; max-width: 76ch; color: var(--muted); font-size: 10px; line-height: 1.65; }
+.elitePaperLab > header svg { flex-shrink: 0; color: var(--error); }
+.elitePaperLabActions { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 18px; }
+.elitePaperLabSummary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; margin-top: 18px; background: var(--line); }

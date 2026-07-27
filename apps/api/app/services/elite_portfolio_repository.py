@@ -14,11 +14,13 @@ from app.services.elite_portfolio_builder import (
     DEFAULT_PROFILE_ID,
     DEFAULT_THRESHOLDS,
     HARD_RULES,
+    PAPER_LAB_MODE,
     PORTFOLIO_PROFILES,
     SOLVER_VERSION,
     candidate_key,
     decision_hash,
     normalized_configuration,
+    paper_lab_preview,
     preview,
     profile_constraints,
     recommend_profile,
@@ -225,6 +227,15 @@ def candidate_variant(row: dict[str, Any]) -> dict[str, Any]:
         "candidate_id": original_id,
         "campaign_id": row.get("campaign_id"),
         "research_job_id": row.get("research_job_id"),
+        # Exposed so eligibility for the paper lab (and any future consumer)
+        # can be verified from the evidence itself rather than trusted purely
+        # because `load_elite_candidate_variants`'s own WHERE clause filtered
+        # on promotion_state -- and so a legacy elite that reached 'elite' via
+        # the older pooled-consistency gate (never through champion
+        # validation) is visibly `validation_state='pending_validation'`
+        # rather than silently indistinguishable from a validated one.
+        "promotion_state": row.get("promotion_state"),
+        "validation_state": row.get("validation_state"),
         "strategy_name": row.get("strategy_name"),
         "strategy_version": row.get("strategy_version"),
         "symbol": symbol,
@@ -425,6 +436,29 @@ def recommend_profile_from_database(conn: psycopg.Connection) -> dict[str, Any]:
     return recommend_profile(load_elite_candidate_variants(conn))
 
 
+def paper_lab_preview_from_database(conn: psycopg.Connection) -> dict[str, Any]:
+    """Every deployable validated elite, with no diversity or correlation gate.
+
+    Read-only: computes the set and its immutable snapshot hash without
+    persisting anything. `create_paper_lab_run` is the function that saves it.
+    """
+    return paper_lab_preview(load_elite_candidate_variants(conn))
+
+
+def _recompute_for_run(conn: psycopg.Connection, run: dict[str, Any]) -> dict[str, Any]:
+    """Re-derive whatever a run's own mode was built from, for staleness checks.
+
+    A paper lab run's `source_configuration` cannot be fed back into the
+    diversified `preview_from_database` -- it carries no `constraints` for the
+    solver to enforce, because it is deliberately not solving anything. This is
+    the one place that has to know both modes exist.
+    """
+    config = dict(run.get("source_configuration") or {})
+    if config.get("mode") == PAPER_LAB_MODE:
+        return paper_lab_preview_from_database(conn)
+    return preview_from_database(conn, config, use_cache=False)
+
+
 def list_runs(conn: psycopg.Connection, *, limit: int = 20) -> dict[str, Any]:
     """Recent portfolio runs, and which one Step 04 should open.
 
@@ -442,6 +476,8 @@ def list_runs(conn: psycopg.Connection, *, limit: int = 20) -> dict[str, Any]:
                 run.approved_snapshot_hash, run.approved_at, run.activated_at,
                 run.created_at, run.updated_at,
                 run.source_configuration->>'profile' AS profile,
+                run.source_configuration->>'mode' AS mode,
+                COALESCE((run.source_configuration->>'diversified')::boolean, TRUE) AS diversified,
                 COUNT(member.id) AS member_count
             FROM elite_portfolio_runs run
             LEFT JOIN elite_portfolio_members member ON member.portfolio_run_id = run.id
@@ -497,6 +533,28 @@ def preview_from_database(
 
 def create_run(conn: psycopg.Connection, configuration: dict[str, Any]) -> dict[str, Any]:
     result = preview_from_database(conn, configuration, use_cache=False, include_decision_inputs=True)
+    return _create_run_from_preview(conn, result)
+
+
+def create_paper_lab_run(conn: psycopg.Connection) -> dict[str, Any]:
+    """Persist the 'All Validated Elites Paper Lab' set as an immutable run.
+
+    Deliberately takes no `configuration`: there is nothing to configure. Every
+    deployable validated elite is included, so the only input is the current
+    elite pool itself.
+    """
+    result = paper_lab_preview_from_database(conn)
+    return _create_run_from_preview(conn, result)
+
+
+def _create_run_from_preview(conn: psycopg.Connection, result: dict[str, Any]) -> dict[str, Any]:
+    """Shared persistence for both `create_run` and `create_paper_lab_run`.
+
+    Both `preview()` and `paper_lab_preview()` return the same response shape,
+    so one insert pipeline serves both -- the columns describe *how a run was
+    built*, and that description differs (mode, objective, solver_version),
+    not the schema.
+    """
     config = result["configuration"]
     run_key = f"ep_{uuid4().hex}"
     snapshot_hash = result["snapshot"]["decision_hash"]
@@ -511,7 +569,7 @@ def create_run(conn: psycopg.Connection, configuration: dict[str, Any]) -> dict[
         RETURNING *
         """,
         (
-            run_key, result["status"], SOLVER_VERSION, config["objective"], Jsonb(config["constraints"]),
+            run_key, result["status"], result.get("solver_version") or SOLVER_VERSION, config["objective"], Jsonb(config["constraints"]),
             Jsonb(config["thresholds"]), Jsonb(config), Jsonb(result["candidate_order"]), result["iterations"],
             Jsonb(result["operations"]), result["termination_reason"], Jsonb(_statistics(result)),
             Jsonb(result["analytics"]), snapshot_hash,
@@ -568,7 +626,7 @@ def approve_run(conn: psycopg.Connection, run_id: int, requested_snapshot_hash: 
     if requested_snapshot_hash != run.get("snapshot_hash"):
         _mark_stale(conn, run_id)
         raise PortfolioStale("requested snapshot does not match the review snapshot")
-    current = preview_from_database(conn, dict(run.get("source_configuration") or {}), use_cache=False)
+    current = _recompute_for_run(conn, run)
     if current["snapshot"]["decision_hash"] != run.get("snapshot_hash"):
         _mark_stale(conn, run_id)
         raise PortfolioStale("portfolio evidence changed; recalculate before approval")
@@ -589,7 +647,10 @@ def recalculate_run(conn: psycopg.Connection, run_id: int) -> dict[str, Any]:
         raise PortfolioStateError("approved or activated portfolios cannot be superseded by recalculation")
     conn.execute("UPDATE elite_portfolio_runs SET status='superseded', updated_at=NOW() WHERE id=%s", (run_id,))
     conn.commit()
-    return create_run(conn, dict(run.get("source_configuration") or {}))
+    config = dict(run.get("source_configuration") or {})
+    if config.get("mode") == PAPER_LAB_MODE:
+        return create_paper_lab_run(conn)
+    return create_run(conn, config)
 
 
 def _mark_stale(conn: psycopg.Connection, run_id: int) -> None:

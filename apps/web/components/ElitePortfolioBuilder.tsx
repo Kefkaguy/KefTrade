@@ -22,14 +22,17 @@ import {
   backfillElitePortfolioEvidence,
   configurationWithProfile,
   createElitePortfolio,
+  createPaperLabRun,
   dedupeResearchChampions,
   getElitePortfolioRecommendation,
   getElitePortfolioRuns,
   getChampionValidationDiagnostics,
   getChampionValidationQueue,
   getElitePortfolioOptions,
+  getPaperLabPreview,
   getResearchChampionStatus,
   importResearchChampions,
+  PAPER_LAB_MODE,
   previewElitePortfolio,
   runChampionValidation,
   type ChampionDedupeResult,
@@ -43,6 +46,7 @@ import {
   type ElitePortfolioProfile,
   type ElitePortfolioRecommendation,
   type ElitePortfolioResult,
+  type ElitePortfolioRunList,
   type ResearchChampionImportResult,
   type ResearchChampionStatus
 } from "@/lib/api";
@@ -67,7 +71,14 @@ export function ElitePortfolioBuilder() {
   const [recommendation, setRecommendation] = useState<ElitePortfolioRecommendation | null>(null);
   // Step 04 must survive a page refresh, so which portfolio it opens comes from
   // the backend rather than from whatever React state the approve click left.
+  // Tracked separately from the paper lab run: an approved diversified (or
+  // Single Elite Test) run and an approved paper lab run can coexist, and
+  // must never collapse into a single "the activatable run" slot -- that
+  // would silently hide one of them.
   const [activatableRunId, setActivatableRunId] = useState<number | null>(null);
+  const [paperLabActivatableRunId, setPaperLabActivatableRunId] = useState<number | null>(null);
+  const [paperLabResult, setPaperLabResult] = useState<ElitePortfolioResult | null>(null);
+  const [paperLabPhase, setPaperLabPhase] = useState<"idle" | "preview" | "saved">("idle");
   const [validationQueue, setValidationQueue] = useState<ChampionValidationQueue | null>(null);
   const [validationResult, setValidationResult] = useState<ChampionValidationRunResult | null>(null);
   const [validationDiagnostics, setValidationDiagnostics] = useState<ChampionValidationDiagnostics | null>(null);
@@ -116,11 +127,26 @@ export function ElitePortfolioBuilder() {
     getChampionValidationDiagnostics(25)
       .then((next) => { if (mounted) setValidationDiagnostics(next); })
       .catch(() => { /* Diagnostics are a read-only aid, never required to run validation. */ });
-    getElitePortfolioRuns(20)
-      .then((next) => { if (mounted) setActivatableRunId(next.current_activatable_run_id); })
-      .catch(() => { /* Step 04 simply stays locked if the run list is unavailable. */ });
+    refreshActivatableRuns();
     return () => { mounted = false; };
+
+    function refreshActivatableRuns() {
+      getElitePortfolioRuns(20)
+        .then((next) => { if (mounted) applyRunList(next); })
+        .catch(() => { /* Step 04 simply stays locked if the run list is unavailable. */ });
+    }
   }, []);
+
+  // A diversified/Single-Elite-Test run and a paper lab run are tracked in
+  // separate slots on purpose: both can be approved and activatable at once,
+  // and collapsing them into one "the activatable run" id would silently hide
+  // whichever one is not newest.
+  function applyRunList(list: ElitePortfolioRunList) {
+    const diversified = list.activatable.find((row) => row.mode !== PAPER_LAB_MODE) ?? null;
+    const lab = list.activatable.find((row) => row.mode === PAPER_LAB_MODE) ?? null;
+    setActivatableRunId(diversified ? diversified.id : null);
+    setPaperLabActivatableRunId(lab ? lab.id : null);
+  }
 
   const snapshotHash = snapshotFor(result);
   const analytics = (result?.analytics ?? result?.portfolio_analytics ?? {}) as Record<string, any>;
@@ -159,7 +185,7 @@ export function ElitePortfolioBuilder() {
         // Ask the backend which run is activatable rather than assuming it is
         // this one, so a refresh lands on exactly the same portfolio.
         await getElitePortfolioRuns(20)
-          .then((runs) => setActivatableRunId(runs.current_activatable_run_id ?? next.id ?? null))
+          .then((runs) => applyRunList(runs))
           .catch(() => setActivatableRunId(next.id ?? null));
       }
     } catch (reason) {
@@ -225,6 +251,50 @@ export function ElitePortfolioBuilder() {
     setError(null);
     try {
       setRecommendation(await getElitePortfolioRecommendation());
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function previewPaperLab() {
+    setBusy("paperlab-preview");
+    setError(null);
+    try {
+      setPaperLabResult(await getPaperLabPreview());
+      setPaperLabPhase("preview");
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function savePaperLabRun() {
+    setBusy("paperlab-save");
+    setError(null);
+    try {
+      const saved = await createPaperLabRun();
+      setPaperLabResult(saved);
+      setPaperLabPhase("saved");
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function approvePaperLabRun() {
+    if (!paperLabResult?.id) return;
+    const hash = snapshotFor(paperLabResult);
+    if (!hash) return;
+    setBusy("paperlab-approve");
+    setError(null);
+    try {
+      const approved = await approveElitePortfolio(paperLabResult.id, hash);
+      setPaperLabResult(approved);
+      await getElitePortfolioRuns(20).then((runs) => applyRunList(runs)).catch(() => setPaperLabActivatableRunId(paperLabResult.id ?? null));
     } catch (reason) {
       setError(message(reason));
     } finally {
@@ -464,23 +534,35 @@ export function ElitePortfolioBuilder() {
         </aside>
       </div> : null}
 
+      <PaperLabPanel
+        result={paperLabResult}
+        phase={paperLabPhase}
+        busy={busy}
+        onPreview={previewPaperLab}
+        onSave={savePaperLabRun}
+        onApprove={approvePaperLabRun}
+      />
+
       {/* Step 04 acts only on an approved immutable snapshot, and finds it from
-          the backend so it is still there after a refresh. */}
-      {activatableRunId ? (
-        <EliteActivationWorkspace portfolioId={activatableRunId} />
-      ) : (
+          the backend so it is still there after a refresh. Diversified/Single
+          Elite Test and the paper lab are two independent activatable runs --
+          either, both, or neither may exist at a given time. */}
+      {activatableRunId ? <EliteActivationWorkspace portfolioId={activatableRunId} /> : null}
+      {paperLabActivatableRunId ? <EliteActivationWorkspace portfolioId={paperLabActivatableRunId} /> : null}
+      {!activatableRunId && !paperLabActivatableRunId ? (
         <section className="eliteActivationLocked">
           <div>
             <span className="eyebrow">Step 4 · Activation</span>
             <h2>Activation unlocks once a portfolio is approved</h2>
             <p>
-              Build a portfolio in step 3, save it as an immutable run, then approve it. This section then loads that
-              exact approved snapshot and drives internal activation, Alpaca Paper approval and execution enablement.
+              Build a diversified portfolio, a Single Elite Test, or an All Validated Elites Paper Lab run in step 3,
+              save it as an immutable run, then approve it. This section then loads that exact approved snapshot and
+              drives internal activation, Alpaca Paper approval and execution enablement.
             </p>
           </div>
           <LockKeyhole size={20} />
         </section>
-      )}
+      ) : null}
     </div>
   );
 
@@ -1088,6 +1170,89 @@ function PortfolioFeasibilityPanel({ result }: { result: ElitePortfolioResult })
           ))}
         </div>
       ) : null}
+    </section>
+  );
+}
+
+function PaperLabPanel({
+  result,
+  phase,
+  busy,
+  onPreview,
+  onSave,
+  onApprove
+}: {
+  result: ElitePortfolioResult | null;
+  phase: "idle" | "preview" | "saved";
+  busy: string | null;
+  onPreview: () => void;
+  onSave: () => void;
+  onApprove: () => void;
+}) {
+  const rejections = result?.rejection_explanations ?? [];
+  const counts = new Map<string, number>();
+  for (const row of rejections) {
+    for (const label of (row.reason_labels ?? row.reasons ?? []) as string[]) {
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+  }
+  const ranked = [...counts.entries()].sort((left, right) => right[1] - left[1]);
+  const snapshotHash = result?.snapshot?.decision_hash ?? result?.snapshot?.snapshot_hash ?? null;
+  const running = busy === "paperlab-preview" || busy === "paperlab-save" || busy === "paperlab-approve";
+  return (
+    <section className="elitePaperLab">
+      <header>
+        <div>
+          <span className="eyebrow">Execution-testing mode</span>
+          <h2>All Validated Elites Paper Lab</h2>
+          <p>
+            Includes every validated elite eligible for Alpaca Paper — long direction, external-capable, unique
+            candidate/symbol/timeframe, authoritative lineage. Nothing is excluded for correlation, shared symbols, or
+            shared families. This is not a diversified portfolio: it exists to exercise activation, approval, preflight
+            and execution across the whole validated pool, and strategies here may be duplicated bets on the same edge.
+          </p>
+        </div>
+        <AlertTriangle size={22} />
+      </header>
+
+      {result ? (
+        <>
+          <div className="eliteAnalyticsStrip">
+            <Metric label="Eligible" value={result.eligible_count ?? 0} tone="safe" />
+            <Metric label="Excluded" value={result.excluded_count ?? 0} />
+            <Metric label="Included in run" value={result.maximum_feasible_size ?? 0} />
+            <Metric label="Status" value={result.status === "review_ready" ? "Ready" : "No elites qualify"} />
+          </div>
+          {ranked.length ? (
+            <div className="eliteExclusionReasons">
+              <h3>Why elites were excluded</h3>
+              {ranked.map(([label, count]) => (
+                <div key={label}><span>{label}</span><strong>{count}</strong></div>
+              ))}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      <div className="elitePaperLabActions">
+        <button className="button secondary" disabled={running} onClick={onPreview}>
+          {busy === "paperlab-preview" ? <LoaderCircle className="spin" size={16} /> : <Sparkles size={16} />}
+          {busy === "paperlab-preview" ? "Reading elite pool…" : "Preview all validated elites"}
+        </button>
+        {phase === "preview" && result?.status === "review_ready" ? (
+          <button className="button" disabled={running} onClick={onSave}>
+            {busy === "paperlab-save" ? <LoaderCircle className="spin" size={16} /> : <ArrowRight size={16} />}
+            {busy === "paperlab-save" ? "Saving…" : "Save immutable paper lab run"}
+          </button>
+        ) : null}
+        {phase === "saved" && result?.id && snapshotHash ? (
+          <button className="button" disabled={running} onClick={onApprove}>
+            {busy === "paperlab-approve" ? <LoaderCircle className="spin" size={16} /> : <Check size={16} />}
+            {busy === "paperlab-approve" ? "Approving…" : "Approve paper lab snapshot"}
+          </button>
+        ) : null}
+        {result?.status === "approved" ? <span className="eliteBulkResult">Approved — see Step 4 below to activate.</span> : null}
+      </div>
     </section>
   );
 }

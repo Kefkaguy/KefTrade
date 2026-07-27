@@ -337,9 +337,12 @@ def test_hard_rules_are_surfaced_and_include_symbol_family_uniqueness_independen
 
 from app.services.elite_portfolio_builder import (  # noqa: E402
     DEFAULT_CONSTRAINTS as _DEFAULTS,
+    PAPER_LAB_MODE,
     PROFILES_BY_ID,
     blocking_analysis,
     normalized_configuration as _normalize,
+    paper_lab_eligibility,
+    paper_lab_preview,
     profile_constraints,
     protected_constraint_violations,
     recommend_profile,
@@ -377,6 +380,10 @@ def _variant(candidate_id, symbol, timeframe, family, **overrides):
     row = {
         "candidate_key": f"{candidate_id}|{symbol}|{timeframe}",
         "candidate_id": candidate_id,
+        "campaign_id": 1,
+        "research_job_id": 100,
+        "promotion_state": "elite",
+        "validation_state": "validated",
         "symbol": symbol,
         "timeframe": timeframe,
         "family_id": family,
@@ -532,3 +539,164 @@ def test_recommendation_reports_an_evidence_problem_rather_than_inventing_a_prof
 
     assert recommendation["recommended_profile"] is None
     assert "evidence problem" in recommendation["reason"]
+
+
+# --- All Validated Elites Paper Lab ------------------------------------------
+
+
+def test_paper_lab_includes_every_validated_elite_regardless_of_overlap() -> None:
+    # Same symbol, same family, same timeframe, highly correlated returns --
+    # exactly what the diversified solver's hard rules would reject. The
+    # paper lab is supposed to include all of it anyway.
+    pool = [_variant(f"c{i}", "AMD", "30m", "session_momentum") for i in range(13)]
+
+    result = paper_lab_preview(pool)
+
+    assert result["status"] == "review_ready"
+    assert result["mode"] == PAPER_LAB_MODE
+    assert result["diversified"] is False
+    assert result["eligible_count"] == 13
+    assert len(result["selected"]) == 13
+    assert result["hard_rules"] == []
+
+
+def test_paper_lab_carries_a_strong_non_diversified_warning() -> None:
+    pool = [_variant("c1", "AMD", "30m", "session_momentum")]
+
+    result = paper_lab_preview(pool)
+
+    assert "not a diversified portfolio" in result["warning"]
+    assert "correlat" in result["warning"]
+    assert result["configuration"]["warning"] == result["warning"]
+    assert result["configuration"]["diversified"] is False
+
+
+def test_paper_lab_excludes_short_strategies() -> None:
+    pool = [_variant("c1", "AMD", "30m", "session_momentum", strategy_direction="short")]
+
+    eligible, decisions = paper_lab_eligibility(pool)
+
+    assert eligible == []
+    assert decisions[0]["reasons"] == ["SHORT_DIRECTION_EXCLUDED"]
+
+
+def test_paper_lab_excludes_internal_only_execution_capability() -> None:
+    pool = [_variant("c1", "AMD", "30m", "session_momentum", execution_capability="internal_only")]
+
+    eligible, decisions = paper_lab_eligibility(pool)
+
+    assert eligible == []
+    assert decisions[0]["reasons"] == ["INTERNAL_ONLY_EXCLUDED"]
+
+
+def test_paper_lab_excludes_elites_that_never_passed_champion_validation() -> None:
+    # promotion_state='elite' alone is not enough: a legacy elite that reached
+    # 'elite' through the older pooled-consistency gate (never through the
+    # champion validation battery) still shows validation_state != 'validated'.
+    pool = [_variant("c1", "AMD", "30m", "session_momentum", validation_state="pending_validation")]
+
+    eligible, decisions = paper_lab_eligibility(pool)
+
+    assert eligible == []
+    assert decisions[0]["reasons"] == ["NOT_VALIDATED"]
+
+
+def test_paper_lab_excludes_rows_with_no_authoritative_lineage() -> None:
+    pool = [_variant("c1", "AMD", "30m", "session_momentum", campaign_id=None)]
+
+    eligible, decisions = paper_lab_eligibility(pool)
+
+    assert eligible == []
+    assert decisions[0]["reasons"] == ["MISSING_AUTHORITATIVE_LINEAGE"]
+
+
+def test_paper_lab_reports_every_exclusion_reason_not_just_the_first() -> None:
+    # Short AND internal-only at once -- both reasons must be visible, not
+    # just whichever check happened to run first.
+    pool = [_variant("c1", "AMD", "30m", "session_momentum", strategy_direction="short", execution_capability="internal_only")]
+
+    _, decisions = paper_lab_eligibility(pool)
+
+    assert set(decisions[0]["reasons"]) == {"SHORT_DIRECTION_EXCLUDED", "INTERNAL_ONLY_EXCLUDED"}
+
+
+def test_paper_lab_deduplicates_the_same_candidate_symbol_timeframe() -> None:
+    # Two different elite_research_candidates rows that somehow ended up
+    # describing the same (candidate_id, symbol, timeframe) -- the exact shape
+    # a data-quality slip would produce. Only one may be deployed.
+    better = _variant("dup1", "AMD", "30m", "session_momentum", quality_score=0.9)
+    worse = {**_variant("dup1", "AMD", "30m", "session_momentum", quality_score=0.4)}
+
+    eligible, decisions = paper_lab_eligibility([better, worse])
+
+    assert len(eligible) == 1
+    kept = next(row for row in decisions if row["eligible"])
+    excluded = next(row for row in decisions if not row["eligible"])
+    assert excluded["reasons"] == ["DUPLICATE_CANDIDATE_SYMBOL_TIMEFRAME"]
+    # The higher-quality row is the one kept.
+    assert eligible[0]["quality_score"] == 0.9
+    assert kept["candidate_key"] == excluded["candidate_key"]
+
+
+def test_paper_lab_excluded_reasons_are_visible_with_human_labels() -> None:
+    pool = [
+        _variant("c1", "AMD", "30m", "session_momentum"),
+        _variant("c2", "NVDA", "15m", "vwap_trend", validation_state="pending_validation"),
+    ]
+
+    result = paper_lab_preview(pool)
+
+    assert result["eligible_count"] == 1
+    assert result["excluded_count"] == 1
+    rejection = result["rejection_explanations"][0]
+    assert rejection["candidate_id"] == "c2"
+    assert rejection["reason_labels"] == ["Has not passed the champion validation battery (validation_state != 'validated')"]
+
+
+def test_paper_lab_never_produces_a_hard_conflict() -> None:
+    # Highly correlated, same symbol, same family, near-identical parameters --
+    # every one of the diversified solver's hard-conflict triggers -- and the
+    # paper lab must still report every conflict as advisory only.
+    pool = [_variant(f"c{i}", "AMD", "30m", "session_momentum") for i in range(4)]
+
+    result = paper_lab_preview(pool)
+
+    assert len(result["selected"]) == 4
+    assert result["conflicts"]  # some advisory evidence should exist to flag
+    assert all(row["hard_conflict"] is False for row in result["conflicts"])
+    assert all(row.get("advisory_only") is True for row in result["conflicts"])
+
+
+def test_paper_lab_advisory_conflicts_use_the_strict_thresholds_not_looser_ones() -> None:
+    # Distinct parameters, distinct symbols -- nothing should be flagged, using
+    # the exact same 0.90/0.75 thresholds the diversified solver enforces as
+    # hard limits. The paper lab borrows the thresholds for labeling; it does
+    # not invent looser ones.
+    pool = [
+        _variant("c1", "AMD", "30m", "session_momentum"),
+        _variant("c2", "NVDA", "15m", "vwap_trend"),
+    ]
+
+    result = paper_lab_preview(pool)
+
+    assert result["conflicts"] == []
+
+
+def test_paper_lab_is_infeasible_only_when_nothing_at_all_qualifies() -> None:
+    pool = [_variant("c1", "AMD", "30m", "session_momentum", validation_state="pending_validation")]
+
+    result = paper_lab_preview(pool)
+
+    assert result["status"] == "infeasible"
+    assert result["eligible_count"] == 0
+    assert result["selected"] == []
+
+
+def test_paper_lab_snapshot_is_deterministic_and_hashed() -> None:
+    pool = [_variant("c1", "AMD", "30m", "session_momentum")]
+
+    first = paper_lab_preview(pool)
+    second = paper_lab_preview(pool)
+
+    assert first["snapshot"]["decision_hash"] == second["snapshot"]["decision_hash"]
+    assert first["snapshot"]["mode"] == PAPER_LAB_MODE

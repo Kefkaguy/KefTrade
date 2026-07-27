@@ -199,6 +199,12 @@ ELIGIBILITY_REASON_LABELS: dict[str, str] = {
     "MAXIMUM_PER_FAMILY": "Too many members in one family",
     "TIMEFRAME_50_PERCENT_CAP": "Timeframe balance cap",
     "PAIRWISE_HARD_CONFLICT": "Pairwise hard conflict",
+    "NOT_PROMOTED_ELITE": "Not a final elite (promotion_state != 'elite')",
+    "NOT_VALIDATED": "Has not passed the champion validation battery (validation_state != 'validated')",
+    "SHORT_DIRECTION_EXCLUDED": "Short strategies have no Alpaca external execution path",
+    "INTERNAL_ONLY_EXCLUDED": "Marked internal-only: no external broker path exists",
+    "MISSING_AUTHORITATIVE_LINEAGE": "Missing an authoritative campaign, research job, or candidate record",
+    "DUPLICATE_CANDIDATE_SYMBOL_TIMEFRAME": "Duplicate of another elite on the same candidate/symbol/timeframe",
 }
 
 
@@ -1326,6 +1332,181 @@ def preview(candidates: list[dict[str, Any]], configuration: dict[str, Any] | No
         "eligibility_ms": eligibility_ms,
         "conflicts_ms": conflict_ms,
         "solver_ms": result["optimization_duration_ms"],
+        "end_to_end_ms": round((time.perf_counter() - total_started) * 1000, 3),
+    }
+    response["response_size_bytes"] = len(canonical_json(response).encode("utf-8"))
+    return response
+
+
+PAPER_LAB_MODE = "all_validated_elites_paper_lab"
+PAPER_LAB_VERSION = "elite_paper_lab_v1"
+
+PAPER_LAB_WARNING = (
+    "This is an execution-testing lab, not a diversified portfolio. Every validated elite is included "
+    "regardless of symbol, family, timeframe, or correlation with any other member. No diversity or "
+    "correlation limit is enforced when building this set -- strategies here may be duplicated bets on "
+    "the same underlying edge."
+)
+
+
+def paper_lab_eligibility(candidates: Iterable[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Everyone-in eligibility for the paper lab: no diversity or quality-ranking gate, only the
+    conditions that make a member actually deployable to Alpaca Paper at all.
+
+    Unlike `evaluate_eligibility` (used by the diversified solver), this never excludes on profit
+    factor, drawdown, or any other quality threshold -- every candidate here already carries
+    `promotion_state='elite'` from `load_elite_candidate_variants`'s own WHERE clause, and quality was
+    already the champion validation battery's job, not this mode's. What this checks is narrower and
+    different: can this elite actually reach an Alpaca Paper deployment at all.
+    """
+    ordered = sorted(candidates, key=lambda row: (-float(row.get("quality_score") or row.get("research_score") or 0), candidate_key(row)))
+    decisions: list[dict[str, Any]] = []
+    eligible: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for candidate in ordered:
+        key = candidate_key(candidate)
+        reasons: list[str] = []
+        if str(candidate.get("promotion_state") or "elite") != "elite":
+            reasons.append("NOT_PROMOTED_ELITE")
+        if str(candidate.get("validation_state") or "") != "validated":
+            reasons.append("NOT_VALIDATED")
+        if str(candidate.get("strategy_direction") or "long") != "long":
+            reasons.append("SHORT_DIRECTION_EXCLUDED")
+        if str(candidate.get("execution_capability") or "") == "internal_only":
+            reasons.append("INTERNAL_ONLY_EXCLUDED")
+        if not candidate.get("campaign_id") or not candidate.get("research_job_id") or not candidate.get("candidate_id"):
+            reasons.append("MISSING_AUTHORITATIVE_LINEAGE")
+        if not reasons and key in seen_keys:
+            # Same (candidate_id, symbol, timeframe) already included from a higher-quality row --
+            # this one is a duplicate deployment target, not a second independent strategy.
+            reasons.append("DUPLICATE_CANDIDATE_SYMBOL_TIMEFRAME")
+        decisions.append({
+            "candidate_key": key,
+            "candidate_id": str(candidate["candidate_id"]),
+            "eligible": not reasons,
+            "reasons": reasons,
+            "strategy_direction": str(candidate.get("strategy_direction") or "long"),
+            "execution_capability": str(candidate.get("execution_capability") or "external_observe"),
+        })
+        if not reasons:
+            seen_keys.add(key)
+            eligible.append(candidate)
+    decisions.sort(key=lambda row: row["candidate_key"])
+    return eligible, decisions
+
+
+def paper_lab_advisory_conflicts(eligible: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Correlation and similarity evidence for the warning banner -- never a gate.
+
+    Reuses `build_conflicts` (and therefore the diversified solver's own strict thresholds) purely to
+    decide what counts as "worth flagging"; nothing here excludes a candidate or blocks the run. Every
+    conflict is relabelled `hard_conflict: False` so a reader of the stored evidence can never mistake
+    an advisory flag in this mode for the solver's actual hard-conflict rule.
+    """
+    if len(eligible) < 2:
+        return [], []
+    conflicts, correlations = build_conflicts(eligible, normalized_configuration({}))
+    advisory = [{**row, "hard_conflict": False, "advisory_only": True} for row in conflicts]
+    return advisory, correlations
+
+
+def paper_lab_preview(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build the immutable 'All Validated Elites Paper Lab' set.
+
+    Deliberately not a call to `preview()`: that function's entire purpose is diversity-constrained
+    selection, and this mode's entire purpose is the opposite -- include every deployable validated
+    elite so the *execution path itself* (internal activation, Alpaca Paper approval, preflight,
+    order submission) gets exercised across the whole pool, correlated or not. Sharing this function
+    with the diversified solver would risk one day sharing its exclusion logic too.
+
+    Returned in the same shape `preview()` returns, so the repository layer's persistence pipeline
+    (`elite_portfolio_runs`, `_persist_eligibility`, `_persist_correlations`, `_persist_conflicts`,
+    `_persist_members`) works for both modes unmodified.
+    """
+    total_started = time.perf_counter()
+    eligible, decisions = paper_lab_eligibility(candidates)
+    conflicts, correlations = paper_lab_advisory_conflicts(eligible)
+    selected_keys = sorted(candidate_key(row) for row in eligible)
+    snapshot = snapshot_with_hash({
+        "mode": PAPER_LAB_MODE,
+        "diversified": False,
+        "solver_version": PAPER_LAB_VERSION,
+        "candidate_evidence": sorted((immutable_candidate(row) for row in candidates), key=lambda row: row["candidate_key"]),
+        "eligibility_decisions": decisions,
+        "correlations": correlations,
+    })
+    verification = {
+        "ran": False,
+        "verified": False,
+        "feasible": bool(eligible) or None,
+        "maximum_feasible_size": len(eligible),
+        "witness": None,
+        "pool_size": len(eligible),
+        "verification_limit": None,
+    }
+    response = {
+        "status": "review_ready" if eligible else "infeasible",
+        "mode": PAPER_LAB_MODE,
+        "diversified": False,
+        "solver_version": PAPER_LAB_VERSION,
+        "selected": selected_keys,
+        "maximum_feasible_size": len(eligible),
+        "constraint_relaxations": [],
+        "constraint_relaxation_count": 0,
+        "candidate_order": selected_keys,
+        "iterations": 0,
+        "operations": [],
+        "swap_count": 0,
+        "termination_reason": "all_eligible_validated_elites_included" if eligible else "no_eligible_validated_elites",
+        "objective_hierarchy": [],
+        "optimization_duration_ms": 0.0,
+        "candidates_examined": len(candidates),
+        "construction_pool_count": len(eligible),
+        "construction_pool_candidate_ids": selected_keys,
+        "peak_memory_mb": _peak_memory_mb(),
+        "verification": verification,
+        "heuristic_miss": False,
+        "verified_infeasible": False,
+        "configuration": {
+            "mode": PAPER_LAB_MODE,
+            "diversified": False,
+            "objective": PAPER_LAB_MODE,
+            "constraints": {},
+            "thresholds": {},
+            "warning": PAPER_LAB_WARNING,
+        },
+        "snapshot": snapshot,
+        "eligible_count": len(eligible),
+        "excluded_count": len(candidates) - len(eligible),
+        "eligibility": decisions,
+        "conflicts": conflicts,
+        "conflict_count_by_type": dict(sorted(Counter(row["conflict_type"] for row in conflicts).items())),
+        "correlations": correlations,
+        "binding_constraints": binding_constraints(decisions, conflicts),
+        "feasibility_report": None,
+        "blocking_analysis": None,
+        "hard_rules": [],
+        "profile": None,
+        "analytics": portfolio_analytics(eligible, correlations),
+        "warning": PAPER_LAB_WARNING,
+        "selection_explanations": [
+            {"candidate_id": row["candidate_id"], "reason": "Validated elite, long direction, external-capable, unique candidate/symbol/timeframe."}
+            for row in eligible
+        ],
+        "rejection_explanations": [
+            {
+                "candidate_key": row["candidate_key"],
+                "candidate_id": row["candidate_id"],
+                "reasons": row["reasons"],
+                "reason_labels": [reason_label(code) for code in row["reasons"]],
+            }
+            for row in decisions if not row["eligible"]
+        ],
+    }
+    response["timing"] = {
+        "eligibility_ms": 0.0,
+        "conflicts_ms": 0.0,
+        "solver_ms": 0.0,
         "end_to_end_ms": round((time.perf_counter() - total_started) * 1000, 3),
     }
     response["response_size_bytes"] = len(canonical_json(response).encode("utf-8"))

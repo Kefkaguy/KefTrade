@@ -13,9 +13,11 @@ from app.services.elite_portfolio_repository import (
     PortfolioStateError,
     approve_run,
     backfill_correlation_evidence,
+    create_paper_lab_run,
     create_run,
     get_run,
     options,
+    paper_lab_preview_from_database,
     preview_from_database,
     list_runs,
     recalculate_run,
@@ -24,7 +26,9 @@ from app.services.elite_portfolio_repository import (
 from app.services.elite_portfolio_activation import PortfolioActivationError, activate_internal
 from app.services.elite_portfolio_operations import (
     PortfolioOperationError,
+    approve_all_members_for_alpaca_paper,
     approve_member_external_paper,
+    enable_all_ready_members_paper_execution,
     enable_member_paper_execution,
     execution_preflight,
     portfolio_activation_view,
@@ -90,6 +94,20 @@ class MemberExecutionRequest(BaseModel):
     # orders reach a broker is deliberately not a single unguarded click.
     confirm_member_id: int
     actor: str | None = None
+
+
+class BulkApprovalRequest(BaseModel):
+    actor: str | None = None
+    reapprove: bool = False
+    # Must repeat the path's portfolio_id: a bulk action touches every member
+    # of a run at once, so it gets the same explicit-confirmation treatment as
+    # a single execution-enable click, not less.
+    confirm_portfolio_run_id: int
+
+
+class BulkExecutionRequest(BaseModel):
+    actor: str | None = None
+    confirm_portfolio_run_id: int
 
 
 class ApprovalRequest(BaseModel):
@@ -221,6 +239,65 @@ def preview_portfolio(payload: PortfolioConfiguration, conn: psycopg.Connection 
 def persist_portfolio(payload: PortfolioConfiguration, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     _require_builder()
     return _translate_configuration(lambda: create_run(conn, payload.model_dump()))
+
+
+@router.get("/paper-lab/preview")
+def preview_paper_lab(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    """Every deployable validated elite, with no diversity or correlation gate.
+
+    Read-only. This is an execution-testing lab, not a diversified portfolio --
+    see `response["warning"]`. Takes no configuration: there is nothing to
+    configure, since nothing is excluded except on the eligibility grounds in
+    `response["rejection_explanations"]`.
+    """
+    _require_builder()
+    return paper_lab_preview_from_database(conn)
+
+
+@router.post("/paper-lab")
+def persist_paper_lab_run(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    """Save the current 'All Validated Elites Paper Lab' set as an immutable run."""
+    _require_builder()
+    return _translate_configuration(lambda: create_paper_lab_run(conn))
+
+
+@router.post("/{portfolio_id}/members/approve-all-external-paper")
+def approve_all_members_endpoint(
+    portfolio_id: int,
+    payload: BulkApprovalRequest,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Approve every eligible member of a run for Alpaca Paper, observe-only.
+
+    Calls `approve_member_external_paper` (and therefore `enable_observe_only`)
+    once per member; a member that fails does not block the rest, and a member
+    already approved is reported as skipped, not as an error. Submits no orders.
+    """
+    _require_builder()
+    if payload.confirm_portfolio_run_id != portfolio_id:
+        raise HTTPException(status_code=422, detail="confirm_portfolio_run_id must exactly match the portfolio run id")
+    return _translate_operation(
+        lambda: approve_all_members_for_alpaca_paper(conn, portfolio_id, actor=payload.actor, reapprove=payload.reapprove)
+    )
+
+
+@router.post("/{portfolio_id}/members/enable-all-paper-execution")
+def enable_all_ready_members_endpoint(
+    portfolio_id: int,
+    payload: BulkExecutionRequest,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Enable Alpaca Paper execution for every member whose full preflight passes.
+
+    A member with any outstanding preflight check is left completely
+    unchanged and reported as blocked, never partially enabled.
+    """
+    _require_builder()
+    if payload.confirm_portfolio_run_id != portfolio_id:
+        raise HTTPException(status_code=422, detail="confirm_portfolio_run_id must exactly match the portfolio run id")
+    return _translate_operation(
+        lambda: enable_all_ready_members_paper_execution(conn, portfolio_id, actor=payload.actor)
+    )
 
 
 @router.post("/evidence/backfill")

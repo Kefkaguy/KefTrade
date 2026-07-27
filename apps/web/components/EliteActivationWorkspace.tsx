@@ -1,13 +1,18 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Check, LoaderCircle, LockKeyhole, Play, RefreshCw, ShieldCheck } from "lucide-react";
+import { AlertTriangle, Check, LoaderCircle, LockKeyhole, Play, RefreshCw, ShieldCheck, Sparkles } from "lucide-react";
 import {
   activateElitePortfolio,
+  approveAllMembersForAlpacaPaper,
   approveMemberForAlpacaPaper,
+  enableAllReadyMembersPaperExecution,
   enableMemberPaperExecution,
   getPortfolioActivation,
+  PAPER_LAB_MODE,
   type ActivationMember,
+  type BulkApprovalResult,
+  type BulkExecutionResult,
   type PortfolioActivationView,
   type PreflightCheck
 } from "@/lib/api";
@@ -24,6 +29,9 @@ export function EliteActivationWorkspace({ portfolioId }: { portfolioId: number 
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<number | null>(null);
+  const [confirmingBulkExecution, setConfirmingBulkExecution] = useState(false);
+  const [bulkApproval, setBulkApproval] = useState<BulkApprovalResult | null>(null);
+  const [bulkExecution, setBulkExecution] = useState<BulkExecutionResult | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -59,6 +67,33 @@ export function EliteActivationWorkspace({ portfolioId }: { portfolioId: number 
     await act("activate", () => activateElitePortfolio(view.portfolio_run_id, snapshot, idempotencyKey));
   }
 
+  async function approveAll() {
+    setBusy("bulk-approve");
+    setError(null);
+    try {
+      setBulkApproval(await approveAllMembersForAlpacaPaper(portfolioId));
+      await refresh();
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function enableAllReady() {
+    setBusy("bulk-execute");
+    setError(null);
+    try {
+      setBulkExecution(await enableAllReadyMembersPaperExecution(portfolioId));
+      await refresh();
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+      setConfirmingBulkExecution(false);
+    }
+  }
+
   if (!view) {
     return (
       <section className="eliteActivation loading">
@@ -69,22 +104,35 @@ export function EliteActivationWorkspace({ portfolioId }: { portfolioId: number 
   }
 
   const summary = view.summary;
+  const isPaperLab = view.mode === PAPER_LAB_MODE;
+  const badge = isPaperLab
+    ? { label: "All Validated Elites Paper Lab", tone: "lab" }
+    : view.diversified
+      ? { label: "Diversified portfolio", tone: "diversified" }
+      : { label: "Single Elite Test", tone: "single" };
   return (
     <section className="eliteActivation">
       <header className="eliteActivationHeader">
         <div>
           <span className="eyebrow">Step 4 · Activation</span>
-          <h2>Take the approved portfolio to Alpaca Paper</h2>
+          <span className={`eliteModeBadge ${badge.tone}`}>{badge.label}</span>
+          <h2>{isPaperLab ? "Exercise the execution path across every validated elite" : "Take the approved portfolio to Alpaca Paper"}</h2>
           <p>
             Three explicit approvals, in order: activate internal deployments, approve each member for Alpaca Paper in
             observe-only state, then authorise order submission once its preflight passes. Nothing here can reach live
             money.
           </p>
+          {view.warning ? (
+            <div className="eliteValidationNotice warning">
+              <AlertTriangle size={16} />
+              <span><strong>Not a diversified portfolio</strong>{view.warning}</span>
+            </div>
+          ) : null}
         </div>
         <div className="eliteActivationIdentity">
           <div><span>Portfolio run</span><strong>#{view.portfolio_run_id}</strong></div>
           <div><span>Status</span><strong>{title(view.status)}</strong></div>
-          <div><span>Profile</span><strong>{view.profile ? title(view.profile) : "—"}</strong></div>
+          <div><span>{isPaperLab ? "Mode" : "Profile"}</span><strong>{isPaperLab ? "Paper lab" : view.profile ? title(view.profile) : "—"}</strong></div>
           <div><span>Approved snapshot</span><code>{(view.approved_snapshot_hash ?? view.snapshot_hash ?? "—").slice(0, 16)}</code></div>
         </div>
       </header>
@@ -119,6 +167,20 @@ export function EliteActivationWorkspace({ portfolioId }: { portfolioId: number 
         </button>
       </div>
 
+      {summary.member_count > 1 ? (
+        <BulkActions
+          summary={summary}
+          busy={busy}
+          confirmingExecution={confirmingBulkExecution}
+          bulkApproval={bulkApproval}
+          bulkExecution={bulkExecution}
+          onApproveAll={() => void approveAll()}
+          onRequestEnableAll={() => setConfirmingBulkExecution(true)}
+          onCancelEnableAll={() => setConfirmingBulkExecution(false)}
+          onConfirmEnableAll={() => void enableAllReady()}
+        />
+      ) : null}
+
       <SafetyPanel view={view} />
 
       <div className="eliteActivationMembers">
@@ -140,6 +202,75 @@ export function EliteActivationWorkspace({ portfolioId }: { portfolioId: number 
         <RefreshCw size={14} />Refresh deployment state
       </button>
     </section>
+  );
+}
+
+function BulkActions({
+  summary,
+  busy,
+  confirmingExecution,
+  bulkApproval,
+  bulkExecution,
+  onApproveAll,
+  onRequestEnableAll,
+  onCancelEnableAll,
+  onConfirmEnableAll
+}: {
+  summary: PortfolioActivationView["summary"];
+  busy: string | null;
+  confirmingExecution: boolean;
+  bulkApproval: BulkApprovalResult | null;
+  bulkExecution: BulkExecutionResult | null;
+  onApproveAll: () => void;
+  onRequestEnableAll: () => void;
+  onCancelEnableAll: () => void;
+  onConfirmEnableAll: () => void;
+}) {
+  const running = busy === "bulk-approve" || busy === "bulk-execute";
+  return (
+    <div className="eliteBulkActions">
+      <div>
+        <strong>Bulk actions across all {summary.member_count} members</strong>
+        <span>
+          Each member still goes through its own individual approval and preflight -- this only loops the same
+          per-member action across the whole run so you are not clicking {summary.member_count} times.
+        </span>
+      </div>
+      <div className="eliteBulkButtons">
+        <button className="button secondary" disabled={running} onClick={onApproveAll}>
+          {busy === "bulk-approve" ? <LoaderCircle className="spin" size={15} /> : <ShieldCheck size={15} />}
+          {busy === "bulk-approve" ? "Approving…" : "Approve all for Alpaca Paper"}
+        </button>
+        {!confirmingExecution ? (
+          <button className="button" disabled={running || !summary.preflight_ready} onClick={onRequestEnableAll} title={summary.preflight_ready ? undefined : "No member has a fully passing preflight yet."}>
+            <Sparkles size={15} />Enable all ready Alpaca Paper deployments
+          </button>
+        ) : (
+          <div className="eliteExecutionConfirm">
+            <strong>Authorise Alpaca Paper order submission for every member whose preflight passes ({summary.preflight_ready} ready)?</strong>
+            <span>A member whose preflight is still outstanding is left completely unchanged. Paper money only.</span>
+            <div>
+              <button className="button" disabled={running} onClick={onConfirmEnableAll}>
+                {busy === "bulk-execute" ? <LoaderCircle className="spin" size={15} /> : <Check size={15} />}Confirm
+              </button>
+              <button className="eliteTextButton" onClick={onCancelEnableAll}>Cancel</button>
+            </div>
+          </div>
+        )}
+      </div>
+      {bulkApproval ? (
+        <p className="eliteBulkResult">
+          Last bulk approval: {bulkApproval.summary.approved} approved, {bulkApproval.summary.skipped} already
+          approved or not yet ready, {bulkApproval.summary.errors} failed.
+        </p>
+      ) : null}
+      {bulkExecution ? (
+        <p className="eliteBulkResult">
+          Last bulk execution enable: {bulkExecution.summary.enabled} enabled, {bulkExecution.summary.blocked} blocked
+          on preflight, {bulkExecution.summary.errors} failed.
+        </p>
+      ) : null}
+    </div>
   );
 }
 

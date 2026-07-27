@@ -374,3 +374,164 @@ def test_a_deployment_with_no_frozen_configuration_fails_the_fingerprint_check()
     assert "re-approve" in next(
         row["detail"] for row in report["checks"] if row["code"] == "CANDIDATE_FINGERPRINT_MATCH"
     ).lower()
+
+
+# --- Bulk approval / execution (All Validated Elites Paper Lab) -------------
+
+
+class FakeMembersConnection:
+    """Answers only the member-listing SELECT the bulk functions issue."""
+
+    def __init__(self, members):
+        self.members = members
+
+    def execute(self, query, params=None):
+        text = " ".join(str(query).split())
+        if "FROM elite_portfolio_members WHERE portfolio_run_id=" in text:
+            return FakeResult([dict(row) for row in self.members])
+        raise AssertionError(f"unexpected query: {text}")
+
+
+def test_bulk_approve_calls_the_per_member_approval_for_every_eligible_member(monkeypatch) -> None:
+    members = [
+        {"id": 1, "strategy_direction": "long", "execution_capability": "external_observe", "internal_deployment_id": 10},
+        {"id": 2, "strategy_direction": "long", "execution_capability": "external_observe", "internal_deployment_id": 11},
+    ]
+    conn = FakeMembersConnection(members)
+    calls: list[int] = []
+
+    def fake_approve(conn_, run_id, member_id, *, actor=None, reapprove=False):
+        calls.append(member_id)
+        return {"member_id": member_id, "state": "external_approval_required"}
+
+    monkeypatch.setattr(ops, "approve_member_external_paper", fake_approve)
+
+    result = ops.approve_all_members_for_alpaca_paper(conn, 1)
+
+    assert calls == [1, 2]
+    assert result["summary"] == {"approved": 2, "skipped": 0, "errors": 0, "total": 2}
+    assert result["live_money_supported"] is False
+
+
+def test_bulk_approve_skips_a_short_member_without_calling_the_per_member_function(monkeypatch) -> None:
+    members = [{"id": 1, "strategy_direction": "short", "execution_capability": "internal_only", "internal_deployment_id": 10}]
+    conn = FakeMembersConnection(members)
+    monkeypatch.setattr(ops, "approve_member_external_paper", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call for a short member")))
+
+    result = ops.approve_all_members_for_alpaca_paper(conn, 1)
+
+    assert result["summary"] == {"approved": 0, "skipped": 1, "errors": 0, "total": 1}
+    assert "no external broker path" in result["skipped"][0]["reason"]
+
+
+def test_bulk_approve_skips_a_member_not_yet_internally_activated(monkeypatch) -> None:
+    members = [{"id": 1, "strategy_direction": "long", "execution_capability": "external_observe", "internal_deployment_id": None}]
+    conn = FakeMembersConnection(members)
+    monkeypatch.setattr(ops, "approve_member_external_paper", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not call before internal activation")))
+
+    result = ops.approve_all_members_for_alpaca_paper(conn, 1)
+
+    assert result["summary"]["skipped"] == 1
+    assert "not activated" in result["skipped"][0]["reason"]
+
+
+def test_bulk_approve_treats_an_already_approved_member_as_skipped_not_an_error(monkeypatch) -> None:
+    # The common case on a retried bulk call: most members are already
+    # approved from the first attempt. That must read as progress, not failure.
+    members = [{"id": 1, "strategy_direction": "long", "execution_capability": "external_observe", "internal_deployment_id": 10}]
+    conn = FakeMembersConnection(members)
+
+    def raise_already(conn_, run_id, member_id, *, actor=None, reapprove=False):
+        raise ValueError("deployment is already enabled or approved")
+
+    monkeypatch.setattr(ops, "approve_member_external_paper", raise_already)
+
+    result = ops.approve_all_members_for_alpaca_paper(conn, 1)
+
+    assert result["summary"] == {"approved": 0, "skipped": 1, "errors": 0, "total": 1}
+
+
+def test_bulk_approve_records_a_genuine_error_without_stopping_the_batch(monkeypatch) -> None:
+    members = [
+        {"id": 1, "strategy_direction": "long", "execution_capability": "external_observe", "internal_deployment_id": 10},
+        {"id": 2, "strategy_direction": "long", "execution_capability": "external_observe", "internal_deployment_id": 11},
+    ]
+    conn = FakeMembersConnection(members)
+    calls: list[int] = []
+
+    def fake_approve(conn_, run_id, member_id, *, actor=None, reapprove=False):
+        calls.append(member_id)
+        if member_id == 1:
+            raise PortfolioOperationError("boom")
+        return {"member_id": member_id}
+
+    monkeypatch.setattr(ops, "approve_member_external_paper", fake_approve)
+
+    result = ops.approve_all_members_for_alpaca_paper(conn, 1)
+
+    # Member 2 is still processed even though member 1 failed.
+    assert calls == [1, 2]
+    assert result["summary"] == {"approved": 1, "skipped": 0, "errors": 1, "total": 2}
+    assert result["errors"][0]["member_id"] == 1
+
+
+def test_bulk_enable_execution_only_calls_through_for_members_with_a_passing_preflight(monkeypatch) -> None:
+    members = [{"id": 1, "external_deployment_id": 100}, {"id": 2, "external_deployment_id": 200}]
+    conn = FakeMembersConnection(members)
+    monkeypatch.setattr(
+        ops,
+        "execution_preflight",
+        lambda conn_, external_id: {"passed": external_id == 100, "outstanding": [] if external_id == 100 else ["NO_ACTIVE_HALTS"]},
+    )
+    calls: list[int] = []
+
+    def fake_enable(conn_, run_id, member_id, *, actor=None):
+        calls.append(member_id)
+        return {"member_id": member_id}
+
+    monkeypatch.setattr(ops, "enable_member_paper_execution", fake_enable)
+
+    result = ops.enable_all_ready_members_paper_execution(conn, 1)
+
+    assert calls == [1]
+    assert result["summary"] == {"enabled": 1, "blocked": 1, "errors": 0, "total": 2}
+    assert "NO_ACTIVE_HALTS" in result["blocked"][0]["reason"]
+
+
+def test_bulk_enable_execution_blocks_a_member_never_approved_for_alpaca_paper(monkeypatch) -> None:
+    members = [{"id": 1, "external_deployment_id": None}]
+    conn = FakeMembersConnection(members)
+    monkeypatch.setattr(ops, "execution_preflight", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not check preflight with no external deployment")))
+
+    result = ops.enable_all_ready_members_paper_execution(conn, 1)
+
+    assert result["summary"] == {"enabled": 0, "blocked": 1, "errors": 0, "total": 1}
+    assert "not approved" in result["blocked"][0]["reason"]
+
+
+def test_bulk_enable_execution_never_partially_enables_a_blocked_member(monkeypatch) -> None:
+    members = [{"id": 1, "external_deployment_id": 100}]
+    conn = FakeMembersConnection(members)
+    monkeypatch.setattr(ops, "execution_preflight", lambda conn_, external_id: {"passed": False, "outstanding": ["FRESH_COMPLETED_BAR"]})
+    monkeypatch.setattr(ops, "enable_member_paper_execution", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not enable a blocked member")))
+
+    result = ops.enable_all_ready_members_paper_execution(conn, 1)
+
+    assert result["summary"] == {"enabled": 0, "blocked": 1, "errors": 0, "total": 1}
+
+
+def test_bulk_enable_execution_records_a_genuine_error_without_stopping_the_batch(monkeypatch) -> None:
+    members = [{"id": 1, "external_deployment_id": 100}, {"id": 2, "external_deployment_id": 200}]
+    conn = FakeMembersConnection(members)
+    monkeypatch.setattr(ops, "execution_preflight", lambda conn_, external_id: {"passed": True, "outstanding": []})
+
+    def fake_enable(conn_, run_id, member_id, *, actor=None):
+        if member_id == 1:
+            raise PortfolioOperationError("boom")
+        return {"member_id": member_id}
+
+    monkeypatch.setattr(ops, "enable_member_paper_execution", fake_enable)
+
+    result = ops.enable_all_ready_members_paper_execution(conn, 1)
+
+    assert result["summary"] == {"enabled": 1, "blocked": 0, "errors": 1, "total": 2}

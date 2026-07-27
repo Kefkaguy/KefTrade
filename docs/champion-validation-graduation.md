@@ -214,3 +214,97 @@ at 2/3 -- without ever permitting a single-timeframe portfolio above size 2.
 one that actually yields a portfolio, reporting exactly which shape constraints
 differ from strict. When none works it says so and calls it an evidence problem
 rather than proposing a looser gate.
+
+## All Validated Elites Paper Lab (execution-testing mode)
+
+A fourth mode, deliberately not a fourth profile: `preview()`/`create_run()`
+build a diversity-constrained *portfolio*. `paper_lab_preview()`/
+`create_paper_lab_run()` build an execution-testing *set* -- every validated
+elite that can reach Alpaca Paper, correlated or duplicated or not. Sharing
+code with the diversified solver would risk one day sharing its exclusion
+logic too, so it is a separate pure function (`elite_portfolio_builder.
+paper_lab_preview`) that happens to return the same response shape, which is
+what lets it reuse the diversified path's persistence, approval, and Step 04
+activation machinery unmodified.
+
+### Eligibility
+
+Narrower and different from the solver's `evaluate_eligibility`: nothing here
+is excluded on profit factor, drawdown, or any other quality threshold --
+`load_elite_candidate_variants` already filtered to `promotion_state='elite'`,
+and quality was the champion validation battery's job. `paper_lab_eligibility`
+checks only whether a member can actually reach a deployment at all:
+
+| Reason | Meaning |
+| --- | --- |
+| `NOT_PROMOTED_ELITE` | Not `promotion_state='elite'` (defensive; the input pool already filters this) |
+| `NOT_VALIDATED` | `validation_state != 'validated'` -- catches a legacy elite that reached `elite` through the older pooled-consistency gate and never actually ran the champion validation battery |
+| `SHORT_DIRECTION_EXCLUDED` | Short strategies have no Alpaca external execution path |
+| `INTERNAL_ONLY_EXCLUDED` | `execution_capability='internal_only'` |
+| `MISSING_AUTHORITATIVE_LINEAGE` | No campaign, research job, or candidate id |
+| `DUPLICATE_CANDIDATE_SYMBOL_TIMEFRAME` | Same (candidate_id, symbol, timeframe) as an already-included, higher-scoring row |
+
+### What is never a gate here
+
+Correlation, shared symbols, shared families, and parameter similarity are
+computed (`paper_lab_advisory_conflicts`, reusing the diversified solver's own
+0.90/0.75 thresholds so the labeling is not invented looser) but every
+conflict is stored `hard_conflict: False, advisory_only: True`. Nothing is
+excluded for it. The response and the Step 04 activation view both carry
+`diversified: False` and a warning string
+(`PAPER_LAB_WARNING`) that the frontend renders as a persistent banner --
+`configuration["warning"]` round-trips through `elite_portfolio_runs.
+source_configuration`, so it survives a page refresh along with everything
+else.
+
+### Reuse, not a fork
+
+`_create_run_from_preview` is the one insert pipeline both `create_run` and
+`create_paper_lab_run` call; `_recompute_for_run` is the one place that
+dispatches an approval/staleness check to either `preview_from_database` or
+`paper_lab_preview_from_database`, keyed on
+`source_configuration["mode"] == PAPER_LAB_MODE`. Everything downstream --
+`get_run`, `list_runs`, `activate_internal`, the whole of
+`elite_portfolio_operations.py` (per-member approval, preflight, execution
+enable) -- operates on `elite_portfolio_runs`/`elite_portfolio_members` rows
+and has no idea which path created them.
+
+### Bulk actions
+
+`approve_all_members_for_alpaca_paper` and
+`enable_all_ready_members_paper_execution` are loops over the exact
+per-member functions a single click already used
+(`approve_member_external_paper` -> `enable_observe_only`;
+`enable_member_paper_execution` -> `enable_paper_execution`), not a
+lower-privilege shortcut. One member's failure never blocks the rest, and a
+member already approved is reported as skipped rather than as an error, so a
+retried bulk call reads as progress. A member whose preflight has any
+outstanding check is left completely unchanged by the bulk execution-enable
+call -- it is either enabled in full or not touched, never partially.
+
+### Account-level safety is unchanged
+
+`default_risk_policy()`, `evaluate_portfolio_risk`, and the preflight's halt
+and reconciliation checks are account-scoped, not portfolio-run-scoped, so
+having thirteen members active from one paper lab run does not create
+thirteen independent risk budgets -- it is still the one account's allocated
+capital, risk-per-trade, exposure, and loss limits. Duplicate-deployment
+arbitration already existed structurally: `_activate_member`'s existing-row
+lookup is keyed on `(campaign_id, candidate_id, symbol, timeframe)` globally,
+not per portfolio run, so the same elite referenced by both a diversified run
+and the paper lab resolves to the same internal and external deployment
+rows -- never two.
+
+### Endpoints
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /paper-lab/preview` | Read-only: every deployable validated elite plus exclusion reasons |
+| `POST /paper-lab` | Save the current set as an immutable run |
+| `POST /{portfolio_id}/members/approve-all-external-paper` | Bulk Alpaca Paper approval (`confirm_portfolio_run_id` required) |
+| `POST /{portfolio_id}/members/enable-all-paper-execution` | Bulk execution enable for members whose preflight passes (`confirm_portfolio_run_id` required) |
+
+Approval, internal activation, and single-member Step 04 actions reuse the
+existing generic endpoints (`/{portfolio_id}/approve`,
+`/{portfolio_id}/activate-internal`, `/{portfolio_id}/members/{member_id}/...`)
+unchanged.

@@ -33,6 +33,8 @@ def elite_job_row() -> dict:
         "timeframes_passed": 1,
         "regimes_passed": 2,
         "forward_validation_state": "collecting_forward_evidence",
+        "promotion_state": "elite",
+        "validation_state": "validated",
     }
 
 
@@ -46,6 +48,22 @@ def test_database_row_becomes_immutable_strategy_market_variant() -> None:
     assert variant["dataset_ids"] == ["dataset-1"]
     assert len(variant["strategy_returns"]) >= 30
     assert set(variant["strategy_returns"]) == set(variant["signal_returns"])
+
+
+def test_variant_exposes_promotion_and_validation_state_for_paper_lab_eligibility() -> None:
+    # The paper lab has to be able to verify "promotion_state='elite' and
+    # validation_state='validated'" from the evidence itself, not merely trust
+    # that load_elite_candidate_variants's own WHERE clause already filtered
+    # for it -- otherwise a legacy elite promoted through the older
+    # pooled-consistency gate would be silently indistinguishable from one that
+    # actually passed the champion validation battery.
+    row = elite_job_row()
+    row["validation_state"] = "pending_validation"
+
+    variant = candidate_variant(row)
+
+    assert variant["promotion_state"] == "elite"
+    assert variant["validation_state"] == "pending_validation"
 
 
 def test_duplicate_trade_timestamps_remain_distinct_correlation_observations() -> None:
@@ -183,3 +201,75 @@ def test_backfill_appends_frozen_evidence_without_rewriting_results(monkeypatch)
     assert conn.commits == 1
     assert conn.rollbacks == 0
     assert len(conn.inserted) == 1
+
+
+# --- Paper lab wiring: mode dispatch and pool loading ------------------------
+
+
+def test_paper_lab_preview_from_database_evaluates_the_full_elite_pool(monkeypatch) -> None:
+    from app.services import elite_portfolio_repository as repo
+
+    pool = [{
+        "candidate_key": "c1|AMD|30m", "candidate_id": "c1", "campaign_id": 1, "research_job_id": 100,
+        "promotion_state": "elite", "validation_state": "validated", "symbol": "AMD", "timeframe": "30m",
+        "family_id": "session_momentum", "strategy_direction": "long", "execution_capability": "external_observe",
+        "parameters": {}, "profit_factor": 1.8, "expectancy": 6.0, "max_drawdown": 0.05, "trade_count": 90,
+        "quality_score": 0.8, "research_score": 0.8, "strategy_returns": {}, "signal_returns": {},
+    }]
+    monkeypatch.setattr(repo, "load_elite_candidate_variants", lambda _conn: pool)
+
+    result = repo.paper_lab_preview_from_database(object())
+
+    assert result["eligible_count"] == 1
+    assert result["mode"] == "all_validated_elites_paper_lab"
+
+
+def test_recompute_for_run_dispatches_to_the_paper_lab_preview_by_mode(monkeypatch) -> None:
+    from app.services import elite_portfolio_repository as repo
+
+    monkeypatch.setattr(repo, "paper_lab_preview_from_database", lambda _conn: {"snapshot": {"decision_hash": "paper-lab-hash"}})
+    monkeypatch.setattr(
+        repo,
+        "preview_from_database",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must not call the diversified preview for a paper lab run")),
+    )
+
+    run = {"source_configuration": {"mode": "all_validated_elites_paper_lab"}}
+    result = repo._recompute_for_run(object(), run)
+
+    assert result["snapshot"]["decision_hash"] == "paper-lab-hash"
+
+
+def test_recompute_for_run_uses_the_diversified_preview_for_a_normal_run(monkeypatch) -> None:
+    from app.services import elite_portfolio_repository as repo
+
+    monkeypatch.setattr(repo, "preview_from_database", lambda _conn, config, use_cache=False: {"snapshot": {"decision_hash": "diversified-hash"}, "seen_config": config})
+    monkeypatch.setattr(
+        repo,
+        "paper_lab_preview_from_database",
+        lambda _conn: (_ for _ in ()).throw(AssertionError("must not call the paper lab preview for a diversified run")),
+    )
+
+    run = {"source_configuration": {"profile": "strict_diversified"}}
+    result = repo._recompute_for_run(object(), run)
+
+    assert result["snapshot"]["decision_hash"] == "diversified-hash"
+    assert result["seen_config"] == {"profile": "strict_diversified"}
+
+
+def test_recompute_for_run_treats_a_run_with_no_mode_key_as_diversified(monkeypatch) -> None:
+    # A run created before the paper lab existed has no "mode" key at all --
+    # this must still route to the diversified preview, not raise or silently
+    # take the paper lab path.
+    from app.services import elite_portfolio_repository as repo
+
+    monkeypatch.setattr(repo, "preview_from_database", lambda _conn, config, use_cache=False: {"snapshot": {"decision_hash": "diversified-hash"}})
+    monkeypatch.setattr(
+        repo,
+        "paper_lab_preview_from_database",
+        lambda _conn: (_ for _ in ()).throw(AssertionError("must not call the paper lab preview")),
+    )
+
+    result = repo._recompute_for_run(object(), {"source_configuration": {}})
+
+    assert result["snapshot"]["decision_hash"] == "diversified-hash"

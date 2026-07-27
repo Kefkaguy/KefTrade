@@ -1528,8 +1528,14 @@ export type ElitePortfolioResult = {
   verified_infeasible?: boolean;
   verification?: ElitePortfolioVerification;
   feasibility_report?: ElitePortfolioFeasibilityReport;
-  blocking_analysis?: ElitePortfolioBlockingAnalysis;
-  profile?: string;
+  blocking_analysis?: ElitePortfolioBlockingAnalysis | null;
+  profile?: string | null;
+  // Set only on an "All Validated Elites Paper Lab" result. `diversified` is
+  // explicitly false there and the page must never present it as a
+  // diversified portfolio merely because every member passed validation.
+  mode?: string | null;
+  diversified?: boolean;
+  warning?: string;
   hard_rules?: ElitePortfolioHardRule[];
   analytics?: Record<string, any>;
   portfolio_analytics?: Record<string, any>;
@@ -2191,6 +2197,12 @@ export function configurationWithProfile(
   return { ...configuration, profile: profile.id, constraints: { ...profile.resolved_constraints } };
 }
 
+// Every mode "All Validated Elites Paper Lab" sets on a run's stored
+// configuration. Kept as a literal here (not fetched from the backend) so a
+// frontend build fails loudly if it ever drifts from the Python constant of
+// the same name in elite_portfolio_builder.py.
+export const PAPER_LAB_MODE = "all_validated_elites_paper_lab";
+
 export type ElitePortfolioRunSummary = {
   id: number;
   run_key: string;
@@ -2201,6 +2213,8 @@ export type ElitePortfolioRunSummary = {
   approved_at: string | null;
   activated_at: string | null;
   profile: string | null;
+  mode: string | null;
+  diversified: boolean;
   member_count: number;
 };
 
@@ -2216,6 +2230,23 @@ export function getElitePortfolioRuns(limit = 20) {
 
 export function getElitePortfolioRecommendation() {
   return request<ElitePortfolioRecommendation>("/research/elite-portfolios/profile-recommendation", { cache: "no-store", timeoutMs: 120000 });
+}
+
+// --- All Validated Elites Paper Lab ------------------------------------------
+//
+// An execution-testing mode, not a diversified portfolio: every validated
+// elite that can reach Alpaca Paper is included, correlated or not. Reuses
+// the same ElitePortfolioResult shape as the diversified preview/create
+// endpoints (mode/diversified/warning distinguish it), and the same
+// run/activation infrastructure once saved -- Step 04 does not need to know
+// which path a run came from.
+
+export function getPaperLabPreview() {
+  return request<ElitePortfolioResult>("/research/elite-portfolios/paper-lab/preview", { cache: "no-store", timeoutMs: 120000 });
+}
+
+export function createPaperLabRun() {
+  return request<ElitePortfolioResult>("/research/elite-portfolios/paper-lab", { method: "POST", timeoutMs: 120000 });
 }
 
 // --- Step 04: activation -----------------------------------------------------
@@ -2291,6 +2322,13 @@ export type PortfolioActivationView = {
   activated_at: string | null;
   objective: string | null;
   profile: string | null;
+  // Set only for an "All Validated Elites Paper Lab" run. `diversified`
+  // defaults true server-side for any run that never set it, so it is always
+  // safe to read directly -- a diversified run and a paper lab run can never
+  // be confused for one another here.
+  mode: string | null;
+  diversified: boolean;
+  warning: string | null;
   members: ActivationMember[];
   activation_attempts: Array<Record<string, any>>;
   summary: {
@@ -2324,6 +2362,43 @@ export function enableMemberPaperExecution(portfolioId: number, memberId: number
     // is the last approval before real orders reach a broker.
     body: JSON.stringify({ confirm_member_id: memberId }),
     timeoutMs: 120000
+  });
+}
+
+export type BulkApprovalResult = {
+  portfolio_run_id: number;
+  approved: Array<Record<string, any>>;
+  skipped: Array<{ member_id: number; reason: string }>;
+  errors: Array<{ member_id: number; error: string }>;
+  summary: { approved: number; skipped: number; errors: number; total: number };
+  live_money_supported: false;
+};
+
+export type BulkExecutionResult = {
+  portfolio_run_id: number;
+  enabled: Array<Record<string, any>>;
+  blocked: Array<{ member_id: number; reason: string }>;
+  errors: Array<{ member_id: number; error: string }>;
+  summary: { enabled: number; blocked: number; errors: number; total: number };
+  live_money_supported: false;
+};
+
+export function approveAllMembersForAlpacaPaper(portfolioId: number, options: { reapprove?: boolean } = {}) {
+  return request<BulkApprovalResult>(`/research/elite-portfolios/${portfolioId}/members/approve-all-external-paper`, {
+    method: "POST",
+    // Repeats the portfolio run id: a bulk action touches every member at
+    // once, so it gets the same explicit-confirmation treatment as a single
+    // execution-enable click, not less.
+    body: JSON.stringify({ reapprove: options.reapprove ?? false, confirm_portfolio_run_id: portfolioId }),
+    timeoutMs: 300000
+  });
+}
+
+export function enableAllReadyMembersPaperExecution(portfolioId: number) {
+  return request<BulkExecutionResult>(`/research/elite-portfolios/${portfolioId}/members/enable-all-paper-execution`, {
+    method: "POST",
+    body: JSON.stringify({ confirm_portfolio_run_id: portfolioId }),
+    timeoutMs: 300000
   });
 }
 

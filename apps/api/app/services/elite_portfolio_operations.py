@@ -512,6 +512,7 @@ def portfolio_activation_view(conn: psycopg.Connection, portfolio_run_id: int) -
         ).fetchall()
     ]
     external_members = [row for row in members if row.get("external_deployment")]
+    source_configuration = dict(run.get("source_configuration") or {})
     return {
         "portfolio_run_id": portfolio_run_id,
         "run_key": run.get("run_key"),
@@ -521,7 +522,14 @@ def portfolio_activation_view(conn: psycopg.Connection, portfolio_run_id: int) -
         "approved_at": run.get("approved_at"),
         "activated_at": run.get("activated_at"),
         "objective": run.get("objective"),
-        "profile": (run.get("source_configuration") or {}).get("profile"),
+        "profile": source_configuration.get("profile"),
+        # `mode`/`diversified`/`warning` are only ever set on a paper lab run's
+        # source_configuration (see `paper_lab_preview`); a diversified run's
+        # `diversified` therefore defaults True here, never the other way
+        # around, so the UI can never mistake one for the other.
+        "mode": source_configuration.get("mode"),
+        "diversified": bool(source_configuration.get("diversified", True)),
+        "warning": source_configuration.get("warning"),
         "constraints": run.get("constraints"),
         "members": members,
         "activation_attempts": attempts,
@@ -632,4 +640,108 @@ def enable_member_paper_execution(
         "live_money_supported": False,
         "trace_id": result.get("trace_id"),
         "preflight": execution_preflight(conn, external_id),
+    }
+
+
+def approve_all_members_for_alpaca_paper(
+    conn: psycopg.Connection,
+    portfolio_run_id: int,
+    *,
+    actor: str | None = None,
+    reapprove: bool = False,
+) -> dict[str, Any]:
+    """Approve every eligible member of a run for Alpaca Paper, one at a time.
+
+    Not specific to the paper lab -- any approved run's members can be
+    bulk-approved -- but the paper lab (potentially thirteen members at once)
+    is the mode this exists for. Each member goes through the exact same
+    `approve_member_external_paper` a single per-member click would use, which
+    itself calls `enable_observe_only`; nothing here bypasses those guards or
+    grants any authority the per-member path does not already grant. One
+    member's failure never blocks the rest, and a member already approved
+    (the common case on a retried bulk call) is reported as skipped rather
+    than as an error.
+    """
+    members = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id, strategy_direction, execution_capability, internal_deployment_id FROM elite_portfolio_members WHERE portfolio_run_id=%s ORDER BY rank",
+            (portfolio_run_id,),
+        ).fetchall()
+    ]
+    approved: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for member in members:
+        member_id = int(member["id"])
+        if str(member.get("strategy_direction") or "long") != "long" or str(member.get("execution_capability")) == "internal_only":
+            skipped.append({"member_id": member_id, "reason": "no external broker path (short or internal-only)"})
+            continue
+        if not member.get("internal_deployment_id"):
+            skipped.append({"member_id": member_id, "reason": "internal deployment not activated yet"})
+            continue
+        try:
+            approved.append(approve_member_external_paper(conn, portfolio_run_id, member_id, actor=actor, reapprove=reapprove))
+        except PortfolioOperationError as error:
+            errors.append({"member_id": member_id, "error": str(error)})
+        except ValueError as error:
+            if "already enabled or approved" in str(error):
+                skipped.append({"member_id": member_id, "reason": str(error)})
+            else:
+                errors.append({"member_id": member_id, "error": str(error)})
+    return {
+        "portfolio_run_id": portfolio_run_id,
+        "approved": approved,
+        "skipped": skipped,
+        "errors": errors,
+        "summary": {"approved": len(approved), "skipped": len(skipped), "errors": len(errors), "total": len(members)},
+        "live_money_supported": False,
+    }
+
+
+def enable_all_ready_members_paper_execution(
+    conn: psycopg.Connection,
+    portfolio_run_id: int,
+    *,
+    actor: str | None = None,
+) -> dict[str, Any]:
+    """Enable Alpaca Paper execution for every member whose full preflight passes.
+
+    A member with any outstanding preflight check is left completely
+    unchanged -- this never partially satisfies `enable_paper_execution`'s own
+    requirements, it only ever calls that function for a member that already
+    passes every one of them. Blocked members are reported, not silently
+    dropped, so a bulk call always accounts for the whole run.
+    """
+    members = [
+        dict(row)
+        for row in conn.execute(
+            "SELECT id, external_deployment_id FROM elite_portfolio_members WHERE portfolio_run_id=%s ORDER BY rank",
+            (portfolio_run_id,),
+        ).fetchall()
+    ]
+    enabled: list[dict[str, Any]] = []
+    blocked: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for member in members:
+        member_id = int(member["id"])
+        external_id = member.get("external_deployment_id")
+        if not external_id:
+            blocked.append({"member_id": member_id, "reason": "not approved for Alpaca Paper yet"})
+            continue
+        preflight = execution_preflight(conn, int(external_id))
+        if not preflight["passed"]:
+            blocked.append({"member_id": member_id, "reason": f"preflight outstanding: {', '.join(preflight['outstanding'])}"})
+            continue
+        try:
+            enabled.append(enable_member_paper_execution(conn, portfolio_run_id, member_id, actor=actor))
+        except (PortfolioOperationError, ValueError) as error:
+            errors.append({"member_id": member_id, "error": str(error)})
+    return {
+        "portfolio_run_id": portfolio_run_id,
+        "enabled": enabled,
+        "blocked": blocked,
+        "errors": errors,
+        "summary": {"enabled": len(enabled), "blocked": len(blocked), "errors": len(errors), "total": len(members)},
+        "live_money_supported": False,
     }
