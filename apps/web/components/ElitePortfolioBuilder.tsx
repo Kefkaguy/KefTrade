@@ -85,11 +85,12 @@ export function ElitePortfolioBuilder() {
   const snapshotHash = snapshotFor(result);
   const analytics = (result?.analytics ?? result?.portfolio_analytics ?? {}) as Record<string, any>;
   const members = result?.members ?? (result?.selected ?? []).map((candidateKey, index) => ({ id: index, candidate_id: candidateKey }));
-  const activeStep = phase === "configure" ? 0 : phase === "preview" ? 2 : phase === "saved" ? 2 : 3;
-  const nextAction = championStatus?.eligible_promoted_jobs
-    ? "Import champions"
-    : championStatus?.research_champions
-      ? "Validate champions"
+  const workflowStep = championStatus?.research_champions ? 1 : 0;
+  const activeStep = phase === "configure" ? workflowStep : phase === "preview" ? 2 : phase === "saved" ? 2 : 3;
+  const nextAction = championStatus?.research_champions
+    ? "Validate champions"
+    : championStatus?.eligible_promoted_jobs
+      ? "Import champions"
       : "Open portfolio builder";
   const twoTimeframeWarning = configuration?.timeframes.length === 2
     ? "With exactly two timeframes, the exact 50% cap requires an even-sized portfolio split equally between them."
@@ -185,6 +186,8 @@ export function ElitePortfolioBuilder() {
         busy={busy === "champions"}
         onImport={importChampions}
       />
+
+      <EliteValidationQueue status={championStatus} />
 
       <section className="eliteAdvancedToggle">
         <div>
@@ -296,6 +299,7 @@ function EliteWorkflowGuide({ status, finalCandidateCount }: { status: ResearchC
   const backlog = status?.eligible_promoted_jobs ?? 0;
   const champions = status?.research_champions ?? 0;
   const finalElites = status?.final_elites ?? finalCandidateCount;
+  const awaitingForward = status?.awaiting_forward_sample ?? champions;
   return (
     <section className="eliteWorkflowGuide" aria-label="Elite graduation workflow">
       <div className={backlog > 0 ? "active" : "done"}>
@@ -306,12 +310,39 @@ function EliteWorkflowGuide({ status, finalCandidateCount }: { status: ResearchC
       <div className={champions > 0 ? "active" : ""}>
         <span>02</span>
         <strong>Validate champions</strong>
-        <p>{champions > 0 ? `${champions.toLocaleString()} research champion${champions === 1 ? "" : "s"} need forward/cross-asset evidence.` : "Imported champions will wait for validation here."}</p>
+        <p>{champions > 0 ? `${awaitingForward.toLocaleString()} champion${awaitingForward === 1 ? "" : "s"} still need forward/cross-asset evidence before becoming final elites.` : "Imported champions will wait for validation here."}</p>
       </div>
       <div className={finalElites > 0 ? "active" : ""}>
         <span>03</span>
         <strong>Build final portfolio</strong>
         <p>{finalElites.toLocaleString()} final elite candidate row{finalElites === 1 ? "" : "s"} are available to the solver today.</p>
+      </div>
+    </section>
+  );
+}
+
+function EliteValidationQueue({ status }: { status: ResearchChampionStatus | null }) {
+  const champions = status?.research_champions ?? 0;
+  const awaitingForward = status?.awaiting_forward_sample ?? 0;
+  const finalElites = status?.final_elites ?? 0;
+  if (!champions) return null;
+  return (
+    <section className="eliteValidationQueue">
+      <div>
+        <span className="eyebrow">Step 2</span>
+        <h2>Next: validate the imported champions</h2>
+        <p>
+          Import worked. These rows are now research champions, not final elites. They need forward/cross-asset evidence before the portfolio builder can treat them as deployable elite candidates.
+        </p>
+      </div>
+      <div className="eliteChampionMetrics">
+        <Metric label="Champion queue" value={champions} />
+        <Metric label="Need forward sample" value={awaitingForward} />
+        <Metric label="Final elites today" value={finalElites} />
+      </div>
+      <div className="eliteValidationAction">
+        <strong>Required engineering step</strong>
+        <span>Connect the validation runner to this page. Until then, importing more champions only grows the validation queue.</span>
       </div>
     </section>
   );
@@ -408,14 +439,16 @@ function ResearchChampionIntake({
   busy: boolean;
   onImport: () => void;
 }) {
+  const hasChampions = Boolean(status?.research_champions);
   return (
     <section className="eliteChampionIntake">
       <div>
         <span className="eyebrow">Step 1</span>
-        <h2>Do this now: import research champions</h2>
+        <h2>{hasChampions ? "Champion import is working" : "Do this now: import research champions"}</h2>
         <p>
-          This takes the best promoted research jobs, removes near-duplicates, and saves only a capped champion set.
-          They are review candidates, not live-trading elites.
+          {hasChampions
+            ? "You already have imported research champions. Import more only if you want a larger validation queue."
+            : "This takes the best promoted research jobs, removes near-duplicates, and saves only a capped champion set. They are review candidates, not live-trading elites."}
         </p>
       </div>
       <div className="eliteChampionMetrics">
@@ -426,12 +459,13 @@ function ResearchChampionIntake({
       </div>
       {result ? (
         <div className="eliteChampionResult">
-          <strong>{result.imported} champions imported</strong>
+          <strong>Import completed: {result.imported} champions added</strong>
+          <span className="eliteImportExplanation">{result.dedupe_clusters_seen} dedupe clusters examined. Final elites created: {result.final_elites_created}. Thresholds weakened: {String(result.thresholds_weakened)}. Next step: validation.</span>
           <span>{result.dedupe_clusters_seen} dedupe clusters examined · {result.final_elites_created} final elites created · thresholds weakened: {String(result.thresholds_weakened)}</span>
         </div>
       ) : null}
       <button className="button" disabled={busy || !status?.eligible_promoted_jobs} onClick={onImport}>
-        <Sparkles size={16} />{busy ? "Importing champions..." : "Do this now: import 25 champions"}
+        <Sparkles size={16} />{busy ? "Importing champions..." : hasChampions ? "Import 25 more champions" : "Do this now: import 25 champions"}
       </button>
     </section>
   );

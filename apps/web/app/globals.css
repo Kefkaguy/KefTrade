@@ -1247,6 +1247,13 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .eliteChampionMetrics .eliteMetric { padding: 11px 10px; }
 .eliteChampionResult { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; }
 .eliteChampionResult strong { color: var(--success); font-family: var(--font-mono); }
+.eliteChampionResult .eliteImportExplanation + span { display: none; }
+.eliteValidationQueue { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .75fr) minmax(260px, .65fr); align-items: center; gap: 22px; margin-top: 18px; padding: 22px; border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--line)); border-radius: var(--radius); background: linear-gradient(135deg, color-mix(in srgb, var(--warning) 10%, transparent), var(--panel)); }
+.eliteValidationQueue h2 { margin-top: 6px; font-size: 20px; }
+.eliteValidationQueue p { margin-top: 9px; color: var(--muted); font-size: 10px; line-height: 1.65; }
+.eliteValidationAction { display: grid; gap: 7px; padding: 15px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); }
+.eliteValidationAction strong { color: var(--warning); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
+.eliteValidationAction span { color: var(--muted); font-size: 10px; line-height: 1.55; }
 .eliteAdvancedToggle { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 24px; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
 .eliteAdvancedToggle h2 { margin-top: 5px; font-size: 17px; }
 .eliteAdvancedToggle p { margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.55; }
@@ -1358,6 +1365,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   .eliteBuilderHero { grid-template-columns: minmax(0, 1fr) 270px; gap: 42px; }
   .eliteWorkflowGuide { grid-template-columns: 1fr; }
   .eliteChampionIntake { grid-template-columns: 1fr; }
+  .eliteValidationQueue { grid-template-columns: 1fr; }
   .eliteChampionIntake .button { width: 100%; justify-content: center; }
   .eliteBuilderGrid { grid-template-columns: minmax(0, 1fr) 260px; gap: 40px; }
   .forwardWorkspaceGrid { grid-template-columns: minmax(0, 1fr) 280px; gap: 40px; }
