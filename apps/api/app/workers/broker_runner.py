@@ -12,6 +12,7 @@ from app.db import connect
 from app.services.broker_reconciliation import reconcile_broker_snapshot
 from app.services.broker_sync import synchronize_broker
 from app.services.external_execution import ensure_disabled_external_candidates, run_shadow_cycle
+from app.services.elite_portfolio_operations import enable_all_ready_members_paper_execution
 from app.settings import settings
 
 BROKER_WORKER_LOCK = 918273645
@@ -50,6 +51,48 @@ async def run_broker_cycle() -> dict[str, Any]:
                         failed = {"deployment_id": deployment["id"], "status": "failed", "error_class": error.__class__.__name__, "error": str(error)}
                         shadows.append(failed)
                         logger.exception("elite observation failed deployment_id=%s", deployment["id"])
+
+            if (
+                reconciliation.get("status") == "clean"
+                and settings.auto_enable_ready_paper_execution
+                and settings.external_paper_execution_enabled
+                and settings.broker_order_submission_enabled
+            ):
+                portfolio_runs = conn.execute(
+                    """
+                    SELECT DISTINCT m.portfolio_run_id
+                    FROM elite_portfolio_members m
+                    JOIN elite_portfolio_runs r
+                      ON r.id = m.portfolio_run_id
+                    WHERE m.external_deployment_id IS NOT NULL
+                      AND r.approved_snapshot_hash IS NOT NULL
+                      AND r.source_configuration->>'mode' = 'all_validated_elites_paper_lab'
+                    ORDER BY m.portfolio_run_id
+                    """
+                ).fetchall()
+
+                for portfolio_run in portfolio_runs:
+                    portfolio_run_id = int(portfolio_run["portfolio_run_id"])
+                    try:
+                        automatic_enablement = enable_all_ready_members_paper_execution(
+                            conn,
+                            portfolio_run_id,
+                            actor="broker-worker:auto-enable-ready-paper-execution",
+                        )
+                        logger.info(
+                            "automatic paper execution enable portfolio_run_id=%s enabled=%s blocked=%s errors=%s",
+                            portfolio_run_id,
+                            automatic_enablement["summary"]["enabled"],
+                            automatic_enablement["summary"]["blocked"],
+                            automatic_enablement["summary"]["errors"],
+                        )
+                    except Exception:
+                        conn.rollback()
+                        logger.exception(
+                            "automatic paper execution enable failed portfolio_run_id=%s",
+                            portfolio_run_id,
+                        )
+
             persist_daily_summary(conn, sync, reconciliation, shadows)
             # Historical evidence is retained indefinitely. No runtime pruning occurs.
             result = {"status": "complete", "sync": sync, "reconciliation": reconciliation, "shadow_executions": shadows, "broker_mutation": False}

@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     broker_shadow_execution_enabled: bool = Field(default=True, validation_alias="BROKER_SHADOW_EXECUTION_ENABLED")
     broker_order_submission_enabled: bool = Field(default=False, validation_alias="BROKER_ORDER_SUBMISSION_ENABLED")
     external_paper_execution_enabled: bool = Field(default=False, validation_alias="EXTERNAL_PAPER_EXECUTION_ENABLED")
+    auto_enable_ready_paper_execution: bool = Field(
+        default=False,
+        validation_alias="AUTO_ENABLE_READY_PAPER_EXECUTION",
+    )
     elite_minimum_trades_per_year: float = Field(default=0, validation_alias="ELITE_MINIMUM_TRADES_PER_YEAR")
     # Phase 12 (Intraday Research Lab), Step 1. Only opening_range_minutes is
     # consumed by Step 1's feature computation
