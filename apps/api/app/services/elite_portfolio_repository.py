@@ -558,6 +558,23 @@ def _create_run_from_preview(conn: psycopg.Connection, result: dict[str, Any]) -
     config = result["configuration"]
     run_key = f"ep_{uuid4().hex}"
     snapshot_hash = result["snapshot"]["decision_hash"]
+
+    # Idempotency: identical immutable evidence should return the existing run
+    # instead of attempting to insert the same unique snapshot hash again.
+    existing_snapshot = conn.execute(
+        """
+        SELECT portfolio_run_id
+        FROM elite_portfolio_snapshots
+        WHERE snapshot_hash = %s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (snapshot_hash,),
+    ).fetchone()
+
+    if existing_snapshot:
+        return get_run(conn, int(existing_snapshot["portfolio_run_id"]))
+
     row = conn.execute(
         """
         INSERT INTO elite_portfolio_runs(
