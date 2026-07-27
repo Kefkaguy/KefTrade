@@ -1342,23 +1342,36 @@ def test_research_campaign_key_changes_with_campaign_label_variant() -> None:
 
     assert base_key != labeled_key
 
-def test_broad_screen_forwards_campaign_label(
-    client,
-    monkeypatch,
-):
-    captured: dict[str, object] = {}
+def _broad_screen_client(monkeypatch, *, duplicate_of=None):
+    """A TestClient with the DB dependency stubbed out.
+
+    The endpoint's own logic is what is under test here; the plan and the
+    campaign creator are both patched, so no real connection is needed.
+    """
+    from fastapi.testclient import TestClient
+
+    from app.db import get_connection
+    from app.main import app
 
     monkeypatch.setattr(
         "app.services.labs.intraday.campaign_plan.build_campaign_plan",
         lambda conn, **kwargs: {
             "blockers": [],
             "timeframes_selected": ["15m", "30m"],
+            "duplicate_of_campaign_id": duplicate_of,
             "active_families": [
                 {"architecture": "family_a"},
                 {"architecture": "family_b"},
             ],
         },
     )
+    app.dependency_overrides[get_connection] = lambda: None
+    return TestClient(app)
+
+
+def test_broad_screen_forwards_campaign_label(monkeypatch):
+    captured: dict[str, object] = {}
+    client = _broad_screen_client(monkeypatch)
 
     def fake_create_intraday_campaign(conn, **kwargs):
         captured.update(kwargs)
@@ -1385,3 +1398,87 @@ def test_broad_screen_forwards_campaign_label(
 
     assert response.status_code == 200
     assert captured["campaign_label"] == "test-rerun-1"
+
+
+def _fake_creator(captured):
+    def fake_create_intraday_campaign(conn, **kwargs):
+        captured.update(kwargs)
+        return {"campaign_id": 90, "jobs_created": 1}
+
+    return fake_create_intraday_campaign
+
+
+def test_broad_screen_refuses_an_unconfirmed_duplicate(monkeypatch):
+    """The original protection: an unlabeled relaunch must never silently
+    reuse an earlier campaign."""
+    captured: dict[str, object] = {}
+    client = _broad_screen_client(monkeypatch, duplicate_of=89)
+    monkeypatch.setattr(
+        "app.services.labs.intraday.families.registry.create_intraday_campaign",
+        _fake_creator(captured),
+    )
+
+    response = client.post(
+        "/research/intraday/campaigns/broad-screen",
+        params=[("timeframes", "15m"), ("timeframes", "30m")],
+    )
+
+    assert response.status_code == 409
+    assert "already ran as campaign 89" in response.json()["detail"]
+    assert captured == {}
+
+
+def test_broad_screen_reruns_a_duplicate_under_a_generated_label(monkeypatch):
+    """Confirming a re-run records a separate campaign rather than colliding."""
+    captured: dict[str, object] = {}
+    client = _broad_screen_client(monkeypatch, duplicate_of=89)
+    monkeypatch.setattr(
+        "app.services.labs.intraday.families.registry.create_intraday_campaign",
+        _fake_creator(captured),
+    )
+
+    response = client.post(
+        "/research/intraday/campaigns/broad-screen",
+        params=[("timeframes", "15m"), ("timeframes", "30m"), ("allow_rerun", "true")],
+    )
+
+    assert response.status_code == 200
+    assert str(captured["campaign_label"]).startswith("rerun_")
+    assert response.json()["rerun_of_campaign_id"] == 89
+
+
+def test_an_explicit_label_reruns_a_duplicate_without_the_confirmation_flag(monkeypatch):
+    """Supplying a label is itself the confirmation; it must not also require
+    allow_rerun."""
+    captured: dict[str, object] = {}
+    client = _broad_screen_client(monkeypatch, duplicate_of=89)
+    monkeypatch.setattr(
+        "app.services.labs.intraday.families.registry.create_intraday_campaign",
+        _fake_creator(captured),
+    )
+
+    response = client.post(
+        "/research/intraday/campaigns/broad-screen",
+        params=[("timeframes", "15m"), ("campaign_label", "my-own-label")],
+    )
+
+    assert response.status_code == 200
+    assert captured["campaign_label"] == "my-own-label"
+
+
+def test_a_fresh_configuration_launches_without_a_label(monkeypatch):
+    captured: dict[str, object] = {}
+    client = _broad_screen_client(monkeypatch, duplicate_of=None)
+    monkeypatch.setattr(
+        "app.services.labs.intraday.families.registry.create_intraday_campaign",
+        _fake_creator(captured),
+    )
+
+    response = client.post(
+        "/research/intraday/campaigns/broad-screen",
+        params=[("timeframes", "15m"), ("timeframes", "30m")],
+    )
+
+    assert response.status_code == 200
+    assert captured["campaign_label"] is None
+    assert response.json()["rerun_of_campaign_id"] is None

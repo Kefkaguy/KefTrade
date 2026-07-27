@@ -1953,8 +1953,11 @@ export type IntradayCampaignPlan = {
   timeframes_supported: string[];
   timeframes_selected: string[];
   variants_per_family: number;
+  candidates_generated: number;
   candidates_after_dedupe: number;
   estimated_jobs: number;
+  duplicate_of_campaign_id: number | null;
+  requires_rerun_confirmation: boolean;
   protocol: {
     split_protocol_version: string;
     elite_gate_version: string;
@@ -1987,12 +1990,15 @@ export function launchIntradayBroadScreen(options: {
   assetLimit?: number;
   variantsPerFamily?: number;
   name?: string;
+  /** Confirms re-running a configuration that already ran, as its own campaign. */
+  allowRerun?: boolean;
 }) {
   const params = new URLSearchParams();
   for (const timeframe of options.timeframes) params.append("timeframes", timeframe);
   params.append("asset_limit", String(options.assetLimit ?? 10));
   params.append("variants_per_family", String(options.variantsPerFamily ?? 12));
   if (options.name) params.append("name", options.name);
+  if (options.allowRerun) params.append("allow_rerun", "true");
   return request<IntradayBroadScreenResult>(`/research/intraday/campaigns/broad-screen?${params.toString()}`, {
     method: "POST",
     timeoutMs: 120000

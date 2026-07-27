@@ -416,13 +416,13 @@ function LaunchIntradayCampaign({
     setSelectedTimeframes((prev) => (prev.includes(tf) ? prev.filter((item) => item !== tf) : [...prev, tf]));
   }
 
-  async function launch() {
+  async function launch(allowRerun = false) {
     if (busy || !selectedTimeframes.length || (plan && !plan.can_launch)) return;
     setBusy(true);
     setError(null);
     setLaunched(null);
     try {
-      const result = await launchIntradayBroadScreen({ timeframes: selectedTimeframes });
+      const result = await launchIntradayBroadScreen({ timeframes: selectedTimeframes, allowRerun });
       setLaunched(result);
       onLaunched();
     } catch (reason) {
@@ -495,14 +495,30 @@ function LaunchIntradayCampaign({
         </div>
       ) : null}
 
+      {plan?.requires_rerun_confirmation ? (
+        <div className="intradayHonestyBanner" style={{ marginTop: 14 }}>
+          <ShieldAlert size={16} />
+          <span>
+            This exact configuration already ran as campaign #{plan.duplicate_of_campaign_id}. Re-running
+            records a separate campaign — useful once the rolling dataset has advanced, wasted compute if it
+            has not.
+          </span>
+        </div>
+      ) : null}
+
       <button
         type="button"
         className="button"
         style={{ marginTop: 16 }}
         disabled={disabled}
-        onClick={() => void launch()}
+        onClick={() => void launch(Boolean(plan?.requires_rerun_confirmation))}
       >
-        <Rocket size={15} /> {busy ? "Launching…" : launchLabel(selectedTimeframes)}
+        <Rocket size={15} />{" "}
+        {busy
+          ? "Launching…"
+          : plan?.requires_rerun_confirmation
+            ? `Re-run ${launchLabel(selectedTimeframes).replace(/^Launch /, "")}`
+            : launchLabel(selectedTimeframes)}
       </button>
 
       {error ? <div className="strategyLibraryError" role="alert" style={{ marginTop: 14 }}>{error}</div> : null}

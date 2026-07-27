@@ -64,6 +64,13 @@ def launch_broad_screen(
             "using the same families, assets, timeframes, and candidate count."
         ),
     ),
+    allow_rerun: bool = Query(
+        False,
+        description=(
+            "Confirm a re-run of a configuration that already ran. Records a "
+            "separate campaign under an auto-generated label."
+        ),
+    ),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     """Launch a broad screen over every ACTIVE family, resolved server-side.
@@ -71,8 +78,17 @@ def launch_broad_screen(
     The caller does not choose families: the registry decides, so an archived
     family can never be screened by a stale frontend list. Refuses to launch
     while the plan reports a blocker.
+
+    A configuration that already ran needs either an explicit `campaign_label`
+    or `allow_rerun=true`. That preserves the original protection -- an
+    unlabeled relaunch must never silently reuse an earlier campaign -- while
+    giving a caller an explicit way to say "run this again as its own
+    campaign" without inventing a label by hand.
     """
-    from app.services.labs.intraday.campaign_plan import build_campaign_plan
+    from app.services.labs.intraday.campaign_plan import (
+        build_campaign_plan,
+        rerun_campaign_label,
+    )
     from app.services.labs.intraday.families.registry import create_intraday_campaign
 
     plan = build_campaign_plan(
@@ -90,6 +106,20 @@ def launch_broad_screen(
             ),
         )
 
+    duplicate_of = plan["duplicate_of_campaign_id"]
+    resolved_label = campaign_label
+    if duplicate_of is not None and not resolved_label:
+        if not allow_rerun:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"This exact configuration already ran as campaign {duplicate_of}. "
+                    "Re-send with allow_rerun=true to record a new, separate campaign, "
+                    "or pass a campaign_label of your own."
+                ),
+            )
+        resolved_label = rerun_campaign_label()
+
     try:
         result = create_intraday_campaign(
             conn,
@@ -102,12 +132,12 @@ def launch_broad_screen(
             asset_limit=asset_limit,
             timeframes=plan["timeframes_selected"],
             max_candidates_per_family=variants_per_family,
-            campaign_label=campaign_label,
+            campaign_label=resolved_label,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
-    return {**result, "plan": plan}
+    return {**result, "plan": plan, "rerun_of_campaign_id": duplicate_of}
 
 
 @router.post("/research/intraday/campaigns")

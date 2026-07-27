@@ -23,10 +23,13 @@ class FakeResult:
 
 
 class FakePlanConn:
-    def __init__(self, assets=None):
+    def __init__(self, assets=None, duplicate_campaign_id=None):
         self.assets = UNIVERSE if assets is None else assets
+        self.duplicate_campaign_id = duplicate_campaign_id
 
     def execute(self, query, params=None):
+        if "campaign_key" in query:
+            return FakeResult({"id": self.duplicate_campaign_id} if self.duplicate_campaign_id else None)
         if "research_universes" in query or "assets" in query:
             return FakeResult({"assets": self.assets})
         return FakeResult(None)
@@ -148,6 +151,49 @@ def test_the_plan_restates_the_evidence_separation_rule():
     plan = build_campaign_plan(FakePlanConn(), timeframes=["30m"])
 
     assert "never merged across families" in plan["evidence_policy"]
+
+
+def test_a_fresh_configuration_needs_no_rerun_confirmation():
+    plan = build_campaign_plan(FakePlanConn(), timeframes=["15m", "30m"])
+
+    assert plan["duplicate_of_campaign_id"] is None
+    assert plan["requires_rerun_confirmation"] is False
+    assert not any(item["code"] == "DUPLICATE_CONFIGURATION" for item in plan["warnings"])
+
+
+def test_a_configuration_that_already_ran_is_flagged_before_the_click():
+    """The collision used to surface only as a 422 after launching. The
+    preview has to know, so the button can say what it will actually do."""
+    plan = build_campaign_plan(FakePlanConn(duplicate_campaign_id=89), timeframes=["15m", "30m"])
+
+    assert plan["duplicate_of_campaign_id"] == 89
+    assert plan["requires_rerun_confirmation"] is True
+    assert any(item["code"] == "DUPLICATE_CONFIGURATION" for item in plan["warnings"])
+
+
+def test_a_duplicate_warns_without_blocking():
+    """Re-running against an advanced rolling dataset is legitimate research,
+    so this is the caller's decision, not a hard stop."""
+    plan = build_campaign_plan(FakePlanConn(duplicate_campaign_id=89), timeframes=["30m"])
+
+    assert plan["can_launch"] is True
+    assert not any(item["code"] == "DUPLICATE_CONFIGURATION" for item in plan["blockers"])
+
+
+def test_the_duplicate_lookup_uses_the_raw_candidate_count():
+    """`research_campaign_key` is built from the generated count, before the
+    per-job dedupe. Using the deduped count would look up a key the launcher
+    never writes, and the collision would go undetected."""
+    plan = build_campaign_plan(FakePlanConn(), timeframes=["30m"])
+
+    assert plan["candidates_generated"] >= plan["candidates_after_dedupe"]
+
+
+def test_each_rerun_label_is_unique():
+    from app.services.labs.intraday.campaign_plan import rerun_campaign_label
+
+    assert rerun_campaign_label() != rerun_campaign_label()
+    assert rerun_campaign_label().startswith("rerun_")
 
 
 def test_a_preview_survives_an_unreadable_universe():

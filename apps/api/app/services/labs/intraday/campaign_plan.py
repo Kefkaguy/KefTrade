@@ -112,6 +112,17 @@ def build_campaign_plan(
 
     estimated_jobs = len(deduped) * len(assets) * len(selected_timeframes)
 
+    duplicate_of = _existing_campaign_for_configuration(
+        conn,
+        family_ids=[family["architecture"] for family in families],
+        assets=assets,
+        timeframes=selected_timeframes,
+        # The campaign key is built from the RAW generated count, before the
+        # per-job dedupe -- matching `_create_intraday_campaign` exactly, so
+        # this lookup finds the same row a launch would collide with.
+        candidate_count=len(candidates),
+    )
+
     audit = _simulator_audit_summary()
     blockers: list[dict[str, str]] = []
     warnings: list[dict[str, str]] = []
@@ -135,6 +146,23 @@ def build_campaign_plan(
     if not deduped:
         blockers.append({"code": "NO_CANDIDATES", "detail": "The active families generated no candidates."})
 
+    if duplicate_of is not None:
+        # Not a blocker. Re-running the same screen against a rolling dataset
+        # that has since advanced is legitimate research; re-running it against
+        # unchanged data is wasted compute that also inflates the
+        # multiple-testing count. The caller has to say which it means, so this
+        # is surfaced rather than silently resolved either way.
+        warnings.append(
+            {
+                "code": "DUPLICATE_CONFIGURATION",
+                "detail": (
+                    f"This exact family/asset/timeframe/candidate configuration already ran as campaign "
+                    f"{duplicate_of}. Launching again requires confirming a re-run, which records it as a "
+                    "separate campaign."
+                ),
+            }
+        )
+
     for finding in audit["economics_findings"]:
         warnings.append(
             {
@@ -156,8 +184,11 @@ def build_campaign_plan(
         "timeframes_supported": supported,
         "timeframes_selected": selected_timeframes,
         "variants_per_family": variants_per_family,
+        "candidates_generated": len(candidates),
         "candidates_after_dedupe": len(deduped),
         "estimated_jobs": estimated_jobs,
+        "duplicate_of_campaign_id": duplicate_of,
+        "requires_rerun_confirmation": duplicate_of is not None,
         "protocol": {
             "split_protocol_version": SPLIT_VERSION,
             "elite_gate_version": ELITE_PROMOTION_RULE_VERSION,
@@ -172,6 +203,59 @@ def build_campaign_plan(
             "elite gate. Evidence is never merged across families."
         ),
     }
+
+
+def rerun_campaign_label() -> str:
+    """A label that makes a re-run its own campaign rather than a collision.
+
+    `research_campaign_key` hashes universe, assets, timeframes, candidate
+    count, architecture and variant -- but NOT the dataset snapshot. So an
+    identical screen re-run against a rolling dataset that has since advanced
+    still produces the same key and collides with the earlier campaign. A
+    distinct label is the mechanism the key already provides for "same
+    configuration, different research question", and it is what the
+    low-timeframe and focused-expansion launchers already use.
+    """
+    from datetime import UTC, datetime
+    from uuid import uuid4
+
+    return f"rerun_{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}_{uuid4().hex[:8]}"
+
+
+def _existing_campaign_for_configuration(
+    conn: psycopg.Connection,
+    *,
+    family_ids: list[str],
+    assets: list[str],
+    timeframes: list[str],
+    candidate_count: int,
+) -> int | None:
+    """The campaign an unlabeled launch of this configuration would collide with.
+
+    Recomputes the same `research_campaign_key` the launcher builds so the
+    preview can warn before the click, instead of the user discovering the
+    collision from a 422.
+    """
+    if not family_ids or not assets or not timeframes or not candidate_count:
+        return None
+    from app.services.research_campaigns import research_campaign_key
+
+    architecture = f"multi_family:{','.join(sorted(family_ids))}"
+    campaign_key = research_campaign_key(
+        "research_core_ten",
+        assets,
+        timeframes,
+        candidate_count,
+        search_mode=architecture,
+        variant=architecture,
+    )
+    try:
+        row = conn.execute(
+            "SELECT id FROM research_campaigns WHERE campaign_key = %s", (campaign_key,)
+        ).fetchone()
+    except Exception:  # noqa: BLE001 - a preview must not fail on an unreadable table
+        return None
+    return int(row["id"]) if row else None
 
 
 def _simulator_audit_summary() -> dict[str, Any]:
