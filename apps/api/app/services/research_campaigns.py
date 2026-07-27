@@ -5129,12 +5129,33 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
     from app.services.labs.intraday.families.registry import is_intraday_lab_candidate
 
     if any(is_intraday_lab_candidate(job.get("candidate") or {}) for job in jobs):
-        from app.services.labs.intraday.pooled_evidence import compute_pooled_candidate_evidence
+        from app.services.labs.intraday.pooled_evidence import (
+            HOLDOUT_CONFIRMATION_VERSION,
+            POOLED_EVIDENCE_VERSION,
+            compute_holdout_confirmation,
+            compute_pooled_candidate_evidence,
+        )
 
         pooled_evidence = compute_pooled_candidate_evidence(conn, campaign_id=campaign_id)
         analytics["pooled_cross_sectional_evidence"] = {
             "pooled_candidates": len(pooled_evidence),
-            "calculation_version": "pooled_cross_sectional_evidence_v1",
+            "calculation_version": POOLED_EVIDENCE_VERSION,
+        }
+        # Must run after pooling: it confirms pooled candidates on their own
+        # untouched validation split. Strictly additive -- it can only remove
+        # candidates, never promote one the pooled gate already rejected.
+        holdout = compute_holdout_confirmation(conn, campaign_id=campaign_id)
+        analytics["holdout_confirmation"] = {
+            "evaluated": len(holdout),
+            "confirmed": sum(1 for row in holdout if row["confirmed"]),
+            "unconfirmed_reasons": dict(
+                sorted(
+                    Counter(
+                        str(row["unconfirmed_reason"]) for row in holdout if row.get("unconfirmed_reason")
+                    ).items()
+                )
+            ),
+            "calculation_version": HOLDOUT_CONFIRMATION_VERSION,
         }
     from app.services.automated_scientific_reporting import generate_automated_scientific_report
 

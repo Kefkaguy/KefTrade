@@ -41,6 +41,8 @@ from psycopg.types.json import Jsonb
 
 POOLED_EVIDENCE_VERSION = "pooled_cross_sectional_evidence_v1"
 
+HOLDOUT_CONFIRMATION_VERSION = "holdout_confirmed_cluster_elite_v1"
+
 # A pool built from fewer contributing symbols than this is not a
 # cross-sectional evidence unit -- see the module docstring.
 MINIMUM_CONTRIBUTING_SYMBOLS = 2
@@ -212,6 +214,205 @@ def _trade_count_by_symbol(trade_rows: list[dict[str, Any]]) -> dict[str, int]:
     for row in trade_rows:
         counts[row["symbol"]] = counts.get(row["symbol"], 0) + 1
     return counts
+
+
+def compute_holdout_confirmation(conn: psycopg.Connection, *, campaign_id: int) -> list[dict[str, Any]]:
+    """Re-run the SAME elite gate over ONLY each pooled candidate's untouched
+    validation split, and record `cluster_elite` for the ones that survive.
+
+    Pooling (above) buys a candidate statistical breadth, but breadth alone
+    cannot tell you whether an edge was fitted to the data it was found in.
+    Every intraday job already stores its own walk-forward boundary, and
+    `persist_intraday_job_trades` tags each trade `dataset_split = 'train'`
+    or `'validation'` from it -- so a genuine out-of-sample check is already
+    sitting in `research_campaign_trades` and has never been used as a gate.
+
+    This is strictly ADDITIVE and strictly HARDER: a candidate reaches
+    `cluster_elite` only if it passed the pooled gate AND passes that same
+    unchanged gate again on validation-split trades alone. No threshold is
+    lowered anywhere; this can only ever remove candidates.
+
+    Three honesty constraints, all explicit in the returned rows:
+      * A candidate with no validation-split trades is NOT confirmed. Absence
+        of a holdout sample is never treated as passing it.
+      * The holdout must itself clear `MINIMUM_CONTRIBUTING_SYMBOLS` distinct
+        symbols -- a confirmation resting on one symbol is not cross-sectional.
+      * Drawdown still comes from each contributing job's own full-period
+        figure (the same limitation the pooled path documents: per-job
+        simulations cannot be blended into one equity curve). That number
+        covers train+validation, so it is at least as large as a
+        validation-only drawdown would be -- it makes this check harder to
+        pass, never easier, which is the acceptable direction for a bias.
+
+    Idempotent by `evidence_key`, exactly like the pooled pass.
+    """
+    from app.services.strategy_discovery import failure_reasons_for, status_for_candidate
+    from app.services.strategy_research import paper_readiness_report, score_metrics
+
+    pooled_rows = list(
+        conn.execute(
+            """
+            SELECT candidate_id, promoted
+            FROM research_candidate_stage_evidence
+            WHERE campaign_id = %s AND calculation_version = %s AND candidate_level = 'cluster_candidate'
+            ORDER BY candidate_id
+            """,
+            (campaign_id, POOLED_EVIDENCE_VERSION),
+        ).fetchall()
+    )
+    if not pooled_rows:
+        return []
+
+    jobs = list(
+        conn.execute(
+            """
+            SELECT id, symbol, candidate->>'candidate_id' AS candidate_id,
+                   candidate->'parameters'->>'strategy_architecture' AS strategy_architecture,
+                   result->'metrics'->>'max_drawdown' AS job_max_drawdown,
+                   (result->'metrics'->'walk_forward'->>'enabled')::boolean AS walk_forward_enabled
+            FROM research_campaign_jobs
+            WHERE campaign_id = %s AND status <> 'queued'
+            """,
+            (campaign_id,),
+        ).fetchall()
+    )
+    jobs_by_candidate: dict[str, list[dict[str, Any]]] = {}
+    for job in jobs:
+        candidate_id = job["candidate_id"]
+        if not candidate_id:
+            continue
+        jobs_by_candidate.setdefault(candidate_id, []).append(job)
+
+    results: list[dict[str, Any]] = []
+    for pooled in pooled_rows:
+        candidate_id = pooled["candidate_id"]
+        candidate_jobs = jobs_by_candidate.get(candidate_id, [])
+        evaluation: dict[str, Any] = {
+            "candidate_id": candidate_id,
+            "pooled_promoted": bool(pooled["promoted"]),
+            "confirmed": False,
+            "calculation_version": HOLDOUT_CONFIRMATION_VERSION,
+        }
+        if not candidate_jobs:
+            evaluation["unconfirmed_reason"] = "NO_CONTRIBUTING_JOBS"
+            results.append(evaluation)
+            continue
+
+        job_ids = [job["id"] for job in candidate_jobs]
+        trade_rows = list(
+            conn.execute(
+                """
+                SELECT job_id, symbol, net_pnl, pnl_pct, holding_period_hours
+                FROM research_campaign_trades
+                WHERE job_id = ANY(%s) AND dataset_split = 'validation'
+                ORDER BY entry_time ASC
+                """,
+                (job_ids,),
+            ).fetchall()
+        )
+        if not trade_rows:
+            # Either walk-forward never ran for these jobs (no split boundary
+            # to tag trades with) or every trade fell in the training window.
+            # Both mean "not confirmed out of sample", never "confirmed".
+            evaluation["unconfirmed_reason"] = "NO_HOLDOUT_TRADES"
+            results.append(evaluation)
+            continue
+
+        holdout_symbols = sorted({row["symbol"] for row in trade_rows})
+        evaluation["holdout_trade_count"] = len(trade_rows)
+        evaluation["holdout_symbols"] = holdout_symbols
+        if len(holdout_symbols) < MINIMUM_CONTRIBUTING_SYMBOLS:
+            evaluation["unconfirmed_reason"] = "INSUFFICIENT_HOLDOUT_SYMBOLS"
+            results.append(evaluation)
+            continue
+
+        contributing_job_ids = {row["job_id"] for row in trade_rows}
+        contributing_jobs = [job for job in candidate_jobs if job["id"] in contributing_job_ids]
+        trades = [
+            {
+                "pnl": Decimal(str(row["net_pnl"])),
+                "pnl_pct": row["pnl_pct"],
+                "holding_period_hours": row["holding_period_hours"],
+            }
+            for row in trade_rows
+        ]
+        metrics = _pooled_metrics(trades, contributing_jobs, contributing_symbols=len(holdout_symbols))
+        metrics["dataset_split"] = "validation"
+        metrics["max_drawdown_source"] = "worst_contributing_symbol_full_period"
+
+        readiness = paper_readiness_report(metrics, [], [])
+        research_score = round(score_metrics(metrics), 4)
+        status = status_for_candidate(metrics, readiness, research_score)
+        failure_reasons = failure_reasons_for(metrics, readiness, [], [])
+        holdout_passed = status == "promoted"
+        evaluation["holdout_status"] = status
+        evaluation["holdout_research_score"] = research_score
+        evaluation["holdout_failure_reasons"] = failure_reasons
+        evaluation["confirmed"] = holdout_passed and bool(pooled["promoted"])
+        if not evaluation["confirmed"]:
+            evaluation["unconfirmed_reason"] = (
+                "HOLDOUT_GATE_FAILED" if not holdout_passed else "POOLED_GATE_NOT_PROMOTED"
+            )
+            results.append(evaluation)
+            continue
+
+        # Only a confirmed candidate gets a `cluster_elite` row, matching the
+        # convention in research_architecture.build_candidate_stage_evidence
+        # where a stage row's existence means that stage was actually reached.
+        evidence_key = f"{HOLDOUT_CONFIRMATION_VERSION}:{campaign_id}:{candidate_id}"
+        row = conn.execute(
+            """
+            INSERT INTO research_candidate_stage_evidence(
+                evidence_key, campaign_id, candidate_id, candidate_level, scope_type, scope_ref,
+                gate_results, metrics, evidence_refs, promoted, calculation_version
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (evidence_key) DO UPDATE SET
+                gate_results = EXCLUDED.gate_results,
+                metrics = EXCLUDED.metrics,
+                evidence_refs = EXCLUDED.evidence_refs,
+                promoted = EXCLUDED.promoted
+            RETURNING *
+            """,
+            (
+                evidence_key,
+                campaign_id,
+                candidate_id,
+                "cluster_elite",
+                "cluster",
+                ",".join(holdout_symbols),
+                Jsonb({**readiness, "research_score": research_score, "failure_reasons": failure_reasons}),
+                Jsonb(metrics),
+                Jsonb(
+                    {
+                        "job_ids": sorted(contributing_job_ids),
+                        "symbols": holdout_symbols,
+                        "architecture": contributing_jobs[0]["strategy_architecture"],
+                        "trade_count_by_symbol": _trade_count_by_symbol(trade_rows),
+                        "pooled_evidence_key": f"{POOLED_EVIDENCE_VERSION}:{campaign_id}:{candidate_id}",
+                        "confirmation_basis": "validation_split_only",
+                    }
+                ),
+                True,
+                HOLDOUT_CONFIRMATION_VERSION,
+            ),
+        ).fetchone()
+        conn.commit()
+        evaluation["evidence"] = dict(row)
+        results.append(evaluation)
+    return results
+
+
+def list_holdout_confirmations(conn: psycopg.Connection, *, campaign_id: int) -> list[dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT * FROM research_candidate_stage_evidence
+        WHERE campaign_id = %s AND calculation_version = %s
+        ORDER BY candidate_id
+        """,
+        (campaign_id, HOLDOUT_CONFIRMATION_VERSION),
+    ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def list_pooled_evidence(conn: psycopg.Connection, *, campaign_id: int) -> list[dict[str, Any]]:

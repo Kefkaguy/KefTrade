@@ -282,3 +282,78 @@ def list_pooled_evidence_endpoint(
 
     evidence = list_pooled_evidence(conn, campaign_id=campaign_id)
     return {"campaign_id": campaign_id, "pooled_candidates": len(evidence), "evidence": evidence}
+
+
+@router.get("/research/intraday/campaigns/{campaign_id}/family-ranking")
+def get_campaign_family_ranking(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Rank this campaign's families by how much promise their evidence shows.
+
+    This is what a broad screen should be judged on. Ranking never promotes
+    and never writes; see app/services/labs/intraday/funnel.py."""
+    from app.services.labs.intraday.funnel import campaign_funnel_report
+
+    return campaign_funnel_report(conn, campaign_id)
+
+
+@router.post("/research/intraday/campaigns/{campaign_id}/focused-expansion")
+def create_focused_expansion_endpoint(
+    campaign_id: int,
+    max_families: int = Query(3, ge=1, le=10, description="How many top-ranked families to expand."),
+    candidates_per_family: int = Query(24, ge=1, le=128, description="Depth of each family's own deterministic parameter grid."),
+    asset_limit: int = Query(10, ge=1, le=100, description="Full universe by default -- breadth is the point of the expansion."),
+    timeframes: list[str] | None = Query(None),
+    name: str | None = Query(None),
+    hypothesis_version_id: int | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Launch a focused multi-asset expansion over the top-ranked families of
+    a completed broad screen -- the funnel step that gives a canonical
+    candidate enough breadth for the unchanged elite gate to be reachable."""
+    from app.services.labs.intraday.funnel import create_focused_expansion_campaign
+
+    try:
+        return create_focused_expansion_campaign(
+            conn,
+            source_campaign_id=campaign_id,
+            max_families=max_families,
+            candidates_per_family=candidates_per_family,
+            asset_limit=asset_limit,
+            timeframes=timeframes,
+            name=name,
+            hypothesis_version_id=hypothesis_version_id,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.post("/research/intraday/campaigns/{campaign_id}/holdout-confirmation")
+def compute_holdout_confirmation_endpoint(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Re-run the unchanged elite gate over each pooled candidate's untouched
+    validation split. Strictly harder than pooling alone: a candidate with no
+    holdout sample is never confirmed."""
+    from app.services.labs.intraday.pooled_evidence import compute_holdout_confirmation
+
+    evaluations = compute_holdout_confirmation(conn, campaign_id=campaign_id)
+    return {
+        "campaign_id": campaign_id,
+        "evaluated": len(evaluations),
+        "confirmed": sum(1 for row in evaluations if row["confirmed"]),
+        "evaluations": evaluations,
+    }
+
+
+@router.get("/research/intraday/campaigns/{campaign_id}/holdout-confirmation")
+def list_holdout_confirmation_endpoint(
+    campaign_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    from app.services.labs.intraday.pooled_evidence import list_holdout_confirmations
+
+    evidence = list_holdout_confirmations(conn, campaign_id=campaign_id)
+    return {"campaign_id": campaign_id, "confirmed_candidates": len(evidence), "evidence": evidence}

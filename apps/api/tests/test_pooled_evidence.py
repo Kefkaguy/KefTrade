@@ -8,8 +8,10 @@ from decimal import Decimal
 import pytest
 
 from app.services.labs.intraday.pooled_evidence import (
+    HOLDOUT_CONFIRMATION_VERSION,
     MINIMUM_CONTRIBUTING_SYMBOLS,
     POOLED_EVIDENCE_VERSION,
+    compute_holdout_confirmation,
     compute_pooled_candidate_evidence,
 )
 
@@ -248,3 +250,196 @@ def test_candidate_level_and_scope_type_match_the_unused_staging_schema():
 
     assert results[0]["candidate_level"] == "cluster_candidate"
     assert results[0]["scope_type"] == "cluster"
+
+
+# ---------------------------------------------------------------------------
+# Holdout confirmation: the same gate, on the untouched validation split only
+# ---------------------------------------------------------------------------
+
+class FakeHoldoutConn:
+    def __init__(self, pooled_rows, jobs, holdout_trades_by_job_id):
+        self.pooled_rows = pooled_rows
+        self.jobs = jobs
+        self.holdout_trades_by_job_id = holdout_trades_by_job_id
+        self.inserted: dict[str, dict] = {}
+        self.commits = 0
+
+    def execute(self, query, params=None):
+        params = params or ()
+        stripped = query.strip()
+        if stripped.startswith("SELECT candidate_id, promoted"):
+            return FakeResult(self.pooled_rows)
+        if stripped.startswith("SELECT id, symbol, candidate->>'candidate_id'"):
+            return FakeResult(self.jobs)
+        if stripped.startswith("SELECT job_id, symbol, net_pnl"):
+            assert "dataset_split = 'validation'" in query, "holdout must read only the validation split"
+            job_ids = params[0]
+            return FakeResult([row for job_id in job_ids for row in self.holdout_trades_by_job_id.get(job_id, [])])
+        if stripped.startswith("INSERT INTO research_candidate_stage_evidence"):
+            (
+                evidence_key, campaign_id, candidate_id, candidate_level, scope_type, scope_ref,
+                gate_results, metrics, evidence_refs, promoted, calculation_version,
+            ) = params
+            row = {
+                "evidence_key": evidence_key,
+                "campaign_id": campaign_id,
+                "candidate_id": candidate_id,
+                "candidate_level": candidate_level,
+                "scope_type": scope_type,
+                "scope_ref": scope_ref,
+                "gate_results": gate_results.obj,
+                "metrics": metrics.obj,
+                "evidence_refs": evidence_refs.obj,
+                "promoted": promoted,
+                "calculation_version": calculation_version,
+            }
+            self.inserted[evidence_key] = row
+            return FakeResult([row])
+        raise AssertionError(f"unexpected query: {stripped[:80]}")
+
+    def commit(self):
+        self.commits += 1
+
+
+def holdout_job(job_id, symbol, candidate_id, *, max_drawdown=0.05, architecture="vwap_bounce_v2"):
+    return {
+        "id": job_id,
+        "symbol": symbol,
+        "candidate_id": candidate_id,
+        "strategy_architecture": architecture,
+        "job_max_drawdown": max_drawdown,
+        "walk_forward_enabled": True,
+    }
+
+
+def holdout_trade(job_id, symbol, net_pnl, pnl_pct=0.01, holding_period_hours=2.0):
+    return {
+        "job_id": job_id,
+        "symbol": symbol,
+        "net_pnl": Decimal(str(net_pnl)),
+        "pnl_pct": pnl_pct,
+        "holding_period_hours": holding_period_hours,
+    }
+
+
+def strong_holdout(job_id, symbol, count=12):
+    """A clearly profitable holdout sample for this job/symbol."""
+    return [holdout_trade(job_id, symbol, 120) for _ in range(count - 3)] + [
+        holdout_trade(job_id, symbol, -50) for _ in range(3)
+    ]
+
+
+def test_a_candidate_with_no_holdout_trades_is_never_confirmed():
+    """Absence of an out-of-sample sample must never be read as passing one.
+    This is the single most important property of the whole check."""
+    pooled = [{"candidate_id": "candA", "promoted": True}]
+    jobs = [holdout_job(1, "NVDA", "candA"), holdout_job(2, "TSLA", "candA")]
+    conn = FakeHoldoutConn(pooled, jobs, {})
+
+    results = compute_holdout_confirmation(conn, campaign_id=101)
+
+    assert results[0]["confirmed"] is False
+    assert results[0]["unconfirmed_reason"] == "NO_HOLDOUT_TRADES"
+    assert conn.inserted == {}
+
+
+def test_holdout_confirmation_requires_breadth_in_the_holdout_itself():
+    """A confirmation resting on a single symbol is not cross-sectional, even
+    when the pooled evidence behind it spanned several symbols."""
+    pooled = [{"candidate_id": "candA", "promoted": True}]
+    jobs = [holdout_job(1, "NVDA", "candA"), holdout_job(2, "TSLA", "candA")]
+    conn = FakeHoldoutConn(pooled, jobs, {1: strong_holdout(1, "NVDA", 30)})
+
+    results = compute_holdout_confirmation(conn, campaign_id=101)
+
+    assert results[0]["confirmed"] is False
+    assert results[0]["unconfirmed_reason"] == "INSUFFICIENT_HOLDOUT_SYMBOLS"
+    assert conn.inserted == {}
+
+
+def test_a_candidate_that_fails_the_gate_out_of_sample_is_not_confirmed():
+    pooled = [{"candidate_id": "candA", "promoted": True}]
+    jobs = [holdout_job(1, "NVDA", "candA"), holdout_job(2, "TSLA", "candA")]
+    losing = {
+        1: [holdout_trade(1, "NVDA", -40) for _ in range(12)],
+        2: [holdout_trade(2, "TSLA", -40) for _ in range(12)],
+    }
+    conn = FakeHoldoutConn(pooled, jobs, losing)
+
+    results = compute_holdout_confirmation(conn, campaign_id=101)
+
+    assert results[0]["confirmed"] is False
+    assert results[0]["unconfirmed_reason"] == "HOLDOUT_GATE_FAILED"
+    assert results[0]["holdout_status"] == "rejected"
+    assert conn.inserted == {}
+
+
+def test_holdout_cannot_confirm_a_candidate_the_pooled_gate_already_rejected():
+    """Strictly additive: this stage can only ever remove candidates."""
+    pooled = [{"candidate_id": "candA", "promoted": False}]
+    jobs = [holdout_job(1, "NVDA", "candA"), holdout_job(2, "TSLA", "candA")]
+    conn = FakeHoldoutConn(pooled, jobs, {1: strong_holdout(1, "NVDA"), 2: strong_holdout(2, "TSLA")})
+
+    results = compute_holdout_confirmation(conn, campaign_id=101)
+
+    assert results[0]["holdout_status"] == "promoted"
+    assert results[0]["confirmed"] is False
+    assert results[0]["unconfirmed_reason"] == "POOLED_GATE_NOT_PROMOTED"
+    assert conn.inserted == {}
+
+
+def test_a_candidate_confirmed_out_of_sample_reaches_cluster_elite():
+    pooled = [{"candidate_id": "candA", "promoted": True}]
+    jobs = [holdout_job(1, "NVDA", "candA"), holdout_job(2, "TSLA", "candA")]
+    conn = FakeHoldoutConn(pooled, jobs, {1: strong_holdout(1, "NVDA"), 2: strong_holdout(2, "TSLA")})
+
+    results = compute_holdout_confirmation(conn, campaign_id=101)
+
+    assert results[0]["confirmed"] is True
+    assert results[0]["holdout_symbols"] == ["NVDA", "TSLA"]
+    evidence = results[0]["evidence"]
+    assert evidence["candidate_level"] == "cluster_elite"
+    assert evidence["scope_type"] == "cluster"
+    assert evidence["promoted"] is True
+    assert evidence["calculation_version"] == HOLDOUT_CONFIRMATION_VERSION
+    assert evidence["evidence_key"] == f"{HOLDOUT_CONFIRMATION_VERSION}:101:candA"
+    assert evidence["metrics"]["dataset_split"] == "validation"
+    assert evidence["evidence_refs"]["confirmation_basis"] == "validation_split_only"
+
+
+def test_holdout_metrics_are_computed_only_from_contributing_holdout_jobs():
+    """A job with no holdout trades must not lend its drawdown to the
+    confirmation -- only jobs that actually contributed count."""
+    pooled = [{"candidate_id": "candA", "promoted": True}]
+    jobs = [
+        holdout_job(1, "NVDA", "candA", max_drawdown=0.04),
+        holdout_job(2, "TSLA", "candA", max_drawdown=0.06),
+        holdout_job(3, "GOOGL", "candA", max_drawdown=0.30),
+    ]
+    conn = FakeHoldoutConn(pooled, jobs, {1: strong_holdout(1, "NVDA"), 2: strong_holdout(2, "TSLA")})
+
+    results = compute_holdout_confirmation(conn, campaign_id=101)
+
+    metrics = results[0]["evidence"]["metrics"]
+    assert metrics["max_drawdown"] == pytest.approx(0.06)
+    assert metrics["contributing_symbol_count"] == 2
+    assert metrics["number_of_trades"] == 24
+    assert sorted(results[0]["evidence"]["evidence_refs"]["job_ids"]) == [1, 2]
+
+
+def test_holdout_confirmation_is_idempotent_by_evidence_key():
+    pooled = [{"candidate_id": "candA", "promoted": True}]
+    jobs = [holdout_job(1, "NVDA", "candA"), holdout_job(2, "TSLA", "candA")]
+    conn = FakeHoldoutConn(pooled, jobs, {1: strong_holdout(1, "NVDA"), 2: strong_holdout(2, "TSLA")})
+
+    first = compute_holdout_confirmation(conn, campaign_id=101)
+    second = compute_holdout_confirmation(conn, campaign_id=101)
+
+    assert first[0]["evidence"]["evidence_key"] == second[0]["evidence"]["evidence_key"]
+    assert len(conn.inserted) == 1
+
+
+def test_no_pooled_evidence_means_nothing_to_confirm():
+    conn = FakeHoldoutConn([], [], {})
+
+    assert compute_holdout_confirmation(conn, campaign_id=101) == []
