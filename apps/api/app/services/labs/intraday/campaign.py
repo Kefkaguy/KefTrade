@@ -229,7 +229,7 @@ def _create_intraday_campaign(
         )
         VALUES (%s, %s, 'research_core_ten', 'queued', %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
         ON CONFLICT(campaign_key) DO UPDATE SET updated_at = NOW()
-        RETURNING *
+        RETURNING *, (xmax = 0) AS newly_inserted
         """,
         (
             campaign_key,
@@ -244,8 +244,24 @@ def _create_intraday_campaign(
             hypothesis_version_id,
         ),
     ).fetchone()
+    newly_inserted = bool(row.pop("newly_inserted"))
     campaign_id = int(row["id"])
     created = queue_campaign_jobs(conn, campaign_id, candidates, assets, selected_timeframes)
+    if not newly_inserted and created == 0:
+        # research_campaign_key is deterministic over
+        # (universe, assets, timeframes, candidate count, architecture, variant),
+        # so relaunching the exact same configuration collides via
+        # ON CONFLICT(campaign_key) and returns the prior campaign untouched
+        # instead of creating a new one -- see
+        # test_research_campaign_key_changes_with_campaign_label_variant.
+        # Surface this instead of silently reporting HTTP 200 success for a
+        # launch that queued nothing.
+        conn.rollback()
+        raise ValueError(
+            f"This exact family/asset/timeframe/candidate configuration already exists as campaign "
+            f"{campaign_id} with no new jobs to queue. Pass a distinct campaign_label to launch another "
+            f"run of this configuration."
+        )
     conn.execute(
         "UPDATE research_campaign_jobs SET dataset_id = %s WHERE campaign_id = %s AND dataset_id IS NULL",
         (dataset_id, campaign_id),
