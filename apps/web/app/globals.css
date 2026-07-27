@@ -1261,6 +1261,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .eliteValidationAction strong { color: var(--warning); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .eliteValidationAction span { color: var(--muted); font-size: 10px; line-height: 1.55; }
 .eliteValidationButtons { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 6px; }
+.eliteValidationProgress { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-top: 4px; padding-top: 10px; border-top: 1px solid var(--line); color: var(--muted-accent); font: 650 9px var(--font-mono); }
 .eliteValidationNotice { display: flex; align-items: flex-start; gap: 11px; padding: 13px 15px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); color: var(--muted); font-size: 10px; line-height: 1.6; }
 .eliteValidationNotice.error { border-color: color-mix(in srgb, var(--error) 52%, var(--line)); }
 .eliteValidationNotice svg { flex-shrink: 0; margin-top: 1px; color: var(--error); }

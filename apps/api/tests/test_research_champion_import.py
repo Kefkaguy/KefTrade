@@ -107,13 +107,53 @@ def test_cluster_key_ignores_candidate_id_and_campaign_id() -> None:
     assert rci._cluster_key(left) == rci._cluster_key(right)
 
 
-def test_cluster_key_distinguishes_different_blocks_or_lineage() -> None:
+def test_cluster_key_distinguishes_genuinely_different_strategies() -> None:
     base = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_a")
     different_blocks = promoted_job(job_id=2, campaign_id=10, candidate_id="cand_b", blocks="rsi_60")
-    different_parent = promoted_job(job_id=3, campaign_id=10, candidate_id="cand_c", parent="root_b")
+    different_symbol = promoted_job(job_id=3, campaign_id=10, candidate_id="cand_c", symbol="NVDA")
+    different_timeframe = promoted_job(job_id=4, campaign_id=10, candidate_id="cand_d", timeframe="15m")
 
     assert rci._cluster_key(base) != rci._cluster_key(different_blocks)
-    assert rci._cluster_key(base) != rci._cluster_key(different_parent)
+    assert rci._cluster_key(base) != rci._cluster_key(different_symbol)
+    assert rci._cluster_key(base) != rci._cluster_key(different_timeframe)
+
+
+def test_cluster_key_separates_strategies_by_their_execution_parameters() -> None:
+    base = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_a")
+    tuned = promoted_job(job_id=2, campaign_id=10, candidate_id="cand_b")
+    tuned["candidate"]["parameters"] = {**tuned["candidate"]["parameters"], "rsi_min": 62}
+
+    assert rci._cluster_key(base) != rci._cluster_key(tuned)
+
+
+def test_cluster_key_ignores_research_lineage_and_provenance() -> None:
+    # Lineage is provenance, not identity: the same executable strategy reached
+    # by two different mutation paths is still one strategy, and treating the
+    # paths as distinct is what let the queue fill with copies.
+    base = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_a")
+    different_parent = promoted_job(job_id=2, campaign_id=20, candidate_id="cand_c", parent="root_b")
+    # `candidate_execution_key` excludes research-provenance parameters, so a
+    # differing hypothesis id must not split a cluster either.
+    different_provenance = promoted_job(job_id=3, campaign_id=30, candidate_id="cand_d")
+    different_provenance["candidate"]["parameters"] = {
+        **different_provenance["candidate"]["parameters"],
+        "hypothesis_version_id": 991,
+        "source_campaign_id": 30,
+    }
+
+    assert rci._cluster_key(base) == rci._cluster_key(different_parent)
+    assert rci._cluster_key(base) == rci._cluster_key(different_provenance)
+
+
+def test_cluster_key_is_stable_against_dict_insertion_order() -> None:
+    # The previous key hashed `str(dict)`, whose output depends on insertion
+    # order, so the same blocks could hash two different ways.
+    left = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_a")
+    right = promoted_job(job_id=2, campaign_id=10, candidate_id="cand_b")
+    left["candidate"]["blocks"] = {"entry": "momentum_rsi_55", "exit": "time_exit_12"}
+    right["candidate"]["blocks"] = {"exit": "time_exit_12", "entry": "momentum_rsi_55"}
+
+    assert rci._cluster_key(left) == rci._cluster_key(right)
 
 
 def test_import_skips_a_job_that_duplicates_an_already_imported_champion() -> None:

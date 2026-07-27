@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -61,6 +61,10 @@ export function ElitePortfolioBuilder() {
   const [validationQueue, setValidationQueue] = useState<ChampionValidationQueue | null>(null);
   const [validationResult, setValidationResult] = useState<ChampionValidationRunResult | null>(null);
   const [validationDiagnostics, setValidationDiagnostics] = useState<ChampionValidationDiagnostics | null>(null);
+  // Running totals across the batched calls that drain one queue, so a long
+  // validation shows progress instead of an indefinite spinner.
+  const [validationProgress, setValidationProgress] = useState<{ examined: number; validated: number; remaining: number } | null>(null);
+  const stopRequested = useRef(false);
   const [phase, setPhase] = useState<Phase>("configure");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -199,14 +203,25 @@ export function ElitePortfolioBuilder() {
   async function validateChampions(revalidate: boolean) {
     setBusy(revalidate ? "revalidate" : "validate");
     setValidationError(null);
+    stopRequested.current = false;
+    let examined = 0;
+    let validated = 0;
     try {
-      // No batch size here either: the queue query is already bounded to
-      // champions in an eligible validation_state, so this validates the
-      // entire queue in one run. Each champion runs a full battery of
-      // backtests, so this can legitimately take a long time on a large queue.
-      const outcome = await runChampionValidation({ revalidate });
-      setValidationResult(outcome);
-      setValidationQueue(outcome.status);
+      // Each server call is bounded by its own wall-clock budget, so draining a
+      // large queue means calling repeatedly rather than holding one request
+      // open. Every champion commits its own verdict, so stopping between
+      // batches — deliberately or by error — never loses completed work.
+      for (;;) {
+        const outcome = await runChampionValidation({ revalidate });
+        examined += outcome.examined;
+        validated += outcome.validated;
+        setValidationResult(outcome);
+        setValidationQueue(outcome.status);
+        setValidationProgress({ examined, validated, remaining: outcome.remaining });
+
+        const finished = !outcome.budget_exhausted || outcome.examined === 0 || stopRequested.current;
+        if (finished) break;
+      }
       // A graduation changes the solver's candidate pool, so both the champion
       // summary and the portfolio options are re-read rather than inferred.
       const [nextStatus, nextOptions, nextDiagnostics] = await Promise.all([
@@ -220,6 +235,8 @@ export function ElitePortfolioBuilder() {
     } catch (reason) {
       setValidationError(message(reason));
     } finally {
+      stopRequested.current = false;
+      setValidationProgress(null);
       setBusy(null);
     }
   }
@@ -277,7 +294,9 @@ export function ElitePortfolioBuilder() {
         diagnostics={validationDiagnostics}
         error={validationError}
         busy={busy}
+        progress={validationProgress}
         onValidate={validateChampions}
+        onStop={() => { stopRequested.current = true; }}
       />
 
       <section className="eliteAdvancedToggle">
@@ -440,7 +459,9 @@ function EliteValidationQueue({
   diagnostics,
   error,
   busy,
-  onValidate
+  progress,
+  onValidate,
+  onStop
 }: {
   status: ResearchChampionStatus | null;
   queue: ChampionValidationQueue | null;
@@ -448,7 +469,9 @@ function EliteValidationQueue({
   diagnostics: ChampionValidationDiagnostics | null;
   error: string | null;
   busy: string | null;
+  progress: { examined: number; validated: number; remaining: number } | null;
   onValidate: (revalidate: boolean) => void;
+  onStop: () => void;
 }) {
   const champions = queue?.research_champions ?? status?.research_champions ?? 0;
   if (!champions && !result) return null;
@@ -487,9 +510,9 @@ function EliteValidationQueue({
         <div className="eliteValidationAction">
           <strong>Run validation for the whole queue</strong>
           <span>
-            One run validates every pending champion. Each one executes the full battery of backtests, so this is
-            slow on purpose and can take a long time on a large queue — nothing is graduated on the strength of the
-            original result alone.
+            The queue is drained in timed batches, so progress appears as it goes rather than after everything
+            finishes. Each champion executes the full battery of backtests, so this is slow on purpose — nothing is
+            graduated on the strength of the original result alone.
           </span>
           <div className="eliteValidationButtons">
             <button className="button" disabled={running || !pending} onClick={() => onValidate(false)}>
@@ -503,6 +526,17 @@ function EliteValidationQueue({
               </button>
             ) : null}
           </div>
+          {progress ? (
+            <div className="eliteValidationProgress">
+              <span>
+                {progress.examined.toLocaleString()} validated so far · {progress.validated.toLocaleString()} graduated ·{" "}
+                {progress.remaining.toLocaleString()} still pending
+              </span>
+              <button className="eliteTextButton" onClick={onStop}>
+                Stop after this batch
+              </button>
+            </div>
+          ) : null}
         </div>
       </div>
 

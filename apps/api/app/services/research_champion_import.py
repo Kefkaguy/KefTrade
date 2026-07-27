@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import json
 from hashlib import sha256
+from types import SimpleNamespace
 from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from app.services.research_campaigns import jsonable
+from app.services.strategy_discovery import candidate_execution_key
 
 
 RESEARCH_CHAMPION_RULE_VERSION = "research_champion_v1"
@@ -34,17 +37,44 @@ def _regimes_passed(result: dict[str, Any]) -> int:
     return len(regimes)
 
 
+def _execution_parameters_key(candidate: dict[str, Any]) -> str:
+    """The campaign-level "same executable strategy" key, applied to a stored payload.
+
+    Reuses `candidate_execution_key` rather than re-deriving its exclusion list
+    (research-provenance parameters such as hypothesis ids and campaign
+    versions, which differ between runs of an identical strategy) so the two
+    definitions cannot drift apart. That function reads only `.parameters`,
+    which is why a namespace stands in for a full DiscoveryCandidate here.
+    """
+    return candidate_execution_key(SimpleNamespace(parameters=dict(candidate.get("parameters") or {})))
+
+
 def _cluster_key(row: dict[str, Any]) -> str:
+    """Identity of the *strategy*, not of the row that happens to carry it.
+
+    Deliberately excludes candidate_id, campaign_id and lineage. Two
+    independent campaign runs that produce the same executable strategy are one
+    strategy, and keying on anything row-specific is what let the same AMD 30m
+    Momentum variant into the champion queue over a thousand times -- each copy
+    then costing a full validation battery to reach an identical verdict.
+
+    The previous key fell back to `candidate_id` whenever lineage was absent
+    (which is always: `research_campaign_jobs.parent_candidate_id` is never
+    populated on insert, and generated intraday candidates carry
+    `parent_candidate_id=None`), making every row its own cluster and the
+    dedup a no-op. Blocks are also hashed from canonical JSON rather than
+    `str(dict)`, whose output depends on insertion order.
+    """
     candidate = dict(row.get("candidate") or {})
-    blocks_hash = sha256(str(candidate.get("blocks") or {}).encode("utf-8")).hexdigest()[:12]
-    parent = row.get("parent_candidate_id") or candidate.get("parent_candidate_id") or row.get("candidate_id")
+    blocks_hash = sha256(json.dumps(candidate.get("blocks") or {}, sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+    execution_hash = sha256(_execution_parameters_key(candidate).encode("utf-8")).hexdigest()[:16]
     return "|".join(
         [
             str(row.get("symbol") or "").upper(),
             str(row.get("timeframe") or ""),
             str(row.get("strategy_family") or row.get("family_id") or ""),
-            str(parent or ""),
             blocks_hash,
+            execution_hash,
             _candidate_direction(candidate),
         ]
     )

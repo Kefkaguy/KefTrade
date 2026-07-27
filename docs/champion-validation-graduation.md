@@ -31,8 +31,8 @@ the original result.
 
 | Gate | Question | Failure means |
 | --- | --- | --- |
-| `out_of_sample` | Does it work on a held-out later period? | Profit factor below the floor, negative expectancy, or decay past the retention floor relative to the in-sample half |
-| `minimum_trades` | Is the holdout result built on enough trades? | Below the trade floor over a window that was long enough to produce them |
+| `out_of_sample` | Does it work on bars the promoted job never traded? | Profit factor below the floor, negative expectancy, or decay past the retention floor relative to the selection window |
+| `minimum_trades` | Is the unseen-window result built on enough trades? | Below the trade floor over a window that was long enough to produce them |
 | `cross_symbol` | Is it an edge, or a fact about one ticker? | Fewer than the required number of alternate symbols reproduced it |
 | `regime_robustness` | Did it work in more than one kind of market? | Profitable in fewer regimes than required |
 | `cost_stress` | Does it survive paying more than assumed? | Edge disappears at the cost multiplier |
@@ -69,9 +69,22 @@ a strategy is bad.
 `strategy_discovery.evaluate_candidate` path the campaign workers use, with three
 deliberate differences, all recorded in the stored measurement:
 
-* `walk_forward_train_ratio` is pinned to `0` so the in-sample and out-of-sample
-  slices execute identically and their profit factors are directly comparable. The
-  holdout split is done by slicing rows, not by the simulator's internal split.
+* `walk_forward_train_ratio` is pinned to `0` so the two windows execute
+  identically and their profit factors are directly comparable. The split is done
+  by slicing rows, not by the simulator's internal split.
+
+  **Which way the split runs matters.** `run_backtest` does not merely score the
+  walk-forward split — it refuses to open a position before it, trading only from
+  `len(rows) * walk_forward_train_ratio` onward. Every promoted job's headline
+  metrics therefore come from the *tail* of its dataset, which makes that tail the
+  window its promotion was selected on, and the *head* the only part no candidate
+  was ever ranked on. `_selection_split` reads the candidate's own ratio to find
+  the boundary; `unseen_period` is the head, `selection_period` is the tail.
+
+  The first implementation of this gate chose its own 30% holdout from the tail,
+  which meant it measured the selection window and compared it against fresh data
+  in the wrong direction. It passed 82 of 82 champions before the bug was found.
+  A gate that only ever passes is not a gate.
 * `frequency_screen_min_opportunities` is disabled, because it is calibrated for a
   full dataset and would short-circuit a deliberately shortened window before any
   trade is simulated. The trade floor is enforced directly on the measured result
@@ -100,14 +113,49 @@ confused. `require_frozen_datasets: true` disables the fallback entirely.
 Existing elite rows start at `pending_validation`. That is the honest value — this
 battery never ran on them — and it deliberately does not demote them.
 
+## What counts as one strategy
+
+`research_champion_import._cluster_key` decides whether two promoted jobs are the
+same strategy. It keys on symbol, timeframe, family, direction, rule blocks and
+the executable parameters (via `candidate_execution_key`, so research-provenance
+parameters such as hypothesis ids do not split a cluster). It deliberately
+excludes `candidate_id`, `campaign_id` and lineage.
+
+The original key fell back to `candidate_id` whenever lineage was absent — which
+is always, since `research_campaign_jobs.parent_candidate_id` is never populated
+on insert and generated intraday candidates carry `parent_candidate_id=None`.
+Every row was therefore its own cluster and the dedup was a no-op: the champion
+queue reached 1,789 rows, roughly 1,700 of them the same AMD 30m Momentum
+strategy, each one costing a full validation battery to reach an identical
+verdict. Import now also seeds its dedup set from clusters that live champions
+and elites already cover, so a later campaign run cannot reintroduce one.
+
+`POST /research-champions/dedupe` collapses champions imported before that fix:
+one representative per cluster kept, the rest set to `promotion_state='demoted'`
+— demoted, never deleted, and never applied to an already-graduated elite.
+
+## Running it
+
+One call is bounded by `max_runtime_seconds` (default
+`DEFAULT_RUN_BUDGET_SECONDS`) as well as by `limit`, checked between champions so
+a partially measured champion is never abandoned. A large queue is drained by
+calling repeatedly: the response carries `budget_exhausted` and `remaining`, and
+the Elite Builder page loops on those, reporting progress as it goes. Every
+champion commits its own verdict, so stopping between batches never loses work.
+
+This is deliberately not a background job system. It is the smallest thing that
+makes a long queue observable and resumable; if validation ever needs to survive
+a page close, that is the point to introduce one.
+
 ## API
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /research/elite-portfolios/champion-validation/queue` | Counts by state plus the next champions in line |
-| `POST /research/elite-portfolios/champion-validation/run` | Validate the next N champions (default 5) and graduate the survivors |
+| `POST /research/elite-portfolios/champion-validation/run` | Validate champions within one time budget and graduate the survivors |
 | `GET /research/elite-portfolios/champion-validation/diagnostics` | Failures grouped by gate and by family/symbol/timeframe |
 | `GET /research/elite-portfolios/champion-validation/runs/{id}` | One run's full evidence, gate by gate |
+| `POST /research/elite-portfolios/research-champions/dedupe` | Collapse duplicate champions to one per cluster |
 
 ## When validation fails
 

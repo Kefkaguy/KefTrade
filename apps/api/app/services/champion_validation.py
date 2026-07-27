@@ -65,11 +65,22 @@ INFINITE_PROFIT_FACTOR = 999.0
 # period itself is fully tradeable rather than losing its first 50 bars.
 SIMULATOR_WARMUP_BARS = 50
 
+# Wall-clock budget for one `run_champion_validation` call. Sized to return
+# comfortably inside the proxy and browser timeouts (see
+# deploy/production/nginx/keftrade.conf and apps/web/lib/api.ts) so a large
+# queue is drained by repeated calls that each report progress, rather than by
+# one request that appears to hang and is eventually cut off mid-flight.
+DEFAULT_RUN_BUDGET_SECONDS = 240.0
+
 DEFAULT_VALIDATION_THRESHOLDS: dict[str, Any] = {
-    # Out-of-sample holdout
-    "holdout_ratio": 0.30,
-    "minimum_holdout_rows": 300,
-    "minimum_in_sample_rows": 300,
+    # Unseen-period holdout. The split point is NOT chosen here -- it is read
+    # from the candidate's own `walk_forward_train_ratio`, because that is what
+    # decides which bars the promoted job actually traded. See
+    # `_selection_split` for why choosing our own ratio produced a gate that
+    # tested on the selection window and passed everything.
+    "default_walk_forward_train_ratio": 0.70,
+    "minimum_unseen_rows": 300,
+    "minimum_selection_rows": 300,
     "minimum_out_of_sample_profit_factor": 1.10,
     "minimum_profit_factor_retention": 0.55,
     "minimum_out_of_sample_trades": 15,
@@ -143,8 +154,8 @@ def thresholds_weakened(thresholds: dict[str, Any]) -> list[str]:
     request parameter.
     """
     looser_when_lower = {
-        "minimum_holdout_rows",
-        "minimum_in_sample_rows",
+        "minimum_unseen_rows",
+        "minimum_selection_rows",
         "minimum_out_of_sample_profit_factor",
         "minimum_profit_factor_retention",
         "minimum_out_of_sample_trades",
@@ -207,55 +218,64 @@ def _gate(gate_id: str, status: str, detail: str, observed: dict[str, Any], requ
 
 
 def gate_out_of_sample(measurements: dict[str, Any], thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Does the edge survive a later period the search never saw?"""
+    """Does the edge survive on bars the promoted job never traded?
+
+    `unseen_period` is the portion of the dataset the promoted job's own
+    walk-forward split skipped, so no candidate was ever ranked or promoted on
+    it. `selection_period` is the portion it did trade -- the window the
+    champion's headline metrics came from, and therefore the window its
+    selection is biased toward. Comparing the two is the whole point of the
+    gate; measuring on the selection window would be self-confirming.
+    """
     required = {
         "minimum_profit_factor": thresholds["minimum_out_of_sample_profit_factor"],
         "minimum_expectancy_per_trade": 0,
         "minimum_profit_factor_retention": thresholds["minimum_profit_factor_retention"],
     }
-    out_of_sample = _measured(measurements, "out_of_sample")
-    in_sample = _measured(measurements, "in_sample")
-    if out_of_sample is None:
-        return _gate("out_of_sample", GATE_INCONCLUSIVE, _unavailable_reason(measurements, "out_of_sample"), {}, required)
-    if in_sample is None:
+    unseen = _measured(measurements, "unseen_period")
+    selection = _measured(measurements, "selection_period")
+    if unseen is None:
+        return _gate("out_of_sample", GATE_INCONCLUSIVE, _unavailable_reason(measurements, "unseen_period"), {}, required)
+    if selection is None:
         return _gate(
             "out_of_sample",
             GATE_INCONCLUSIVE,
-            "The out-of-sample window ran but the in-sample window did not, so profit-factor "
-            f"decay could not be measured. {_unavailable_reason(measurements, 'in_sample')}",
-            {"out_of_sample_profit_factor": profit_factor_value(out_of_sample["metrics"])},
+            "The unseen window ran but the selection window did not, so profit-factor "
+            f"decay could not be measured. {_unavailable_reason(measurements, 'selection_period')}",
+            {"unseen_profit_factor": profit_factor_value(unseen["metrics"])},
             required,
         )
 
-    out_metrics = out_of_sample["metrics"]
-    in_metrics = in_sample["metrics"]
-    out_pf = profit_factor_value(out_metrics)
-    in_pf = profit_factor_value(in_metrics)
-    expectancy = finite_metric(out_metrics.get("expectancy_per_trade"))
+    unseen_metrics = unseen["metrics"]
+    selection_metrics = selection["metrics"]
+    unseen_pf = profit_factor_value(unseen_metrics)
+    selection_pf = profit_factor_value(selection_metrics)
+    expectancy = finite_metric(unseen_metrics.get("expectancy_per_trade"))
     # An infinite profit factor (zero losing trades) is a sentinel, not a
     # measurement, so a ratio built from one would be an artifact rather than
     # evidence of decay. Retention is reported as null in that case and the
     # absolute floors below still apply.
-    comparable = not (out_metrics.get("profit_factor_is_infinite") or in_metrics.get("profit_factor_is_infinite"))
-    retention = round(out_pf / in_pf, 6) if comparable and in_pf > 0 else None
+    comparable = not (unseen_metrics.get("profit_factor_is_infinite") or selection_metrics.get("profit_factor_is_infinite"))
+    retention = round(unseen_pf / selection_pf, 6) if comparable and selection_pf > 0 else None
     observed = {
-        "in_sample_profit_factor": in_pf,
-        "out_of_sample_profit_factor": out_pf,
+        "selection_profit_factor": selection_pf,
+        "unseen_profit_factor": unseen_pf,
         "profit_factor_retention": retention,
-        "out_of_sample_expectancy_per_trade": expectancy,
-        "out_of_sample_trades": int(finite_metric(out_metrics.get("number_of_trades"))),
-        "in_sample_trades": int(finite_metric(in_metrics.get("number_of_trades"))),
-        "window": out_of_sample.get("window"),
+        "unseen_expectancy_per_trade": expectancy,
+        "unseen_trades": int(finite_metric(unseen_metrics.get("number_of_trades"))),
+        "selection_trades": int(finite_metric(selection_metrics.get("number_of_trades"))),
+        "unseen_window": unseen.get("window"),
+        "selection_window": selection.get("window"),
     }
 
     failures: list[str] = []
-    if not profit_factor_passes(out_metrics, float(thresholds["minimum_out_of_sample_profit_factor"])):
-        failures.append(f"out-of-sample profit factor {out_pf:.3f} < {float(thresholds['minimum_out_of_sample_profit_factor']):.2f}")
+    if not profit_factor_passes(unseen_metrics, float(thresholds["minimum_out_of_sample_profit_factor"])):
+        failures.append(f"profit factor on unseen bars {unseen_pf:.3f} < {float(thresholds['minimum_out_of_sample_profit_factor']):.2f}")
     if expectancy <= 0:
-        failures.append(f"out-of-sample expectancy {expectancy:.4f} is not positive")
+        failures.append(f"expectancy on unseen bars {expectancy:.4f} is not positive")
     if retention is not None and retention < float(thresholds["minimum_profit_factor_retention"]):
         failures.append(
-            f"profit factor decayed to {retention:.0%} of in-sample "
+            f"profit factor decayed to {retention:.0%} of the selection window "
             f"(minimum {float(thresholds['minimum_profit_factor_retention']):.0%})"
         )
     if failures:
@@ -263,32 +283,32 @@ def gate_out_of_sample(measurements: dict[str, Any], thresholds: dict[str, Any])
     return _gate(
         "out_of_sample",
         GATE_PASSED,
-        f"Held up on the held-out tail: profit factor {out_pf:.3f} on {observed['out_of_sample_trades']} trades, "
-        f"{'retention n/a' if retention is None else f'{retention:.0%} of in-sample'}.",
+        f"Held up on bars the search never traded: profit factor {unseen_pf:.3f} on {observed['unseen_trades']} trades, "
+        f"{'retention n/a' if retention is None else f'{retention:.0%} of the selection window'}.",
         observed,
         required,
     )
 
 
 def gate_minimum_trades(measurements: dict[str, Any], thresholds: dict[str, Any]) -> dict[str, Any]:
-    """Is the out-of-sample result built on enough trades to mean anything?"""
+    """Is the unseen-period result built on enough trades to mean anything?"""
     required = {"minimum_out_of_sample_trades": thresholds["minimum_out_of_sample_trades"]}
-    out_of_sample = _measured(measurements, "out_of_sample")
-    if out_of_sample is None:
-        return _gate("minimum_trades", GATE_INCONCLUSIVE, _unavailable_reason(measurements, "out_of_sample"), {}, required)
-    trades = int(finite_metric(out_of_sample["metrics"].get("number_of_trades")))
+    unseen = _measured(measurements, "unseen_period")
+    if unseen is None:
+        return _gate("minimum_trades", GATE_INCONCLUSIVE, _unavailable_reason(measurements, "unseen_period"), {}, required)
+    trades = int(finite_metric(unseen["metrics"].get("number_of_trades")))
     minimum = int(thresholds["minimum_out_of_sample_trades"])
-    observed = {"out_of_sample_trades": trades, "out_of_sample_rows": out_of_sample.get("row_count")}
+    observed = {"unseen_trades": trades, "unseen_rows": unseen.get("row_count")}
     if trades < minimum:
         return _gate(
             "minimum_trades",
             GATE_FAILED,
-            f"Only {trades} out-of-sample trade(s) over {out_of_sample.get('row_count')} bars; "
+            f"Only {trades} trade(s) on unseen bars over {unseen.get('row_count')} bars; "
             f"{minimum} are required before the metrics carry any weight.",
             observed,
             required,
         )
-    return _gate("minimum_trades", GATE_PASSED, f"{trades} out-of-sample trades clears the {minimum}-trade floor.", observed, required)
+    return _gate("minimum_trades", GATE_PASSED, f"{trades} trades on unseen bars clears the {minimum}-trade floor.", observed, required)
 
 
 def gate_cross_symbol(measurements: dict[str, Any], thresholds: dict[str, Any]) -> dict[str, Any]:
@@ -461,7 +481,7 @@ def gate_drawdown_stress(measurements: dict[str, Any], thresholds: dict[str, Any
     """What is the worst drawdown across every window and stress we ran?"""
     required = {"maximum_drawdown": thresholds["maximum_stressed_drawdown"]}
     observations: list[dict[str, Any]] = []
-    for key in ("full", "in_sample", "out_of_sample", "cost_stress", "timeframe_stability"):
+    for key in ("full", "selection_period", "unseen_period", "cost_stress", "timeframe_stability"):
         row = _measured(measurements, key)
         if row is not None:
             observations.append({"run": key, "max_drawdown": finite_metric(row["metrics"].get("max_drawdown"))})
@@ -701,6 +721,34 @@ _SWING_TIMEFRAMES = ("1h", "4h")
 
 class ChampionValidationError(RuntimeError):
     """A champion could not be measured at all (bad payload, missing job)."""
+
+
+def _selection_split(candidate: dict[str, Any], thresholds: dict[str, Any]) -> float:
+    """Row fraction dividing bars the promoted job never traded from bars it did.
+
+    `run_backtest` does not merely score the walk-forward split -- it refuses to
+    open a position before it, opening trades only from
+    `len(rows) * walk_forward_train_ratio` onward. Every promoted job's headline
+    metrics therefore come from the *tail* of its dataset, and that tail is the
+    window its promotion was selected on. The head is the only part of the
+    dataset no candidate was ever ranked on.
+
+    Choosing our own holdout ratio here instead of reading the candidate's own
+    made this gate test on the tail -- the selection window -- which is
+    self-confirming and passed every champion it saw.
+    """
+    ratio = (candidate.get("parameters") or {}).get("walk_forward_train_ratio")
+    try:
+        parsed = float(ratio)
+    except (TypeError, ValueError):
+        parsed = float(thresholds["default_walk_forward_train_ratio"])
+    if not 0.0 < parsed < 1.0:
+        # 0 or 1 means the job traded everything (or nothing was skipped), so
+        # there is no untouched head to test on. Fall back to the documented
+        # default rather than producing an empty unseen window; the row-count
+        # floors below still reject a split that cannot be measured.
+        parsed = float(thresholds["default_walk_forward_train_ratio"])
+    return max(0.0, min(1.0, parsed))
 
 
 def _candidate_kind(candidate: dict[str, Any]) -> str:
@@ -1084,9 +1132,8 @@ def measure_champion(
     timeframe = str(champion["timeframe"])
     dataset_id = int(champion["dataset_id"]) if champion.get("dataset_id") is not None else None
     manifest = _load_manifest(conn, dataset_id)
-    minimum_rows = int(thresholds["minimum_holdout_rows"]) + int(thresholds["minimum_in_sample_rows"])
-    holdout_ratio = float(thresholds["holdout_ratio"])
-    split = max(0.0, min(1.0, 1.0 - holdout_ratio))
+    minimum_rows = int(thresholds["minimum_unseen_rows"]) + int(thresholds["minimum_selection_rows"])
+    split = _selection_split(candidate_payload, thresholds)
 
     measurements: dict[str, Any] = {
         "protocol_version": CHAMPION_VALIDATION_PROTOCOL_VERSION,
@@ -1094,6 +1141,7 @@ def measure_champion(
         "symbol": symbol,
         "timeframe": timeframe,
         "dataset_id": dataset_id,
+        "selection_split": split,
         "cross_symbol": [],
         "backtests_executed": 0,
     }
@@ -1114,13 +1162,16 @@ def measure_champion(
     }
 
     full = record("full", _simulate(conn, **common, keep_series=True, minimum_rows=minimum_rows))
+    # rows[:split] is what the promoted job's walk-forward split skipped -- no
+    # candidate was ever ranked on it. rows[split:] is what it traded, and
+    # therefore what its promotion was selected on. See `_selection_split`.
     record(
-        "in_sample",
-        _simulate(conn, **common, window=(0.0, split), minimum_rows=int(thresholds["minimum_in_sample_rows"])),
+        "unseen_period",
+        _simulate(conn, **common, window=(0.0, split), minimum_rows=int(thresholds["minimum_unseen_rows"])),
     )
     record(
-        "out_of_sample",
-        _simulate(conn, **common, window=(split, 1.0), minimum_rows=int(thresholds["minimum_holdout_rows"])),
+        "selection_period",
+        _simulate(conn, **common, window=(split, 1.0), minimum_rows=int(thresholds["minimum_selection_rows"])),
     )
 
     multiplier = float(thresholds["cost_stress_multiplier"])
@@ -1451,6 +1502,7 @@ def run_champion_validation(
     threshold_overrides: dict[str, Any] | None = None,
     revalidate: bool = False,
     require_frozen: bool = False,
+    max_runtime_seconds: float = DEFAULT_RUN_BUDGET_SECONDS,
 ) -> dict[str, Any]:
     """Validate the next champions in the queue and graduate the survivors.
 
@@ -1458,6 +1510,13 @@ def run_champion_validation(
     which is the only thing that makes it visible to the portfolio solver.
     Everything else keeps its champion state and carries the reason it did not
     graduate, so re-running after more data arrives is the natural next step.
+
+    Bounded by `max_runtime_seconds` as well as `limit`. Each champion costs a
+    full battery of backtests, so a large queue cannot finish inside one HTTP
+    request; rather than hold a connection open until something upstream times
+    out and the caller sees a hang with nothing to show for it, the run stops
+    at the budget and reports `remaining` so the caller can simply call again.
+    Every champion commits its own verdict, so stopping early never loses work.
     """
     # The queue query below is already bounded to champions in an eligible
     # validation_state, so a caller can request "the whole queue" via a large
@@ -1493,8 +1552,17 @@ def run_champion_validation(
     cache: dict[Any, Any] = {}
     outcomes: list[dict[str, Any]] = []
     graduated = 0
+    budget = max(0.0, float(max_runtime_seconds))
+    batch_started = time.perf_counter()
+    budget_exhausted = False
 
     for raw in rows:
+        # Checked before starting a champion, never mid-champion: a partially
+        # measured champion has no verdict to record, so abandoning one would
+        # only waste the backtests already run.
+        if outcomes and budget and (time.perf_counter() - batch_started) >= budget:
+            budget_exhausted = True
+            break
         champion = dict(raw)
         started = time.perf_counter()
         conn.execute(
@@ -1616,6 +1684,7 @@ def run_champion_validation(
             }
         )
 
+    status = champion_validation_queue(conn)
     return {
         "protocol_version": CHAMPION_VALIDATION_PROTOCOL_VERSION,
         "examined": len(outcomes),
@@ -1626,7 +1695,12 @@ def run_champion_validation(
         "thresholds": thresholds,
         "thresholds_weakened": False,
         "outcomes": outcomes,
-        "status": champion_validation_queue(conn),
+        # True when the run stopped on its time budget with champions still
+        # queued. The caller is expected to call again; nothing is lost.
+        "budget_exhausted": budget_exhausted,
+        "remaining": int(status.get("pending_validation") or 0),
+        "runtime_seconds": round(time.perf_counter() - batch_started, 3),
+        "status": status,
         "simulation_only": True,
     }
 

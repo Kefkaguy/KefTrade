@@ -1716,6 +1716,11 @@ export type ChampionValidationRunResult = {
   thresholds: Record<string, number>;
   thresholds_weakened: false;
   outcomes: ChampionValidationOutcome[];
+  // Set when the run stopped on its wall-clock budget with champions still
+  // queued. Call again to continue -- every verdict is already committed.
+  budget_exhausted: boolean;
+  remaining: number;
+  runtime_seconds: number;
   status: ChampionValidationQueue;
 };
 
@@ -1762,11 +1767,12 @@ export function runChampionValidation(options: { limit?: number; eliteCandidateI
       elite_candidate_ids: options.eliteCandidateIds ?? [],
       revalidate: options.revalidate ?? false
     }),
-    // Every champion runs a full battery of backtests, so a full-queue batch
-    // is deliberately the longest-running call on the page. Requires the
-    // matching proxy_read_timeout/proxy_send_timeout in
-    // deploy/production/nginx/keftrade.conf to actually be allowed to finish.
-    timeoutMs: 3600000
+    // One call is bounded server-side by max_runtime_seconds, so this only has
+    // to outlast a single budgeted batch rather than the whole queue -- the
+    // caller drains the queue by calling repeatedly (see validateChampions in
+    // ElitePortfolioBuilder), which is what keeps a long queue observable
+    // instead of looking hung.
+    timeoutMs: 600000
   });
 }
 

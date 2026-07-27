@@ -21,6 +21,7 @@ from app.services.elite_portfolio_repository import (
 )
 from app.services.elite_portfolio_activation import PortfolioActivationError, activate_internal
 from app.services.champion_validation import (
+    DEFAULT_RUN_BUDGET_SECONDS,
     ChampionValidationError,
     champion_validation_diagnostics,
     champion_validation_queue,
@@ -59,6 +60,10 @@ class ChampionValidationRequest(BaseModel):
     threshold_overrides: dict[str, Any] = Field(default_factory=dict)
     revalidate: bool = False
     require_frozen_datasets: bool = False
+    # Wall-clock ceiling for one call. The response reports `remaining` and
+    # `budget_exhausted` so a caller draining a large queue calls repeatedly
+    # instead of holding one request open past the proxy timeout.
+    max_runtime_seconds: float = Field(default=DEFAULT_RUN_BUDGET_SECONDS, ge=30.0, le=3000.0)
 
 
 class ApprovalRequest(BaseModel):
@@ -142,6 +147,7 @@ def run_champion_validation_endpoint(
             threshold_overrides=request.threshold_overrides or None,
             revalidate=request.revalidate,
             require_frozen=request.require_frozen_datasets,
+            max_runtime_seconds=request.max_runtime_seconds,
         )
     except ValueError as error:
         # Weakened or unknown thresholds: a rejected request, never a silent

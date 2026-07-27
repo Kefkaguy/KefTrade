@@ -14,6 +14,7 @@ from app.services.champion_validation import (
     GATE_PASSED,
     _duplication_measurements,
     _regime_buckets,
+    _selection_split,
     classify_validation,
     evaluate_gates,
     gate_counts,
@@ -47,8 +48,8 @@ def healthy_measurements(**overrides):
     """Every measurement present and comfortably clearing every gate."""
     base = {
         "full": run(),
-        "in_sample": run(pf=2.1, trades=40),
-        "out_of_sample": run(pf=1.8, trades=25),
+        "selection_period": run(pf=2.1, trades=40),
+        "unseen_period": run(pf=1.8, trades=25),
         "cost_stress": run(pf=1.4),
         "cross_symbol": [
             {"status": "measured", "symbol": "NVDA", "metrics": metrics(pf=1.5, trades=30)},
@@ -81,18 +82,18 @@ def test_a_champion_that_clears_every_gate_is_validated() -> None:
 
 
 def test_out_of_sample_collapse_fails_the_gate() -> None:
-    gate = verdicts(healthy_measurements(out_of_sample=run(pf=0.8, expectancy=-1.2, trades=25)))["out_of_sample"]
+    gate = verdicts(healthy_measurements(unseen_period=run(pf=0.8, expectancy=-1.2, trades=25)))["out_of_sample"]
 
     assert gate["status"] == GATE_FAILED
     assert "profit factor" in gate["detail"]
-    assert gate["observed"]["out_of_sample_profit_factor"] == 0.8
+    assert gate["observed"]["unseen_profit_factor"] == 0.8
 
 
 def test_profit_factor_decay_fails_even_when_out_of_sample_is_still_profitable() -> None:
     # 1.15 clears the absolute 1.10 floor on its own, but it is only 38% of the
-    # in-sample 3.0 -- the "it worked until the exact window that found it
-    # ended" signature the retention threshold exists to catch.
-    measurements = healthy_measurements(in_sample=run(pf=3.0, trades=40), out_of_sample=run(pf=1.15, trades=25))
+    # 3.0 the champion posted on its selection window -- the "it only worked on
+    # the bars that promoted it" signature the retention threshold exists to catch.
+    measurements = healthy_measurements(selection_period=run(pf=3.0, trades=40), unseen_period=run(pf=1.15, trades=25))
     gate = verdicts(measurements)["out_of_sample"]
 
     assert gate["status"] == GATE_FAILED
@@ -101,7 +102,7 @@ def test_profit_factor_decay_fails_even_when_out_of_sample_is_still_profitable()
 
 
 def test_a_missing_holdout_window_is_inconclusive_not_a_pass() -> None:
-    measurements = healthy_measurements(out_of_sample=unavailable("only 40 usable bars in this window"))
+    measurements = healthy_measurements(unseen_period=unavailable("only 40 usable bars in this window"))
     gates = evaluate_gates(measurements)
     by_id = {gate["gate_id"]: gate for gate in gates}
 
@@ -114,10 +115,10 @@ def test_a_missing_holdout_window_is_inconclusive_not_a_pass() -> None:
 
 
 def test_too_few_out_of_sample_trades_is_a_failure_not_missing_data() -> None:
-    gate = verdicts(healthy_measurements(out_of_sample=run(pf=4.0, trades=3)))["minimum_trades"]
+    gate = verdicts(healthy_measurements(unseen_period=run(pf=4.0, trades=3)))["minimum_trades"]
 
     assert gate["status"] == GATE_FAILED
-    assert gate["observed"]["out_of_sample_trades"] == 3
+    assert gate["observed"]["unseen_trades"] == 3
 
 
 def test_a_single_symbol_result_cannot_pass_the_cross_asset_gate() -> None:
@@ -274,7 +275,7 @@ def test_a_reparameterised_clone_of_a_same_slot_elite_fails() -> None:
 
 def test_a_failure_outranks_an_inconclusive_gate_in_the_verdict() -> None:
     measurements = healthy_measurements(
-        out_of_sample=run(pf=0.5, expectancy=-3.0, trades=25),
+        unseen_period=run(pf=0.5, expectancy=-3.0, trades=25),
         timeframe_stability=unavailable("no 15m data"),
     )
     state, reason = classify_validation(evaluate_gates(measurements))
@@ -286,7 +287,7 @@ def test_a_failure_outranks_an_inconclusive_gate_in_the_verdict() -> None:
 
 def test_an_infinite_profit_factor_is_not_read_as_zero() -> None:
     assert profit_factor_value(metrics(infinite=True)) > 100
-    gate = verdicts(healthy_measurements(out_of_sample=run(infinite=True, trades=25)))["out_of_sample"]
+    gate = verdicts(healthy_measurements(unseen_period=run(infinite=True, trades=25)))["out_of_sample"]
     assert gate["status"] == GATE_PASSED
 
 
@@ -294,7 +295,7 @@ def test_an_infinite_in_sample_profit_factor_does_not_manufacture_fake_decay() -
     # In-sample had zero losing trades, so the "999" sentinel would make any
     # finite out-of-sample number look like a 99% collapse. Retention is
     # reported as unmeasured instead; the absolute floors still decide.
-    measurements = healthy_measurements(in_sample=run(infinite=True, trades=40), out_of_sample=run(pf=1.5, trades=25))
+    measurements = healthy_measurements(selection_period=run(infinite=True, trades=40), unseen_period=run(pf=1.5, trades=25))
     gate = verdicts(measurements)["out_of_sample"]
 
     assert gate["status"] == GATE_PASSED
@@ -391,7 +392,7 @@ def test_every_gate_has_a_default_threshold_and_a_label() -> None:
         assert gate["label"]
         assert gate["detail"]
         assert isinstance(gate["required"], dict)
-    assert set(DEFAULT_VALIDATION_THRESHOLDS) >= {"holdout_ratio", "cost_stress_multiplier", "maximum_parameter_similarity"}
+    assert set(DEFAULT_VALIDATION_THRESHOLDS) >= {"default_walk_forward_train_ratio", "cost_stress_multiplier", "maximum_parameter_similarity"}
 
 
 class FakeResult:
@@ -433,11 +434,15 @@ CHAMPION_ROW = {
 class FakeValidationConnection:
     """Just enough of psycopg to exercise the graduation state machine."""
 
-    def __init__(self, champion=None):
-        self.champion = dict(champion or CHAMPION_ROW)
+    def __init__(self, champion=None, champions=None):
+        self.champion_rows = [dict(row) for row in champions] if champions else [dict(champion or CHAMPION_ROW)]
         self.statements: list[tuple[str, Any]] = []
         self.gate_rows: list[tuple[Any, ...]] = []
         self.commits = 0
+
+    @property
+    def champion(self):
+        return self.champion_rows[0]
 
     def execute(self, query, params=None):
         self.statements.append((query, params))
@@ -451,7 +456,7 @@ class FakeValidationConnection:
         if "COUNT(*) FILTER" in query:
             return FakeResult([{}])
         if "JOIN LATERAL" in query:
-            return FakeResult([self.champion])
+            return FakeResult(list(self.champion_rows))
         return FakeResult([])
 
     def commit(self):
@@ -494,7 +499,7 @@ def test_a_champion_that_passes_every_gate_is_promoted_to_final_elite(monkeypatc
 
 
 def test_a_failing_champion_keeps_its_champion_state_and_records_why(monkeypatch) -> None:
-    _stub_measurements(monkeypatch, healthy_measurements(out_of_sample=run(pf=0.6, expectancy=-2.0, trades=25)))
+    _stub_measurements(monkeypatch, healthy_measurements(unseen_period=run(pf=0.6, expectancy=-2.0, trades=25)))
     conn = FakeValidationConnection()
 
     outcome = run_champion_validation(conn, limit=1)
@@ -578,3 +583,71 @@ def test_migration_054_covers_every_validation_state_the_service_can_write() -> 
         assert f"'{status}'" in sql
     # Evidence of a weakened run can never be stored.
     assert "CHECK (thresholds_weakened = FALSE)" in sql
+
+
+def test_the_unseen_window_is_the_head_the_promoted_job_never_traded() -> None:
+    # run_backtest opens positions only from len(rows) * walk_forward_train_ratio
+    # onward, so a job promoted at ratio 0.7 was scored purely on the last 30%.
+    # The split must therefore come back as 0.7 -- rows[:0.7] is the untouched
+    # head to test on, rows[0.7:] is the window that selected the champion.
+    thresholds = validation_thresholds()
+
+    assert _selection_split({"parameters": {"walk_forward_train_ratio": 0.7}}, thresholds) == pytest.approx(0.7)
+    assert _selection_split({"parameters": {"walk_forward_train_ratio": 0.6}}, thresholds) == pytest.approx(0.6)
+
+
+def test_selection_split_falls_back_when_the_candidate_names_no_usable_ratio() -> None:
+    thresholds = validation_thresholds()
+    default = float(thresholds["default_walk_forward_train_ratio"])
+
+    assert _selection_split({"parameters": {}}, thresholds) == pytest.approx(default)
+    assert _selection_split({}, thresholds) == pytest.approx(default)
+    assert _selection_split({"parameters": {"walk_forward_train_ratio": None}}, thresholds) == pytest.approx(default)
+    assert _selection_split({"parameters": {"walk_forward_train_ratio": "nonsense"}}, thresholds) == pytest.approx(default)
+    # 1.0 was a real defect in an early ORB campaign: it means nothing was
+    # skipped, so there is no untouched head. Fall back rather than produce an
+    # empty unseen window.
+    assert _selection_split({"parameters": {"walk_forward_train_ratio": 1.0}}, thresholds) == pytest.approx(default)
+    assert _selection_split({"parameters": {"walk_forward_train_ratio": 0.0}}, thresholds) == pytest.approx(default)
+
+
+def test_a_champion_that_only_works_on_its_selection_window_now_fails() -> None:
+    # The exact overfit signature: superb on the bars that promoted it, broken
+    # on the bars nothing ever ranked. Before the split was corrected this
+    # measured the selection window as if it were the holdout and passed.
+    measurements = healthy_measurements(
+        selection_period=run(pf=2.4, trades=84),
+        unseen_period=run(pf=0.71, expectancy=-3.1, trades=140),
+    )
+    gate = verdicts(measurements)["out_of_sample"]
+
+    assert gate["status"] == GATE_FAILED
+    assert gate["observed"]["unseen_profit_factor"] == 0.71
+    assert gate["observed"]["selection_profit_factor"] == 2.4
+
+
+def test_a_run_stops_on_its_time_budget_and_reports_what_is_left(monkeypatch) -> None:
+    # Each champion costs a full battery of backtests, so a large queue cannot
+    # finish inside one request. The run must come back with partial results
+    # rather than hold the connection open until something upstream kills it.
+    clock = iter([0.0, 0.0, 500.0, 500.0, 1000.0, 1000.0, 1500.0, 1500.0])
+    monkeypatch.setattr(champion_validation.time, "perf_counter", lambda: next(clock))
+    _stub_measurements(monkeypatch, healthy_measurements())
+    conn = FakeValidationConnection(champions=[dict(CHAMPION_ROW, id=index) for index in (41, 42, 43)])
+
+    outcome = run_champion_validation(conn, limit=100, max_runtime_seconds=60)
+
+    # First champion always runs (the budget is checked before starting a
+    # champion, never mid-champion), then the elapsed check trips.
+    assert outcome["examined"] == 1
+    assert outcome["budget_exhausted"] is True
+
+
+def test_a_run_that_drains_the_queue_reports_no_budget_exhaustion(monkeypatch) -> None:
+    _stub_measurements(monkeypatch, healthy_measurements())
+    conn = FakeValidationConnection()
+
+    outcome = run_champion_validation(conn, limit=100, max_runtime_seconds=600)
+
+    assert outcome["examined"] == 1
+    assert outcome["budget_exhausted"] is False
