@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import psycopg
+from fastapi.encoders import jsonable_encoder
 from psycopg.types.json import Jsonb
 
+from app.observability import log_exception
 from app.services.external_execution import feature_flags
 from app.services.paper_trading import create_deployment
 from app.services.research_campaigns import ensure_candidate_forward_account
@@ -110,14 +112,94 @@ def activate_internal(
         "order_submission_changed": False,
         "live_money_supported": False,
     }
-    conn.execute(
-        "UPDATE elite_portfolio_activation_attempts SET status=%s,result=%s,error=%s,completed_at=NOW() WHERE id=%s",
-        (attempt_status, Jsonb(result), Jsonb(errors) if errors else None, attempt["id"]),
-    )
-    if complete:
-        conn.execute("UPDATE elite_portfolio_runs SET status='activated_internal',activated_at=COALESCE(activated_at,NOW()),updated_at=NOW() WHERE id=%s", (portfolio_run_id,))
-    conn.commit()
-    return result
+    # `refreshed` and `results` are raw psycopg rows (dict_row): timestamps come
+    # back as datetime, JSONB columns can carry Decimal/UUID, and none of that is
+    # JSON-serializable on its own. jsonable_encoder is the encoder the rest of
+    # this codebase already uses immediately before Jsonb(...) (see
+    # elite_portfolio_repository.py, paper_trading.py, research_automation.py),
+    # so this reuses that convention rather than inventing another one.
+    #
+    # Sanitized once, then used for both the audit-column write below and the
+    # value returned to the caller, so the two can never disagree about what
+    # actually happened.
+    sanitized_result = jsonable_encoder(result)
+    sanitized_errors = jsonable_encoder(errors) if errors else None
+    try:
+        conn.execute(
+            "UPDATE elite_portfolio_activation_attempts SET status=%s,result=%s,error=%s,completed_at=NOW() WHERE id=%s",
+            (attempt_status, Jsonb(sanitized_result), Jsonb(sanitized_errors) if sanitized_errors else None, attempt["id"]),
+        )
+        if complete:
+            conn.execute("UPDATE elite_portfolio_runs SET status='activated_internal',activated_at=COALESCE(activated_at,NOW()),updated_at=NOW() WHERE id=%s", (portfolio_run_id,))
+        conn.commit()
+    except Exception as error:
+        # The deployment work above is already committed (each _activate_member
+        # call commits its own row); only the audit-trail write for *this*
+        # attempt failed. A caller must never see that as "activation failed" --
+        # the members table is the source of truth, and `sanitized_result`
+        # already reflects it correctly. Persist a minimal, guaranteed-safe
+        # fallback so the attempt row does not stay stuck in 'running' forever,
+        # log the real cause for investigation, and still return the accurate
+        # result to the caller.
+        conn.rollback()
+        log_exception(
+            "Failed to persist elite portfolio activation attempt result; deployments were already committed",
+            error,
+            portfolio_run_id=portfolio_run_id,
+            attempt_id=attempt["id"],
+        )
+        conn.execute(
+            "UPDATE elite_portfolio_activation_attempts SET status=%s,result=%s,error=%s,completed_at=NOW() WHERE id=%s",
+            (
+                attempt_status,
+                Jsonb({"status": attempt_status, "note": "Result persistence failed; see elite_portfolio_members for authoritative state."}),
+                Jsonb({"persistence_error": f"{type(error).__name__}: {error}"}),
+                attempt["id"],
+            ),
+        )
+        if complete:
+            conn.execute("UPDATE elite_portfolio_runs SET status='activated_internal',activated_at=COALESCE(activated_at,NOW()),updated_at=NOW() WHERE id=%s", (portfolio_run_id,))
+        conn.commit()
+    return sanitized_result
+
+
+def repair_stalled_activation_attempts(conn: psycopg.Connection) -> list[dict[str, Any]]:
+    """Finish activation attempts an earlier serialization bug left stuck.
+
+    Before this module sanitized `result` for `Jsonb(...)`, a raw psycopg row
+    containing a `datetime` (e.g. `elite_portfolio_members.updated_at`) made the
+    final persist step raise, leaving the attempt row in 'running' or 'partial'
+    even though every member's deployment had already been created and
+    committed.
+
+    Replaying `activate_internal` with the attempt's own idempotency key is a
+    safe fix, not a workaround: `activation_worklist` only ever selects members
+    outside `TERMINAL_MEMBER_STATES`, so a member already at
+    `external_approval_required` (or any other terminal state) is skipped
+    entirely -- no deployment is recreated, nothing is duplicated. The replay
+    simply reaches the now-fixed persist step and marks the attempt complete.
+    """
+    stalled = [dict(row) for row in conn.execute("SELECT * FROM elite_portfolio_activation_attempts WHERE status IN ('running', 'partial')").fetchall()]
+    repaired: list[dict[str, Any]] = []
+    for attempt in stalled:
+        try:
+            result = activate_internal(conn, int(attempt["portfolio_run_id"]), attempt["idempotency_key"], attempt["requested_snapshot_hash"])
+            repaired.append({
+                "attempt_id": attempt["id"],
+                "portfolio_run_id": attempt["portfolio_run_id"],
+                "idempotency_key": attempt["idempotency_key"],
+                "status": result["status"],
+            })
+        except PortfolioActivationError as error:
+            conn.rollback()
+            repaired.append({
+                "attempt_id": attempt["id"],
+                "portfolio_run_id": attempt["portfolio_run_id"],
+                "idempotency_key": attempt["idempotency_key"],
+                "status": "error",
+                "error": str(error),
+            })
+    return repaired
 
 
 def _activate_member(conn: psycopg.Connection, member: dict[str, Any]) -> dict[str, Any]:
