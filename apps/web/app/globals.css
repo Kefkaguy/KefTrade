@@ -1248,6 +1248,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .eliteChampionResult { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; }
 .eliteChampionResult strong { color: var(--success); font-family: var(--font-mono); }
 .eliteChampionResult .eliteImportExplanation + span { display: none; }
+.eliteChampionActions { display: grid; gap: 10px; justify-items: end; }
 .eliteValidationQueue { display: grid; gap: 22px; margin-top: 18px; padding: 22px; border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--line)); border-radius: var(--radius); background: linear-gradient(135deg, color-mix(in srgb, var(--warning) 10%, transparent), var(--panel)); }
 .eliteValidationQueue h2 { margin-top: 6px; font-size: 20px; }
 .eliteValidationQueue h3 { margin: 0 0 10px; color: var(--ink); font-size: 12px; }

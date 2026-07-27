@@ -171,6 +171,51 @@ def research_champion_status(conn: psycopg.Connection) -> dict[str, Any]:
     }
 
 
+def _existing_cluster_keys(conn: psycopg.Connection, *, promotion_states: tuple[str, ...]) -> set[str]:
+    """Cluster keys already covered by a live (non-demoted) champion or elite.
+
+    `_load_promoted_jobs`'s `NOT EXISTS` only ever excluded a literal
+    (campaign_id, candidate_id) pair already imported. It never excluded a
+    *different* pair that happens to be the same effective strategy -- which
+    is exactly what independent campaign runs of a near-identical family
+    produce, each under a fresh candidate_id. This closes that gap by
+    recomputing `_cluster_key` for everything already imported and folding it
+    into the dedup set before ranking new candidates.
+    """
+    rows = conn.execute(
+        """
+        SELECT
+            e.candidate_id, e.campaign_id,
+            j.symbol, j.timeframe, j.candidate, j.strategy_family,
+            j.family_id AS job_family_id, j.parent_candidate_id AS job_parent_candidate_id
+        FROM elite_research_candidates e
+        JOIN LATERAL (
+            SELECT symbol, timeframe, candidate, strategy_family, family_id, parent_candidate_id
+            FROM research_campaign_jobs
+            WHERE campaign_id = e.campaign_id AND candidate_id = e.candidate_id AND simulation_only = TRUE
+            ORDER BY (status = 'promoted') DESC, id DESC
+            LIMIT 1
+        ) j ON TRUE
+        WHERE e.simulation_only = TRUE
+          AND e.promotion_state = ANY(%s)
+        """,
+        (list(promotion_states),),
+    ).fetchall()
+    return {
+        _cluster_key(
+            {
+                "symbol": row["symbol"],
+                "timeframe": row["timeframe"],
+                "strategy_family": row["strategy_family"],
+                "family_id": row["job_family_id"],
+                "parent_candidate_id": row["job_parent_candidate_id"],
+                "candidate": row["candidate"],
+            }
+        )
+        for row in rows
+    }
+
+
 def import_research_champions(
     conn: psycopg.Connection,
     *,
@@ -194,8 +239,12 @@ def import_research_champions(
         max_drawdown=max_drawdown,
     )
     ranked = sorted(candidates, key=_score, reverse=True)
+    # Seeded with every cluster a live champion or elite already covers, so a
+    # different campaign's near-identical job can no longer sneak in under a
+    # fresh candidate_id -- see `_existing_cluster_keys`.
+    already_covered = _existing_cluster_keys(conn, promotion_states=("research_champion", "elite"))
+    seen_clusters: set[str] = set(already_covered)
     selected: list[dict[str, Any]] = []
-    seen_clusters: set[str] = set()
     for row in ranked:
         cluster = _cluster_key(row)
         if cluster in seen_clusters:
@@ -337,12 +386,109 @@ def import_research_champions(
     return {
         "imported": len(imported),
         "examined": len(candidates),
-        "dedupe_clusters_seen": len(seen_clusters),
+        # New distinct clusters found in this call's candidate pool -- not the
+        # running total, which also includes every cluster a prior import
+        # already covered (see `already_covered` above).
+        "dedupe_clusters_seen": len(seen_clusters) - len(already_covered),
+        "already_covered_clusters": len(already_covered),
         "max_champions": bounded,
         "promotion_rule_version": RESEARCH_CHAMPION_RULE_VERSION,
         "promotion_state": "research_champion",
         "final_elites_created": 0,
         "thresholds_weakened": False,
         "champions": imported,
+        "status": research_champion_status(conn),
+    }
+
+
+def dedupe_research_champions(conn: psycopg.Connection, *, dry_run: bool = False) -> dict[str, Any]:
+    """Collapse already-imported duplicate champions down to one per cluster.
+
+    Fixing `import_research_champions`'s dedup (see `_existing_cluster_keys`)
+    stops *new* duplicates. It does nothing about champions a prior import
+    already created before that fix existed -- potentially hundreds of literal
+    copies of the same strategy, each of which champion validation would
+    re-measure independently at full cost for an identical verdict.
+
+    This groups every `research_champion` row by the same cluster key import
+    uses, keeps the single highest-scoring row per cluster exactly as it is,
+    and demotes the rest with `promotion_state = 'demoted'` -- the same
+    non-destructive exclusion state `reevaluate_elite_candidates` uses for a
+    failed consistency gate. Nothing is deleted, no score is recalculated, and
+    an already-graduated `elite` row is never touched: if two elites turn out
+    to be near-duplicates, that is what the validation battery's own
+    correlation and parameter-similarity gates are for, not a blunt cleanup.
+    """
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT
+                e.id, e.candidate_id, e.campaign_id, e.research_score,
+                j.symbol, j.timeframe, j.candidate, j.strategy_family,
+                j.family_id AS job_family_id, j.parent_candidate_id AS job_parent_candidate_id
+            FROM elite_research_candidates e
+            JOIN LATERAL (
+                SELECT symbol, timeframe, candidate, strategy_family, family_id, parent_candidate_id
+                FROM research_campaign_jobs
+                WHERE campaign_id = e.campaign_id AND candidate_id = e.candidate_id AND simulation_only = TRUE
+                ORDER BY (status = 'promoted') DESC, id DESC
+                LIMIT 1
+            ) j ON TRUE
+            WHERE e.simulation_only = TRUE
+              AND e.promotion_state = 'research_champion'
+            """
+        ).fetchall()
+    ]
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        cluster = _cluster_key(
+            {
+                "symbol": row["symbol"],
+                "timeframe": row["timeframe"],
+                "strategy_family": row["strategy_family"],
+                "family_id": row["job_family_id"],
+                "parent_candidate_id": row["job_parent_candidate_id"],
+                "candidate": row["candidate"],
+            }
+        )
+        groups.setdefault(cluster, []).append(row)
+
+    duplicate_groups = 0
+    demoted_ids: list[int] = []
+    kept: list[dict[str, Any]] = []
+    for cluster, members in groups.items():
+        if len(members) < 2:
+            continue
+        duplicate_groups += 1
+        ranked_members = sorted(members, key=lambda row: (float(row["research_score"] or 0), row["id"]), reverse=True)
+        keeper = ranked_members[0]
+        losers = ranked_members[1:]
+        kept.append({"id": keeper["id"], "candidate_id": keeper["candidate_id"], "cluster_key": cluster, "duplicates_demoted": len(losers)})
+        demoted_ids.extend(int(loser["id"]) for loser in losers)
+        if not dry_run:
+            reason = f"duplicate_of:{keeper['candidate_id']}|{keeper['campaign_id']}|cluster:{cluster}"
+            conn.execute(
+                """
+                UPDATE elite_research_candidates
+                SET promotion_state = 'demoted',
+                    demotion_reason = %s,
+                    reevaluated_at = NOW()
+                WHERE id = ANY(%s)
+                """,
+                (reason[:2000], [int(loser["id"]) for loser in losers]),
+            )
+
+    if not dry_run:
+        conn.commit()
+
+    return {
+        "champions_examined": len(rows),
+        "clusters_examined": len(groups),
+        "duplicate_clusters": duplicate_groups,
+        "champions_demoted": len(demoted_ids),
+        "champions_kept_per_cluster": kept[:50],
+        "dry_run": dry_run,
         "status": research_champion_status(conn),
     }

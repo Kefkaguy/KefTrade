@@ -27,7 +27,7 @@ from app.services.champion_validation import (
     champion_validation_run,
     run_champion_validation,
 )
-from app.services.research_champion_import import import_research_champions, research_champion_status
+from app.services.research_champion_import import dedupe_research_champions, import_research_champions, research_champion_status
 from app.settings import settings
 
 
@@ -98,6 +98,15 @@ def import_research_champions_endpoint(
         min_trades=min_trades,
         max_drawdown=max_drawdown,
     )
+
+
+@router.post("/research-champions/dedupe")
+def dedupe_research_champions_endpoint(
+    dry_run: bool = Query(False),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    _require_builder()
+    return dedupe_research_champions(conn, dry_run=dry_run)
 
 
 @router.get("/champion-validation/queue")

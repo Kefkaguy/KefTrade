@@ -21,6 +21,7 @@ import {
   approveElitePortfolio,
   backfillElitePortfolioEvidence,
   createElitePortfolio,
+  dedupeResearchChampions,
   getChampionValidationDiagnostics,
   getChampionValidationQueue,
   getElitePortfolioOptions,
@@ -28,6 +29,7 @@ import {
   importResearchChampions,
   previewElitePortfolio,
   runChampionValidation,
+  type ChampionDedupeResult,
   type ChampionValidationDiagnostics,
   type ChampionValidationQueue,
   type ChampionValidationRunResult,
@@ -55,6 +57,7 @@ export function ElitePortfolioBuilder() {
   const [result, setResult] = useState<ElitePortfolioResult | null>(null);
   const [championStatus, setChampionStatus] = useState<ResearchChampionStatus | null>(null);
   const [championImport, setChampionImport] = useState<ResearchChampionImportResult | null>(null);
+  const [dedupeResult, setDedupeResult] = useState<ChampionDedupeResult | null>(null);
   const [validationQueue, setValidationQueue] = useState<ChampionValidationQueue | null>(null);
   const [validationResult, setValidationResult] = useState<ChampionValidationRunResult | null>(null);
   const [validationDiagnostics, setValidationDiagnostics] = useState<ChampionValidationDiagnostics | null>(null);
@@ -176,6 +179,23 @@ export function ElitePortfolioBuilder() {
     }
   }
 
+  async function dedupeChampions() {
+    setBusy("dedupe");
+    setError(null);
+    try {
+      const outcome = await dedupeResearchChampions();
+      setDedupeResult(outcome);
+      setChampionStatus(outcome.status);
+      const [nextOptions, nextQueue] = await Promise.all([getElitePortfolioOptions(), getChampionValidationQueue(25)]);
+      setOptions(nextOptions);
+      setValidationQueue(nextQueue);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function validateChampions(revalidate: boolean) {
     setBusy(revalidate ? "revalidate" : "validate");
     setValidationError(null);
@@ -243,8 +263,11 @@ export function ElitePortfolioBuilder() {
       <ResearchChampionIntake
         status={championStatus}
         result={championImport}
+        dedupeResult={dedupeResult}
         busy={busy === "champions"}
+        dedupeBusy={busy === "dedupe"}
         onImport={importChampions}
+        onDedupe={dedupeChampions}
       />
 
       <EliteValidationQueue
@@ -683,13 +706,19 @@ function PortfolioReview({ result, analytics, members }: { result: ElitePortfoli
 function ResearchChampionIntake({
   status,
   result,
+  dedupeResult,
   busy,
-  onImport
+  dedupeBusy,
+  onImport,
+  onDedupe
 }: {
   status: ResearchChampionStatus | null;
   result: ResearchChampionImportResult | null;
+  dedupeResult: ChampionDedupeResult | null;
   busy: boolean;
+  dedupeBusy: boolean;
   onImport: () => void;
+  onDedupe: () => void;
 }) {
   const hasChampions = Boolean(status?.research_champions);
   return (
@@ -712,18 +741,36 @@ function ResearchChampionIntake({
       {result ? (
         <div className="eliteChampionResult">
           <strong>Import completed: {result.imported} champions added</strong>
-          <span className="eliteImportExplanation">{result.dedupe_clusters_seen} dedupe clusters examined. Final elites created: {result.final_elites_created}. Thresholds weakened: {String(result.thresholds_weakened)}. Next step: validation.</span>
-          <span>{result.dedupe_clusters_seen} dedupe clusters examined · {result.final_elites_created} final elites created · thresholds weakened: {String(result.thresholds_weakened)}</span>
+          <span className="eliteImportExplanation">{result.dedupe_clusters_seen} new dedupe clusters found · {result.already_covered_clusters} already covered by an existing champion. Final elites created: {result.final_elites_created}. Thresholds weakened: {String(result.thresholds_weakened)}. Next step: validation.</span>
+          <span>{result.dedupe_clusters_seen} new clusters · {result.already_covered_clusters} already covered · thresholds weakened: {String(result.thresholds_weakened)}</span>
         </div>
       ) : null}
-      <button className="button" disabled={busy || !status?.eligible_promoted_jobs} onClick={onImport}>
-        <Sparkles size={16} />
-        {busy
-          ? "Importing champions..."
-          : status?.eligible_promoted_jobs
-            ? `Import all ${status.eligible_promoted_jobs.toLocaleString()} eligible champions`
-            : "No eligible backlog to import"}
-      </button>
+      {dedupeResult ? (
+        <div className="eliteChampionResult">
+          <strong>
+            {dedupeResult.champions_demoted
+              ? `Cleanup removed ${dedupeResult.champions_demoted} duplicate champion${dedupeResult.champions_demoted === 1 ? "" : "s"}`
+              : "No duplicate champions found"}
+          </strong>
+          <span>{dedupeResult.duplicate_clusters} duplicate cluster{dedupeResult.duplicate_clusters === 1 ? "" : "s"} of {dedupeResult.clusters_examined} examined · duplicates demoted, never deleted</span>
+        </div>
+      ) : null}
+      <div className="eliteChampionActions">
+        <button className="button" disabled={busy || !status?.eligible_promoted_jobs} onClick={onImport}>
+          <Sparkles size={16} />
+          {busy
+            ? "Importing champions..."
+            : status?.eligible_promoted_jobs
+              ? `Import all ${status.eligible_promoted_jobs.toLocaleString()} eligible champions`
+              : "No eligible backlog to import"}
+        </button>
+        {hasChampions ? (
+          <button className="eliteTextButton" disabled={dedupeBusy} onClick={onDedupe} title="A different campaign run can produce the same effective strategy under a new candidate_id. This finds those and keeps one per strategy.">
+            <RefreshCw className={dedupeBusy ? "spin" : ""} size={14} />
+            {dedupeBusy ? "Checking for duplicates…" : "Remove duplicate champions"}
+          </button>
+        ) : null}
+      </div>
     </section>
   );
 }

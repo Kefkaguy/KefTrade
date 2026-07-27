@@ -1599,12 +1599,23 @@ export type ResearchChampionImportResult = {
   imported: number;
   examined: number;
   dedupe_clusters_seen: number;
+  already_covered_clusters: number;
   max_champions: number;
   promotion_rule_version: string;
   promotion_state: "research_champion";
   final_elites_created: 0;
   thresholds_weakened: false;
   champions: Array<Record<string, any>>;
+  status: ResearchChampionStatus;
+};
+
+export type ChampionDedupeResult = {
+  champions_examined: number;
+  clusters_examined: number;
+  duplicate_clusters: number;
+  champions_demoted: number;
+  champions_kept_per_cluster: Array<{ id: number; candidate_id: string; cluster_key: string; duplicates_demoted: number }>;
+  dry_run: boolean;
   status: ResearchChampionStatus;
 };
 
@@ -1629,6 +1640,14 @@ export function importResearchChampions(options: { maxChampions?: number; minPro
   // multi-thousand-row backlog is still slower than the default 2-minute
   // budget most calls on this page use.
   return request<ResearchChampionImportResult>(`/research/elite-portfolios/research-champions/import?${params.toString()}`, { method: "POST", timeoutMs: 300000 });
+}
+
+// Collapses champions that share an already-imported strategy's cluster key
+// (see `_cluster_key` server-side) down to one representative per cluster.
+// Only demotes -- never deletes, and never touches an already-graduated elite.
+export function dedupeResearchChampions(options: { dryRun?: boolean } = {}) {
+  const params = new URLSearchParams({ dry_run: String(options.dryRun ?? false) });
+  return request<ChampionDedupeResult>(`/research/elite-portfolios/research-champions/dedupe?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
 }
 
 export type ChampionValidationState =
