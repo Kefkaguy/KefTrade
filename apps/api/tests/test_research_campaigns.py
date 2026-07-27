@@ -1341,3 +1341,47 @@ def test_research_campaign_key_changes_with_campaign_label_variant() -> None:
     )
 
     assert base_key != labeled_key
+
+def test_broad_screen_forwards_campaign_label(
+    client,
+    monkeypatch,
+):
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "app.services.labs.intraday.campaign_plan.build_campaign_plan",
+        lambda conn, **kwargs: {
+            "blockers": [],
+            "timeframes_selected": ["15m", "30m"],
+            "active_families": [
+                {"architecture": "family_a"},
+                {"architecture": "family_b"},
+            ],
+        },
+    )
+
+    def fake_create_intraday_campaign(conn, **kwargs):
+        captured.update(kwargs)
+        return {
+            "campaign_id": 90,
+            "jobs_created": 1,
+        }
+
+    monkeypatch.setattr(
+        "app.services.labs.intraday.families.registry.create_intraday_campaign",
+        fake_create_intraday_campaign,
+    )
+
+    response = client.post(
+        "/research/intraday/campaigns/broad-screen",
+        params=[
+            ("timeframes", "15m"),
+            ("timeframes", "30m"),
+            ("asset_limit", "10"),
+            ("variants_per_family", "12"),
+            ("campaign_label", "test-rerun-1"),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert captured["campaign_label"] == "test-rerun-1"

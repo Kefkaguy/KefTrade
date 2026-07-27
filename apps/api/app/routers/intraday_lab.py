@@ -48,17 +48,30 @@ def get_intraday_campaign_plan(
 
 @router.post("/research/intraday/campaigns/broad-screen")
 def launch_broad_screen(
-    timeframes: list[str] | None = Query(None, description="Defaults to every supported timeframe."),
+    timeframes: list[str] | None = Query(
+        None,
+        description="Defaults to every supported timeframe.",
+    ),
     asset_limit: int = Query(10, ge=1, le=100),
     variants_per_family: int = Query(12, ge=1, le=64),
     name: str | None = Query(None),
+    campaign_label: str | None = Query(
+        None,
+        min_length=1,
+        max_length=120,
+        description=(
+            "Optional label distinguishing this run from an earlier campaign "
+            "using the same families, assets, timeframes, and candidate count."
+        ),
+    ),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     """Launch a broad screen over every ACTIVE family, resolved server-side.
 
     The caller does not choose families: the registry decides, so an archived
     family can never be screened by a stale frontend list. Refuses to launch
-    while the plan reports a blocker."""
+    while the plan reports a blocker.
+    """
     from app.services.labs.intraday.campaign_plan import build_campaign_plan
     from app.services.labs.intraday.families.registry import create_intraday_campaign
 
@@ -71,17 +84,25 @@ def launch_broad_screen(
     if plan["blockers"]:
         raise HTTPException(
             status_code=422,
-            detail="; ".join(f"{item['code']}: {item['detail']}" for item in plan["blockers"]),
+            detail="; ".join(
+                f"{item['code']}: {item['detail']}"
+                for item in plan["blockers"]
+            ),
         )
 
     try:
         result = create_intraday_campaign(
             conn,
-            family_ids=[family["architecture"] for family in plan["active_families"]],
-            name=name or f"Broad {'/'.join(plan['timeframes_selected'])} family screen",
+            family_ids=[
+                family["architecture"]
+                for family in plan["active_families"]
+            ],
+            name=name
+            or f"Broad {'/'.join(plan['timeframes_selected'])} family screen",
             asset_limit=asset_limit,
             timeframes=plan["timeframes_selected"],
             max_candidates_per_family=variants_per_family,
+            campaign_label=campaign_label,
         )
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
