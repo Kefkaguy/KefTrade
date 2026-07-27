@@ -46,7 +46,13 @@ class PortfolioConfiguration(BaseModel):
 
 
 class ChampionValidationRequest(BaseModel):
-    limit: int = Field(default=5, ge=1, le=25)
+    # The queue query is already bounded to champions in an eligible
+    # validation_state, so a caller can request "all of them" via a large
+    # limit without needing to know the exact queue size up front. Each
+    # champion runs a full battery of backtests, so this is deliberately the
+    # slowest endpoint on the page -- see the timeout notes in lib/api.ts and
+    # deploy/production/nginx/keftrade.conf.
+    limit: int = Field(default=5, ge=1, le=2000)
     elite_candidate_ids: list[int] = Field(default_factory=list)
     # Overrides may only tighten a gate. `run_champion_validation` rejects any
     # value looser than the shipped default rather than quietly accepting it.
@@ -78,7 +84,7 @@ def get_research_champion_status(conn: psycopg.Connection = Depends(get_connecti
 
 @router.post("/research-champions/import")
 def import_research_champions_endpoint(
-    max_champions: int = Query(25, ge=1, le=100),
+    max_champions: int = Query(25, ge=1, le=5000),
     min_profit_factor: float = Query(1.25, ge=1.0, le=10.0),
     min_trades: int = Query(30, ge=1, le=1000),
     max_drawdown: float = Query(0.12, ge=0.0, le=1.0),

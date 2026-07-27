@@ -1459,7 +1459,10 @@ def run_champion_validation(
     Everything else keeps its champion state and carries the reason it did not
     graduate, so re-running after more data arrives is the natural next step.
     """
-    bounded = max(1, min(int(limit), 25))
+    # The queue query below is already bounded to champions in an eligible
+    # validation_state, so a caller can request "the whole queue" via a large
+    # limit without needing to know its exact size up front.
+    bounded = max(1, min(int(limit), 2000))
     thresholds = validation_thresholds(threshold_overrides)
     weakened = thresholds_weakened(thresholds)
     if weakened:

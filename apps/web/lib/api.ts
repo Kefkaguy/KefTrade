@@ -1612,14 +1612,23 @@ export function getResearchChampionStatus() {
   return request<ResearchChampionStatus>("/research/elite-portfolios/research-champions/status", { cache: "no-store", timeoutMs: 60000 });
 }
 
+// The backlog query is already bounded to actual eligible, not-yet-imported
+// jobs, so passing this ceiling always means "import all of them" without the
+// caller needing to know the exact backlog size. Matches the server-side cap
+// on max_champions.
+export const IMPORT_ALL_CHAMPIONS_LIMIT = 5000;
+
 export function importResearchChampions(options: { maxChampions?: number; minProfitFactor?: number; minTrades?: number; maxDrawdown?: number } = {}) {
   const params = new URLSearchParams({
-    max_champions: String(options.maxChampions ?? 25),
+    max_champions: String(options.maxChampions ?? IMPORT_ALL_CHAMPIONS_LIMIT),
     min_profit_factor: String(options.minProfitFactor ?? 1.25),
     min_trades: String(options.minTrades ?? 30),
     max_drawdown: String(options.maxDrawdown ?? 0.12)
   });
-  return request<ResearchChampionImportResult>(`/research/elite-portfolios/research-champions/import?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
+  // No simulation runs here, only reads of already-stored results, but a
+  // multi-thousand-row backlog is still slower than the default 2-minute
+  // budget most calls on this page use.
+  return request<ResearchChampionImportResult>(`/research/elite-portfolios/research-champions/import?${params.toString()}`, { method: "POST", timeoutMs: 300000 });
 }
 
 export type ChampionValidationState =
@@ -1720,17 +1729,25 @@ export function getChampionValidationDiagnostics(limit = 25) {
   });
 }
 
+// The queue query is already bounded to champions in an eligible
+// validation_state, so passing this ceiling always means "the whole queue"
+// without the caller needing to know its exact size. Matches the server-side
+// cap in ChampionValidationRequest.limit.
+export const VALIDATE_ALL_CHAMPIONS_LIMIT = 2000;
+
 export function runChampionValidation(options: { limit?: number; eliteCandidateIds?: number[]; revalidate?: boolean } = {}) {
   return request<ChampionValidationRunResult>("/research/elite-portfolios/champion-validation/run", {
     method: "POST",
     body: JSON.stringify({
-      limit: options.limit ?? 5,
+      limit: options.limit ?? VALIDATE_ALL_CHAMPIONS_LIMIT,
       elite_candidate_ids: options.eliteCandidateIds ?? [],
       revalidate: options.revalidate ?? false
     }),
-    // Every champion runs a full battery of backtests, so this is deliberately
-    // the longest-running call on the page.
-    timeoutMs: 900000
+    // Every champion runs a full battery of backtests, so a full-queue batch
+    // is deliberately the longest-running call on the page. Requires the
+    // matching proxy_read_timeout/proxy_send_timeout in
+    // deploy/production/nginx/keftrade.conf to actually be allowed to finish.
+    timeoutMs: 3600000
   });
 }
 

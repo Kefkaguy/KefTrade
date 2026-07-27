@@ -161,7 +161,9 @@ export function ElitePortfolioBuilder() {
     setBusy("champions");
     setError(null);
     try {
-      const imported = await importResearchChampions({ maxChampions: 25, minProfitFactor: 1.25, minTrades: 30, maxDrawdown: 0.12 });
+      // No batch size here: the backlog query is already bounded to eligible,
+      // not-yet-imported jobs, so this always means "import all of them".
+      const imported = await importResearchChampions({ minProfitFactor: 1.25, minTrades: 30, maxDrawdown: 0.12 });
       setChampionImport(imported);
       setChampionStatus(imported.status);
       const [nextOptions, nextQueue] = await Promise.all([getElitePortfolioOptions(), getChampionValidationQueue(25)]);
@@ -178,7 +180,11 @@ export function ElitePortfolioBuilder() {
     setBusy(revalidate ? "revalidate" : "validate");
     setValidationError(null);
     try {
-      const outcome = await runChampionValidation({ limit: 5, revalidate });
+      // No batch size here either: the queue query is already bounded to
+      // champions in an eligible validation_state, so this validates the
+      // entire queue in one run. Each champion runs a full battery of
+      // backtests, so this can legitimately take a long time on a large queue.
+      const outcome = await runChampionValidation({ revalidate });
       setValidationResult(outcome);
       setValidationQueue(outcome.status);
       // A graduation changes the solver's candidate pool, so both the champion
@@ -380,7 +386,7 @@ function EliteWorkflowGuide({
       <div className={champions > 0 ? "done" : "active"}>
         <span>01</span>
         <strong>Import research champions</strong>
-        <p>{backlog > 0 ? `${backlog.toLocaleString()} promoted jobs are waiting. Import 25 deduped champions at a time.` : "No promoted-job backlog is waiting."}</p>
+        <p>{backlog > 0 ? `${backlog.toLocaleString()} promoted jobs are waiting. Import deduplicates and imports all of them.` : "No promoted-job backlog is waiting."}</p>
       </div>
       <div className={waiting > 0 ? "active" : champions > 0 ? "done" : ""}>
         <span>02</span>
@@ -456,20 +462,21 @@ function EliteValidationQueue({
           <Metric label="Graduated" value={graduated} tone={graduated ? "safe" : undefined} />
         </div>
         <div className="eliteValidationAction">
-          <strong>Run validation for champions</strong>
+          <strong>Run validation for the whole queue</strong>
           <span>
-            Five champions per run. Each one executes the full battery of backtests, so this is slow on purpose —
-            nothing is graduated on the strength of the original result alone.
+            One run validates every pending champion. Each one executes the full battery of backtests, so this is
+            slow on purpose and can take a long time on a large queue — nothing is graduated on the strength of the
+            original result alone.
           </span>
           <div className="eliteValidationButtons">
             <button className="button" disabled={running || !pending} onClick={() => onValidate(false)}>
               {busy === "validate" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
-              {busy === "validate" ? "Validating…" : pending ? "Run validation for 5 champions" : "No champion is pending"}
+              {busy === "validate" ? "Validating…" : pending ? `Run validation for all ${pending.toLocaleString()} pending champions` : "No champion is pending"}
             </button>
             {retryable ? (
               <button className="eliteTextButton" disabled={running} onClick={() => onValidate(true)}>
                 <RefreshCw className={busy === "revalidate" ? "spin" : ""} size={14} />
-                {busy === "revalidate" ? "Re-checking…" : `Re-check ${retryable} blocked or failed champion${retryable === 1 ? "" : "s"}`}
+                {busy === "revalidate" ? "Re-checking…" : `Re-check all ${retryable.toLocaleString()} blocked or failed champion${retryable === 1 ? "" : "s"}`}
               </button>
             ) : null}
           </div>
@@ -692,8 +699,8 @@ function ResearchChampionIntake({
         <h2>{hasChampions ? "Champion import is working" : "Do this now: import research champions"}</h2>
         <p>
           {hasChampions
-            ? "You already have imported research champions. Import more only if you want a larger validation queue."
-            : "This takes the best promoted research jobs, removes near-duplicates, and saves only a capped champion set. They are review candidates, not live-trading elites."}
+            ? "You already have imported research champions. Import again only to pull in newly promoted jobs."
+            : "This takes every eligible promoted research job, removes near-duplicates, and imports the rest as champions. They are review candidates, not live-trading elites."}
         </p>
       </div>
       <div className="eliteChampionMetrics">
@@ -710,7 +717,12 @@ function ResearchChampionIntake({
         </div>
       ) : null}
       <button className="button" disabled={busy || !status?.eligible_promoted_jobs} onClick={onImport}>
-        <Sparkles size={16} />{busy ? "Importing champions..." : hasChampions ? "Import 25 more champions" : "Do this now: import 25 champions"}
+        <Sparkles size={16} />
+        {busy
+          ? "Importing champions..."
+          : status?.eligible_promoted_jobs
+            ? `Import all ${status.eligible_promoted_jobs.toLocaleString()} eligible champions`
+            : "No eligible backlog to import"}
       </button>
     </section>
   );

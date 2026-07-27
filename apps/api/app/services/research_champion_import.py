@@ -182,7 +182,10 @@ def import_research_champions(
     from app.services.research_campaigns import ensure_campaign_tables
 
     ensure_campaign_tables(conn)
-    bounded = max(1, min(int(max_champions), 100))
+    # The WHERE clause already bounds the query to actual eligible jobs, so a
+    # caller can safely ask for "all of them" via a large max_champions rather
+    # than needing to know the exact backlog size up front.
+    bounded = max(1, min(int(max_champions), 5000))
     candidates = _load_promoted_jobs(
         conn,
         limit=max(500, bounded * 80),
