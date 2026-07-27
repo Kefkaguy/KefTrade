@@ -21,10 +21,17 @@ import {
   approveElitePortfolio,
   backfillElitePortfolioEvidence,
   createElitePortfolio,
+  getChampionValidationDiagnostics,
+  getChampionValidationQueue,
   getElitePortfolioOptions,
   getResearchChampionStatus,
   importResearchChampions,
   previewElitePortfolio,
+  runChampionValidation,
+  type ChampionValidationDiagnostics,
+  type ChampionValidationQueue,
+  type ChampionValidationRunResult,
+  type ChampionValidationState,
   type ElitePortfolioConfiguration,
   type ElitePortfolioHardRule,
   type ElitePortfolioOptions,
@@ -48,9 +55,15 @@ export function ElitePortfolioBuilder() {
   const [result, setResult] = useState<ElitePortfolioResult | null>(null);
   const [championStatus, setChampionStatus] = useState<ResearchChampionStatus | null>(null);
   const [championImport, setChampionImport] = useState<ResearchChampionImportResult | null>(null);
+  const [validationQueue, setValidationQueue] = useState<ChampionValidationQueue | null>(null);
+  const [validationResult, setValidationResult] = useState<ChampionValidationRunResult | null>(null);
+  const [validationDiagnostics, setValidationDiagnostics] = useState<ChampionValidationDiagnostics | null>(null);
   const [phase, setPhase] = useState<Phase>("configure");
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Kept out of the page-level banner: a validation problem belongs to step 2
+  // and must not read as "the whole builder failed".
+  const [validationError, setValidationError] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
@@ -79,19 +92,35 @@ export function ElitePortfolioBuilder() {
     getResearchChampionStatus()
       .then((next) => { if (mounted) setChampionStatus(next); })
       .catch(() => { /* The builder can still function without the intake summary. */ });
+    getChampionValidationQueue(25)
+      .then((next) => { if (mounted) setValidationQueue(next); })
+      .catch((reason) => { if (mounted) setValidationError(message(reason)); });
+    getChampionValidationDiagnostics(25)
+      .then((next) => { if (mounted) setValidationDiagnostics(next); })
+      .catch(() => { /* Diagnostics are a read-only aid, never required to run validation. */ });
     return () => { mounted = false; };
   }, []);
 
   const snapshotHash = snapshotFor(result);
   const analytics = (result?.analytics ?? result?.portfolio_analytics ?? {}) as Record<string, any>;
   const members = result?.members ?? (result?.selected ?? []).map((candidateKey, index) => ({ id: index, candidate_id: candidateKey }));
+  const solverPool = options?.candidate_count ?? 0;
+  const finalElites = championStatus?.final_elites ?? solverPool;
+  const pendingValidation = validationQueue?.pending_validation ?? championStatus?.pending_validation ?? 0;
+  const backlog = championStatus?.eligible_promoted_jobs ?? 0;
   const workflowStep = championStatus?.research_champions ? 1 : 0;
   const activeStep = phase === "configure" ? workflowStep : phase === "preview" ? 2 : phase === "saved" ? 2 : 3;
-  const nextAction = championStatus?.research_champions
+  // Strict priority, so the seal always names the one thing that unblocks the
+  // next stage rather than the most recently touched one.
+  const nextAction = pendingValidation
     ? "Validate champions"
-    : championStatus?.eligible_promoted_jobs
+    : backlog && !championStatus?.research_champions
       ? "Import champions"
-      : "Open portfolio builder";
+      : finalElites
+        ? "Build portfolio"
+        : backlog
+          ? "Import champions"
+          : "Expand research";
   const twoTimeframeWarning = configuration?.timeframes.length === 2
     ? "With exactly two timeframes, the exact 50% cap requires an even-sized portfolio split equally between them."
     : null;
@@ -135,10 +164,35 @@ export function ElitePortfolioBuilder() {
       const imported = await importResearchChampions({ maxChampions: 25, minProfitFactor: 1.25, minTrades: 30, maxDrawdown: 0.12 });
       setChampionImport(imported);
       setChampionStatus(imported.status);
-      const nextOptions = await getElitePortfolioOptions();
+      const [nextOptions, nextQueue] = await Promise.all([getElitePortfolioOptions(), getChampionValidationQueue(25)]);
       setOptions(nextOptions);
+      setValidationQueue(nextQueue);
     } catch (reason) {
       setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function validateChampions(revalidate: boolean) {
+    setBusy(revalidate ? "revalidate" : "validate");
+    setValidationError(null);
+    try {
+      const outcome = await runChampionValidation({ limit: 5, revalidate });
+      setValidationResult(outcome);
+      setValidationQueue(outcome.status);
+      // A graduation changes the solver's candidate pool, so both the champion
+      // summary and the portfolio options are re-read rather than inferred.
+      const [nextStatus, nextOptions, nextDiagnostics] = await Promise.all([
+        getResearchChampionStatus(),
+        getElitePortfolioOptions(),
+        getChampionValidationDiagnostics(25)
+      ]);
+      setChampionStatus(nextStatus);
+      setOptions(nextOptions);
+      setValidationDiagnostics(nextDiagnostics);
+    } catch (reason) {
+      setValidationError(message(reason));
     } finally {
       setBusy(null);
     }
@@ -159,7 +213,7 @@ export function ElitePortfolioBuilder() {
         <div>
           <span className="eyebrow">Elite graduation workflow</span>
           <h1>Turn research winners into elites.<br /><em>One gate at a time.</em></h1>
-          <p className="elitePrimaryLead">Start by importing deduped research champions. Final portfolio construction only uses candidates that later pass validation.</p>
+          <p className="elitePrimaryLead">Promoted jobs → research champions → validated elites → portfolio. A champion only becomes an elite by surviving evidence it was never fitted to.</p>
           <p>Combine elite strategy-market variants under immutable quality, diversity, correlation, and safety constraints. An infeasible result is evidence—not an error.</p>
         </div>
         <div className="eliteSolverSeal">
@@ -178,7 +232,7 @@ export function ElitePortfolioBuilder() {
       {error ? <div className="eliteNotice error"><AlertTriangle size={17} /><span><strong>Action stopped</strong>{error}</span></div> : null}
       {twoTimeframeWarning ? <div className="eliteNotice"><AlertTriangle size={17} /><span><strong>Two-timeframe arithmetic</strong>{twoTimeframeWarning}</span></div> : null}
 
-      <EliteWorkflowGuide status={championStatus} finalCandidateCount={options.candidate_count} />
+      <EliteWorkflowGuide status={championStatus} queue={validationQueue} finalCandidateCount={options.candidate_count} />
 
       <ResearchChampionIntake
         status={championStatus}
@@ -187,13 +241,25 @@ export function ElitePortfolioBuilder() {
         onImport={importChampions}
       />
 
-      <EliteValidationQueue status={championStatus} />
+      <EliteValidationQueue
+        status={championStatus}
+        queue={validationQueue}
+        result={validationResult}
+        diagnostics={validationDiagnostics}
+        error={validationError}
+        busy={busy}
+        onValidate={validateChampions}
+      />
 
       <section className="eliteAdvancedToggle">
         <div>
           <span className="eyebrow">Advanced</span>
           <h2>Portfolio builder is step 3</h2>
-          <p>Open this only when you want to preview a portfolio from final elites. Research champions do not enter this solver until they validate.</p>
+          <p>
+            {solverPool
+              ? `${solverPool.toLocaleString()} elite strategy-market variant${solverPool === 1 ? "" : "s"} are visible to the solver. Research champions do not enter it until they validate.`
+              : "No final elite exists yet. Validate champions first — the solver reads final elites only."}
+          </p>
         </div>
         <button type="button" className="button secondary" onClick={() => setShowAdvanced((value) => !value)}>
           {showAdvanced ? "Hide portfolio builder" : "Open portfolio builder"}
@@ -295,56 +361,235 @@ export function ElitePortfolioBuilder() {
   }
 }
 
-function EliteWorkflowGuide({ status, finalCandidateCount }: { status: ResearchChampionStatus | null; finalCandidateCount: number }) {
+function EliteWorkflowGuide({
+  status,
+  queue,
+  finalCandidateCount
+}: {
+  status: ResearchChampionStatus | null;
+  queue: ChampionValidationQueue | null;
+  finalCandidateCount: number;
+}) {
   const backlog = status?.eligible_promoted_jobs ?? 0;
   const champions = status?.research_champions ?? 0;
   const finalElites = status?.final_elites ?? finalCandidateCount;
-  const awaitingForward = status?.awaiting_forward_sample ?? champions;
+  const waiting = queue ? queue.pending_validation + queue.needs_more_data : champions;
+  const graduated = queue?.graduated_elites ?? status?.graduated_elites ?? 0;
   return (
     <section className="eliteWorkflowGuide" aria-label="Elite graduation workflow">
-      <div className={backlog > 0 ? "active" : "done"}>
+      <div className={champions > 0 ? "done" : "active"}>
         <span>01</span>
         <strong>Import research champions</strong>
-        <p>{backlog > 0 ? `${backlog.toLocaleString()} promoted jobs are waiting. Import 25 deduped champions first.` : "No promoted-job backlog is waiting."}</p>
+        <p>{backlog > 0 ? `${backlog.toLocaleString()} promoted jobs are waiting. Import 25 deduped champions at a time.` : "No promoted-job backlog is waiting."}</p>
       </div>
-      <div className={champions > 0 ? "active" : ""}>
+      <div className={waiting > 0 ? "active" : champions > 0 ? "done" : ""}>
         <span>02</span>
         <strong>Validate champions</strong>
-        <p>{champions > 0 ? `${awaitingForward.toLocaleString()} champion${awaitingForward === 1 ? "" : "s"} still need forward/cross-asset evidence before becoming final elites.` : "Imported champions will wait for validation here."}</p>
+        <p>{waiting > 0 ? `${waiting.toLocaleString()} champion${waiting === 1 ? "" : "s"} still owe out-of-sample, cross-asset and stress evidence.` : champions > 0 ? "Every imported champion has a verdict." : "Imported champions queue for validation here."}</p>
       </div>
       <div className={finalElites > 0 ? "active" : ""}>
         <span>03</span>
         <strong>Build final portfolio</strong>
-        <p>{finalElites.toLocaleString()} final elite candidate row{finalElites === 1 ? "" : "s"} are available to the solver today.</p>
+        <p>{finalElites.toLocaleString()} final elite row{finalElites === 1 ? "" : "s"} reach the solver{graduated ? `, ${graduated.toLocaleString()} of them graduated through validation` : ""}.</p>
       </div>
     </section>
   );
 }
 
-function EliteValidationQueue({ status }: { status: ResearchChampionStatus | null }) {
-  const champions = status?.research_champions ?? 0;
-  const awaitingForward = status?.awaiting_forward_sample ?? 0;
-  const finalElites = status?.final_elites ?? 0;
-  if (!champions) return null;
+const VALIDATION_STATE_COPY: Record<ChampionValidationState, { label: string; tone: string }> = {
+  pending_validation: { label: "Pending", tone: "pending" },
+  validating: { label: "Running", tone: "running" },
+  validated: { label: "Validated", tone: "validated" },
+  failed_validation: { label: "Failed", tone: "failed" },
+  needs_more_data: { label: "Needs data", tone: "blocked" }
+};
+
+function EliteValidationQueue({
+  status,
+  queue,
+  result,
+  diagnostics,
+  error,
+  busy,
+  onValidate
+}: {
+  status: ResearchChampionStatus | null;
+  queue: ChampionValidationQueue | null;
+  result: ChampionValidationRunResult | null;
+  diagnostics: ChampionValidationDiagnostics | null;
+  error: string | null;
+  busy: string | null;
+  onValidate: (revalidate: boolean) => void;
+}) {
+  const champions = queue?.research_champions ?? status?.research_champions ?? 0;
+  if (!champions && !result) return null;
+  const pending = queue?.pending_validation ?? status?.pending_validation ?? 0;
+  const needsData = queue?.needs_more_data ?? status?.needs_more_data ?? 0;
+  const failed = queue?.failed_validation ?? status?.failed_validation ?? 0;
+  const graduated = queue?.graduated_elites ?? status?.graduated_elites ?? 0;
+  const rows = queue?.queue ?? [];
+  const running = busy === "validate" || busy === "revalidate";
+  const retryable = needsData + failed;
+
   return (
     <section className="eliteValidationQueue">
-      <div>
+      <div className="eliteValidationLead">
         <span className="eyebrow">Step 2</span>
-        <h2>Next: validate the imported champions</h2>
+        <h2>Validate the imported champions</h2>
         <p>
-          Import worked. These rows are now research champions, not final elites. They need forward/cross-asset evidence before the portfolio builder can treat them as deployable elite candidates.
+          A champion is a winner inside the exact backtest that found it. Validation re-runs it where the search never
+          looked: a held-out later period, other symbols, the sibling timeframe, doubled costs, and a duplication check
+          against the elites that already exist. Passing every gate is what makes a champion a final elite.
         </p>
+        {queue?.gates?.length ? (
+          <ul className="eliteGateLegend">
+            {queue.gates.map((gate) => <li key={gate.gate_id}>{gate.label}</li>)}
+          </ul>
+        ) : null}
       </div>
-      <div className="eliteChampionMetrics">
-        <Metric label="Champion queue" value={champions} />
-        <Metric label="Need forward sample" value={awaitingForward} />
-        <Metric label="Final elites today" value={finalElites} />
+
+      <div className="eliteValidationSummary">
+        <div className="eliteChampionMetrics">
+          <Metric label="Pending" value={pending} />
+          <Metric label="Needs data" value={needsData} />
+          <Metric label="Failed" value={failed} />
+          <Metric label="Graduated" value={graduated} tone={graduated ? "safe" : undefined} />
+        </div>
+        <div className="eliteValidationAction">
+          <strong>Run validation for champions</strong>
+          <span>
+            Five champions per run. Each one executes the full battery of backtests, so this is slow on purpose —
+            nothing is graduated on the strength of the original result alone.
+          </span>
+          <div className="eliteValidationButtons">
+            <button className="button" disabled={running || !pending} onClick={() => onValidate(false)}>
+              {busy === "validate" ? <LoaderCircle className="spin" size={16} /> : <ShieldCheck size={16} />}
+              {busy === "validate" ? "Validating…" : pending ? "Run validation for 5 champions" : "No champion is pending"}
+            </button>
+            {retryable ? (
+              <button className="eliteTextButton" disabled={running} onClick={() => onValidate(true)}>
+                <RefreshCw className={busy === "revalidate" ? "spin" : ""} size={14} />
+                {busy === "revalidate" ? "Re-checking…" : `Re-check ${retryable} blocked or failed champion${retryable === 1 ? "" : "s"}`}
+              </button>
+            ) : null}
+          </div>
+        </div>
       </div>
-      <div className="eliteValidationAction">
-        <strong>Required engineering step</strong>
-        <span>Connect the validation runner to this page. Until then, importing more champions only grows the validation queue.</span>
-      </div>
+
+      {error ? (
+        <div className="eliteValidationNotice error">
+          <AlertTriangle size={16} />
+          <span><strong>Validation stopped</strong>{error}</span>
+        </div>
+      ) : null}
+
+      {result ? <ValidationRunSummary result={result} /> : null}
+      {rows.length ? <ValidationQueueTable rows={rows} /> : null}
+      {diagnostics?.by_gate?.length ? <ValidationGateDiagnostics diagnostics={diagnostics} /> : null}
     </section>
+  );
+}
+
+function ValidationRunSummary({ result }: { result: ChampionValidationRunResult }) {
+  return (
+    <div className="eliteValidationRun">
+      <h3>
+        Last run: {result.examined} champion{result.examined === 1 ? "" : "s"} examined · {result.validated} validated ·{" "}
+        {result.failed_validation} failed · {result.needs_more_data} need more data
+        {result.errors ? ` · ${result.errors} could not run` : ""}
+      </h3>
+      <p className="eliteValidationPolicy">
+        <LockKeyhole size={14} /> Thresholds weakened: {String(result.thresholds_weakened)}. A gate that could not be
+        measured counts as missing evidence, never as a pass.
+      </p>
+      <div className="eliteValidationOutcomes">
+        {result.outcomes.map((outcome) => (
+          <article key={outcome.elite_candidate_id} className={`outcome ${outcome.status}`}>
+            <header>
+              <strong>{outcome.symbol} · {outcome.timeframe}</strong>
+              <em>{outcome.status === "error" ? "Could not run" : VALIDATION_STATE_COPY[outcome.status]?.label ?? outcome.status}</em>
+            </header>
+            <p>{outcome.reason}</p>
+            <small>
+              {outcome.gates_passed ?? 0} passed · {outcome.gates_failed ?? 0} failed · {outcome.gates_inconclusive ?? 0} unmeasured
+              {outcome.backtests_executed ? ` · ${outcome.backtests_executed} backtests` : ""}
+              {outcome.runtime_ms ? ` · ${(outcome.runtime_ms / 1000).toFixed(1)}s` : ""}
+            </small>
+            {outcome.failed_gates?.length ? <small className="failedGates">Failed: {outcome.failed_gates.map(title).join(", ")}</small> : null}
+            {outcome.inconclusive_gates?.length ? <small>Unmeasured: {outcome.inconclusive_gates.map(title).join(", ")}</small> : null}
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ValidationQueueTable({ rows }: { rows: ChampionValidationQueue["queue"] }) {
+  return (
+    <div className="eliteValidationTable">
+      <h3>Validation queue ({rows.length} shown)</h3>
+      <table>
+        <thead>
+          <tr><th>Champion</th><th>Family</th><th>PF</th><th>Trades</th><th>Drawdown</th><th>State</th><th>Reason</th></tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={row.elite_candidate_id}>
+              <td><strong>{row.symbol}</strong> · {row.timeframe}</td>
+              <td>{row.family_id}</td>
+              <td>{row.profit_factor.toFixed(2)}</td>
+              <td>{row.trade_count}</td>
+              <td>{(row.max_drawdown * 100).toFixed(1)}%</td>
+              <td><span className={`eliteStateChip ${VALIDATION_STATE_COPY[row.validation_state]?.tone ?? ""}`}>{VALIDATION_STATE_COPY[row.validation_state]?.label ?? row.validation_state}</span></td>
+              <td className="reason">{row.validation_state_reason ?? "Not validated yet."}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function ValidationGateDiagnostics({ diagnostics }: { diagnostics: ChampionValidationDiagnostics }) {
+  const byGate = new Map<string, { label: string; passed: number; failed: number; inconclusive: number }>();
+  for (const row of diagnostics.by_gate) {
+    const entry = byGate.get(row.gate_id) ?? { label: row.label, passed: 0, failed: 0, inconclusive: 0 };
+    if (row.status === "passed") entry.passed += row.candidates;
+    if (row.status === "failed") entry.failed += row.candidates;
+    if (row.status === "inconclusive") entry.inconclusive += row.candidates;
+    byGate.set(row.gate_id, entry);
+  }
+  const gates = [...byGate.entries()].sort((left, right) => right[1].failed - left[1].failed);
+  return (
+    <div className="eliteValidationDiagnostics">
+      <h3>Where champions are dying</h3>
+      <p>Grouped by gate across the latest verdict for every champion. This is what decides which research families are worth expanding next.</p>
+      <div className="eliteGateGrid">
+        {gates.map(([gateId, entry]) => (
+          <div key={gateId}>
+            <strong>{entry.label}</strong>
+            <span><b className="passed">{entry.passed}</b> passed · <b className="failed">{entry.failed}</b> failed · <b>{entry.inconclusive}</b> unmeasured</span>
+          </div>
+        ))}
+      </div>
+      {diagnostics.by_group?.length ? (
+        <table>
+          <thead><tr><th>Family</th><th>Symbol</th><th>Timeframe</th><th>Validated</th><th>Failed</th><th>Needs data</th></tr></thead>
+          <tbody>
+            {diagnostics.by_group.slice(0, 12).map((row) => (
+              <tr key={`${row.family_id}-${row.symbol}-${row.timeframe}`}>
+                <td>{row.family_id}</td>
+                <td>{row.symbol}</td>
+                <td>{row.timeframe}</td>
+                <td>{row.validated}</td>
+                <td>{row.failed_validation}</td>
+                <td>{row.needs_more_data}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      ) : null}
+    </div>
   );
 }
 

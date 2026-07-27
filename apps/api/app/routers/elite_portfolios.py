@@ -20,6 +20,13 @@ from app.services.elite_portfolio_repository import (
     recalculate_run,
 )
 from app.services.elite_portfolio_activation import PortfolioActivationError, activate_internal
+from app.services.champion_validation import (
+    ChampionValidationError,
+    champion_validation_diagnostics,
+    champion_validation_queue,
+    champion_validation_run,
+    run_champion_validation,
+)
 from app.services.research_champion_import import import_research_champions, research_champion_status
 from app.settings import settings
 
@@ -36,6 +43,16 @@ class PortfolioConfiguration(BaseModel):
     constraints: dict[str, Any] = Field(default_factory=dict)
     objective: str = "balanced"
     custom_size: int | None = Field(default=None, ge=1, le=20)
+
+
+class ChampionValidationRequest(BaseModel):
+    limit: int = Field(default=5, ge=1, le=25)
+    elite_candidate_ids: list[int] = Field(default_factory=list)
+    # Overrides may only tighten a gate. `run_champion_validation` rejects any
+    # value looser than the shipped default rather than quietly accepting it.
+    threshold_overrides: dict[str, Any] = Field(default_factory=dict)
+    revalidate: bool = False
+    require_frozen_datasets: bool = False
 
 
 class ApprovalRequest(BaseModel):
@@ -75,6 +92,55 @@ def import_research_champions_endpoint(
         min_trades=min_trades,
         max_drawdown=max_drawdown,
     )
+
+
+@router.get("/champion-validation/queue")
+def get_champion_validation_queue(
+    limit: int = Query(25, ge=1, le=200),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    _require_builder()
+    return champion_validation_queue(conn, limit=limit)
+
+
+@router.get("/champion-validation/diagnostics")
+def get_champion_validation_diagnostics(
+    limit: int = Query(25, ge=1, le=100),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    _require_builder()
+    return champion_validation_diagnostics(conn, limit=limit)
+
+
+@router.post("/champion-validation/run")
+def run_champion_validation_endpoint(
+    payload: ChampionValidationRequest | None = None,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    _require_builder()
+    request = payload or ChampionValidationRequest()
+    try:
+        return run_champion_validation(
+            conn,
+            limit=request.limit,
+            elite_candidate_ids=request.elite_candidate_ids or None,
+            threshold_overrides=request.threshold_overrides or None,
+            revalidate=request.revalidate,
+            require_frozen=request.require_frozen_datasets,
+        )
+    except ValueError as error:
+        # Weakened or unknown thresholds: a rejected request, never a silent
+        # fallback to the shipped defaults.
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.get("/champion-validation/runs/{run_id}")
+def get_champion_validation_run(run_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    _require_builder()
+    try:
+        return champion_validation_run(conn, run_id)
+    except ChampionValidationError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
 
 
 @router.post("/preview")

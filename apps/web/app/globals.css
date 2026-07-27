@@ -1248,12 +1248,53 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .eliteChampionResult { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; }
 .eliteChampionResult strong { color: var(--success); font-family: var(--font-mono); }
 .eliteChampionResult .eliteImportExplanation + span { display: none; }
-.eliteValidationQueue { display: grid; grid-template-columns: minmax(0, 1fr) minmax(360px, .75fr) minmax(260px, .65fr); align-items: center; gap: 22px; margin-top: 18px; padding: 22px; border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--line)); border-radius: var(--radius); background: linear-gradient(135deg, color-mix(in srgb, var(--warning) 10%, transparent), var(--panel)); }
+.eliteValidationQueue { display: grid; gap: 22px; margin-top: 18px; padding: 22px; border: 1px solid color-mix(in srgb, var(--warning) 34%, var(--line)); border-radius: var(--radius); background: linear-gradient(135deg, color-mix(in srgb, var(--warning) 10%, transparent), var(--panel)); }
 .eliteValidationQueue h2 { margin-top: 6px; font-size: 20px; }
+.eliteValidationQueue h3 { margin: 0 0 10px; color: var(--ink); font-size: 12px; }
 .eliteValidationQueue p { margin-top: 9px; color: var(--muted); font-size: 10px; line-height: 1.65; }
+.eliteValidationLead { max-width: 78ch; }
+.eliteGateLegend { display: flex; flex-wrap: wrap; gap: 6px; margin: 14px 0 0; padding: 0; list-style: none; }
+.eliteGateLegend li { padding: 5px 10px; border: 1px solid var(--line); border-radius: 99px; color: var(--muted); font-size: 8px; }
+.eliteValidationSummary { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, .9fr); align-items: center; gap: 22px; }
 .eliteValidationAction { display: grid; gap: 7px; padding: 15px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); }
 .eliteValidationAction strong { color: var(--warning); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; }
 .eliteValidationAction span { color: var(--muted); font-size: 10px; line-height: 1.55; }
+.eliteValidationButtons { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-top: 6px; }
+.eliteValidationNotice { display: flex; align-items: flex-start; gap: 11px; padding: 13px 15px; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); color: var(--muted); font-size: 10px; line-height: 1.6; }
+.eliteValidationNotice.error { border-color: color-mix(in srgb, var(--error) 52%, var(--line)); }
+.eliteValidationNotice svg { flex-shrink: 0; margin-top: 1px; color: var(--error); }
+.eliteValidationNotice strong { display: block; margin-bottom: 3px; color: var(--ink); }
+.eliteValidationRun { padding-top: 18px; border-top: 1px solid var(--line); }
+.eliteValidationPolicy { display: flex; align-items: center; gap: 7px; margin-top: 0 !important; color: var(--muted); font-size: 9px; }
+.eliteValidationPolicy svg { flex-shrink: 0; color: var(--accent); }
+.eliteValidationOutcomes { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; margin-top: 14px; }
+.eliteValidationOutcomes .outcome { display: grid; gap: 6px; padding: 14px; border: 1px solid var(--line); border-left-width: 3px; border-radius: var(--radius-small); background: var(--panel-soft); }
+.eliteValidationOutcomes .outcome.validated { border-left-color: var(--success); }
+.eliteValidationOutcomes .outcome.failed_validation { border-left-color: var(--error); }
+.eliteValidationOutcomes .outcome.needs_more_data, .eliteValidationOutcomes .outcome.error { border-left-color: var(--warning); }
+.eliteValidationOutcomes header { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.eliteValidationOutcomes header strong { color: var(--ink); font: 650 11px var(--font-mono); }
+.eliteValidationOutcomes header em { color: var(--muted-accent); font-size: 8px; font-style: normal; text-transform: uppercase; letter-spacing: .08em; }
+.eliteValidationOutcomes p { margin: 0 !important; color: var(--muted); font-size: 9px; line-height: 1.55; }
+.eliteValidationOutcomes small { color: var(--muted); font-size: 8px; }
+.eliteValidationOutcomes small.failedGates { color: var(--error); }
+.eliteValidationTable, .eliteValidationDiagnostics { padding-top: 18px; border-top: 1px solid var(--line); overflow-x: auto; }
+.eliteValidationQueue table { width: 100%; border-collapse: collapse; font-size: 9px; }
+.eliteValidationQueue th { padding: 8px 10px 8px 0; border-bottom: 1px solid var(--line); color: var(--muted); font-weight: 600; text-align: left; text-transform: uppercase; letter-spacing: .06em; font-size: 7px; }
+.eliteValidationQueue td { padding: 9px 10px 9px 0; border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent); color: var(--muted-accent); }
+.eliteValidationQueue td strong { color: var(--ink); font-family: var(--font-mono); }
+.eliteValidationQueue td.reason { max-width: 46ch; color: var(--muted); }
+.eliteStateChip { display: inline-block; padding: 3px 9px; border: 1px solid var(--line); border-radius: 99px; font-size: 7px; text-transform: uppercase; letter-spacing: .07em; }
+.eliteStateChip.validated { border-color: color-mix(in srgb, var(--success) 55%, var(--line)); color: var(--success); }
+.eliteStateChip.failed { border-color: color-mix(in srgb, var(--error) 55%, var(--line)); color: var(--error); }
+.eliteStateChip.blocked, .eliteStateChip.running { border-color: color-mix(in srgb, var(--warning) 55%, var(--line)); color: var(--warning); }
+.eliteGateGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 1px; margin: 14px 0 18px; background: var(--line); }
+.eliteGateGrid > div { display: grid; gap: 5px; padding: 13px; background: var(--bg-secondary); }
+.eliteGateGrid strong { color: var(--ink); font-size: 10px; }
+.eliteGateGrid span { color: var(--muted); font-size: 8px; }
+.eliteGateGrid b { font-family: var(--font-mono); font-weight: 650; }
+.eliteGateGrid b.passed { color: var(--success); }
+.eliteGateGrid b.failed { color: var(--error); }
 .eliteAdvancedToggle { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 24px; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel); }
 .eliteAdvancedToggle h2 { margin-top: 5px; font-size: 17px; }
 .eliteAdvancedToggle p { margin-top: 6px; color: var(--muted); font-size: 10px; line-height: 1.55; }
@@ -1365,7 +1406,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
   .eliteBuilderHero { grid-template-columns: minmax(0, 1fr) 270px; gap: 42px; }
   .eliteWorkflowGuide { grid-template-columns: 1fr; }
   .eliteChampionIntake { grid-template-columns: 1fr; }
-  .eliteValidationQueue { grid-template-columns: 1fr; }
+  .eliteValidationSummary { grid-template-columns: 1fr; }
   .eliteChampionIntake .button { width: 100%; justify-content: center; }
   .eliteBuilderGrid { grid-template-columns: minmax(0, 1fr) 260px; gap: 40px; }
   .forwardWorkspaceGrid { grid-template-columns: minmax(0, 1fr) 280px; gap: 40px; }

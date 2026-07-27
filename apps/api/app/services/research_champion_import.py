@@ -141,7 +141,12 @@ def research_champion_status(conn: psycopg.Connection) -> dict[str, Any]:
         SELECT
             COUNT(*) FILTER (WHERE promotion_state = 'research_champion') AS research_champions,
             COUNT(*) FILTER (WHERE promotion_state = 'elite') AS final_elites,
-            COUNT(*) FILTER (WHERE forward_validation_state = 'insufficient_forward_sample') AS awaiting_forward_sample
+            COUNT(*) FILTER (WHERE forward_validation_state = 'insufficient_forward_sample') AS awaiting_forward_sample,
+            COUNT(*) FILTER (WHERE promotion_state = 'research_champion' AND validation_state = 'pending_validation') AS pending_validation,
+            COUNT(*) FILTER (WHERE promotion_state = 'research_champion' AND validation_state = 'validating') AS validating,
+            COUNT(*) FILTER (WHERE promotion_state = 'research_champion' AND validation_state = 'failed_validation') AS failed_validation,
+            COUNT(*) FILTER (WHERE promotion_state = 'research_champion' AND validation_state = 'needs_more_data') AS needs_more_data,
+            COUNT(*) FILTER (WHERE promotion_state = 'elite' AND validation_state = 'validated') AS graduated_elites
         FROM elite_research_candidates
         WHERE simulation_only = TRUE
         """
@@ -154,6 +159,14 @@ def research_champion_status(conn: psycopg.Connection) -> dict[str, Any]:
         "research_champions": int((imported or {}).get("research_champions") or 0),
         "final_elites": int((imported or {}).get("final_elites") or 0),
         "awaiting_forward_sample": int((imported or {}).get("awaiting_forward_sample") or 0),
+        # Champion graduation state (Phase 13.9). `graduated_elites` counts the
+        # final elites that reached that state through the validation battery,
+        # as distinct from elites promoted by the earlier campaign gates.
+        "pending_validation": int((imported or {}).get("pending_validation") or 0),
+        "validating": int((imported or {}).get("validating") or 0),
+        "failed_validation": int((imported or {}).get("failed_validation") or 0),
+        "needs_more_data": int((imported or {}).get("needs_more_data") or 0),
+        "graduated_elites": int((imported or {}).get("graduated_elites") or 0),
         "promotion_rule_version": RESEARCH_CHAMPION_RULE_VERSION,
     }
 

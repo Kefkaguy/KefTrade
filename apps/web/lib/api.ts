@@ -1587,6 +1587,11 @@ export type ResearchChampionStatus = {
   research_champions: number;
   final_elites: number;
   awaiting_forward_sample: number;
+  pending_validation: number;
+  validating: number;
+  failed_validation: number;
+  needs_more_data: number;
+  graduated_elites: number;
   promotion_rule_version: string;
 };
 
@@ -1615,6 +1620,118 @@ export function importResearchChampions(options: { maxChampions?: number; minPro
     max_drawdown: String(options.maxDrawdown ?? 0.12)
   });
   return request<ResearchChampionImportResult>(`/research/elite-portfolios/research-champions/import?${params.toString()}`, { method: "POST", timeoutMs: 120000 });
+}
+
+export type ChampionValidationState =
+  | "pending_validation"
+  | "validating"
+  | "validated"
+  | "failed_validation"
+  | "needs_more_data";
+
+export type ChampionValidationQueueRow = {
+  elite_candidate_id: number;
+  candidate_id: string;
+  campaign_id: number | null;
+  symbol: string;
+  timeframe: string;
+  family_id: string;
+  research_score: number;
+  profit_factor: number;
+  expectancy: number;
+  max_drawdown: number;
+  trade_count: number;
+  validation_state: ChampionValidationState;
+  validation_state_reason: string | null;
+  dataset_id: number | null;
+};
+
+export type ChampionValidationQueue = {
+  protocol_version: string;
+  gates: Array<{ gate_id: string; label: string }>;
+  thresholds: Record<string, number>;
+  queue: ChampionValidationQueueRow[];
+  research_champions: number;
+  pending_validation: number;
+  validating: number;
+  failed_validation: number;
+  needs_more_data: number;
+  final_elites: number;
+  graduated_elites: number;
+};
+
+export type ChampionValidationOutcome = {
+  elite_candidate_id: number;
+  candidate_id: string;
+  symbol: string;
+  timeframe: string;
+  family_id?: string;
+  run_id?: number;
+  status: ChampionValidationState | "error";
+  reason: string;
+  gates_passed?: number;
+  gates_failed?: number;
+  gates_inconclusive?: number;
+  backtests_executed?: number;
+  runtime_ms?: number;
+  failed_gates?: string[];
+  inconclusive_gates?: string[];
+};
+
+export type ChampionValidationRunResult = {
+  protocol_version: string;
+  examined: number;
+  validated: number;
+  failed_validation: number;
+  needs_more_data: number;
+  errors: number;
+  thresholds: Record<string, number>;
+  thresholds_weakened: false;
+  outcomes: ChampionValidationOutcome[];
+  status: ChampionValidationQueue;
+};
+
+export type ChampionValidationDiagnostics = {
+  protocol_version: string;
+  by_gate: Array<{ gate_id: string; label: string; status: string; candidates: number }>;
+  by_group: Array<{
+    family_id: string;
+    symbol: string;
+    timeframe: string;
+    validated: number;
+    failed_validation: number;
+    needs_more_data: number;
+    runs: number;
+  }>;
+  recent_runs: Array<Record<string, any>>;
+};
+
+export function getChampionValidationQueue(limit = 25) {
+  return request<ChampionValidationQueue>(`/research/elite-portfolios/champion-validation/queue?limit=${limit}`, {
+    cache: "no-store",
+    timeoutMs: 60000
+  });
+}
+
+export function getChampionValidationDiagnostics(limit = 25) {
+  return request<ChampionValidationDiagnostics>(`/research/elite-portfolios/champion-validation/diagnostics?limit=${limit}`, {
+    cache: "no-store",
+    timeoutMs: 60000
+  });
+}
+
+export function runChampionValidation(options: { limit?: number; eliteCandidateIds?: number[]; revalidate?: boolean } = {}) {
+  return request<ChampionValidationRunResult>("/research/elite-portfolios/champion-validation/run", {
+    method: "POST",
+    body: JSON.stringify({
+      limit: options.limit ?? 5,
+      elite_candidate_ids: options.eliteCandidateIds ?? [],
+      revalidate: options.revalidate ?? false
+    }),
+    // Every champion runs a full battery of backtests, so this is deliberately
+    // the longest-running call on the page.
+    timeoutMs: 900000
+  });
 }
 
 export function previewElitePortfolio(configuration: ElitePortfolioConfiguration) {
