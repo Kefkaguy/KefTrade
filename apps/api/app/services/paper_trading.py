@@ -835,7 +835,10 @@ def candidate_payload_for_deployment(conn: psycopg.Connection, deployment: dict[
 
 
 def strategy_definition_for_deployment(conn: psycopg.Connection, deployment: dict[str, Any]) -> StrategyDefinition:
-    if deployment.get("strategy_name") != "autonomous_strategy_discovery":
+    if deployment.get("strategy_name") not in {
+        "autonomous_strategy_discovery",
+        "research_champion",
+    }:
         return get_strategy_definition(deployment["strategy_name"], deployment["strategy_version"])
     from app.services.research_campaigns import candidate_from_payload
     from app.services.strategy_discovery import make_strategy_definition
