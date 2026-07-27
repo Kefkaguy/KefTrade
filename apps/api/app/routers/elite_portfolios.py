@@ -17,6 +17,7 @@ from app.services.elite_portfolio_repository import (
     get_run,
     options,
     preview_from_database,
+    list_runs,
     recalculate_run,
     recommend_profile_from_database,
 )
@@ -187,6 +188,20 @@ def get_champion_validation_run(run_id: int, conn: psycopg.Connection = Depends(
         return champion_validation_run(conn, run_id)
     except ChampionValidationError as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@router.get("/runs")
+def get_portfolio_runs(
+    limit: int = Query(20, ge=1, le=100),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Recent portfolio runs plus which one Step 04 should open.
+
+    Declared before `/{portfolio_id}` so "runs" is matched as a literal path
+    rather than parsed as an id.
+    """
+    _require_builder()
+    return list_runs(conn, limit=limit)
 
 
 @router.get("/profile-recommendation")

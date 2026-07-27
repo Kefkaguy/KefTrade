@@ -20,9 +20,11 @@ import {
   activateElitePortfolio,
   approveElitePortfolio,
   backfillElitePortfolioEvidence,
+  configurationWithProfile,
   createElitePortfolio,
   dedupeResearchChampions,
   getElitePortfolioRecommendation,
+  getElitePortfolioRuns,
   getChampionValidationDiagnostics,
   getChampionValidationQueue,
   getElitePortfolioOptions,
@@ -38,6 +40,7 @@ import {
   type ElitePortfolioConfiguration,
   type ElitePortfolioHardRule,
   type ElitePortfolioOptions,
+  type ElitePortfolioProfile,
   type ElitePortfolioRecommendation,
   type ElitePortfolioResult,
   type ResearchChampionImportResult,
@@ -62,6 +65,9 @@ export function ElitePortfolioBuilder() {
   const [championImport, setChampionImport] = useState<ResearchChampionImportResult | null>(null);
   const [dedupeResult, setDedupeResult] = useState<ChampionDedupeResult | null>(null);
   const [recommendation, setRecommendation] = useState<ElitePortfolioRecommendation | null>(null);
+  // Step 04 must survive a page refresh, so which portfolio it opens comes from
+  // the backend rather than from whatever React state the approve click left.
+  const [activatableRunId, setActivatableRunId] = useState<number | null>(null);
   const [validationQueue, setValidationQueue] = useState<ChampionValidationQueue | null>(null);
   const [validationResult, setValidationResult] = useState<ChampionValidationRunResult | null>(null);
   const [validationDiagnostics, setValidationDiagnostics] = useState<ChampionValidationDiagnostics | null>(null);
@@ -110,6 +116,9 @@ export function ElitePortfolioBuilder() {
     getChampionValidationDiagnostics(25)
       .then((next) => { if (mounted) setValidationDiagnostics(next); })
       .catch(() => { /* Diagnostics are a read-only aid, never required to run validation. */ });
+    getElitePortfolioRuns(20)
+      .then((next) => { if (mounted) setActivatableRunId(next.current_activatable_run_id); })
+      .catch(() => { /* Step 04 simply stays locked if the run list is unavailable. */ });
     return () => { mounted = false; };
   }, []);
 
@@ -146,6 +155,13 @@ export function ElitePortfolioBuilder() {
       const next = await operation();
       setResult(next);
       setPhase(nextPhase);
+      if (nextPhase === "approved" || nextPhase === "activated") {
+        // Ask the backend which run is activatable rather than assuming it is
+        // this one, so a refresh lands on exactly the same portfolio.
+        await getElitePortfolioRuns(20)
+          .then((runs) => setActivatableRunId(runs.current_activatable_run_id ?? next.id ?? null))
+          .catch(() => setActivatableRunId(next.id ?? null));
+      }
     } catch (reason) {
       setError(message(reason));
     } finally {
@@ -188,6 +204,20 @@ export function ElitePortfolioBuilder() {
     } finally {
       setBusy(null);
     }
+  }
+
+  /**
+   * Selecting a profile must replace the visible constraint values, not just
+   * the profile name: the backend merges explicit `constraints` over the
+   * preset, so keeping the strict defaults here silently builds a strict
+   * portfolio no matter which profile is highlighted.
+   */
+  function applyProfile(profileId: string): ElitePortfolioConfiguration | null {
+    const profile = (options?.profiles ?? []).find((row) => row.id === profileId);
+    if (!profile || !configuration) return null;
+    const next = configurationWithProfile(configuration, profile);
+    setConfiguration(next);
+    return next;
   }
 
   async function loadRecommendation() {
@@ -340,9 +370,12 @@ export function ElitePortfolioBuilder() {
             configuration={configuration}
             recommendation={recommendation}
             busy={busy}
-            onSelect={(profile) => setConfiguration({ ...configuration, profile })}
+            onSelect={(profile) => applyProfile(profile)}
             onRecommend={loadRecommendation}
-            onApplyRecommendation={(profile) => { setConfiguration({ ...configuration, profile }); run("preview", () => previewElitePortfolio({ ...configuration, profile }), "preview"); }}
+            onApplyRecommendation={(profile) => {
+              const next = applyProfile(profile);
+              if (next) run("preview", () => previewElitePortfolio(next), "preview");
+            }}
           />
 
           {result ? <PortfolioFeasibilityPanel result={result} /> : null}
@@ -389,7 +422,8 @@ export function ElitePortfolioBuilder() {
               <Constraint label="Per symbol" value={`≤ ${configuration.constraints.maximum_per_symbol}`} />
               <Constraint label="Per family" value={`≤ ${configuration.constraints.maximum_per_family}`} />
               <Constraint label="Strategy correlation" value={`≤ ${configuration.constraints.maximum_strategy_return_correlation}`} />
-              <Constraint label="Timeframe share" value="2 × count ≤ total" />
+              {/* Rendered from the active profile: the cap is 1/2 under Strict and 2/3 under Small Paper Launch, so a fixed label would misdescribe two of the three profiles. */}
+              <Constraint label="Timeframe share" value={`count ≤ ${Number(configuration.constraints.timeframe_cap_numerator ?? 1)}/${Number(configuration.constraints.timeframe_cap_denominator ?? 2)} × total`} />
             </div>
             <div className="eliteHardRules">
               <h3>Hard rules (never relaxed)</h3>
@@ -426,16 +460,27 @@ export function ElitePortfolioBuilder() {
                 requires, so neither can be skipped on the way to activation. */}
             {phase === "preview" && result?.status === "review_ready" ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("save", () => createElitePortfolio(configuration), "saved")}><ArrowRight size={16} />Save immutable run</button> : null}
             {phase === "saved" && result?.id && snapshotHash ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("approve", () => approveElitePortfolio(result.id!, snapshotHash), "approved")}><Check size={16} />Approve portfolio</button> : null}
-            {(phase === "approved" || phase === "activated") && result?.id && snapshotHash ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("activate", () => activateElitePortfolio(result.id!, snapshotHash, `elite-builder-${result.id}-${snapshotHash.slice(0, 12)}`), "activated")}><Play size={16} />{busy === "activate" ? "Activating…" : "Continue to activation"}</button> : null}
           </section>
         </aside>
       </div> : null}
 
-      {/* Step 04 only exists once a real immutable snapshot has been approved --
-          there is nothing to deploy before that, by design. */}
-      {result?.id && (phase === "approved" || phase === "activated") ? (
-        <EliteActivationWorkspace portfolioId={result.id} />
-      ) : null}
+      {/* Step 04 acts only on an approved immutable snapshot, and finds it from
+          the backend so it is still there after a refresh. */}
+      {activatableRunId ? (
+        <EliteActivationWorkspace portfolioId={activatableRunId} />
+      ) : (
+        <section className="eliteActivationLocked">
+          <div>
+            <span className="eyebrow">Step 4 · Activation</span>
+            <h2>Activation unlocks once a portfolio is approved</h2>
+            <p>
+              Build a portfolio in step 3, save it as an immutable run, then approve it. This section then loads that
+              exact approved snapshot and drives internal activation, Alpaca Paper approval and execution enablement.
+            </p>
+          </div>
+          <LockKeyhole size={20} />
+        </section>
+      )}
     </div>
   );
 
@@ -945,6 +990,7 @@ function PortfolioProfilePicker({
               <div><dt>Timeframe cap</dt><dd>{profile.resolved_constraints.timeframe_cap_numerator}/{profile.resolved_constraints.timeframe_cap_denominator}</dd></div>
             </dl>
             {profile.warning ? <span className="eliteProfileWarning"><AlertTriangle size={12} />{profile.warning}</span> : null}
+            <span className="eliteProfileApply">{active === profile.id ? "Applied" : `Apply ${profile.label}`}</span>
           </button>
         ))}
       </div>

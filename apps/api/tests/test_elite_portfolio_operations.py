@@ -34,6 +34,9 @@ READY = {
     "reconciliation": {"id": 51, "status": "clean"},
     "halts": [],
     "candle": {"timestamp": "fresh"},
+    "adapter": {"id": 61, "version": "1.2.3", "change_class": "compatible_patch"},
+    "account": {"id": 3, "provider": "alpaca", "environment": "paper", "account_number_masked": "****1234"},
+    "fingerprint": {"matches": True, "detail": "Matches the configuration frozen at approval (abc123…)."},
 }
 
 
@@ -57,7 +60,9 @@ class FakePreflightConnection:
         if "FROM portfolio_risk_decisions" in text:
             return FakeResult([self.data["portfolio_decision"]] if self.data["portfolio_decision"] else [])
         if "FROM broker_accounts" in text:
-            return FakeResult([{"id": 3}])
+            return FakeResult([self.data["account"]] if self.data["account"] else [])
+        if "FROM broker_adapter_releases" in text:
+            return FakeResult([self.data["adapter"]] if self.data["adapter"] else [])
         if "FROM broker_sync_runs" in text:
             return FakeResult([self.data["sync"]] if self.data["sync"] else [])
         if "FROM broker_reconciliation_runs" in text:
@@ -73,6 +78,15 @@ class FakePreflightConnection:
 
     def rollback(self):
         pass
+
+
+@pytest.fixture(autouse=True)
+def _stub_fingerprint(monkeypatch, request):
+    """Fingerprint recomputation needs the whole deployment graph; the checks
+    that care about it stub it directly."""
+    if "no_fingerprint_stub" in request.keywords:
+        return
+    monkeypatch.setattr(ops, "_fingerprint_state", lambda conn, external: FakePreflightConnection().data["fingerprint"])
 
 
 @pytest.fixture(autouse=True)
@@ -149,7 +163,10 @@ def test_preflight_fails_closed_when_the_execution_flags_are_off(monkeypatch) ->
     )
     report = execution_preflight(FakePreflightConnection(), 7)
 
-    assert codes(report)["EXECUTION_FLAGS_ENABLED"] is False
+    # Reported separately: when execution is blocked it matters which of the
+    # two flags the operator still has to set.
+    assert codes(report)["ORDER_SUBMISSION_FLAG"] is False
+    assert codes(report)["PAPER_EXECUTION_FLAG"] is True
     assert report["passed"] is False
 
 
@@ -303,3 +320,57 @@ def test_enabling_execution_requires_external_approval_first(monkeypatch) -> Non
     with pytest.raises(PortfolioOperationError, match="approve this member"):
         enable_member_paper_execution(conn, 1, 1)
     assert called == []
+
+
+def test_preflight_covers_every_documented_requirement() -> None:
+    report = execution_preflight(FakePreflightConnection(), 7)
+
+    assert {row["code"] for row in report["checks"]} == {
+        "PAPER_ACCOUNT_DETECTED",
+        "OBSERVE_ONLY_APPROVED",
+        "OPEN_EXECUTION_EPOCH",
+        "BROKER_SYNC_COMPLETE",
+        "RECONCILIATION_CLEAN",
+        "ADAPTER_COMPATIBLE",
+        "NO_ACTIVE_HALTS",
+        "CANDIDATE_FINGERPRINT_MATCH",
+        "FRESH_COMPLETED_BAR",
+        "WOULD_SUBMIT_DECISION",
+        "PORTFOLIO_RISK_APPROVED",
+        "ORDER_SUBMISSION_FLAG",
+        "PAPER_EXECUTION_FLAG",
+    }
+
+
+def test_an_incompatible_adapter_release_blocks_execution() -> None:
+    report = execution_preflight(
+        FakePreflightConnection(adapter={"id": 61, "version": "2.0.0", "change_class": "breaking"}),
+        7,
+    )
+
+    assert codes(report)["ADAPTER_COMPATIBLE"] is False
+    assert report["passed"] is False
+
+
+def test_a_missing_broker_account_blocks_execution() -> None:
+    report = execution_preflight(FakePreflightConnection(account=None), 7)
+
+    assert codes(report)["PAPER_ACCOUNT_DETECTED"] is False
+
+
+@pytest.mark.no_fingerprint_stub
+def test_a_deployment_with_no_frozen_configuration_fails_the_fingerprint_check() -> None:
+    # "We could not verify the fingerprint" must never read as "the fingerprint
+    # is fine": a candidate that changed since approval no longer describes what
+    # would actually trade.
+    report = execution_preflight(
+        FakePreflightConnection(
+            external={**READY["external"], "active_configuration_version_id": None, "internal_deployment_id": 5}
+        ),
+        7,
+    )
+
+    assert codes(report)["CANDIDATE_FINGERPRINT_MATCH"] is False
+    assert "re-approve" in next(
+        row["detail"] for row in report["checks"] if row["code"] == "CANDIDATE_FINGERPRINT_MATCH"
+    ).lower()

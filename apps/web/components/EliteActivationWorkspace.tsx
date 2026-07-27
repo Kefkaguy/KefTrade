@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, Check, LoaderCircle, LockKeyhole, Play, RefreshCw, ShieldCheck } from "lucide-react";
 import {
+  activateElitePortfolio,
   approveMemberForAlpacaPaper,
   enableMemberPaperExecution,
   getPortfolioActivation,
@@ -48,6 +49,16 @@ export function EliteActivationWorkspace({ portfolioId }: { portfolioId: number 
     }
   }
 
+  const snapshot = view?.approved_snapshot_hash ?? view?.snapshot_hash ?? null;
+
+  async function activateInternally() {
+    if (!view || !snapshot) return;
+    // Stable key derived from the run and its approved snapshot: retrying after
+    // a partial failure resumes the same attempt instead of starting a new one.
+    const idempotencyKey = `elite-builder-${view.portfolio_run_id}-${snapshot.slice(0, 24)}`;
+    await act("activate", () => activateElitePortfolio(view.portfolio_run_id, snapshot, idempotencyKey));
+  }
+
   if (!view) {
     return (
       <section className="eliteActivation loading">
@@ -91,6 +102,21 @@ export function EliteActivationWorkspace({ portfolioId }: { portfolioId: number 
         <Metric label="Observe only" value={summary.observe_only} />
         <Metric label="Preflight ready" value={summary.preflight_ready} />
         <Metric label="Execution enabled" value={summary.execution_enabled} tone={summary.execution_enabled ? "safe" : undefined} />
+      </div>
+
+      <div className="eliteActivationPrimary">
+        <div>
+          <strong>Internal activation</strong>
+          <span>
+            Creates (or reuses) one internal deployment per member and, for long members, a disabled external record.
+            Safe to retry: the attempt is keyed by this run and its approved snapshot, so a repeat resumes rather than
+            duplicates.
+          </span>
+        </div>
+        <button className="button" disabled={busy !== null || !snapshot} onClick={() => void activateInternally()}>
+          {busy === "activate" ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />}
+          {busy === "activate" ? "Activating…" : summary.internally_active ? "Re-run activation" : "Activate portfolio"}
+        </button>
       </div>
 
       <SafetyPanel view={view} />

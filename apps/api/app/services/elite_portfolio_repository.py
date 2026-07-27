@@ -425,6 +425,46 @@ def recommend_profile_from_database(conn: psycopg.Connection) -> dict[str, Any]:
     return recommend_profile(load_elite_candidate_variants(conn))
 
 
+def list_runs(conn: psycopg.Connection, *, limit: int = 20) -> dict[str, Any]:
+    """Recent portfolio runs, and which one Step 04 should open.
+
+    Step 04 has to survive a page refresh, so the page cannot depend on the
+    React state left over from whoever clicked Approve. It asks which run is
+    activatable and loads that run's state from the backend instead.
+    """
+    bounded = max(1, min(int(limit), 100))
+    rows = [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT
+                run.id, run.run_key, run.status, run.objective, run.snapshot_hash,
+                run.approved_snapshot_hash, run.approved_at, run.activated_at,
+                run.created_at, run.updated_at,
+                run.source_configuration->>'profile' AS profile,
+                COUNT(member.id) AS member_count
+            FROM elite_portfolio_runs run
+            LEFT JOIN elite_portfolio_members member ON member.portfolio_run_id = run.id
+            GROUP BY run.id
+            ORDER BY run.id DESC
+            LIMIT %s
+            """,
+            (bounded,),
+        ).fetchall()
+    ]
+    # Approved and activated runs are the only ones Step 04 can act on. Newest
+    # first, so re-approving supersedes an older run in the UI as well as in
+    # the database.
+    activatable = [row for row in rows if row["status"] in {"approved", "activated_internal"}]
+    return jsonable_encoder(
+        {
+            "runs": rows,
+            "activatable": activatable,
+            "current_activatable_run_id": activatable[0]["id"] if activatable else None,
+        }
+    )
+
+
 def preview_from_database(
     conn: psycopg.Connection,
     configuration: dict[str, Any],

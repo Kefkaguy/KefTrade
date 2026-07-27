@@ -66,6 +66,49 @@ def _check(code: str, label: str, passed: bool, detail: str) -> dict[str, Any]:
     return {"code": code, "label": label, "passed": bool(passed), "detail": detail}
 
 
+def _fingerprint_state(conn: psycopg.Connection, external: dict[str, Any]) -> dict[str, Any]:
+    """Does the candidate still hash to what was frozen at approval time?
+
+    `enable_observe_only` freezes a `candidate_fingerprint` into the active
+    configuration version. If the underlying deployment, elite row or candidate
+    object has changed since, the approval no longer describes what would
+    actually trade, and execution must not be enabled on it.
+
+    A missing piece is reported as a failed check with the reason, never as a
+    pass: "we could not verify the fingerprint" is not "the fingerprint is fine".
+    """
+    from app.services.external_execution import candidate_fingerprint, candidate_object_for
+
+    version_id = external.get("active_configuration_version_id")
+    if not version_id:
+        return {"matches": False, "detail": "No active configuration version; re-approve this member for Alpaca Paper."}
+    try:
+        version = conn.execute(
+            "SELECT candidate_fingerprint FROM deployment_configuration_versions WHERE id=%s", (version_id,)
+        ).fetchone()
+        deployment = conn.execute(
+            "SELECT * FROM strategy_deployments WHERE id=%s", (external["internal_deployment_id"],)
+        ).fetchone()
+        elite = conn.execute(
+            "SELECT * FROM elite_research_candidates WHERE campaign_id=%s AND candidate_id=%s AND simulation_only=TRUE",
+            (external.get("campaign_id"), external.get("candidate_id")),
+        ).fetchone()
+        if not version or not deployment or not elite:
+            return {"matches": False, "detail": "The frozen configuration, deployment or elite record is missing."}
+        candidate_object = candidate_object_for(conn, int(deployment["campaign_id"]), str(deployment["candidate_id"]))
+        current = candidate_fingerprint(dict(deployment), dict(elite), candidate_object)
+    except Exception as error:  # noqa: BLE001 - see docstring
+        conn.rollback()
+        return {"matches": False, "detail": f"Fingerprint could not be recomputed: {type(error).__name__}: {error}"}
+    stored = str(version["candidate_fingerprint"])
+    if current != stored:
+        return {
+            "matches": False,
+            "detail": f"Candidate changed since approval (frozen {stored[:12]}…, current {current[:12]}…). Re-approve before enabling execution.",
+        }
+    return {"matches": True, "detail": f"Matches the configuration frozen at approval ({stored[:12]}…)."}
+
+
 def execution_preflight(conn: psycopg.Connection, external_deployment_id: int) -> dict[str, Any]:
     """Read-only checklist of everything `enable_paper_execution` will require.
 
@@ -128,8 +171,23 @@ def execution_preflight(conn: psycopg.Connection, external_deployment_id: int) -
         except Exception:  # noqa: BLE001 - an unparseable bar is simply "not fresh"
             bar_fresh = False
 
+    adapter = conn.execute(
+        "SELECT * FROM broker_adapter_releases WHERE provider='alpaca' ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    fingerprint = _fingerprint_state(conn, external)
+
     flags = feature_flags()
     checks = [
+        _check(
+            "PAPER_ACCOUNT_DETECTED",
+            "Alpaca paper account detected",
+            bool(account and str(account.get("environment")) == "paper"),
+            (
+                f"{account.get('provider')} {account.get('environment')} account {account.get('account_number_masked')}."
+                if account
+                else "No broker account has been synced."
+            ),
+        ),
         _check(
             "OBSERVE_ONLY_APPROVED",
             "Approved for Alpaca Paper (observe only)",
@@ -155,10 +213,26 @@ def execution_preflight(conn: psycopg.Connection, external_deployment_id: int) -
             f"Reconciliation status {reconciliation['status']}." if reconciliation else "No reconciliation run.",
         ),
         _check(
+            "ADAPTER_COMPATIBLE",
+            "Compatible broker adapter release",
+            bool(adapter and adapter["change_class"] == "compatible_patch"),
+            (
+                f"Adapter release {adapter.get('version') or adapter.get('id')} is {adapter['change_class']}."
+                if adapter
+                else "No Alpaca adapter release is registered."
+            ),
+        ),
+        _check(
             "NO_ACTIVE_HALTS",
             "No active execution halts",
             not halts,
             "No active halts." if not halts else f"{len(halts)} active halt(s): " + ", ".join(sorted({str(row['reason_code']) for row in halts})),
+        ),
+        _check(
+            "CANDIDATE_FINGERPRINT_MATCH",
+            "Candidate fingerprint matches the approved configuration",
+            fingerprint["matches"],
+            fingerprint["detail"],
         ),
         _check(
             "FRESH_COMPLETED_BAR",
@@ -182,14 +256,26 @@ def execution_preflight(conn: psycopg.Connection, external_deployment_id: int) -
             portfolio_decision is not None,
             "A portfolio-level risk decision has been approved." if portfolio_decision else "Waiting for an approved portfolio-risk decision.",
         ),
+        # Reported separately rather than as one combined flag: when execution
+        # is blocked it matters which of the two an operator still has to set.
         _check(
-            "EXECUTION_FLAGS_ENABLED",
-            "Both broker execution flags enabled",
-            bool(flags["broker_order_submission_enabled"] and flags["external_paper_execution_enabled"]),
+            "ORDER_SUBMISSION_FLAG",
+            "Broker order submission flag enabled",
+            bool(flags["broker_order_submission_enabled"]),
             (
-                "BROKER_ORDER_SUBMISSION_ENABLED and EXTERNAL_PAPER_EXECUTION_ENABLED are both on."
-                if flags["broker_order_submission_enabled"] and flags["external_paper_execution_enabled"]
-                else "Both flags must be enabled in the API environment; this is an operator decision, not a UI toggle."
+                "BROKER_ORDER_SUBMISSION_ENABLED is on."
+                if flags["broker_order_submission_enabled"]
+                else "BROKER_ORDER_SUBMISSION_ENABLED is off. This is an API environment setting, not a UI toggle."
+            ),
+        ),
+        _check(
+            "PAPER_EXECUTION_FLAG",
+            "External paper execution flag enabled",
+            bool(flags["external_paper_execution_enabled"]),
+            (
+                "EXTERNAL_PAPER_EXECUTION_ENABLED is on."
+                if flags["external_paper_execution_enabled"]
+                else "EXTERNAL_PAPER_EXECUTION_ENABLED is off. This is an API environment setting, not a UI toggle."
             ),
         ),
     ]

@@ -2175,6 +2175,45 @@ export function activateElitePortfolio(portfolioId: number, snapshotHash: string
   return request<ElitePortfolioResult>(`/research/elite-portfolios/${portfolioId}/activate-internal`, { method: "POST", body: JSON.stringify({ snapshot_hash: snapshotHash, idempotency_key: idempotencyKey }), timeoutMs: 60000 });
 }
 
+/**
+ * Apply a portfolio profile to a configuration.
+ *
+ * The visible constraint values must be replaced, not just the profile name.
+ * `normalized_configuration` merges explicit `constraints` *over* the profile
+ * preset, so a configuration that carries the strict defaults alongside
+ * `profile: "single_elite_test"` silently builds a strict portfolio -- which is
+ * exactly what happened before this existed.
+ */
+export function configurationWithProfile(
+  configuration: ElitePortfolioConfiguration,
+  profile: ElitePortfolioProfile
+): ElitePortfolioConfiguration {
+  return { ...configuration, profile: profile.id, constraints: { ...profile.resolved_constraints } };
+}
+
+export type ElitePortfolioRunSummary = {
+  id: number;
+  run_key: string;
+  status: string;
+  objective: string | null;
+  snapshot_hash: string | null;
+  approved_snapshot_hash: string | null;
+  approved_at: string | null;
+  activated_at: string | null;
+  profile: string | null;
+  member_count: number;
+};
+
+export type ElitePortfolioRunList = {
+  runs: ElitePortfolioRunSummary[];
+  activatable: ElitePortfolioRunSummary[];
+  current_activatable_run_id: number | null;
+};
+
+export function getElitePortfolioRuns(limit = 20) {
+  return request<ElitePortfolioRunList>(`/research/elite-portfolios/runs?limit=${limit}`, { cache: "no-store", timeoutMs: 60000 });
+}
+
 export function getElitePortfolioRecommendation() {
   return request<ElitePortfolioRecommendation>("/research/elite-portfolios/profile-recommendation", { cache: "no-store", timeoutMs: 120000 });
 }
