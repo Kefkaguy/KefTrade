@@ -704,6 +704,41 @@ def classify_validation(gates: list[dict[str, Any]]) -> tuple[str, str]:
     return "validated", f"Passed all {len(gates)} graduation gates."
 
 
+def measured_breadth(measurements: dict[str, Any], gates: list[dict[str, Any]]) -> dict[str, int]:
+    """Asset/timeframe/regime breadth this battery actually demonstrated.
+
+    `research_champion_import` writes a placeholder `assets_passed=1` and
+    `timeframes_passed=1` because at import time nothing had been measured
+    outside the originating symbol. Validation then measures exactly that, so
+    leaving the placeholder in place would make every graduated champion fail
+    the portfolio solver's `minimum_assets_passed` gate on evidence that
+    exists but was never written down.
+
+    Counted from passing gates only, so a failed or unmeasured cross-symbol
+    gate contributes nothing. The caller applies these with `GREATEST`, so a
+    candidate that already carried richer breadth from an earlier promotion
+    path is never downgraded.
+    """
+    by_id = {gate["gate_id"]: gate for gate in gates}
+
+    assets = 1
+    cross_symbol = by_id.get("cross_symbol")
+    if cross_symbol is not None and cross_symbol["status"] == GATE_PASSED:
+        assets += int(cross_symbol["observed"].get("symbols_passed") or 0)
+
+    timeframes = 1
+    stability = by_id.get("timeframe_stability")
+    if stability is not None and stability["status"] == GATE_PASSED:
+        timeframes = 2
+
+    regimes = 0
+    regime = by_id.get("regime_robustness")
+    if regime is not None and regime["status"] == GATE_PASSED:
+        regimes = int(regime["observed"].get("buckets_profitable") or 0)
+
+    return {"assets_passed": assets, "timeframes_passed": timeframes, "regimes_passed": regimes}
+
+
 def gate_counts(gates: list[dict[str, Any]]) -> dict[str, int]:
     return {
         "passed": sum(1 for gate in gates if gate["status"] == GATE_PASSED),
@@ -1615,6 +1650,7 @@ def run_champion_validation(
             continue
 
         counts = gate_counts(gates)
+        breadth = measured_breadth(measurements, gates)
         runtime_ms = int((time.perf_counter() - started) * 1000)
         run_id = _persist_run(
             conn,
@@ -1640,6 +1676,14 @@ def run_champion_validation(
                 candidate_level = CASE WHEN %s THEN 'cluster_elite' ELSE candidate_level END,
                 promotion_rule_version = %s,
                 demotion_reason = CASE WHEN %s THEN NULL ELSE %s END,
+                -- Breadth the battery actually measured, replacing the
+                -- placeholder 1/1 the import writes. Without this a graduated
+                -- champion can never clear the portfolio solver's
+                -- minimum_assets_passed gate, no matter how many symbols the
+                -- cross-symbol gate proved it on. See `measured_breadth`.
+                assets_passed = GREATEST(assets_passed, %s),
+                timeframes_passed = GREATEST(timeframes_passed, %s),
+                regimes_passed = GREATEST(regimes_passed, %s),
                 reevaluated_at = NOW()
             WHERE id = %s
             """,
@@ -1654,6 +1698,9 @@ def run_champion_validation(
                 CHAMPION_VALIDATION_PROTOCOL_VERSION,
                 promoted,
                 reason,
+                breadth["assets_passed"],
+                breadth["timeframes_passed"],
+                breadth["regimes_passed"],
                 champion["id"],
             ),
         )

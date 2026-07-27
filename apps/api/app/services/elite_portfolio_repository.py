@@ -11,13 +11,17 @@ from psycopg.types.json import Jsonb
 
 from app.services.elite_portfolio_builder import (
     DEFAULT_CONSTRAINTS,
+    DEFAULT_PROFILE_ID,
     DEFAULT_THRESHOLDS,
     HARD_RULES,
+    PORTFOLIO_PROFILES,
     SOLVER_VERSION,
     candidate_key,
     decision_hash,
     normalized_configuration,
     preview,
+    profile_constraints,
+    recommend_profile,
 )
 from app.services.shared_cache import get_json, set_json
 
@@ -404,11 +408,21 @@ def options(conn: psycopg.Connection) -> dict[str, Any]:
         "hard_rules": deepcopy(HARD_RULES),
         "objectives": ["balanced", "profit_factor", "expectancy", "minimum_drawdown"],
         "maximum_portfolio_size": 20,
+        "default_profile": DEFAULT_PROFILE_ID,
+        "profiles": [
+            {**deepcopy(profile), "resolved_constraints": profile_constraints(profile["id"])}
+            for profile in PORTFOLIO_PROFILES
+        ],
         "execution_policy": {
             "long": "Internal activation; external record remains disabled and requires separate approval.",
             "short": "Internal simulation only. No external deployment, order, authorization, or broker path exists.",
         },
     }
+
+
+def recommend_profile_from_database(conn: psycopg.Connection) -> dict[str, Any]:
+    """Strictest profile that produces a portfolio from the current elite pool."""
+    return recommend_profile(load_elite_candidate_variants(conn))
 
 
 def preview_from_database(

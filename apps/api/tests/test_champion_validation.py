@@ -434,10 +434,13 @@ CHAMPION_ROW = {
 class FakeValidationConnection:
     """Just enough of psycopg to exercise the graduation state machine."""
 
-    def __init__(self, champion=None, champions=None):
+    def __init__(self, champion=None, champions=None, unclaimable=()):
         self.champion_rows = [dict(row) for row in champions] if champions else [dict(champion or CHAMPION_ROW)]
         self.statements: list[tuple[str, Any]] = []
         self.gate_rows: list[tuple[Any, ...]] = []
+        # Champion ids another worker is treated as having claimed first.
+        self.unclaimable = set(unclaimable)
+        self.claimed: list[int] = []
         self.commits = 0
 
     @property
@@ -451,6 +454,16 @@ class FakeValidationConnection:
         if "INSERT INTO elite_champion_validation_gates" in query:
             self.gate_rows.append(params)
             return FakeResult([])
+        # The claim UPDATE takes the champion atomically and returns its id;
+        # an empty result means another worker got there first, which makes the
+        # runner skip the row. Standing in for a real row here is what lets the
+        # rest of the state machine be exercised at all.
+        if "validation_state = 'validating'" in query and "RETURNING id" in query:
+            claimed_id = params[1]
+            if claimed_id in self.unclaimable:
+                return FakeResult([])
+            self.claimed.append(claimed_id)
+            return FakeResult([{"id": claimed_id}])
         if "UPDATE elite_research_candidates" in query:
             return FakeResult([])
         if "COUNT(*) FILTER" in query:
@@ -651,3 +664,46 @@ def test_a_run_that_drains_the_queue_reports_no_budget_exhaustion(monkeypatch) -
 
     assert outcome["examined"] == 1
     assert outcome["budget_exhausted"] is False
+
+
+def test_a_champion_another_worker_already_claimed_is_skipped(monkeypatch) -> None:
+    # The claim UPDATE is what stops two concurrent runs validating the same
+    # champion twice. An empty result means someone else took it, and the
+    # runner must move on rather than measure it anyway.
+    _stub_measurements(monkeypatch, healthy_measurements())
+    conn = FakeValidationConnection(
+        champions=[dict(CHAMPION_ROW, id=41), dict(CHAMPION_ROW, id=42)],
+        unclaimable={41},
+    )
+
+    outcome = run_champion_validation(conn, limit=10)
+
+    assert conn.claimed == [42]
+    assert [row["elite_candidate_id"] for row in outcome["outcomes"]] == [42]
+
+
+def test_graduation_records_the_breadth_the_battery_actually_measured() -> None:
+    # The import writes a placeholder assets_passed=1. Leaving it there makes
+    # every graduated champion fail the portfolio solver's minimum_assets_passed
+    # gate on evidence the cross-symbol gate already produced.
+    gates = evaluate_gates(healthy_measurements())
+    breadth = champion_validation.measured_breadth(healthy_measurements(), gates)
+
+    # Own symbol plus the two alternates that passed in healthy_measurements().
+    assert breadth["assets_passed"] == 3
+    assert breadth["timeframes_passed"] == 2
+    assert breadth["regimes_passed"] == 2
+
+
+def test_breadth_counts_nothing_from_a_gate_that_did_not_pass() -> None:
+    measurements = healthy_measurements(
+        cross_symbol=[
+            {"status": "measured", "symbol": "NVDA", "metrics": metrics(pf=0.6, expectancy=-2.0, trades=30)},
+            {"status": "measured", "symbol": "TSLA", "metrics": metrics(pf=0.7, expectancy=-1.0, trades=30)},
+        ],
+        timeframe_stability=unavailable("no 15m dataset"),
+    )
+    breadth = champion_validation.measured_breadth(measurements, evaluate_gates(measurements))
+
+    assert breadth["assets_passed"] == 1
+    assert breadth["timeframes_passed"] == 1

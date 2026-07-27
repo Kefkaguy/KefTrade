@@ -1386,6 +1386,11 @@ export type PortfolioReadiness = {
 };
 
 export type ElitePortfolioConfiguration = {
+  // Portfolio shape preset. Presets change size and spread only; quality
+  // thresholds, correlation limits and the parameter-similarity rule are
+  // identical in every one, and the API rejects a configuration that tries to
+  // weaken them.
+  profile?: string;
   universe: string[];
   families: string[];
   directions: string[];
@@ -1410,7 +1415,66 @@ export type ElitePortfolioOptions = {
   hard_rules?: ElitePortfolioHardRule[];
   objectives: string[];
   maximum_portfolio_size: number;
+  default_profile?: string;
+  profiles?: ElitePortfolioProfile[];
   execution_policy: Record<string, string>;
+};
+
+export type ElitePortfolioProfile = {
+  id: string;
+  label: string;
+  summary: string;
+  intended_use: string;
+  diversified: boolean;
+  warning?: string;
+  constraints: Record<string, number>;
+  resolved_constraints: Record<string, number>;
+};
+
+export type ElitePortfolioBlocker = {
+  setting: string;
+  label: string;
+  required: number | null;
+  available: number | null;
+  severity: "structural" | "eligibility" | "conflict";
+  excluded?: number;
+  detail: string;
+};
+
+export type ElitePortfolioBlockingAnalysis = {
+  feasible: boolean;
+  primary_blocker: ElitePortfolioBlocker | null;
+  blockers: ElitePortfolioBlocker[];
+  eligible_pool_size: number;
+  pool_symbols: string[];
+  pool_families: string[];
+  pool_timeframes: string[];
+};
+
+export type ElitePortfolioProfileOutcome = {
+  profile: string;
+  label: string;
+  summary?: string;
+  diversified: boolean;
+  warning?: string | null;
+  feasible: boolean;
+  size: number;
+  eligible_count?: number;
+  members?: string[];
+  blocking?: ElitePortfolioBlocker | null;
+  error?: string;
+};
+
+export type ElitePortfolioRecommendation = {
+  recommended_profile: string | null;
+  recommended_label?: string;
+  recommended_size?: number;
+  diversified?: boolean;
+  warning?: string | null;
+  reason: string;
+  profiles: ElitePortfolioProfileOutcome[];
+  constraints_relaxed_versus_strict: Array<{ setting: string; label: string; strict_value: unknown; profile_value: unknown }>;
+  protected_constraints_unchanged: boolean;
 };
 
 export type ElitePortfolioVerification = {
@@ -1464,6 +1528,8 @@ export type ElitePortfolioResult = {
   verified_infeasible?: boolean;
   verification?: ElitePortfolioVerification;
   feasibility_report?: ElitePortfolioFeasibilityReport;
+  blocking_analysis?: ElitePortfolioBlockingAnalysis;
+  profile?: string;
   hard_rules?: ElitePortfolioHardRule[];
   analytics?: Record<string, any>;
   portfolio_analytics?: Record<string, any>;
@@ -2107,6 +2173,119 @@ export function approveElitePortfolio(portfolioId: number, snapshotHash: string)
 
 export function activateElitePortfolio(portfolioId: number, snapshotHash: string, idempotencyKey: string) {
   return request<ElitePortfolioResult>(`/research/elite-portfolios/${portfolioId}/activate-internal`, { method: "POST", body: JSON.stringify({ snapshot_hash: snapshotHash, idempotency_key: idempotencyKey }), timeoutMs: 60000 });
+}
+
+export function getElitePortfolioRecommendation() {
+  return request<ElitePortfolioRecommendation>("/research/elite-portfolios/profile-recommendation", { cache: "no-store", timeoutMs: 120000 });
+}
+
+// --- Step 04: activation -----------------------------------------------------
+
+export type PreflightCheck = { code: string; label: string; passed: boolean; detail: string };
+
+export type ExecutionPreflight = {
+  external_deployment_id: number;
+  state: string;
+  state_label: string;
+  checks: PreflightCheck[];
+  passed: boolean;
+  outstanding: string[];
+  next_action: string;
+  account_environment: string;
+  live_money_supported: false;
+  active_halts: Array<Record<string, any>>;
+};
+
+export type ActivationMemberAction = { action: string; enabled: boolean; reason: string };
+
+export type ActivationMember = {
+  id: number;
+  rank: number;
+  candidate_id: string;
+  symbol: string;
+  timeframe: string;
+  strategy_family?: string | null;
+  family_id?: string | null;
+  strategy_direction: string;
+  execution_capability: string;
+  activation_state: string;
+  latest_error: string | null;
+  internal_deployment_id: number | null;
+  external_deployment_id: number | null;
+  internal_deployment_state: string;
+  external_deployment_state: string;
+  external_deployment_state_label: string;
+  preflight: ExecutionPreflight | null;
+  activity: {
+    last_scan: Record<string, any> | null;
+    last_signal: Record<string, any> | null;
+    last_risk_decision: Record<string, any> | null;
+    last_proposed_order: Record<string, any> | null;
+    last_submitted_order: Record<string, any> | null;
+    last_fill: Record<string, any> | null;
+    halt_reason: string | null;
+  };
+  available_actions: ActivationMemberAction[];
+};
+
+export type ActivationSafetyPanel = {
+  provider: string;
+  environment: string;
+  account_is_paper: boolean;
+  live_money_supported: false;
+  account: Record<string, any>;
+  broker_sync: Record<string, any> | null;
+  reconciliation: Record<string, any> | null;
+  market_clock: Record<string, any>;
+  active_halts: Array<Record<string, any>>;
+  feature_flags: Record<string, boolean>;
+  risk_limits: Record<string, number | boolean>;
+};
+
+export type PortfolioActivationView = {
+  portfolio_run_id: number;
+  run_key: string | null;
+  status: string;
+  snapshot_hash: string | null;
+  approved_snapshot_hash: string | null;
+  approved_at: string | null;
+  activated_at: string | null;
+  objective: string | null;
+  profile: string | null;
+  members: ActivationMember[];
+  activation_attempts: Array<Record<string, any>>;
+  summary: {
+    member_count: number;
+    internally_active: number;
+    external_records: number;
+    observe_only: number;
+    execution_enabled: number;
+    preflight_ready: number;
+  };
+  safety: ActivationSafetyPanel;
+  live_money_supported: false;
+};
+
+export function getPortfolioActivation(portfolioId: number) {
+  return request<PortfolioActivationView>(`/research/elite-portfolios/${portfolioId}/activation`, { cache: "no-store", timeoutMs: 120000 });
+}
+
+export function approveMemberForAlpacaPaper(portfolioId: number, memberId: number, options: { reapprove?: boolean } = {}) {
+  return request<Record<string, any>>(`/research/elite-portfolios/${portfolioId}/members/${memberId}/approve-external-paper`, {
+    method: "POST",
+    body: JSON.stringify({ reapprove: options.reapprove ?? false }),
+    timeoutMs: 120000
+  });
+}
+
+export function enableMemberPaperExecution(portfolioId: number, memberId: number) {
+  return request<Record<string, any>>(`/research/elite-portfolios/${portfolioId}/members/${memberId}/enable-paper-execution`, {
+    method: "POST",
+    // Repeats the member id, mirroring the CLI's --confirm-deployment-id: this
+    // is the last approval before real orders reach a broker.
+    body: JSON.stringify({ confirm_member_id: memberId }),
+    timeoutMs: 120000
+  });
 }
 
 export function getCandles(limit = 220, input: ResearchAssetInput = { symbol: "BTCUSDT", timeframe: "4h" }) {

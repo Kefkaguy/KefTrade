@@ -165,3 +165,52 @@ evidence rather than a guess: stop expanding the families that die on
 `cross_symbol`, keep expanding the ones that only miss `minimum_trades`, and
 snapshot more timeframes when `needs_more_data` dominates. The response to a wave
 of failures is more research breadth, not a weaker gate.
+
+
+## Reaching the portfolio solver (Phase 13.10)
+
+Graduating a champion is not enough on its own: the solver reads
+`promotion_state = 'elite'` but *also* applies `DEFAULT_THRESHOLDS`, including
+`minimum_assets_passed = 2`. The import writes a placeholder `assets_passed = 1`
+because at import time nothing had been measured outside the originating symbol,
+and nothing used to overwrite it -- so every graduated champion was structurally
+ineligible for the solver no matter how many symbols its cross-symbol gate had
+actually proved it on.
+
+`measured_breadth` fixes that at the source: on graduation the candidate's
+`assets_passed`, `timeframes_passed` and `regimes_passed` are set from the gates
+that actually passed (own symbol plus each alternate that cleared the
+cross-symbol gate; 2 timeframes when the stability gate passed; the count of
+profitable regime buckets). Applied with `GREATEST`, so a candidate carrying
+richer breadth from an older promotion path is never downgraded, and counted
+only from *passing* gates, so a failed or unmeasured probe contributes nothing.
+
+No threshold was lowered to achieve this. The evidence already existed; it was
+simply never written down.
+
+## Portfolio profiles
+
+`elite_portfolio_builder.PORTFOLIO_PROFILES` presets portfolio *shape* only:
+
+| Profile | Size | Assets | Families | Timeframe cap |
+| --- | --- | --- | --- | --- |
+| Strict Diversified | 5-20 | >= 5 | >= 4 | 1/2 (exact half) |
+| Small Paper Launch | 2-4 | >= 2 | >= 2 | 2/3 |
+| Single Elite Test | 1 | >= 1 | >= 1 | 1/1 |
+
+Quality thresholds, the validated-elite requirement, parameter similarity,
+signal correlation, strategy-return correlation, the minimum correlation
+evidence and the one-per-symbol-family rule are identical in all three.
+`protected_constraint_violations` rejects any configuration that tries to widen
+one, so the API returns 422 rather than quietly building a portfolio on weaker
+protections.
+
+The former 50% timeframe cap was hardcoded as `2 * count <= total` in three
+places. It is now `count * denominator <= total * numerator`, which is
+byte-for-byte the old behaviour at 1/2 and makes odd-sized portfolios reachable
+at 2/3 -- without ever permitting a single-timeframe portfolio above size 2.
+
+`recommend_profile` walks the profiles strictest-first and stops at the first
+one that actually yields a portfolio, reporting exactly which shape constraints
+differ from strict. When none works it says so and calls it an evidence problem
+rather than proposing a looser gate.

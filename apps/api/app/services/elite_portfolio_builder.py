@@ -88,6 +88,160 @@ HARD_RULES: list[dict[str, Any]] = [
     },
 ]
 
+# Constraints that exist to stop two candidates that are really the same bet
+# from sharing a portfolio, plus the evidence floor those checks need. A
+# profile may make any of these stricter and none of them looser: they are the
+# reason a portfolio is diversified at all, so relaxing them to reach
+# feasibility would defeat the point of building one.
+#
+# `minimum_correlation_observations` is protected in the opposite direction --
+# lowering it would let a correlation measured on a handful of overlapping days
+# stand in for real evidence.
+PROTECTED_CEILING_CONSTRAINTS = (
+    "maximum_parameter_similarity",
+    "maximum_signal_correlation",
+    "maximum_strategy_return_correlation",
+)
+PROTECTED_FLOOR_CONSTRAINTS = ("minimum_correlation_observations",)
+
+# Portfolio shape presets. These change only how *many* and how *spread* the
+# members must be -- never a quality threshold, never a correlation or
+# similarity limit, never the symbol-family uniqueness rule. `constraints` here
+# is a partial override applied over DEFAULT_CONSTRAINTS.
+PORTFOLIO_PROFILES: list[dict[str, Any]] = [
+    {
+        "id": "strict_diversified",
+        "label": "Strict Diversified",
+        "summary": "Production diversification. Five assets, four families, exact timeframe balance.",
+        "intended_use": "A mature research pool with elites spread across many symbols and families.",
+        "diversified": True,
+        "constraints": {},
+    },
+    {
+        "id": "small_paper_launch",
+        "label": "Small Paper Launch",
+        "summary": "Two to four members, at least two assets and two families, one member per symbol.",
+        "intended_use": "A first Alpaca paper launch from a research pool that is real but still narrow.",
+        "diversified": True,
+        "constraints": {
+            "minimum_portfolio_size": 2,
+            "maximum_portfolio_size": 4,
+            "minimum_unique_assets": 2,
+            "minimum_families": 2,
+            "minimum_timeframes": 2,
+            "maximum_per_symbol": 1,
+            "maximum_per_family": 2,
+            # 2/3 rather than 1/2: an odd-sized portfolio cannot split evenly,
+            # so the exact-half cap makes every 3-member portfolio infeasible
+            # on two timeframes. Two thirds still forbids a single-timeframe
+            # portfolio at size 3 or more.
+            "timeframe_cap_numerator": 2,
+            "timeframe_cap_denominator": 3,
+        },
+    },
+    {
+        "id": "single_elite_test",
+        "label": "Single Elite Test",
+        "summary": "One validated elite, deployed alone. Not a diversified portfolio.",
+        "intended_use": "Controlled Alpaca paper testing of one strategy's live execution path.",
+        "diversified": False,
+        "warning": (
+            "A single-member portfolio has no diversification of any kind: one symbol, one family, "
+            "one timeframe, and no correlation benefit. Its drawdown is the strategy's own drawdown. "
+            "Use it to exercise the execution path, not to evaluate portfolio behaviour."
+        ),
+        "constraints": {
+            "minimum_portfolio_size": 1,
+            "maximum_portfolio_size": 1,
+            "minimum_unique_assets": 1,
+            "minimum_families": 1,
+            "minimum_timeframes": 1,
+            "maximum_per_symbol": 1,
+            "maximum_per_family": 1,
+            # A one-member portfolio is trivially 100% one timeframe.
+            "timeframe_cap_numerator": 1,
+            "timeframe_cap_denominator": 1,
+        },
+    },
+]
+
+PROFILES_BY_ID = {row["id"]: row for row in PORTFOLIO_PROFILES}
+DEFAULT_PROFILE_ID = "strict_diversified"
+
+# Ordered least-permissive first. The recommender walks this in order and stops
+# at the first profile that actually yields a portfolio, so it never proposes a
+# looser shape than the evidence requires.
+PROFILE_PREFERENCE_ORDER = ("strict_diversified", "small_paper_launch", "single_elite_test")
+
+ELIGIBILITY_REASON_LABELS: dict[str, str] = {
+    "UNIVERSE_EXCLUDED": "Symbol is outside the selected universe",
+    "FAMILY_EXCLUDED": "Family is outside the selected families",
+    "DIRECTION_EXCLUDED": "Outside the selected direction",
+    "TIMEFRAME_EXCLUDED": "Outside the selected timeframes",
+    "PROFIT_FACTOR_MINIMUM": "Profit factor below the minimum",
+    "EXPECTANCY_POSITIVE": "Expectancy is not positive",
+    "DRAWDOWN_MAXIMUM": "Drawdown above the maximum",
+    "TRADE_COUNT_MINIMUM": "Below the minimum trade count",
+    "STABILITY_MINIMUM": "Stability below the minimum",
+    "ASSET_BREADTH_MINIMUM": "Insufficient passing assets",
+    "TIMEFRAME_EVIDENCE_MINIMUM": "Insufficient passing timeframes",
+    "HEALTH_CLASSIFICATION": "Missing required evidence (health not classified healthy)",
+    "SYMBOL_FAMILY_DUPLICATE": "Duplicate symbol-family pair",
+    "PARAMETER_SIMILARITY": "Parameter-similarity conflict",
+    "SIGNAL_CORRELATION_LIMIT": "Signal-correlation conflict",
+    "STRATEGY_RETURN_CORRELATION_LIMIT": "Strategy-return-correlation conflict",
+    "SIGNAL_CORRELATION_INSUFFICIENT": "Missing required evidence (too few overlapping signal observations)",
+    "STRATEGY_RETURN_CORRELATION_INSUFFICIENT": "Missing required evidence (too few overlapping return observations)",
+    "MINIMUM_UNIQUE_ASSETS": "Not enough unique assets",
+    "MINIMUM_FAMILIES": "Not enough families",
+    "MINIMUM_TIMEFRAMES": "Not enough timeframes",
+    "MAXIMUM_PER_SYMBOL": "Too many members on one symbol",
+    "MAXIMUM_PER_FAMILY": "Too many members in one family",
+    "TIMEFRAME_50_PERCENT_CAP": "Timeframe balance cap",
+    "PAIRWISE_HARD_CONFLICT": "Pairwise hard conflict",
+}
+
+
+def reason_label(code: str) -> str:
+    return ELIGIBILITY_REASON_LABELS.get(code, str(code).replace("_", " ").title())
+
+
+def profile_constraints(profile_id: str | None) -> dict[str, Any]:
+    profile = PROFILES_BY_ID.get(str(profile_id or DEFAULT_PROFILE_ID))
+    if profile is None:
+        raise ValueError(f"unknown portfolio profile {profile_id!r}")
+    return {**DEFAULT_CONSTRAINTS, **dict(profile["constraints"])}
+
+
+def protected_constraint_violations(constraints: dict[str, Any]) -> list[str]:
+    """Constraint keys the caller set looser than the shipped default.
+
+    Reported rather than silently corrected: a caller trying to reach
+    feasibility by widening a correlation limit needs to be told no, not
+    quietly given the default back and left believing it worked.
+    """
+    violations: list[str] = []
+    for key in PROTECTED_CEILING_CONSTRAINTS:
+        if float(constraints.get(key, DEFAULT_CONSTRAINTS[key])) > float(DEFAULT_CONSTRAINTS[key]):
+            violations.append(key)
+    for key in PROTECTED_FLOOR_CONSTRAINTS:
+        if float(constraints.get(key, DEFAULT_CONSTRAINTS[key])) < float(DEFAULT_CONSTRAINTS[key]):
+            violations.append(key)
+    return sorted(violations)
+
+
+def timeframe_cap_holds(counts: Iterable[int], total: int, constraints: dict[str, Any]) -> bool:
+    """No single timeframe may exceed numerator/denominator of the portfolio.
+
+    Generalises the former hardcoded `2 * count <= total`. At 1/2 the behaviour
+    is byte-for-byte what it was; at 2/3 an odd-sized portfolio becomes
+    reachable without ever allowing a single-timeframe portfolio above size 2.
+    """
+    numerator = int(constraints.get("timeframe_cap_numerator", 1))
+    denominator = int(constraints.get("timeframe_cap_denominator", 2))
+    return all(count * denominator <= total * numerator for count in counts)
+
+
 OBJECTIVE_HIERARCHY = [
     "maximum_feasible_size",
     "selected_objective",
@@ -124,12 +278,25 @@ def candidate_key(candidate: dict[str, Any]) -> str:
 
 def normalized_configuration(configuration: dict[str, Any] | None = None) -> dict[str, Any]:
     supplied = deepcopy(configuration or {})
-    constraints = {**DEFAULT_CONSTRAINTS, **dict(supplied.get("constraints") or {})}
+    profile_id = str(supplied.get("profile") or DEFAULT_PROFILE_ID)
+    # Profile first, explicit constraints second, so a caller can still tighten
+    # an individual value on top of a preset. Loosening a protected constraint
+    # is rejected below rather than merged.
+    constraints = {**profile_constraints(profile_id), **dict(supplied.get("constraints") or {})}
     thresholds = {**DEFAULT_THRESHOLDS, **dict(supplied.get("thresholds") or {})}
+    violations = protected_constraint_violations(constraints)
+    if violations:
+        raise ValueError(
+            "these portfolio constraints may not be weakened: "
+            + ", ".join(violations)
+            + ". They are what stop two versions of the same bet sharing a portfolio."
+        )
     constraints["maximum_portfolio_size"] = min(MAX_PORTFOLIO_SIZE, max(1, int(constraints["maximum_portfolio_size"])))
     constraints["minimum_portfolio_size"] = max(1, int(constraints["minimum_portfolio_size"]))
+    constraints["minimum_portfolio_size"] = min(constraints["minimum_portfolio_size"], constraints["maximum_portfolio_size"])
     return {
         "solver_version": SOLVER_VERSION,
+        "profile": profile_id,
         "objective": str(supplied.get("objective") or "balanced"),
         "custom_size": int(supplied["custom_size"]) if supplied.get("custom_size") is not None else None,
         "universe": sorted({str(item).upper() for item in supplied.get("universe") or []}),
@@ -414,10 +581,12 @@ def candidate_order(candidates: Iterable[dict[str, Any]], objective: str) -> lis
     )
 
 
-def exact_timeframe_cap_holds(selected: Iterable[dict[str, Any]]) -> bool:
+def exact_timeframe_cap_holds(selected: Iterable[dict[str, Any]], constraints: dict[str, Any] | None = None) -> bool:
     rows = list(selected)
     total = len(rows)
-    return total > 0 and all(2 * count <= total for count in Counter(str(row.get("timeframe")) for row in rows).values())
+    resolved = constraints if constraints is not None else DEFAULT_CONSTRAINTS
+    counts = Counter(str(row.get("timeframe")) for row in rows).values()
+    return total > 0 and timeframe_cap_holds(counts, total, resolved)
 
 
 def portfolio_constraint_reasons(selected: list[dict[str, Any]], constraints: dict[str, Any], conflicts: set[frozenset[str]]) -> list[str]:
@@ -432,7 +601,7 @@ def portfolio_constraint_reasons(selected: list[dict[str, Any]], constraints: di
         reasons.append("MAXIMUM_PER_SYMBOL")
     if any(count > int(constraints["maximum_per_family"]) for count in Counter(str(row.get("family_id")) for row in selected).values()):
         reasons.append("MAXIMUM_PER_FAMILY")
-    if not exact_timeframe_cap_holds(selected):
+    if not exact_timeframe_cap_holds(selected, constraints):
         reasons.append("TIMEFRAME_50_PERCENT_CAP")
     ids = [candidate_key(row) for row in selected]
     if any(frozenset((left, right)) in conflicts for index, left in enumerate(ids) for right in ids[index + 1:]):
@@ -449,7 +618,7 @@ def _can_add(selected: list[dict[str, Any]], candidate: dict[str, Any], target: 
     if sum(str(row.get("family_id")) == str(candidate.get("family_id")) for row in selected) >= int(constraints["maximum_per_family"]):
         return False
     timeframe_count = sum(str(row.get("timeframe")) == str(candidate.get("timeframe")) for row in selected) + 1
-    return 2 * timeframe_count <= target
+    return timeframe_cap_holds([timeframe_count], target, constraints)
 
 
 def _selection_score(selected: list[dict[str, Any]], objective: str) -> tuple[Any, ...]:
@@ -615,7 +784,7 @@ def _search_feasible_subset(
             if (
                 symbol_counts.get(symbol, 0) < maximum_per_symbol
                 and family_counts.get(family, 0) < maximum_per_family
-                and 2 * (timeframe_counts.get(timeframe, 0) + 1) <= target
+                and timeframe_cap_holds([timeframe_counts.get(timeframe, 0) + 1], target, constraints)
             ):
                 symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
                 family_counts[family] = family_counts.get(family, 0) + 1
@@ -863,6 +1032,216 @@ def feasibility_report(pool: list[dict[str, Any]], conflicts: list[dict[str, Any
     }
 
 
+def blocking_analysis(
+    pool: list[dict[str, Any]],
+    eligibility: list[dict[str, Any]],
+    conflicts: list[dict[str, Any]],
+    result: dict[str, Any],
+    configuration: dict[str, Any],
+) -> dict[str, Any]:
+    """Name the single setting most responsible for the current outcome.
+
+    A list of binding constraints tells you everything that bit at least once;
+    it does not tell you which one to change. This picks one, with the number
+    behind it, so the page can say "this is what is stopping you" instead of
+    leaving the operator to rank a histogram themselves.
+    """
+    config = normalized_configuration(configuration)
+    constraints = config["constraints"]
+    feasible = result.get("status") != "infeasible"
+    symbols = {str(row.get("symbol")) for row in pool}
+    families = {str(row.get("family_id")) for row in pool}
+    timeframes = {str(row.get("timeframe")) for row in pool}
+
+    reason_counts: Counter[str] = Counter()
+    for decision in eligibility:
+        reason_counts.update(decision.get("reasons") or [])
+
+    blockers: list[dict[str, Any]] = []
+    # Structural shortfalls first: no rearrangement of the pool can fix these,
+    # so they outrank per-candidate exclusions and pairwise conflicts.
+    if len(symbols) < int(constraints["minimum_unique_assets"]):
+        blockers.append({
+            "setting": "minimum_unique_assets",
+            "label": "Minimum unique assets",
+            "required": int(constraints["minimum_unique_assets"]),
+            "available": len(symbols),
+            "severity": "structural",
+            "detail": (
+                f"The eligible pool covers {len(symbols)} symbol(s) but this profile requires "
+                f"{int(constraints['minimum_unique_assets'])}. No selection can satisfy it."
+            ),
+        })
+    if len(families) < int(constraints["minimum_families"]):
+        blockers.append({
+            "setting": "minimum_families",
+            "label": "Minimum families",
+            "required": int(constraints["minimum_families"]),
+            "available": len(families),
+            "severity": "structural",
+            "detail": (
+                f"The eligible pool covers {len(families)} family/families but this profile requires "
+                f"{int(constraints['minimum_families'])}. No selection can satisfy it."
+            ),
+        })
+    if len(timeframes) < int(constraints["minimum_timeframes"]):
+        blockers.append({
+            "setting": "minimum_timeframes",
+            "label": "Minimum timeframes",
+            "required": int(constraints["minimum_timeframes"]),
+            "available": len(timeframes),
+            "severity": "structural",
+            "detail": (
+                f"The eligible pool covers {len(timeframes)} timeframe(s) but this profile requires "
+                f"{int(constraints['minimum_timeframes'])}."
+            ),
+        })
+    if len(pool) < int(constraints["minimum_portfolio_size"]):
+        blockers.append({
+            "setting": "minimum_portfolio_size",
+            "label": "Minimum portfolio size",
+            "required": int(constraints["minimum_portfolio_size"]),
+            "available": len(pool),
+            "severity": "structural",
+            "detail": f"Only {len(pool)} eligible variant(s) exist; the profile needs at least {int(constraints['minimum_portfolio_size'])}.",
+        })
+
+    # Then whatever excluded the most candidates before the solver ever ran.
+    for code, count in reason_counts.most_common(1):
+        blockers.append({
+            "setting": code,
+            "label": reason_label(code),
+            "required": None,
+            "available": None,
+            "severity": "eligibility",
+            "excluded": count,
+            "detail": f"{count} variant(s) were excluded from the pool by: {reason_label(code)}.",
+        })
+
+    conflict_counts = Counter(row["conflict_type"] for row in conflicts)
+    for code, count in conflict_counts.most_common(1):
+        blockers.append({
+            "setting": code,
+            "label": reason_label(code),
+            "required": None,
+            "available": None,
+            "severity": "conflict",
+            "excluded": count,
+            "detail": f"{count} candidate pair(s) cannot sit together because of: {reason_label(code)}.",
+        })
+
+    return {
+        "feasible": feasible,
+        "primary_blocker": None if feasible else (blockers[0] if blockers else None),
+        "blockers": blockers,
+        "eligible_pool_size": len(pool),
+        "pool_symbols": sorted(symbols),
+        "pool_families": sorted(families),
+        "pool_timeframes": sorted(timeframes),
+    }
+
+
+def profile_feasibility(candidates: list[dict[str, Any]], configuration: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    """Try every profile against the current evidence, cheapest question first.
+
+    Used by the recommender and surfaced directly so the page can show why a
+    profile is or isn't available rather than making the operator discover it
+    by clicking through each one.
+    """
+    base = deepcopy(configuration or {})
+    outcomes: list[dict[str, Any]] = []
+    for profile_id in PROFILE_PREFERENCE_ORDER:
+        profile = PROFILES_BY_ID[profile_id]
+        attempt = {**base, "profile": profile_id, "constraints": {}}
+        try:
+            result = preview(candidates, attempt)
+        except ValueError as error:
+            outcomes.append({
+                "profile": profile_id,
+                "label": profile["label"],
+                "feasible": False,
+                "size": 0,
+                "error": str(error),
+                "diversified": bool(profile["diversified"]),
+            })
+            continue
+        outcomes.append({
+            "profile": profile_id,
+            "label": profile["label"],
+            "summary": profile["summary"],
+            "diversified": bool(profile["diversified"]),
+            "warning": profile.get("warning"),
+            "feasible": result["status"] != "infeasible",
+            "size": int(result.get("maximum_feasible_size") or 0),
+            "eligible_count": int(result.get("eligible_count") or 0),
+            "members": list(result.get("selected") or []),
+            "blocking": result.get("blocking_analysis", {}).get("primary_blocker"),
+        })
+    return outcomes
+
+
+def recommend_profile(candidates: list[dict[str, Any]], configuration: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The strictest profile that actually produces a portfolio from this evidence.
+
+    Walks `PROFILE_PREFERENCE_ORDER` and stops at the first feasible profile,
+    so the recommendation is never looser than it has to be. Correlation,
+    similarity, quality and validation requirements are identical in every
+    profile, so nothing about this search can weaken them -- the only things
+    that vary are portfolio size and how far the members must be spread.
+    """
+    outcomes = profile_feasibility(candidates, configuration)
+    by_id = {row["profile"]: row for row in outcomes}
+    recommended = next((row for row in outcomes if row["feasible"]), None)
+    strict = by_id.get("strict_diversified") or {}
+    if recommended is None:
+        return {
+            "recommended_profile": None,
+            "reason": (
+                "No profile produces a portfolio from the current evidence, including a single-member test. "
+                "This is an evidence problem, not a settings problem: validate more champions, or widen "
+                "research so more symbols and families reach the elite pool."
+            ),
+            "profiles": outcomes,
+            "constraints_relaxed_versus_strict": [],
+            "protected_constraints_unchanged": True,
+        }
+    relaxed = _profile_differences(recommended["profile"])
+    return {
+        "recommended_profile": recommended["profile"],
+        "recommended_label": recommended["label"],
+        "recommended_size": recommended["size"],
+        "diversified": recommended["diversified"],
+        "warning": recommended.get("warning"),
+        "reason": (
+            f"Strict Diversified is feasible; no change needed."
+            if recommended["profile"] == "strict_diversified"
+            else (
+                f"Strict Diversified produces no portfolio from this evidence "
+                f"({(strict.get('blocking') or {}).get('detail') or 'no feasible selection'}). "
+                f"{recommended['label']} is the strictest profile that does, at {recommended['size']} member(s)."
+            )
+        ),
+        "profiles": outcomes,
+        "constraints_relaxed_versus_strict": relaxed,
+        # Stated explicitly because this is the question an operator should ask
+        # of any automatic recommendation.
+        "protected_constraints_unchanged": True,
+    }
+
+
+def _profile_differences(profile_id: str) -> list[dict[str, Any]]:
+    overrides = dict(PROFILES_BY_ID[profile_id]["constraints"])
+    return [
+        {
+            "setting": key,
+            "label": reason_label(key),
+            "strict_value": DEFAULT_CONSTRAINTS.get(key),
+            "profile_value": value,
+        }
+        for key, value in sorted(overrides.items())
+    ]
+
+
 def portfolio_analytics(selected: list[dict[str, Any]], correlations: list[dict[str, Any]]) -> dict[str, Any]:
     ids = {candidate_key(row) for row in selected}
     coefficients = [abs(float(row["coefficient"])) for row in correlations if row.get("coefficient") is not None and row["left_candidate_id"] in ids and row["right_candidate_id"] in ids and row["correlation_type"] == "strategy_return"]
@@ -928,10 +1307,20 @@ def preview(candidates: list[dict[str, Any]], configuration: dict[str, Any] | No
         "correlations": correlations,
         "binding_constraints": binding_constraints(eligibility, conflicts),
         "feasibility_report": feasibility_report(conflict_pool, conflicts, result["verification"], config),
+        "blocking_analysis": blocking_analysis(conflict_pool, eligibility, conflicts, result, config),
         "hard_rules": deepcopy(HARD_RULES),
+        "profile": config["profile"],
         "analytics": portfolio_analytics(selected, correlations),
         "selection_explanations": [{"candidate_id": candidate_id, "reason": "Selected by deterministic objective hierarchy."} for candidate_id in result["selected"]],
-        "rejection_explanations": [{"candidate_key": row["candidate_key"], "candidate_id": row["candidate_id"], "reasons": row["reasons"]} for row in eligibility if not row["eligible"]],
+        "rejection_explanations": [
+            {
+                "candidate_key": row["candidate_key"],
+                "candidate_id": row["candidate_id"],
+                "reasons": row["reasons"],
+                "reason_labels": [reason_label(code) for code in row["reasons"]],
+            }
+            for row in eligibility if not row["eligible"]
+        ],
     }
     response["timing"] = {
         "eligibility_ms": eligibility_ms,

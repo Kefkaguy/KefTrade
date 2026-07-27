@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 import app.services.elite_portfolio_builder as elite_portfolio_builder
 from app.services.elite_portfolio_builder import (
     SOLVER_VERSION,
@@ -329,3 +331,204 @@ def test_hard_rules_are_surfaced_and_include_symbol_family_uniqueness_independen
     assert "SIGNAL_CORRELATION_LIMIT" in rule_ids
     assert "STRATEGY_RETURN_CORRELATION_LIMIT" in rule_ids
     assert "TIMEFRAME_50_PERCENT_CAP" in rule_ids
+
+
+# --- Portfolio profiles (Step 03 feasibility) --------------------------------
+
+from app.services.elite_portfolio_builder import (  # noqa: E402
+    DEFAULT_CONSTRAINTS as _DEFAULTS,
+    PROFILES_BY_ID,
+    blocking_analysis,
+    normalized_configuration as _normalize,
+    profile_constraints,
+    protected_constraint_violations,
+    recommend_profile,
+    timeframe_cap_holds,
+)
+
+
+def _series(seed: str, days: int = 60) -> dict[str, float]:
+    """A daily return series long enough to actually measure correlation on.
+
+    Empty series are not a neutral default here: a pair with fewer than
+    `minimum_correlation_observations` overlapping days is a hard
+    "insufficient evidence" conflict, so a fixture without returns makes every
+    pair conflict and every portfolio above size one infeasible.
+    """
+    step = 7 + (sum(ord(character) for character in seed) % 11)
+    return {f"2026-01-{day + 1:02d}": round(((day * step) % 17 - 8) / 100.0, 4) for day in range(days)}
+
+
+def _parameters(candidate_id: str, family: str) -> dict[str, object]:
+    """Distinct, deterministic parameters per variant.
+
+    Two candidates whose parameters are >90% similar are a hard conflict, so a
+    fixture that varies one field by a few percent is a fixture where nothing
+    can share a portfolio. Real families also carry their own named
+    parameters, which is what actually separates them here. Derived from the
+    id rather than hash(), whose value changes between runs.
+    """
+    index = int("".join(character for character in candidate_id if character.isdigit()) or "1")
+    return {"rsi_min": 50 + index, "atr_multiplier": 1.0 + index * 0.25, f"{family}_threshold": index}
+
+
+def _variant(candidate_id, symbol, timeframe, family, **overrides):
+    """An elite variant that clears every quality threshold by default."""
+    row = {
+        "candidate_key": f"{candidate_id}|{symbol}|{timeframe}",
+        "candidate_id": candidate_id,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "family_id": family,
+        "strategy_direction": "long",
+        "execution_capability": "external_observe",
+        "parameters": _parameters(candidate_id, family),
+        "profit_factor": 1.8,
+        "expectancy": 6.0,
+        "max_drawdown": 0.05,
+        "trade_count": 90,
+        "stability": 0.8,
+        "assets_passed": 3,
+        "timeframes_passed": 2,
+        "regimes_passed": 2,
+        "health": "healthy",
+        "research_score": 0.8,
+        "quality_score": 0.8,
+        "strategy_returns": _series(candidate_id),
+        "signal_returns": _series(candidate_id + "_signal"),
+    }
+    row.update(overrides)
+    return row
+
+
+def test_timeframe_cap_at_one_half_is_unchanged_from_the_original_rule() -> None:
+    half = {"timeframe_cap_numerator": 1, "timeframe_cap_denominator": 2}
+
+    assert timeframe_cap_holds([2, 2], 4, half) is True
+    assert timeframe_cap_holds([3, 1], 4, half) is False
+    # The exact-half cap is what makes every 3-member two-timeframe portfolio
+    # infeasible: 2 of 3 already exceeds half.
+    assert timeframe_cap_holds([2, 1], 3, half) is False
+
+
+def test_two_thirds_cap_makes_an_odd_sized_portfolio_reachable() -> None:
+    two_thirds = {"timeframe_cap_numerator": 2, "timeframe_cap_denominator": 3}
+
+    assert timeframe_cap_holds([2, 1], 3, two_thirds) is True
+    # Still forbids a single-timeframe portfolio at size 3.
+    assert timeframe_cap_holds([3], 3, two_thirds) is False
+
+
+def test_every_profile_keeps_the_correlation_and_similarity_limits_intact() -> None:
+    for profile_id in PROFILES_BY_ID:
+        constraints = profile_constraints(profile_id)
+        assert constraints["maximum_parameter_similarity"] == _DEFAULTS["maximum_parameter_similarity"]
+        assert constraints["maximum_signal_correlation"] == _DEFAULTS["maximum_signal_correlation"]
+        assert constraints["maximum_strategy_return_correlation"] == _DEFAULTS["maximum_strategy_return_correlation"]
+        assert constraints["minimum_correlation_observations"] == _DEFAULTS["minimum_correlation_observations"]
+        assert protected_constraint_violations(constraints) == []
+
+
+def test_a_configuration_that_loosens_a_protected_limit_is_rejected() -> None:
+    with pytest.raises(ValueError, match="may not be weakened"):
+        _normalize({"constraints": {"maximum_strategy_return_correlation": 0.99}})
+    with pytest.raises(ValueError, match="may not be weakened"):
+        _normalize({"constraints": {"maximum_parameter_similarity": 0.99}})
+    with pytest.raises(ValueError, match="may not be weakened"):
+        _normalize({"constraints": {"minimum_correlation_observations": 5}})
+
+
+def test_a_configuration_may_still_tighten_a_protected_limit() -> None:
+    config = _normalize({"constraints": {"maximum_strategy_return_correlation": 0.50}})
+
+    assert config["constraints"]["maximum_strategy_return_correlation"] == 0.50
+
+
+def test_a_narrow_pool_is_infeasible_strict_but_works_as_a_small_paper_launch() -> None:
+    # Two symbols, two families -- a real but narrow research pool, exactly the
+    # shape that produced "no feasible portfolio" under the strict profile.
+    pool = [
+        _variant("c1", "AMD", "30m", "session_momentum"),
+        _variant("c2", "NVDA", "15m", "vwap_trend"),
+        _variant("c3", "SPY", "30m", "breakout"),
+    ]
+
+    strict = preview(pool, {"profile": "strict_diversified"})
+    assert strict["status"] == "infeasible"
+
+    small = preview(pool, {"profile": "small_paper_launch"})
+    assert small["status"] == "review_ready"
+    assert 2 <= small["maximum_feasible_size"] <= 4
+
+
+def test_single_elite_test_deploys_one_member_and_is_labelled_non_diversified() -> None:
+    pool = [_variant("c1", "AMD", "30m", "session_momentum")]
+
+    result = preview(pool, {"profile": "single_elite_test"})
+
+    assert result["status"] == "review_ready"
+    assert result["maximum_feasible_size"] == 1
+    assert PROFILES_BY_ID["single_elite_test"]["diversified"] is False
+    assert "no diversification" in PROFILES_BY_ID["single_elite_test"]["warning"]
+
+
+def test_blocking_analysis_names_the_setting_that_actually_blocks() -> None:
+    pool = [
+        _variant("c1", "AMD", "30m", "session_momentum"),
+        _variant("c2", "NVDA", "15m", "vwap_trend"),
+    ]
+
+    result = preview(pool, {"profile": "strict_diversified"})
+    blocker = result["blocking_analysis"]["primary_blocker"]
+
+    assert result["blocking_analysis"]["feasible"] is False
+    # Two symbols cannot satisfy a five-symbol minimum by any rearrangement.
+    assert blocker["setting"] == "minimum_unique_assets"
+    assert blocker["required"] == 5
+    assert blocker["available"] == 2
+    assert blocker["severity"] == "structural"
+
+
+def test_recommendation_picks_the_strictest_profile_that_actually_works() -> None:
+    pool = [
+        _variant("c1", "AMD", "30m", "session_momentum"),
+        _variant("c2", "NVDA", "15m", "vwap_trend"),
+        _variant("c3", "SPY", "30m", "breakout"),
+    ]
+
+    recommendation = recommend_profile(pool)
+
+    assert recommendation["recommended_profile"] == "small_paper_launch"
+    assert recommendation["protected_constraints_unchanged"] is True
+    relaxed = {row["setting"] for row in recommendation["constraints_relaxed_versus_strict"]}
+    # Only portfolio shape moves; nothing that keeps two versions of the same
+    # bet out of one portfolio.
+    assert "maximum_parameter_similarity" not in relaxed
+    assert "maximum_strategy_return_correlation" not in relaxed
+    assert "minimum_unique_assets" in relaxed
+
+
+def test_recommendation_prefers_strict_when_the_pool_can_support_it() -> None:
+    pool = [
+        _variant("c1", "AMD", "30m", "session_momentum"),
+        _variant("c2", "NVDA", "15m", "vwap_trend"),
+        _variant("c3", "SPY", "30m", "breakout"),
+        _variant("c4", "QQQ", "15m", "gap_fill"),
+        _variant("c5", "TSLA", "30m", "opening_fade"),
+        _variant("c6", "AAPL", "15m", "trend_pullback"),
+    ]
+
+    recommendation = recommend_profile(pool)
+
+    assert recommendation["recommended_profile"] == "strict_diversified"
+    assert recommendation["constraints_relaxed_versus_strict"] == []
+
+
+def test_recommendation_reports_an_evidence_problem_rather_than_inventing_a_profile() -> None:
+    # Nothing clears the quality thresholds, so no portfolio shape can help.
+    pool = [_variant("c1", "AMD", "30m", "session_momentum", trade_count=3, profit_factor=0.4)]
+
+    recommendation = recommend_profile(pool)
+
+    assert recommendation["recommended_profile"] is None
+    assert "evidence problem" in recommendation["reason"]

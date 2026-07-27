@@ -22,6 +22,7 @@ import {
   backfillElitePortfolioEvidence,
   createElitePortfolio,
   dedupeResearchChampions,
+  getElitePortfolioRecommendation,
   getChampionValidationDiagnostics,
   getChampionValidationQueue,
   getElitePortfolioOptions,
@@ -37,10 +38,12 @@ import {
   type ElitePortfolioConfiguration,
   type ElitePortfolioHardRule,
   type ElitePortfolioOptions,
+  type ElitePortfolioRecommendation,
   type ElitePortfolioResult,
   type ResearchChampionImportResult,
   type ResearchChampionStatus
 } from "@/lib/api";
+import { EliteActivationWorkspace } from "@/components/EliteActivationWorkspace";
 
 type Phase = "configure" | "preview" | "saved" | "approved" | "activated";
 
@@ -58,6 +61,7 @@ export function ElitePortfolioBuilder() {
   const [championStatus, setChampionStatus] = useState<ResearchChampionStatus | null>(null);
   const [championImport, setChampionImport] = useState<ResearchChampionImportResult | null>(null);
   const [dedupeResult, setDedupeResult] = useState<ChampionDedupeResult | null>(null);
+  const [recommendation, setRecommendation] = useState<ElitePortfolioRecommendation | null>(null);
   const [validationQueue, setValidationQueue] = useState<ChampionValidationQueue | null>(null);
   const [validationResult, setValidationResult] = useState<ChampionValidationRunResult | null>(null);
   const [validationDiagnostics, setValidationDiagnostics] = useState<ChampionValidationDiagnostics | null>(null);
@@ -80,6 +84,7 @@ export function ElitePortfolioBuilder() {
         if (!mounted) return;
         setOptions(next);
         setConfiguration({
+          profile: next.default_profile ?? "strict_diversified",
           universe: [],
           families: [],
           directions: [...next.directions],
@@ -128,8 +133,10 @@ export function ElitePortfolioBuilder() {
         : backlog
           ? "Import champions"
           : "Expand research";
-  const twoTimeframeWarning = configuration?.timeframes.length === 2
-    ? "With exactly two timeframes, the exact 50% cap requires an even-sized portfolio split equally between them."
+  // Only the strict profile enforces an exact half; Small Paper Launch uses a
+  // two-thirds cap precisely so an odd-sized portfolio is reachable.
+  const twoTimeframeWarning = configuration?.timeframes.length === 2 && (configuration?.profile ?? "strict_diversified") === "strict_diversified"
+    ? "Strict Diversified caps any one timeframe at half the portfolio. With exactly two timeframes selected that forces an even-sized, evenly split portfolio. Small Paper Launch uses a two-thirds cap instead."
     : null;
 
   async function run(action: string, operation: () => Promise<ElitePortfolioResult>, nextPhase: Phase) {
@@ -176,6 +183,18 @@ export function ElitePortfolioBuilder() {
       const [nextOptions, nextQueue] = await Promise.all([getElitePortfolioOptions(), getChampionValidationQueue(25)]);
       setOptions(nextOptions);
       setValidationQueue(nextQueue);
+    } catch (reason) {
+      setError(message(reason));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function loadRecommendation() {
+    setBusy("recommend");
+    setError(null);
+    try {
+      setRecommendation(await getElitePortfolioRecommendation());
     } catch (reason) {
       setError(message(reason));
     } finally {
@@ -316,6 +335,18 @@ export function ElitePortfolioBuilder() {
 
       {showAdvanced ? <div className="eliteBuilderGrid">
         <main>
+          <PortfolioProfilePicker
+            options={options}
+            configuration={configuration}
+            recommendation={recommendation}
+            busy={busy}
+            onSelect={(profile) => setConfiguration({ ...configuration, profile })}
+            onRecommend={loadRecommendation}
+            onApplyRecommendation={(profile) => { setConfiguration({ ...configuration, profile }); run("preview", () => previewElitePortfolio({ ...configuration, profile }), "preview"); }}
+          />
+
+          {result ? <PortfolioFeasibilityPanel result={result} /> : null}
+
           <section className="elitePanel">
             <header><div><span className="eyebrow">01 · Research scope</span><h2>Choose the evidence pool</h2></div><Layers3 size={20} /></header>
             <div className="eliteChoiceSection">
@@ -390,13 +421,21 @@ export function ElitePortfolioBuilder() {
           <section className="eliteRailActions">
             {hasInsufficientCorrelation(result) ? <button className="button secondary" disabled={Boolean(busy)} onClick={buildMissingEvidence}><RefreshCw className={busy === "evidence" ? "spin" : ""} size={16} />{busy === "evidence" ? "Building evidence..." : "Build missing correlation evidence"}</button> : null}
             <button className="button" disabled={Boolean(busy)} onClick={() => run("preview", () => previewElitePortfolio(configuration), "preview")}><Sparkles size={16} />{busy === "preview" ? "Constructing…" : "Preview portfolio"}</button>
-            {phase === "preview" && result?.status === "review_ready" ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("save", () => createElitePortfolio(configuration), "saved")}><ArrowRight size={16} />Save immutable run</button> : null}
-            {phase === "saved" && result?.id && snapshotHash ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("approve", () => approveElitePortfolio(result.id!, snapshotHash), "approved")}><Check size={16} />Approve snapshot</button> : null}
-            {phase === "approved" && result?.id && snapshotHash ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("activate", () => activateElitePortfolio(result.id!, snapshotHash, `elite-builder-${result.id}-${snapshotHash.slice(0, 12)}`), "activated")}><Play size={16} />Activate internally</button> : null}
             {result ? <button className="eliteTextButton" disabled={Boolean(busy)} onClick={() => run("refresh", () => previewElitePortfolio(configuration), "preview")}><RefreshCw size={14} />Recalculate from current evidence</button> : null}
+            {/* Saving mints the immutable snapshot; approval is what Step 04
+                requires, so neither can be skipped on the way to activation. */}
+            {phase === "preview" && result?.status === "review_ready" ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("save", () => createElitePortfolio(configuration), "saved")}><ArrowRight size={16} />Save immutable run</button> : null}
+            {phase === "saved" && result?.id && snapshotHash ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("approve", () => approveElitePortfolio(result.id!, snapshotHash), "approved")}><Check size={16} />Approve portfolio</button> : null}
+            {(phase === "approved" || phase === "activated") && result?.id && snapshotHash ? <button className="button secondary" disabled={Boolean(busy)} onClick={() => run("activate", () => activateElitePortfolio(result.id!, snapshotHash, `elite-builder-${result.id}-${snapshotHash.slice(0, 12)}`), "activated")}><Play size={16} />{busy === "activate" ? "Activating…" : "Continue to activation"}</button> : null}
           </section>
         </aside>
       </div> : null}
+
+      {/* Step 04 only exists once a real immutable snapshot has been approved --
+          there is nothing to deploy before that, by design. */}
+      {result?.id && (phase === "approved" || phase === "activated") ? (
+        <EliteActivationWorkspace portfolioId={result.id} />
+      ) : null}
     </div>
   );
 
@@ -849,4 +888,160 @@ function objectiveDetail(value: string) {
   if (value === "expectancy") return "Prioritize expected return";
   if (value === "minimum_drawdown") return "Prioritize capital defense";
   return "Balance quality and diversity";
+}
+
+function PortfolioProfilePicker({
+  options,
+  configuration,
+  recommendation,
+  busy,
+  onSelect,
+  onRecommend,
+  onApplyRecommendation
+}: {
+  options: ElitePortfolioOptions;
+  configuration: ElitePortfolioConfiguration;
+  recommendation: ElitePortfolioRecommendation | null;
+  busy: string | null;
+  onSelect: (profile: string) => void;
+  onRecommend: () => void;
+  onApplyRecommendation: (profile: string) => void;
+}) {
+  const profiles = options.profiles ?? [];
+  if (!profiles.length) return null;
+  const active = configuration.profile ?? options.default_profile ?? "strict_diversified";
+  return (
+    <section className="elitePanel">
+      <header>
+        <div>
+          <span className="eyebrow">00 · Portfolio shape</span>
+          <h2>Pick how spread the portfolio must be</h2>
+        </div>
+        <Layers3 size={20} />
+      </header>
+      <p className="eliteProfileLead">
+        Profiles change portfolio size and how far members must be spread. They never change a quality threshold, a
+        correlation limit, or the parameter-similarity rule — those are identical in every profile, and the API rejects
+        a configuration that tries to weaken them.
+      </p>
+      <div className="eliteProfileGrid">
+        {profiles.map((profile) => (
+          <button
+            key={profile.id}
+            type="button"
+            className={`eliteProfileCard ${active === profile.id ? "active" : ""} ${profile.diversified ? "" : "undiversified"}`}
+            onClick={() => onSelect(profile.id)}
+          >
+            <header>
+              <strong>{profile.label}</strong>
+              {active === profile.id ? <Check size={14} /> : null}
+            </header>
+            <p>{profile.summary}</p>
+            <small>{profile.intended_use}</small>
+            <dl>
+              <div><dt>Size</dt><dd>{profile.resolved_constraints.minimum_portfolio_size}–{profile.resolved_constraints.maximum_portfolio_size}</dd></div>
+              <div><dt>Assets</dt><dd>≥ {profile.resolved_constraints.minimum_unique_assets}</dd></div>
+              <div><dt>Families</dt><dd>≥ {profile.resolved_constraints.minimum_families}</dd></div>
+              <div><dt>Timeframe cap</dt><dd>{profile.resolved_constraints.timeframe_cap_numerator}/{profile.resolved_constraints.timeframe_cap_denominator}</dd></div>
+            </dl>
+            {profile.warning ? <span className="eliteProfileWarning"><AlertTriangle size={12} />{profile.warning}</span> : null}
+          </button>
+        ))}
+      </div>
+
+      <div className="eliteRecommendation">
+        {recommendation ? (
+          <>
+            <strong>{recommendation.recommended_label ?? "No feasible profile"}</strong>
+            <p>{recommendation.reason}</p>
+            {recommendation.constraints_relaxed_versus_strict.length ? (
+              <ul>
+                {recommendation.constraints_relaxed_versus_strict.map((row) => (
+                  <li key={row.setting}>{row.label}: {String(row.strict_value)} → {String(row.profile_value)}</li>
+                ))}
+              </ul>
+            ) : null}
+            <small className="eliteProfilePolicy">
+              <LockKeyhole size={12} /> Correlation, parameter-similarity, quality and validation requirements unchanged:{" "}
+              {String(recommendation.protected_constraints_unchanged)}
+            </small>
+            <div className="eliteProfileFeasibility">
+              {recommendation.profiles.map((row) => (
+                <span key={row.profile} className={row.feasible ? "feasible" : "infeasible"}>
+                  {row.label}: {row.feasible ? `${row.size} member${row.size === 1 ? "" : "s"}` : "no portfolio"}
+                </span>
+              ))}
+            </div>
+            {recommendation.recommended_profile && recommendation.recommended_profile !== active ? (
+              <button className="button" onClick={() => onApplyRecommendation(recommendation.recommended_profile!)} disabled={Boolean(busy)}>
+                <Sparkles size={15} />Use recommended {recommendation.recommended_label} profile
+              </button>
+            ) : null}
+          </>
+        ) : (
+          <>
+            <strong>Not sure which profile fits?</strong>
+            <p>Test every profile against the current elite pool and recommend the strictest one that actually produces a portfolio.</p>
+            <button className="button secondary" onClick={onRecommend} disabled={Boolean(busy)}>
+              {busy === "recommend" ? <LoaderCircle className="spin" size={15} /> : <Sparkles size={15} />}
+              {busy === "recommend" ? "Testing profiles…" : "Recommend a feasible profile"}
+            </button>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function PortfolioFeasibilityPanel({ result }: { result: ElitePortfolioResult }) {
+  const analysis = result.blocking_analysis;
+  if (!analysis) return null;
+  const rejections = result.rejection_explanations ?? [];
+  const counts = new Map<string, number>();
+  for (const row of rejections) {
+    for (const label of (row.reason_labels ?? row.reasons ?? []) as string[]) {
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+  }
+  const ranked = [...counts.entries()].sort((left, right) => right[1] - left[1]);
+  return (
+    <section className="elitePanel eliteFeasibility">
+      <header>
+        <div>
+          <span className="eyebrow">Eligibility</span>
+          <h2>{analysis.feasible ? "What the solver had to work with" : "Why there is no portfolio yet"}</h2>
+        </div>
+        {analysis.feasible ? <ShieldCheck size={20} /> : <AlertTriangle size={20} />}
+      </header>
+
+      <div className="eliteAnalyticsStrip">
+        <Metric label="Elite variants" value={(result.eligible_count ?? 0) + (result.excluded_count ?? 0)} />
+        <Metric label="Eligible" value={result.eligible_count ?? 0} />
+        <Metric label="Excluded" value={result.excluded_count ?? 0} />
+        <Metric label="Max feasible size" value={result.maximum_feasible_size ?? 0} />
+      </div>
+
+      {analysis.primary_blocker ? (
+        <div className="elitePrimaryBlocker">
+          <strong>Biggest blocker: {analysis.primary_blocker.label}</strong>
+          <p>{analysis.primary_blocker.detail}</p>
+        </div>
+      ) : null}
+
+      <div className="elitePoolCoverage">
+        <div><span>Symbols in pool</span><strong>{analysis.pool_symbols.join(", ") || "—"}</strong></div>
+        <div><span>Families in pool</span><strong>{analysis.pool_families.join(", ") || "—"}</strong></div>
+        <div><span>Timeframes in pool</span><strong>{analysis.pool_timeframes.join(", ") || "—"}</strong></div>
+      </div>
+
+      {ranked.length ? (
+        <div className="eliteExclusionReasons">
+          <h3>Why elites were excluded from the pool</h3>
+          {ranked.map(([label, count]) => (
+            <div key={label}><span>{label}</span><strong>{count}</strong></div>
+          ))}
+        </div>
+      ) : null}
+    </section>
+  );
 }

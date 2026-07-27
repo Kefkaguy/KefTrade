@@ -18,8 +18,16 @@ from app.services.elite_portfolio_repository import (
     options,
     preview_from_database,
     recalculate_run,
+    recommend_profile_from_database,
 )
 from app.services.elite_portfolio_activation import PortfolioActivationError, activate_internal
+from app.services.elite_portfolio_operations import (
+    PortfolioOperationError,
+    approve_member_external_paper,
+    enable_member_paper_execution,
+    execution_preflight,
+    portfolio_activation_view,
+)
 from app.services.champion_validation import (
     DEFAULT_RUN_BUDGET_SECONDS,
     ChampionValidationError,
@@ -36,6 +44,11 @@ router = APIRouter(prefix="/research/elite-portfolios", tags=["elite-portfolios"
 
 
 class PortfolioConfiguration(BaseModel):
+    # Portfolio shape preset. Presets change how many members and how far
+    # spread they must be; they never touch a quality threshold, a correlation
+    # limit, or the parameter-similarity rule -- `normalized_configuration`
+    # rejects any configuration that tries.
+    profile: str | None = None
     universe: list[str] = Field(default_factory=list)
     families: list[str] = Field(default_factory=list)
     directions: list[str] = Field(default_factory=lambda: ["long", "short"])
@@ -64,6 +77,18 @@ class ChampionValidationRequest(BaseModel):
     # `budget_exhausted` so a caller draining a large queue calls repeatedly
     # instead of holding one request open past the proxy timeout.
     max_runtime_seconds: float = Field(default=DEFAULT_RUN_BUDGET_SECONDS, ge=30.0, le=3000.0)
+
+
+class MemberApprovalRequest(BaseModel):
+    actor: str | None = None
+    reapprove: bool = False
+
+
+class MemberExecutionRequest(BaseModel):
+    # Mirrors the CLI's --confirm-deployment-id. The last approval before real
+    # orders reach a broker is deliberately not a single unguarded click.
+    confirm_member_id: int
+    actor: str | None = None
 
 
 class ApprovalRequest(BaseModel):
@@ -164,16 +189,23 @@ def get_champion_validation_run(run_id: int, conn: psycopg.Connection = Depends(
         raise HTTPException(status_code=404, detail=str(error)) from error
 
 
+@router.get("/profile-recommendation")
+def get_profile_recommendation(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    """The strictest portfolio profile that is actually feasible right now."""
+    _require_builder()
+    return recommend_profile_from_database(conn)
+
+
 @router.post("/preview")
 def preview_portfolio(payload: PortfolioConfiguration, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     _require_builder()
-    return preview_from_database(conn, payload.model_dump())
+    return _translate_configuration(lambda: preview_from_database(conn, payload.model_dump()))
 
 
 @router.post("")
 def persist_portfolio(payload: PortfolioConfiguration, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     _require_builder()
-    return create_run(conn, payload.model_dump())
+    return _translate_configuration(lambda: create_run(conn, payload.model_dump()))
 
 
 @router.post("/evidence/backfill")
@@ -213,9 +245,106 @@ def activate_portfolio(portfolio_id: int, payload: ActivationRequest, conn: psyc
         raise HTTPException(status_code=409, detail=str(error)) from error
 
 
+@router.get("/{portfolio_id}/activation")
+def portfolio_activation(portfolio_id: int, conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    """Step 04 in one read: members, deployment states, preflight, safety panel."""
+    _require_builder()
+    return _translate_operation(lambda: portfolio_activation_view(conn, portfolio_id))
+
+
+@router.get("/{portfolio_id}/members/{member_id}/preflight")
+def member_execution_preflight(
+    portfolio_id: int,
+    member_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Read-only: every condition `enable_paper_execution` will check."""
+    _require_builder()
+
+    def read() -> dict[str, Any]:
+        member = conn.execute(
+            "SELECT external_deployment_id FROM elite_portfolio_members WHERE id=%s AND portfolio_run_id=%s",
+            (member_id, portfolio_id),
+        ).fetchone()
+        if not member:
+            raise PortfolioOperationError("portfolio member not found")
+        if not member["external_deployment_id"]:
+            raise PortfolioOperationError("this member has no external deployment yet")
+        return execution_preflight(conn, int(member["external_deployment_id"]))
+
+    return _translate_operation(read)
+
+
+@router.post("/{portfolio_id}/members/{member_id}/approve-external-paper")
+def approve_member_for_alpaca_paper(
+    portfolio_id: int,
+    member_id: int,
+    payload: MemberApprovalRequest | None = None,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Approve one member for Alpaca Paper, observe-only.
+
+    Calls the same service function as
+    `python -m app.cli.deployments enable-external-paper`, so the guards, audit
+    trail, frozen configuration and epoch are identical. Submits no orders.
+    """
+    _require_builder()
+    request = payload or MemberApprovalRequest()
+    return _translate_operation(
+        lambda: approve_member_external_paper(
+            conn, portfolio_id, member_id, actor=request.actor, reapprove=request.reapprove
+        )
+    )
+
+
+@router.post("/{portfolio_id}/members/{member_id}/enable-paper-execution")
+def enable_member_execution(
+    portfolio_id: int,
+    member_id: int,
+    payload: MemberExecutionRequest,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Authorise Alpaca Paper order submission for one approved member.
+
+    The confirmation field must repeat the member id, mirroring the CLI's
+    `--confirm-deployment-id`: this is the last approval before real orders
+    reach a broker, so it is deliberately not a single unguarded click.
+    """
+    _require_builder()
+    if payload.confirm_member_id != member_id:
+        raise HTTPException(status_code=422, detail="confirm_member_id must exactly match the member id")
+    return _translate_operation(
+        lambda: enable_member_paper_execution(conn, portfolio_id, member_id, actor=payload.actor)
+    )
+
+
 def _require_builder() -> None:
     if not settings.elite_portfolio_builder_enabled:
         raise HTTPException(status_code=503, detail="elite portfolio builder is disabled")
+
+
+def _translate_configuration(operation):
+    """A rejected configuration is a 422, not a 500.
+
+    `normalized_configuration` raises when a caller tries to weaken a protected
+    constraint or names an unknown profile.
+    """
+    try:
+        return operation()
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+def _translate_operation(operation):
+    try:
+        return operation()
+    except PortfolioOperationError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except ValueError as error:
+        # Raised by the underlying external-execution guards (missing sync,
+        # dirty reconciliation, disabled flags). Surfaced verbatim so the page
+        # can show the real reason instead of "something went wrong".
+        raise HTTPException(status_code=409, detail=str(error)) from error
 
 
 def _translate(operation):
