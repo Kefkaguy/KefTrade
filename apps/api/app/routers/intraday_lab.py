@@ -615,13 +615,21 @@ def get_signal_diagnostics_job_endpoint(
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     """Poll a queued measurement's status. `status` is one of queued,
-    running, completed, failed; `result` is populated once completed."""
-    from app.services.signal_diagnostics import get_signal_diagnostics_job
+    running, completed, failed; `result` is populated once completed.
+
+    Also reports queue health, so a caller can distinguish "the measurement is
+    slow" from "no worker process is consuming the queue" -- without it, a
+    missing worker looks identical to a long-running job until the client
+    eventually times out."""
+    from app.services.signal_diagnostics import (
+        get_signal_diagnostics_job,
+        signal_diagnostics_queue_health,
+    )
 
     job = get_signal_diagnostics_job(conn, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"signal diagnostics job {job_id} not found")
-    return job
+    return {**job, "queue": signal_diagnostics_queue_health(conn)}
 
 
 @router.get("/research/intraday/signal-diagnostics")

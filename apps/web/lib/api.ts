@@ -2061,6 +2061,13 @@ export type IntradaySignalDiagnosticsJob = {
   status: "queued" | "running" | "completed" | "failed";
   result?: Record<string, any> | null;
   error?: string | null;
+  queue?: {
+    queued: number;
+    running: number;
+    oldest_queued_seconds: number | null;
+    worker_appears_stopped: boolean;
+    detail: string;
+  };
 };
 
 /** Queues the measurement and returns immediately — the actual run happens in
@@ -2087,9 +2094,12 @@ export function getIntradaySignalDiagnosticsJob(jobId: number) {
   });
 }
 
-/** Queues the measurement, then polls until it finishes (or the queue never
- * drains within the timeout — the worker process must be running for this
- * to ever resolve; see app/workers/signal_diagnostics_runner.py). */
+/** Queues the measurement, then polls until it finishes.
+ *
+ * Fails fast and specifically when nothing is consuming the queue: a job that
+ * never leaves `queued` means the worker process is not running, which is a
+ * different problem from a slow measurement and should not be reported as a
+ * ten-minute timeout. See app/workers/signal_diagnostics_runner.py. */
 export async function runIntradaySignalDiagnostics(
   options: { timeframe: string; maxVariants?: number; maxSymbols?: number },
   onStatus?: (job: IntradaySignalDiagnosticsJob) => void
@@ -2100,6 +2110,12 @@ export async function runIntradaySignalDiagnostics(
     const job = await getIntradaySignalDiagnosticsJob(job_id);
     onStatus?.(job);
     if (job.status === "completed" || job.status === "failed") return job;
+    if (job.queue?.worker_appears_stopped) {
+      throw new Error(
+        `No worker is consuming the signal-diagnostics queue, so job ${job_id} will never run. ` +
+          `Start it with: python -m app.workers.signal_diagnostics_runner`
+      );
+    }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
   throw new Error(`Signal diagnostics job ${job_id} did not finish within 10 minutes.`);

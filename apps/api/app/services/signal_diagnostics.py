@@ -64,6 +64,12 @@ MINIMUM_T_STATISTIC = 3.0
 # own `i = max(start_index, 50)` so indicators are comparably warm.
 WARMUP_BARS = 50
 
+# A job still unclaimed after this long means no worker is consuming the
+# queue. Generous enough to tolerate a worker busy with a previous job on its
+# poll interval, short enough that a missing worker is reported in seconds
+# rather than after a ten-minute client timeout.
+UNCLAIMED_JOB_STALL_SECONDS = 45
+
 
 def _forward_returns(rows: Sequence[dict[str, Any]], horizon: int) -> list[float | None]:
     """Return from bar i+1's open to bar i+1+horizon's open, for every i.
@@ -695,6 +701,48 @@ def get_signal_diagnostics_job(conn: psycopg.Connection, job_id: int) -> dict[st
         "SELECT * FROM research_signal_diagnostics_jobs WHERE id = %s", (job_id,)
     ).fetchone()
     return dict(row) if row else None
+
+
+def signal_diagnostics_queue_health(conn: psycopg.Connection) -> dict[str, Any]:
+    """Whether anything is actually consuming the queue.
+
+    A job that never leaves `queued` does not mean the measurement is slow --
+    it means no worker process claimed it. Without this, the UI polls a job
+    that will never move and reports a ten-minute timeout, which reads like a
+    hung measurement rather than a missing process. `worker_running` is
+    inferred from evidence rather than assumed: a job has been claimed
+    recently, or none is waiting long enough to be suspicious.
+    """
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'queued') AS queued,
+            COUNT(*) FILTER (WHERE status = 'running') AS running,
+            EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE status = 'queued'))) AS oldest_queued_seconds,
+            MAX(started_at) AS last_started_at
+        FROM research_signal_diagnostics_jobs
+        """
+    ).fetchone()
+    queued = int((row or {}).get("queued") or 0)
+    running = int((row or {}).get("running") or 0)
+    oldest = (row or {}).get("oldest_queued_seconds")
+    oldest_seconds = float(oldest) if oldest is not None else None
+    # A queued job older than this with nothing running is the signal that no
+    # worker is consuming the queue at all.
+    stalled = bool(queued and running == 0 and (oldest_seconds or 0) > UNCLAIMED_JOB_STALL_SECONDS)
+    return {
+        "queued": queued,
+        "running": running,
+        "oldest_queued_seconds": round(oldest_seconds, 1) if oldest_seconds is not None else None,
+        "last_started_at": (row or {}).get("last_started_at"),
+        "worker_appears_stopped": stalled,
+        "detail": (
+            "No worker has claimed a queued job. Start app/workers/signal_diagnostics_runner.py -- "
+            "queued measurements will not run until it does."
+            if stalled
+            else "Queue is being consumed normally."
+        ),
+    }
 
 
 def claim_next_signal_diagnostics_job(conn: psycopg.Connection) -> dict[str, Any] | None:

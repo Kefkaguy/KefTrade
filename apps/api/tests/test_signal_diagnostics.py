@@ -502,6 +502,69 @@ def test_run_one_job_processes_a_single_queued_item(monkeypatch):
     assert run_one_signal_diagnostics_job(conn) is None, "the queue should be empty now"
 
 
+class _QueueHealthConn:
+    """Stands in for the aggregate query behind signal_diagnostics_queue_health."""
+
+    def __init__(self, *, queued=0, running=0, oldest_queued_seconds=None, last_started_at=None):
+        self.row = {
+            "queued": queued,
+            "running": running,
+            "oldest_queued_seconds": oldest_queued_seconds,
+            "last_started_at": last_started_at,
+        }
+
+    def execute(self, query, params=None):
+        return _FakeJobsResult(dict(self.row))
+
+    def commit(self):
+        pass
+
+
+def test_a_long_unclaimed_job_reports_the_worker_as_stopped():
+    """The failure the user hit: job queued, nothing running, ten minutes of
+    polling, and a timeout that reads like a hung measurement instead of a
+    missing process."""
+    from app.services.signal_diagnostics import signal_diagnostics_queue_health
+
+    health = signal_diagnostics_queue_health(
+        _QueueHealthConn(queued=1, running=0, oldest_queued_seconds=300)
+    )
+
+    assert health["worker_appears_stopped"] is True
+    assert "signal_diagnostics_runner" in health["detail"]
+
+
+def test_a_briefly_queued_job_is_not_called_stopped():
+    """A worker busy with a previous job, on its poll interval, must not be
+    misreported as absent."""
+    from app.services.signal_diagnostics import signal_diagnostics_queue_health
+
+    health = signal_diagnostics_queue_health(
+        _QueueHealthConn(queued=1, running=0, oldest_queued_seconds=5)
+    )
+
+    assert health["worker_appears_stopped"] is False
+
+
+def test_a_running_job_means_the_worker_is_alive():
+    from app.services.signal_diagnostics import signal_diagnostics_queue_health
+
+    health = signal_diagnostics_queue_health(
+        _QueueHealthConn(queued=2, running=1, oldest_queued_seconds=600)
+    )
+
+    assert health["worker_appears_stopped"] is False
+
+
+def test_an_empty_queue_is_not_stalled():
+    from app.services.signal_diagnostics import signal_diagnostics_queue_health
+
+    health = signal_diagnostics_queue_health(_QueueHealthConn())
+
+    assert health["worker_appears_stopped"] is False
+    assert health["queued"] == 0
+
+
 class _DDLRecordingConn(_FakeJobsConn):
     """Records whether any statement issued DDL."""
 
