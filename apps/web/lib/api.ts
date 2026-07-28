@@ -1964,6 +1964,12 @@ export type IntradayCampaignPlan = {
   estimated_jobs: number;
   duplicate_of_campaign_id: number | null;
   requires_rerun_confirmation: boolean;
+  signal_diagnostics: {
+    measured_families: number;
+    verdict_counts: Record<string, number>;
+    predictive: string[];
+    signal_below_cost: string[];
+  };
   protocol: {
     split_protocol_version: string;
     elite_gate_version: string;
@@ -2008,6 +2014,61 @@ export function launchIntradayBroadScreen(options: {
   return request<IntradayBroadScreenResult>(`/research/intraday/campaigns/broad-screen?${params.toString()}`, {
     method: "POST",
     timeoutMs: 120000
+  });
+}
+
+export type IntradaySignalDiagnostic = {
+  architecture: string;
+  family_name: string | null;
+  timeframe: string;
+  verdict: "predictive" | "signal_below_cost" | "no_signal" | "insufficient_signals" | "not_measurable";
+  detail: string;
+  best_horizon_bars: number | null;
+  excess_edge_bps: number | null;
+  t_statistic: number | null;
+  round_trip_cost_bps: number;
+  clears_cost: boolean;
+  signal_count: number;
+  horizons: {
+    horizon_bars: number;
+    signals: number;
+    raw_edge_bps: number;
+    unconditional_drift_bps: number;
+    excess_edge_bps: number;
+    t_statistic: number | null;
+    hit_rate: number;
+  }[];
+};
+
+/** Stored verdicts only — rendering a row never triggers a recompute. */
+export async function getIntradaySignalDiagnostics(timeframe?: string): Promise<IntradaySignalDiagnostic[] | null> {
+  const params = new URLSearchParams();
+  if (timeframe) params.append("timeframe", timeframe);
+  const suffix = params.toString() ? `?${params.toString()}` : "";
+  try {
+    const response = await request<{ diagnostics: IntradaySignalDiagnostic[] }>(
+      `/research/intraday/signal-diagnostics${suffix}`,
+      { cache: "no-store", timeoutMs: 30000 }
+    );
+    return response.diagnostics ?? [];
+  } catch {
+    return null;
+  }
+}
+
+/** Runs the measurement. Slow by design — it reads bars, not cached rows. */
+export function runIntradaySignalDiagnostics(options: {
+  timeframe: string;
+  maxVariants?: number;
+  maxSymbols?: number;
+}) {
+  const params = new URLSearchParams();
+  params.append("timeframe", options.timeframe);
+  params.append("max_variants", String(options.maxVariants ?? 3));
+  params.append("max_symbols", String(options.maxSymbols ?? 4));
+  return request<Record<string, any>>(`/research/intraday/signal-diagnostics?${params.toString()}`, {
+    method: "POST",
+    timeoutMs: 600000
   });
 }
 

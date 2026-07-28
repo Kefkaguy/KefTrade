@@ -1559,6 +1559,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
 .intradayArchiveIntro { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; color: var(--muted); font-size: 10px; }
 .intradayArchiveIntro svg { color: var(--accent-2); }
 .strategyFamilyTable.threeCol .strategyFamilyHead, .strategyFamilyTable.threeCol .strategyFamilyRow { grid-template-columns: minmax(0, 1.2fr) 0.7fr minmax(0, 2.4fr); }
+.strategyFamilyTable.fourCol .strategyFamilyHead, .strategyFamilyTable.fourCol .strategyFamilyRow { grid-template-columns: minmax(0, 1.1fr) 0.6fr minmax(0, 1.8fr) minmax(0, 1.5fr); }
 
 .intradayCandidateList { display: grid; gap: 8px; }
 .intradayCandidateRow { border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--panel-soft); overflow: hidden; }

@@ -7,14 +7,17 @@ import {
   getIntradayExpansionRecommendation,
   getIntradayFamilyDiagnostics,
   getIntradayLabOverview,
+  getIntradaySignalDiagnostics,
   launchIntradayBroadScreen,
   launchLowTimeframeExpansion,
+  runIntradaySignalDiagnostics,
   type IntradayBroadScreenResult,
   type IntradayCampaignPlan,
   type IntradayExpansionRecommendation,
   type IntradayFamilyDiagnostic,
   type IntradayLabOverview,
   type IntradaySampleJob,
+  type IntradaySignalDiagnostic,
   type IntradayStrategyRosterEntry
 } from "@/lib/api";
 import { Card, EmptyState, PageTitle } from "@/components/ResearchUI";
@@ -187,7 +190,12 @@ export function IntradayResearchLab() {
         onLaunched={load}
       />
 
-      <FamilyRoster strategies={materialStrategies} latestCampaignId={latestCampaignId} loading={!overview} />
+      <FamilyRoster
+        strategies={materialStrategies}
+        latestCampaignId={latestCampaignId}
+        timeframes={overview?.timeframes_supported ?? ["15m", "30m"]}
+        loading={!overview}
+      />
 
       <details className="intradayDeepDive">
         <summary>Show highest-signal family cards</summary>
@@ -303,17 +311,45 @@ function diagnosticLabel(diagnostic: IntradayFamilyDiagnostic | undefined) {
   return DIAGNOSTIC_LABELS[diagnostic.failure_reason ?? ""] ?? null;
 }
 
-/** Secondary informational list: name, status, and Phase F state when known. */
+const SIGNAL_VERDICT_LABELS: Record<IntradaySignalDiagnostic["verdict"], string> = {
+  predictive: "Predictive",
+  signal_below_cost: "Signal below cost",
+  no_signal: "No signal",
+  insufficient_signals: "Too few signals",
+  not_measurable: "Not measurable"
+};
+
+const SIGNAL_VERDICT_TONE: Record<IntradaySignalDiagnostic["verdict"], string> = {
+  predictive: "good",
+  signal_below_cost: "warn",
+  no_signal: "muted",
+  insufficient_signals: "muted",
+  not_measurable: "muted"
+};
+
+function signalCell(signal: IntradaySignalDiagnostic | undefined) {
+  if (!signal) return null;
+  const label = SIGNAL_VERDICT_LABELS[signal.verdict] ?? signal.verdict;
+  if (signal.excess_edge_bps == null || signal.best_horizon_bars == null) return label;
+  return `${label} · ${signal.excess_edge_bps.toFixed(2)}bps @ ${signal.best_horizon_bars} bars (t=${signal.t_statistic?.toFixed(1) ?? "—"})`;
+}
+
+/** Secondary informational list: name, status, signal verdict, Phase F state. */
 function FamilyRoster({
   strategies,
   latestCampaignId,
+  timeframes,
   loading
 }: {
   strategies: IntradayStrategyRosterEntry[];
   latestCampaignId: number | null;
+  timeframes: string[];
   loading: boolean;
 }) {
   const [diagnostics, setDiagnostics] = useState<IntradayFamilyDiagnostic[] | null>(null);
+  const [signals, setSignals] = useState<IntradaySignalDiagnostic[] | null>(null);
+  const [measuring, setMeasuring] = useState(false);
+  const [measureError, setMeasureError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -325,22 +361,69 @@ function FamilyRoster({
     };
   }, [latestCampaignId]);
 
+  const loadSignals = () => {
+    getIntradaySignalDiagnostics().then((result) => setSignals(result));
+  };
+  useEffect(loadSignals, []);
+
+  async function measure() {
+    if (measuring) return;
+    setMeasuring(true);
+    setMeasureError(null);
+    try {
+      // One timeframe at a time: this reads bars rather than cached rows.
+      for (const timeframe of timeframes) {
+        await runIntradaySignalDiagnostics({ timeframe });
+      }
+      loadSignals();
+    } catch (reason) {
+      setMeasureError(reason instanceof Error ? reason.message : "Could not measure signals.");
+    } finally {
+      setMeasuring(false);
+    }
+  }
+
   const byArchitecture = useMemo(() => {
     const map = new Map<string, IntradayFamilyDiagnostic>();
     for (const row of diagnostics ?? []) map.set(row.architecture, row);
     return map;
   }, [diagnostics]);
 
+  // Best verdict per family across timeframes, so one row can summarise both.
+  const signalByArchitecture = useMemo(() => {
+    const order: IntradaySignalDiagnostic["verdict"][] = [
+      "predictive",
+      "signal_below_cost",
+      "no_signal",
+      "insufficient_signals",
+      "not_measurable"
+    ];
+    const map = new Map<string, IntradaySignalDiagnostic>();
+    for (const row of signals ?? []) {
+      const current = map.get(row.architecture);
+      if (!current || order.indexOf(row.verdict) < order.indexOf(current.verdict)) map.set(row.architecture, row);
+    }
+    return map;
+  }, [signals]);
+
   return (
     <Card title="Families" eyebrow="Registry status">
-      <div className="strategyFamilyTable legacy threeCol" role="table" aria-label="Intraday strategy families">
+      <p className="intradayStrategySummary">
+        Signal verdicts come from measuring each family&apos;s own entry logic with no stops, targets or
+        position sizing, net of the unconditional drift, against a{" "}
+        {signals?.[0]?.round_trip_cost_bps?.toFixed(1) ?? "—"}bps round trip. A family with no signal cannot be
+        rescued by a campaign.
+      </p>
+      <div className="strategyFamilyTable legacy fourCol" role="table" aria-label="Intraday strategy families">
         <div role="row" className="strategyFamilyHead">
           <span role="columnheader">Family</span>
           <span role="columnheader">Status</span>
+          <span role="columnheader">Signal</span>
           <span role="columnheader">Diagnostic state</span>
         </div>
         {strategies.map((strategy) => {
           const diagnostic = diagnosticLabel(byArchitecture.get(strategy.id));
+          const signal = signalByArchitecture.get(strategy.id);
           return (
             <div role="row" key={strategy.id} className={`strategyFamilyRow ${strategy.status === "archived" ? "muted" : ""}`}>
               <span role="cell">{strategy.name}{strategy.version ? ` ${strategy.version}` : ""}</span>
@@ -349,6 +432,13 @@ function FamilyRoster({
                   {strategy.status === "archived" ? "Archived" : "Active"}
                 </em>
               </span>
+              <span role="cell" title={signal?.detail ?? undefined}>
+                {signal ? (
+                  <em className={`familyTag ${SIGNAL_VERDICT_TONE[signal.verdict]}`}>{signalCell(signal)}</em>
+                ) : (
+                  "Not measured"
+                )}
+              </span>
               <span role="cell">{diagnostic ?? "—"}</span>
             </div>
           );
@@ -356,6 +446,13 @@ function FamilyRoster({
         {loading ? <div className="strategyFamilyEmpty">Loading families…</div> : null}
         {!loading && !strategies.length ? <div className="strategyFamilyEmpty">No families with evidence yet.</div> : null}
       </div>
+      <div className="eliteChampionActions" style={{ marginTop: 14 }}>
+        <button type="button" className="button secondary" disabled={measuring} onClick={() => void measure()}>
+          <TrendingUp size={15} />
+          {measuring ? "Measuring signals…" : signals?.length ? "Re-measure signals" : "Measure family signals"}
+        </button>
+      </div>
+      {measureError ? <div className="strategyLibraryError" role="alert" style={{ marginTop: 12 }}>{measureError}</div> : null}
     </Card>
   );
 }
@@ -472,6 +569,14 @@ function LaunchIntradayCampaign({
           <div><span>Split protocol</span><strong className="mono">{plan.protocol.split_protocol_version}</strong></div>
           <div><span>Elite gate</span><strong className="mono">{plan.protocol.elite_gate_version}</strong></div>
           <div><span>Cost model</span><strong className="mono">{plan.protocol.cost_model.version}</strong></div>
+          <div>
+            <span>Predictive families</span>
+            <strong>
+              {plan.signal_diagnostics.measured_families
+                ? `${plan.signal_diagnostics.predictive.length} of ${plan.signal_diagnostics.measured_families}`
+                : "not measured"}
+            </strong>
+          </div>
         </div>
       ) : null}
 

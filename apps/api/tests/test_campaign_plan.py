@@ -22,12 +22,28 @@ class FakeResult:
         return []
 
 
+class FakeListResult:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def fetchone(self):
+        return self.rows[0] if self.rows else None
+
+    def fetchall(self):
+        return self.rows
+
+
 class FakePlanConn:
-    def __init__(self, assets=None, duplicate_campaign_id=None):
+    def __init__(self, assets=None, duplicate_campaign_id=None, signal_rows=None):
         self.assets = UNIVERSE if assets is None else assets
         self.duplicate_campaign_id = duplicate_campaign_id
+        self.signal_rows = signal_rows or []
 
     def execute(self, query, params=None):
+        if "research_signal_diagnostics" in query:
+            if query.strip().startswith("CREATE TABLE"):
+                return FakeListResult([])
+            return FakeListResult(list(self.signal_rows))
         if "campaign_key" in query:
             return FakeResult({"id": self.duplicate_campaign_id} if self.duplicate_campaign_id else None)
         if "research_universes" in query or "assets" in query:
@@ -194,6 +210,46 @@ def test_each_rerun_label_is_unique():
 
     assert rerun_campaign_label() != rerun_campaign_label()
     assert rerun_campaign_label().startswith("rerun_")
+
+
+def _signal_row(architecture, verdict):
+    return {"architecture": architecture, "verdict": verdict}
+
+
+def test_an_unmeasured_signal_warns_before_the_compute_is_spent():
+    """A campaign is the most expensive way to learn a signal predicts
+    nothing. Not-yet-checked must not look like checked-and-passed."""
+    plan = build_campaign_plan(FakePlanConn(), timeframes=["30m"])
+
+    assert plan["signal_diagnostics"]["measured_families"] == 0
+    assert any(item["code"] == "SIGNAL_NOT_MEASURED" for item in plan["warnings"])
+
+
+def test_measured_families_with_no_predictive_content_warn():
+    rows = [_signal_row("gap_fill_v2", "no_signal"), _signal_row("vwap_bounce_v2", "signal_below_cost")]
+    plan = build_campaign_plan(FakePlanConn(signal_rows=rows), timeframes=["30m"])
+
+    assert any(item["code"] == "NO_PREDICTIVE_FAMILY" for item in plan["warnings"])
+    assert plan["signal_diagnostics"]["signal_below_cost"] == ["vwap_bounce_v2"]
+
+
+def test_a_predictive_family_removes_the_signal_warning():
+    rows = [_signal_row("gap_fill_v2", "predictive"), _signal_row("vwap_bounce_v2", "no_signal")]
+    plan = build_campaign_plan(FakePlanConn(signal_rows=rows), timeframes=["30m"])
+
+    codes = {item["code"] for item in plan["warnings"]}
+    assert "NO_PREDICTIVE_FAMILY" not in codes
+    assert "SIGNAL_NOT_MEASURED" not in codes
+    assert plan["signal_diagnostics"]["predictive"] == ["gap_fill_v2"]
+
+
+def test_signal_diagnostics_never_block_a_launch():
+    """Advisory, not a gate: the user may legitimately want to run anyway."""
+    rows = [_signal_row("gap_fill_v2", "no_signal")]
+    plan = build_campaign_plan(FakePlanConn(signal_rows=rows), timeframes=["30m"])
+
+    assert plan["can_launch"] is True
+    assert not any(item["code"] == "NO_PREDICTIVE_FAMILY" for item in plan["blockers"])
 
 
 def test_a_preview_survives_an_unreadable_universe():

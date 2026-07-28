@@ -578,6 +578,52 @@ def confirm_frozen_candidate(
         raise HTTPException(status_code=422, detail=str(error)) from error
 
 
+@router.post("/research/intraday/signal-diagnostics")
+def run_signal_diagnostics_endpoint(
+    timeframe: str = Query(..., description="Timeframe to measure, e.g. 30m."),
+    dataset_id: int | None = Query(None, description="Defaults to the latest intraday snapshot."),
+    max_variants: int = Query(3, ge=1, le=12, description="Parameter points sampled per family."),
+    max_symbols: int = Query(4, ge=1, le=25, description="Symbols pooled per family."),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Measure whether each active family's signal predicts anything, before
+    spending a campaign on it.
+
+    Runs the family's own decide() with no stops, targets or position sizing,
+    nets out the unconditional drift, and compares the remaining edge against
+    the round-trip cost. Results are stored, so the UI reads them without
+    triggering a recompute. See app/services/signal_diagnostics.py."""
+    from app.services.signal_diagnostics import run_signal_diagnostics
+
+    try:
+        return run_signal_diagnostics(
+            conn,
+            timeframe=timeframe,
+            dataset_id=dataset_id,
+            max_variants=max_variants,
+            max_symbols=max_symbols,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+
+
+@router.get("/research/intraday/signal-diagnostics")
+def list_signal_diagnostics_endpoint(
+    dataset_id: int | None = Query(None),
+    timeframe: str | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Stored signal verdicts per family. Never recomputes."""
+    from app.services.signal_diagnostics import list_signal_diagnostics
+
+    rows = list_signal_diagnostics(conn, dataset_id=dataset_id, timeframe=timeframe)
+    return {
+        "measured_families": len(rows),
+        "predictive": [row["architecture"] for row in rows if row["verdict"] == "predictive"],
+        "diagnostics": rows,
+    }
+
+
 @router.get("/research/intraday/simulator-audit")
 def get_simulator_audit() -> dict[str, Any]:
     """Phase A: verify the shared execution path against deterministic

@@ -146,6 +146,28 @@ def build_campaign_plan(
     if not deduped:
         blockers.append({"code": "NO_CANDIDATES", "detail": "The active families generated no candidates."})
 
+    signals = _signal_diagnostics_summary(conn, selected_timeframes)
+    if signals["measured_families"] == 0:
+        warnings.append(
+            {
+                "code": "SIGNAL_NOT_MEASURED",
+                "detail": (
+                    "No family's signal has been measured on this timeframe. A campaign is the most "
+                    "expensive way to discover a signal predicts nothing -- run signal diagnostics first."
+                ),
+            }
+        )
+    elif not signals["predictive"]:
+        warnings.append(
+            {
+                "code": "NO_PREDICTIVE_FAMILY",
+                "detail": (
+                    f"None of the {signals['measured_families']} measured families shows predictive content "
+                    "that clears costs. This screen will spend its full job budget confirming that."
+                ),
+            }
+        )
+
     if duplicate_of is not None:
         # Not a blocker. Re-running the same screen against a rolling dataset
         # that has since advanced is legitimate research; re-running it against
@@ -189,6 +211,7 @@ def build_campaign_plan(
         "estimated_jobs": estimated_jobs,
         "duplicate_of_campaign_id": duplicate_of,
         "requires_rerun_confirmation": duplicate_of is not None,
+        "signal_diagnostics": signals,
         "protocol": {
             "split_protocol_version": SPLIT_VERSION,
             "elite_gate_version": ELITE_PROMOTION_RULE_VERSION,
@@ -201,6 +224,38 @@ def build_campaign_plan(
         "evidence_policy": (
             "Each family keeps its own candidates and is evaluated independently through the unmodified "
             "elite gate. Evidence is never merged across families."
+        ),
+    }
+
+
+def _signal_diagnostics_summary(
+    conn: psycopg.Connection, timeframes: list[str]
+) -> dict[str, Any]:
+    """Stored signal verdicts for the selected timeframes.
+
+    Read-only and advisory: a never-measured family is reported as such rather
+    than assumed fine, because "not checked" and "checked and passed" must not
+    look the same on a launch screen.
+    """
+    from app.services.signal_diagnostics import list_signal_diagnostics
+
+    rows: list[dict[str, Any]] = []
+    for timeframe in timeframes:
+        try:
+            rows.extend(list_signal_diagnostics(conn, timeframe=timeframe))
+        except Exception:  # noqa: BLE001 - a preview must not fail on an unreadable table
+            continue
+
+    verdicts: dict[str, int] = {}
+    for row in rows:
+        verdict = str(row.get("verdict"))
+        verdicts[verdict] = verdicts.get(verdict, 0) + 1
+    return {
+        "measured_families": len(rows),
+        "verdict_counts": dict(sorted(verdicts.items())),
+        "predictive": sorted({str(row["architecture"]) for row in rows if row.get("verdict") == "predictive"}),
+        "signal_below_cost": sorted(
+            {str(row["architecture"]) for row in rows if row.get("verdict") == "signal_below_cost"}
         ),
     }
 
