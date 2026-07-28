@@ -394,7 +394,10 @@ def ensure_signal_diagnostics_table(conn: psycopg.Connection) -> None:
 
 
 def persist_signal_diagnostics(conn: psycopg.Connection, report: dict[str, Any]) -> dict[str, Any]:
-    ensure_signal_diagnostics_table(conn)
+    """Write one family's verdict. No DDL: this runs inside the worker's loop,
+    and a `CREATE TABLE IF NOT EXISTS` here would hold an ACCESS EXCLUSIVE
+    lock on the results table for the rest of the worker's transaction,
+    blocking every UI read of stored verdicts."""
     summary = report["summary"]
     best = report.get("best_variant") or {}
     measurement = best.get("measurement") or {}
@@ -446,8 +449,10 @@ def persist_signal_diagnostics(conn: psycopg.Connection, report: dict[str, Any])
 def list_signal_diagnostics(
     conn: psycopg.Connection, *, dataset_id: int | None = None, timeframe: str | None = None
 ) -> list[dict[str, Any]]:
-    """Stored verdicts, so the UI never triggers a recompute to render a row."""
-    ensure_signal_diagnostics_table(conn)
+    """Stored verdicts, so the UI never triggers a recompute to render a row.
+
+    Pure read, no schema work -- see `get_signal_diagnostics_job` for why DDL
+    on a request path is what caused the 502s."""
     clauses = []
     params: list[Any] = []
     if dataset_id is not None:
@@ -544,10 +549,15 @@ def run_signal_diagnostics(
             )
             continue
         if persist:
+            # Commit per family rather than once at the end. A single
+            # transaction spanning the whole sweep would hold row locks on the
+            # results table for minutes, blocking every UI read of stored
+            # verdicts -- and it would discard every completed family if a
+            # later one failed. Committing here also means the UI sees
+            # verdicts appear progressively instead of all at once.
             persist_signal_diagnostics(conn, report)
+            conn.commit()
         reports.append(report)
-    if persist:
-        conn.commit()
 
     verdicts: dict[str, int] = {}
     for report in reports:
@@ -646,10 +656,10 @@ def enqueue_signal_diagnostics_job(
     """Queue a measurement and return immediately. Does not run anything.
 
     This is the entire body of what the API request should do: one INSERT,
-    one commit, no candle reads, no decide() calls -- the request returns in
-    milliseconds regardless of how long the actual measurement takes.
+    one commit, no candle reads, no decide() calls, and no schema work -- the
+    request returns in milliseconds regardless of how long the actual
+    measurement takes.
     """
-    ensure_signal_diagnostics_jobs_table(conn)
     row = conn.execute(
         """
         INSERT INTO research_signal_diagnostics_jobs(
@@ -671,7 +681,16 @@ def enqueue_signal_diagnostics_job(
 
 
 def get_signal_diagnostics_job(conn: psycopg.Connection, job_id: int) -> dict[str, Any] | None:
-    ensure_signal_diagnostics_jobs_table(conn)
+    """Pure read. Deliberately does NO schema work.
+
+    This is polled every couple of seconds while a measurement runs. It used
+    to call `ensure_signal_diagnostics_jobs_table` first, and `CREATE TABLE IF
+    NOT EXISTS` takes an ACCESS EXCLUSIVE lock even when the table already
+    exists -- so every poll queued behind any other transaction touching the
+    table, including the worker's own claim. That serialisation is what turned
+    a millisecond SELECT into a 5.8s request and then an nginx 502. Schema is
+    owned by migrations 057/058 and bootstrapped once at startup.
+    """
     row = conn.execute(
         "SELECT * FROM research_signal_diagnostics_jobs WHERE id = %s", (job_id,)
     ).fetchone()
@@ -683,9 +702,9 @@ def claim_next_signal_diagnostics_job(conn: psycopg.Connection) -> dict[str, Any
 
     `FOR UPDATE SKIP LOCKED` is the same claiming pattern the campaign job
     queue uses, so two worker processes can run concurrently without ever
-    claiming the same row.
+    claiming the same row. No schema work here either: DDL would take an
+    ACCESS EXCLUSIVE lock that blocks every concurrent status poll.
     """
-    ensure_signal_diagnostics_jobs_table(conn)
     row = conn.execute(
         """
         UPDATE research_signal_diagnostics_jobs

@@ -502,6 +502,55 @@ def test_run_one_job_processes_a_single_queued_item(monkeypatch):
     assert run_one_signal_diagnostics_job(conn) is None, "the queue should be empty now"
 
 
+class _DDLRecordingConn(_FakeJobsConn):
+    """Records whether any statement issued DDL."""
+
+    def __init__(self):
+        super().__init__()
+        self.ddl_statements: list[str] = []
+
+    def execute(self, query, params=None):
+        text = " ".join(str(query).split()).upper()
+        if any(token in text for token in ("CREATE TABLE", "CREATE INDEX", "ALTER TABLE", "DROP TABLE")):
+            self.ddl_statements.append(text[:60])
+        return super().execute(query, params)
+
+
+def test_polling_a_job_status_never_issues_ddl():
+    """The 502 bug. `CREATE TABLE IF NOT EXISTS` takes an ACCESS EXCLUSIVE
+    lock even when the table exists, so calling it on an endpoint the UI polls
+    every two seconds serialised every poll behind every other transaction on
+    that table. Schema belongs to migrations and to startup, never to a
+    request path."""
+    from app.services.signal_diagnostics import get_signal_diagnostics_job
+
+    conn = _DDLRecordingConn()
+    enqueue_signal_diagnostics_job(conn, timeframe="30m")
+    conn.ddl_statements.clear()
+
+    get_signal_diagnostics_job(conn, 1)
+
+    assert conn.ddl_statements == []
+
+
+def test_enqueuing_never_issues_ddl():
+    conn = _DDLRecordingConn()
+
+    enqueue_signal_diagnostics_job(conn, timeframe="30m")
+
+    assert conn.ddl_statements == []
+
+
+def test_claiming_a_job_never_issues_ddl():
+    conn = _DDLRecordingConn()
+    enqueue_signal_diagnostics_job(conn, timeframe="30m")
+    conn.ddl_statements.clear()
+
+    claim_next_signal_diagnostics_job(conn)
+
+    assert conn.ddl_statements == []
+
+
 def test_every_write_commits_so_no_transaction_is_held_open():
     """The other half of the original bug: results must be visible to a
     poller immediately, not held inside one long-lived transaction."""
