@@ -9,6 +9,7 @@ Vercel Next.js frontend
   -> FastAPI
   -> PostgreSQL
   -> research campaign worker
+  -> signal diagnostics worker
   -> persistent Docker volumes
 ```
 
@@ -17,7 +18,7 @@ No research logic, validation thresholds, or APIs are changed except deployment-
 ## Files
 
 - `apps/api/Dockerfile` — production FastAPI/worker image.
-- `deploy/production/docker-compose.prod.yml` — PostgreSQL, migration runner, API, worker, Nginx.
+- `deploy/production/docker-compose.prod.yml` — PostgreSQL, migration runner, API, campaign worker, signal diagnostics worker, Nginx.
 - `deploy/production/nginx/keftrade.conf` — reverse proxy with gzip, proxy headers, and websocket upgrade support.
 - `deploy/production/.env.production.example` — required production environment variables.
 - `deploy/production/bootstrap_ubuntu.sh` — Ubuntu Docker/firewall/fail2ban bootstrap.
@@ -67,7 +68,7 @@ cd /opt/keftrade/deploy/production
 docker compose -f docker-compose.prod.yml build
 docker compose -f docker-compose.prod.yml up -d postgres
 docker compose -f docker-compose.prod.yml run --rm migrate
-docker compose -f docker-compose.prod.yml up -d api worker nginx
+docker compose -f docker-compose.prod.yml up -d api worker signal-diagnostics-worker nginx
 docker compose -f docker-compose.prod.yml ps
 ```
 
@@ -78,6 +79,14 @@ docker compose -f docker-compose.prod.yml up -d --force-recreate worker
 docker compose -f docker-compose.prod.yml logs --tail=100 --since=5m worker
 ```
 
+Signal measurements use a separate queue. Create or refresh its worker after
+deploying a version that includes signal diagnostics:
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --force-recreate signal-diagnostics-worker
+docker compose -f docker-compose.prod.yml logs --tail=100 --since=5m signal-diagnostics-worker
+```
+
 ## Validation commands
 
 ```bash
@@ -86,6 +95,7 @@ curl -fsS http://127.0.0.1/docs | head
 docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml ps
 docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml logs --tail=100 api
 docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml logs --tail=100 --since=5m worker
+docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml logs --tail=100 --since=5m signal-diagnostics-worker
 docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml exec postgres pg_isready -U keftrade -d keftrade
 docker compose -f /opt/keftrade/deploy/production/docker-compose.prod.yml exec postgres psql -U keftrade -d keftrade -c "select to_regclass('public.research_campaign_jobs');"
 ```

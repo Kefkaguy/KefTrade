@@ -104,6 +104,39 @@ services:
         max-size: "20m"
         max-file: "5"
 
+  signal-diagnostics-worker:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 30s
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    command:
+      - python
+      - -m
+      - app.workers.signal_diagnostics_runner
+      - --poll-seconds
+      - ${KEFTRADE_SIGNAL_DIAGNOSTICS_POLL_SECONDS:-5}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; assert os.environ.get('DATABASE_URL')"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
   nginx:
     image: nginx:1.27-alpine
     restart: unless-stopped

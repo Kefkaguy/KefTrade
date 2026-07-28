@@ -134,6 +134,15 @@ def test_worker_supervision_config_contains_restart_health_identity_and_logs() -
     assert {row["name"] for row in result["checks"]} >= {"automatic_restart", "healthcheck", "unique_worker_identity", "structured_logs"}
 
 
+def test_signal_diagnostics_worker_is_supervised_in_production() -> None:
+    compose = Path(__file__).resolve().parents[3] / "deploy" / "production" / "docker-compose.prod.yml"
+    text = compose.read_text(encoding="utf-8")
+
+    assert "signal-diagnostics-worker:" in text
+    assert "app.workers.signal_diagnostics_runner" in text
+    assert text.count("restart: unless-stopped") >= 4
+
+
 def test_missing_worker_supervision_config_returns_failed_check(tmp_path) -> None:
     missing_path = tmp_path / "missing-compose.yml"
 
