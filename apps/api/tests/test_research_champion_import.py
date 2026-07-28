@@ -100,6 +100,117 @@ def _stub_ensure_campaign_tables(monkeypatch):
     monkeypatch.setattr(research_campaigns, "ensure_campaign_tables", lambda conn: None)
 
 
+def champion_row(job, *, candidate_id="cand_original", campaign_id=10, state="research_champion"):
+    return {
+        "candidate_id": candidate_id,
+        "campaign_id": campaign_id,
+        "symbol": job["symbol"],
+        "timeframe": job["timeframe"],
+        "candidate": job["candidate"],
+        "strategy_family": job["strategy_family"],
+        "job_family_id": job["family_id"],
+        "job_parent_candidate_id": job["parent_candidate_id"],
+        "promotion_state": state,
+    }
+
+
+# ---------------------------------------------------------------------------
+# The backlog count and the import must mean the same thing
+# ---------------------------------------------------------------------------
+
+def test_the_backlog_counts_only_what_the_import_can_actually_add() -> None:
+    """The reported bug: the backlog counted job rows not yet imported by
+    (campaign_id, candidate_id), while the import additionally dropped rows
+    whose strategy a live champion already covered. The count promised 15 and
+    the button delivered 0, forever."""
+    existing = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_original")
+    duplicates = [
+        promoted_job(job_id=index, campaign_id=20, candidate_id=f"cand_new_{index}")
+        for index in range(2, 6)
+    ]
+    conn = FakeImportConnection(
+        promoted_jobs=duplicates,
+        existing_champion_rows=[champion_row(existing)],
+    )
+
+    status = rci.research_champion_status(conn)
+
+    assert status["eligible_promoted_jobs"] == 0
+    assert status["eligible_jobs_scanned"] == 4
+    assert status["duplicate_of_existing_champion"] == 4
+
+
+def test_the_backlog_counts_a_genuinely_new_strategy() -> None:
+    existing = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_original")
+    fresh = promoted_job(job_id=2, campaign_id=20, candidate_id="cand_new", symbol="NVDA")
+    conn = FakeImportConnection(
+        promoted_jobs=[fresh],
+        existing_champion_rows=[champion_row(existing)],
+    )
+
+    status = rci.research_champion_status(conn)
+
+    assert status["eligible_promoted_jobs"] == 1
+    assert status["duplicate_of_existing_champion"] == 0
+
+
+def test_the_backlog_collapses_duplicates_within_itself() -> None:
+    """Four job rows of one strategy are one importable champion, so the
+    backlog must say 1 rather than 4."""
+    rows = [
+        promoted_job(job_id=index, campaign_id=20, candidate_id=f"cand_{index}")
+        for index in range(1, 5)
+    ]
+    conn = FakeImportConnection(promoted_jobs=rows)
+
+    status = rci.research_champion_status(conn)
+
+    assert status["eligible_promoted_jobs"] == 1
+    assert status["duplicate_within_backlog"] == 3
+
+
+def test_the_count_and_the_import_agree() -> None:
+    """The invariant that was broken: whatever the backlog reports is exactly
+    what a subsequent import inserts."""
+    existing = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_original")
+    rows = [
+        promoted_job(job_id=2, campaign_id=20, candidate_id="cand_dup"),
+        promoted_job(job_id=3, campaign_id=20, candidate_id="cand_new", symbol="NVDA"),
+    ]
+    status_conn = FakeImportConnection(promoted_jobs=rows, existing_champion_rows=[champion_row(existing)])
+    import_conn = FakeImportConnection(promoted_jobs=rows, existing_champion_rows=[champion_row(existing)])
+
+    reported = rci.research_champion_status(status_conn)["eligible_promoted_jobs"]
+    result = rci.import_research_champions(import_conn, max_champions=5000)
+
+    assert reported == result["imported"] == 1
+
+
+def test_an_import_that_adds_nothing_says_why() -> None:
+    """'0 champions added' with no reason is what made this look like a bug."""
+    existing = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_original")
+    conn = FakeImportConnection(
+        promoted_jobs=[promoted_job(job_id=2, campaign_id=20, candidate_id="cand_dup")],
+        existing_champion_rows=[champion_row(existing)],
+    )
+
+    result = rci.import_research_champions(conn, max_champions=25)
+
+    assert result["imported"] == 0
+    assert result["examined"] == 1
+    assert result["skipped_duplicate_of_existing_champion"] == 1
+
+
+def test_an_already_graduated_elite_also_covers_a_cluster() -> None:
+    existing = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_original")
+    conn = FakeImportConnection(
+        promoted_jobs=[promoted_job(job_id=2, campaign_id=20, candidate_id="cand_dup")],
+        existing_champion_rows=[champion_row(existing, state="elite")],
+    )
+
+    assert rci.research_champion_status(conn)["eligible_promoted_jobs"] == 0
+
+
 def test_cluster_key_ignores_candidate_id_and_campaign_id() -> None:
     left = promoted_job(job_id=1, campaign_id=10, candidate_id="cand_a")
     right = promoted_job(job_id=2, campaign_id=99, candidate_id="cand_totally_different")

@@ -140,32 +140,68 @@ def _load_promoted_jobs(
     return [dict(row) for row in rows]
 
 
+STATUS_BACKLOG_SCAN_LIMIT = 5000
+
+
+def selectable_champion_rows(
+    conn: psycopg.Connection,
+    *,
+    limit: int,
+    min_profit_factor: float = 1.25,
+    min_trades: int = 30,
+    max_drawdown: float = 0.12,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """The rows an import would actually insert, and why the rest were skipped.
+
+    One definition, used by both the backlog count and the import. They used
+    to disagree: the count excluded only an exact (campaign_id, candidate_id)
+    already imported, while the import ALSO dropped anything whose
+    `_cluster_key` matched a live champion. A job that was a new row but the
+    same effective strategy therefore counted as eligible and could never be
+    imported -- the backlog showed a number the button could not deliver, and
+    it never went down.
+    """
+    candidates = _load_promoted_jobs(
+        conn,
+        limit=max(500, limit * 80),
+        min_profit_factor=min_profit_factor,
+        min_trades=min_trades,
+        max_drawdown=max_drawdown,
+    )
+    ranked = sorted(candidates, key=_score, reverse=True)
+    already_covered = _existing_cluster_keys(conn, promotion_states=("research_champion", "elite"))
+    seen_clusters: set[str] = set(already_covered)
+    selected: list[dict[str, Any]] = []
+    duplicate_of_existing = 0
+    duplicate_within_backlog = 0
+    for row in ranked:
+        cluster = _cluster_key(row)
+        if cluster in already_covered:
+            duplicate_of_existing += 1
+            continue
+        if cluster in seen_clusters:
+            duplicate_within_backlog += 1
+            continue
+        seen_clusters.add(cluster)
+        if len(selected) < limit:
+            selected.append(row)
+    return selected, {
+        "eligible_jobs_scanned": len(candidates),
+        "duplicate_of_existing_champion": duplicate_of_existing,
+        "duplicate_within_backlog": duplicate_within_backlog,
+    }
+
+
 def research_champion_status(conn: psycopg.Connection) -> dict[str, Any]:
-    backlog = conn.execute(
-        """
-        SELECT
-            COUNT(*) AS eligible_promoted_jobs,
-            COUNT(DISTINCT j.symbol) AS symbols,
-            COUNT(DISTINCT j.timeframe) AS timeframes,
-            COUNT(DISTINCT COALESCE(j.strategy_family, j.family_id)) AS families
-        FROM research_campaign_jobs j
-        WHERE j.simulation_only = TRUE
-          AND j.status = 'promoted'
-          AND j.candidate IS NOT NULL
-          AND j.result IS NOT NULL
-          AND COALESCE((j.result->'metrics'->>'profit_factor')::double precision, 0) >= 1.25
-          AND COALESCE((j.result->'metrics'->>'expectancy_per_trade')::double precision, 0) > 0
-          AND COALESCE((j.result->'metrics'->>'number_of_trades')::double precision, 0) >= 30
-          AND COALESCE((j.result->'metrics'->>'max_drawdown')::double precision, 1) <= 0.12
-          AND NOT EXISTS (
-              SELECT 1
-              FROM elite_research_candidates e
-              WHERE e.campaign_id = j.campaign_id
-                AND e.candidate_id = j.candidate_id
-                AND e.simulation_only = TRUE
-          )
-        """
-    ).fetchone()
+    importable, skipped = selectable_champion_rows(conn, limit=STATUS_BACKLOG_SCAN_LIMIT)
+    backlog = {
+        "eligible_promoted_jobs": len(importable),
+        "symbols": len({str(row.get("symbol") or "") for row in importable}),
+        "timeframes": len({str(row.get("timeframe") or "") for row in importable}),
+        "families": len(
+            {str(row.get("strategy_family") or row.get("family_id") or "") for row in importable}
+        ),
+    }
     imported = conn.execute(
         """
         SELECT
@@ -198,6 +234,18 @@ def research_champion_status(conn: psycopg.Connection) -> dict[str, Any]:
         "needs_more_data": int((imported or {}).get("needs_more_data") or 0),
         "graduated_elites": int((imported or {}).get("graduated_elites") or 0),
         "promotion_rule_version": RESEARCH_CHAMPION_RULE_VERSION,
+        # `eligible_promoted_jobs` above counts strategies the import would
+        # actually add. These explain the gap to the raw job count, so a
+        # backlog that refuses to shrink is legible rather than mysterious.
+        "eligible_jobs_scanned": skipped["eligible_jobs_scanned"],
+        "duplicate_of_existing_champion": skipped["duplicate_of_existing_champion"],
+        "duplicate_within_backlog": skipped["duplicate_within_backlog"],
+        "backlog_scan_limit": STATUS_BACKLOG_SCAN_LIMIT,
+        "backlog_note": (
+            "Eligible counts distinct strategies, not job rows. Jobs whose symbol, timeframe, family, "
+            "blocks, execution parameters and direction already match a live champion are not importable "
+            "and are reported separately."
+        ),
     }
 
 
@@ -261,28 +309,16 @@ def import_research_champions(
     # caller can safely ask for "all of them" via a large max_champions rather
     # than needing to know the exact backlog size up front.
     bounded = max(1, min(int(max_champions), 5000))
-    candidates = _load_promoted_jobs(
+    # Same selection the backlog count reports, so the number on the button and
+    # the number actually inserted cannot disagree -- see
+    # `selectable_champion_rows`.
+    selected, skipped = selectable_champion_rows(
         conn,
-        limit=max(500, bounded * 80),
+        limit=bounded,
         min_profit_factor=min_profit_factor,
         min_trades=min_trades,
         max_drawdown=max_drawdown,
     )
-    ranked = sorted(candidates, key=_score, reverse=True)
-    # Seeded with every cluster a live champion or elite already covers, so a
-    # different campaign's near-identical job can no longer sneak in under a
-    # fresh candidate_id -- see `_existing_cluster_keys`.
-    already_covered = _existing_cluster_keys(conn, promotion_states=("research_champion", "elite"))
-    seen_clusters: set[str] = set(already_covered)
-    selected: list[dict[str, Any]] = []
-    for row in ranked:
-        cluster = _cluster_key(row)
-        if cluster in seen_clusters:
-            continue
-        seen_clusters.add(cluster)
-        selected.append(row)
-        if len(selected) >= bounded:
-            break
 
     imported: list[dict[str, Any]] = []
     for row in selected:
@@ -415,12 +451,16 @@ def import_research_champions(
     conn.commit()
     return {
         "imported": len(imported),
-        "examined": len(candidates),
-        # New distinct clusters found in this call's candidate pool -- not the
-        # running total, which also includes every cluster a prior import
-        # already covered (see `already_covered` above).
-        "dedupe_clusters_seen": len(seen_clusters) - len(already_covered),
-        "already_covered_clusters": len(already_covered),
+        "examined": skipped["eligible_jobs_scanned"],
+        # New distinct strategies this call could add -- not the running total,
+        # which also includes every cluster a prior import already covered.
+        "dedupe_clusters_seen": len(selected),
+        "already_covered_clusters": skipped["duplicate_of_existing_champion"],
+        # Why eligible job rows did not become champions. When `imported` is 0
+        # but rows were examined, these two say which -- the answer is almost
+        # always that the strategy is already represented.
+        "skipped_duplicate_of_existing_champion": skipped["duplicate_of_existing_champion"],
+        "skipped_duplicate_within_backlog": skipped["duplicate_within_backlog"],
         "max_champions": bounded,
         "promotion_rule_version": RESEARCH_CHAMPION_RULE_VERSION,
         "promotion_state": "research_champion",

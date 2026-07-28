@@ -1652,7 +1652,13 @@ export function getElitePortfolioOptions() {
 }
 
 export type ResearchChampionStatus = {
+  /** Distinct strategies the import would actually add — not raw job rows. */
   eligible_promoted_jobs: number;
+  /** Eligible job rows examined, before duplicate strategies were collapsed. */
+  eligible_jobs_scanned?: number;
+  /** Rows whose strategy a live champion already covers, so they can never import. */
+  duplicate_of_existing_champion?: number;
+  duplicate_within_backlog?: number;
   symbols: number;
   timeframes: number;
   families: number;

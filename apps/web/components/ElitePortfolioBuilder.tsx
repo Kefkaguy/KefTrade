@@ -938,11 +938,29 @@ function ResearchChampionIntake({
         <Metric label="Final elites" value={status?.final_elites ?? "—"} />
         <Metric label="Symbols" value={status?.symbols ?? "—"} />
       </div>
+      {/* A backlog of 0 alongside eligible job rows is the normal steady state
+          once a strategy is already represented, not a stuck queue. Saying so
+          here stops it reading as a broken import. */}
+      {status && !status.eligible_promoted_jobs && (status.duplicate_of_existing_champion ?? 0) > 0 ? (
+        <div className="eliteChampionResult">
+          <strong>Nothing new to import</strong>
+          <span className="eliteImportExplanation">
+            {status.eligible_jobs_scanned?.toLocaleString()} eligible job
+            {status.eligible_jobs_scanned === 1 ? "" : "s"} passed the thresholds, but{" "}
+            {status.duplicate_of_existing_champion?.toLocaleString()} are the same strategy as a champion you
+            already have — same symbol, timeframe, family, blocks, execution parameters and direction. Importing
+            them again would duplicate work, not add coverage.
+          </span>
+        </div>
+      ) : null}
       {result ? (
         <div className="eliteChampionResult">
           <strong>Import completed: {result.imported} champions added</strong>
-          <span className="eliteImportExplanation">{result.dedupe_clusters_seen} new dedupe clusters found · {result.already_covered_clusters} already covered by an existing champion. Final elites created: {result.final_elites_created}. Thresholds weakened: {String(result.thresholds_weakened)}. Next step: validation.</span>
-          <span>{result.dedupe_clusters_seen} new clusters · {result.already_covered_clusters} already covered · thresholds weakened: {String(result.thresholds_weakened)}</span>
+          <span className="eliteImportExplanation">
+            {result.imported === 0 && result.examined > 0
+              ? `All ${result.examined.toLocaleString()} eligible job${result.examined === 1 ? "" : "s"} already match a champion you have. Nothing was skipped by mistake.`
+              : `${result.dedupe_clusters_seen} new dedupe cluster${result.dedupe_clusters_seen === 1 ? "" : "s"} found · ${result.already_covered_clusters} already covered by an existing champion. Final elites created: ${result.final_elites_created}. Thresholds weakened: ${String(result.thresholds_weakened)}. Next step: validation.`}
+          </span>
         </div>
       ) : null}
       {dedupeResult ? (
