@@ -14,8 +14,13 @@ import pytest
 from app.services.signal_diagnostics import (
     MINIMUM_SIGNALS_FOR_A_VERDICT,
     MINIMUM_T_STATISTIC,
+    _load_dataset_cached,
+    claim_next_signal_diagnostics_job,
+    enqueue_signal_diagnostics_job,
     measure_signal_edge,
     round_trip_cost_bps,
+    run_claimed_signal_diagnostics_job,
+    run_one_signal_diagnostics_job,
     summarize_edge,
 )
 from app.services.strategy import StrategyDecision
@@ -288,3 +293,244 @@ def test_the_significance_bar_is_above_the_conventional_two():
     """Several horizons are tested and the best kept, so 2.0 would under-state
     the real false-positive rate."""
     assert MINIMUM_T_STATISTIC > 2.0
+
+
+# ---------------------------------------------------------------------------
+# N+1 fix: the same (symbol, timeframe, dataset_id) must be loaded once
+# ---------------------------------------------------------------------------
+
+class _FakeCandidate:
+    def __init__(self, parameters):
+        self.parameters = parameters
+
+
+def test_the_same_symbol_is_loaded_once_across_repeated_calls(monkeypatch):
+    """This is the exact bug: without a shared cache, every (family, variant)
+    pair re-issues the candle query for a symbol whose result never changes
+    within one sweep."""
+    calls = []
+
+    def fake_load_intraday_backtest_dataset(conn, symbol, timeframe, *, dataset_id):
+        calls.append((symbol, timeframe, dataset_id))
+        return {"rows": [], "candles": [], "features": []}
+
+    monkeypatch.setattr(
+        "app.services.labs.intraday.dataset.load_intraday_backtest_dataset",
+        fake_load_intraday_backtest_dataset,
+    )
+
+    cache: dict = {}
+    candidate = _FakeCandidate({"strategy_architecture": "session_momentum_v2"})
+    for _ in range(12):  # simulating 12 families asking for the same symbol
+        _load_dataset_cached(None, candidate, "NVDA", "30m", 7, cache)
+
+    assert len(calls) == 1
+
+
+def test_different_symbols_still_each_load_once(monkeypatch):
+    calls = []
+
+    def fake_load_intraday_backtest_dataset(conn, symbol, timeframe, *, dataset_id):
+        calls.append(symbol)
+        return {"rows": [], "candles": [], "features": []}
+
+    monkeypatch.setattr(
+        "app.services.labs.intraday.dataset.load_intraday_backtest_dataset",
+        fake_load_intraday_backtest_dataset,
+    )
+
+    cache: dict = {}
+    candidate = _FakeCandidate({"strategy_architecture": "session_momentum_v2"})
+    for symbol in ("NVDA", "TSLA", "NVDA", "TSLA", "AMD"):
+        _load_dataset_cached(None, candidate, symbol, "30m", 7, cache)
+
+    assert sorted(calls) == ["AMD", "NVDA", "TSLA"]
+
+
+class _FakeJobsConn:
+    """Minimal in-memory stand-in for the jobs table, just enough to exercise
+    enqueue / claim / complete without a real database."""
+
+    def __init__(self):
+        self.rows: dict[int, dict] = {}
+        self._next_id = 1
+        self.commits = 0
+
+    def execute(self, query, params=None):
+        text = " ".join(str(query).split())
+        params = params or ()
+
+        if text.startswith("CREATE TABLE") or text.startswith("CREATE INDEX"):
+            return _FakeJobsResult(None)
+
+        if text.startswith("INSERT INTO research_signal_diagnostics_jobs"):
+            timeframe, dataset_id, architectures, max_variants, max_symbols = params
+            row_id = self._next_id
+            self._next_id += 1
+            row = {
+                "id": row_id,
+                "timeframe": timeframe,
+                "dataset_id": dataset_id,
+                "architectures": architectures.obj if architectures is not None else None,
+                "max_variants": max_variants,
+                "max_symbols": max_symbols,
+                "status": "queued",
+                "result": None,
+                "error": None,
+            }
+            self.rows[row_id] = row
+            return _FakeJobsResult(dict(row))
+
+        if "SET status = 'running'" in text:
+            queued = sorted((row for row in self.rows.values() if row["status"] == "queued"), key=lambda r: r["id"])
+            if not queued:
+                return _FakeJobsResult(None)
+            queued[0]["status"] = "running"
+            return _FakeJobsResult(dict(queued[0]))
+
+        if "SET status = 'completed'" in text:
+            result, job_id = params
+            row = self.rows[job_id]
+            row["status"] = "completed"
+            row["result"] = result.obj if hasattr(result, "obj") else result
+            return _FakeJobsResult(dict(row))
+
+        if "SET status = 'failed'" in text:
+            error, job_id = params
+            row = self.rows[job_id]
+            row["status"] = "failed"
+            row["error"] = error
+            return _FakeJobsResult(dict(row))
+
+        if text.startswith("SELECT * FROM research_signal_diagnostics_jobs WHERE id"):
+            (job_id,) = params
+            row = self.rows.get(job_id)
+            return _FakeJobsResult(dict(row) if row else None)
+
+        raise AssertionError(f"unexpected query: {text[:80]}")
+
+    def commit(self):
+        self.commits += 1
+
+
+class _FakeJobsResult:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+# ---------------------------------------------------------------------------
+# Background job queue: the fix for the 502s
+# ---------------------------------------------------------------------------
+
+def test_enqueue_returns_immediately_without_running_anything(monkeypatch):
+    """The whole point: enqueuing must never touch measure_signal_edge."""
+    called = []
+    monkeypatch.setattr(
+        "app.services.signal_diagnostics.run_signal_diagnostics",
+        lambda *a, **k: called.append(1),
+    )
+
+    job = enqueue_signal_diagnostics_job(_FakeJobsConn(), timeframe="30m")
+
+    assert job["status"] == "queued"
+    assert called == []
+
+
+def test_claim_picks_the_oldest_queued_job_and_marks_it_running():
+    conn = _FakeJobsConn()
+    first = enqueue_signal_diagnostics_job(conn, timeframe="30m")
+    enqueue_signal_diagnostics_job(conn, timeframe="15m")
+
+    claimed = claim_next_signal_diagnostics_job(conn)
+
+    assert claimed["id"] == first["id"]
+    assert claimed["status"] == "running"
+
+
+def test_claim_on_an_empty_queue_returns_none():
+    assert claim_next_signal_diagnostics_job(_FakeJobsConn()) is None
+
+
+def test_a_successful_job_stores_its_result(monkeypatch):
+    fake_result = {"families_measured": 3, "predictive_families": ["session_momentum_v2"]}
+    monkeypatch.setattr(
+        "app.services.signal_diagnostics.run_signal_diagnostics",
+        lambda conn, **kwargs: fake_result,
+    )
+    conn = _FakeJobsConn()
+    enqueue_signal_diagnostics_job(conn, timeframe="30m")
+    job = claim_next_signal_diagnostics_job(conn)
+
+    completed = run_claimed_signal_diagnostics_job(conn, job)
+
+    assert completed["status"] == "completed"
+    assert completed["result"] == fake_result
+
+
+def test_a_failing_job_is_recorded_as_failed_not_raised(monkeypatch):
+    """One bad dataset must not crash the worker loop -- the same principle
+    run_signal_diagnostics already applies per-family, one level up."""
+
+    def boom(conn, **kwargs):
+        raise ValueError("no intraday dataset snapshot exists to measure against")
+
+    monkeypatch.setattr("app.services.signal_diagnostics.run_signal_diagnostics", boom)
+    conn = _FakeJobsConn()
+    enqueue_signal_diagnostics_job(conn, timeframe="30m")
+    job = claim_next_signal_diagnostics_job(conn)
+
+    completed = run_claimed_signal_diagnostics_job(conn, job)
+
+    assert completed["status"] == "failed"
+    assert "no intraday dataset snapshot" in completed["error"]
+
+
+def test_run_one_job_processes_a_single_queued_item(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.signal_diagnostics.run_signal_diagnostics",
+        lambda conn, **kwargs: {"families_measured": 0},
+    )
+    conn = _FakeJobsConn()
+    enqueue_signal_diagnostics_job(conn, timeframe="30m")
+
+    result = run_one_signal_diagnostics_job(conn)
+
+    assert result["status"] == "completed"
+    assert run_one_signal_diagnostics_job(conn) is None, "the queue should be empty now"
+
+
+def test_every_write_commits_so_no_transaction_is_held_open():
+    """The other half of the original bug: results must be visible to a
+    poller immediately, not held inside one long-lived transaction."""
+    conn = _FakeJobsConn()
+    enqueue_signal_diagnostics_job(conn, timeframe="30m")
+
+    assert conn.commits >= 1
+
+
+def test_cross_sectional_cache_key_includes_lookback_bars(monkeypatch):
+    """A cross-sectional dataset's shape depends on lookback_bars too, so two
+    different lookbacks must not collide in the cache."""
+    calls = []
+
+    def fake_load_cross_sectional_intraday_dataset(conn, symbol, timeframe, *, dataset_id, lookback_bars):
+        calls.append(lookback_bars)
+        return {"rows": [], "candles": [], "features": []}
+
+    monkeypatch.setattr(
+        "app.services.labs.intraday.cross_sectional_dataset.load_cross_sectional_intraday_dataset",
+        fake_load_cross_sectional_intraday_dataset,
+    )
+
+    cache: dict = {}
+    short = _FakeCandidate({"strategy_architecture": "cross_sectional_momentum_v2", "cross_sectional_lookback_bars": 4})
+    long = _FakeCandidate({"strategy_architecture": "cross_sectional_momentum_v2", "cross_sectional_lookback_bars": 16})
+
+    _load_dataset_cached(None, short, "NVDA", "30m", 7, cache)
+    _load_dataset_cached(None, short, "NVDA", "30m", 7, cache)
+    _load_dataset_cached(None, long, "NVDA", "30m", 7, cache)
+
+    assert sorted(calls) == [4, 16]

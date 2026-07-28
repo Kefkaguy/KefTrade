@@ -247,12 +247,22 @@ def family_signal_diagnostics(
     symbols: Sequence[str],
     max_variants: int = 3,
     horizons: Sequence[int] = DEFAULT_HORIZONS,
+    dataset_cache: dict[Any, Any] | None = None,
 ) -> dict[str, Any]:
     """Measure one family's signal across symbols, pooling its firings.
 
     Signals are pooled across symbols before the statistic is taken, so the
     result describes the family rather than its luckiest instrument -- the
     one-symbol dependence that has dominated this pipeline's results.
+
+    `dataset_cache` is keyed by `(is_cross_sectional, symbol, timeframe,
+    dataset_id, lookback_bars)`. The candle query behind `_load_dataset` is a
+    function of that key alone -- it does not depend on which family or which
+    parameter variant is asking -- so without a cache shared across the whole
+    sweep, the same symbol's candles get re-fetched once per (family, variant)
+    pair: with defaults, up to 12 families x 3 variants = 36x the necessary
+    reads per symbol. Pass one dict in from the caller and reuse it across
+    every family in a sweep; a fresh `{}` still deduplicates within one family.
     """
     from dataclasses import replace as dataclass_replace
 
@@ -268,6 +278,7 @@ def family_signal_diagnostics(
     if not candidates:
         raise ValueError(f"family {architecture!r} generated no candidates")
 
+    cache: dict[Any, Any] = {} if dataset_cache is None else dataset_cache
     cost_bps = round_trip_cost_bps()
     variants: list[dict[str, Any]] = []
     for candidate in candidates:
@@ -275,7 +286,7 @@ def family_signal_diagnostics(
         per_symbol: list[dict[str, Any]] = []
         for symbol in symbols:
             try:
-                dataset = _load_dataset(conn, candidate, symbol, timeframe, dataset_id)
+                dataset = _load_dataset_cached(conn, candidate, symbol, timeframe, dataset_id, cache)
             except Exception as error:  # noqa: BLE001 - one unreadable symbol must not sink the family
                 per_symbol.append({"symbol": symbol, "error": str(error)})
                 continue
@@ -501,6 +512,11 @@ def run_signal_diagnostics(
         wanted = set(architectures)
         families = [family for family in families if family["architecture"] in wanted]
 
+    # Shared across every family in this sweep: the candle query behind
+    # _load_dataset depends only on (symbol, timeframe, dataset_id[,
+    # lookback_bars]), which is identical for most families here, so one
+    # cache dict turns up to families*variants reads per symbol into one.
+    dataset_cache: dict[Any, Any] = {}
     reports: list[dict[str, Any]] = []
     for family in families:
         if timeframe not in family["supported_timeframes"]:
@@ -513,6 +529,7 @@ def run_signal_diagnostics(
                 dataset_id=dataset_id,
                 symbols=selected_symbols,
                 max_variants=max_variants,
+                dataset_cache=dataset_cache,
             )
         except Exception as error:  # noqa: BLE001 - one broken family must not sink the sweep
             reports.append(
@@ -576,11 +593,176 @@ def _sweep_recommendation(predictive: list[str], below_cost: list[str], measured
     return "Nothing was measurable on this timeframe."
 
 
+# ---------------------------------------------------------------------------
+# Background job queue
+#
+# The measurement above reads bars for every (family, variant, symbol) and
+# runs decide() over every one of them -- seconds to low minutes of real work.
+# Running that inline in an API request holds the request's DB transaction
+# open for the whole duration and, on a single-worker process, starves the
+# async event loop of GIL time long enough that unrelated endpoints start
+# timing out. So the request path only ever enqueues a row; a separate worker
+# process (app/workers/signal_diagnostics_runner.py) claims and runs it on its
+# own short-lived connection, exactly the pattern campaign_runner.py already
+# uses for campaign execution.
+# ---------------------------------------------------------------------------
+
+def ensure_signal_diagnostics_jobs_table(conn: psycopg.Connection) -> None:
+    """Idempotent creation for fresh environments. Migration 058 is
+    authoritative; this mirrors the `ensure_*` convention used elsewhere."""
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS research_signal_diagnostics_jobs (
+            id BIGSERIAL PRIMARY KEY,
+            timeframe TEXT NOT NULL,
+            dataset_id BIGINT,
+            architectures JSONB,
+            max_variants INTEGER NOT NULL DEFAULT 3,
+            max_symbols INTEGER NOT NULL DEFAULT 4,
+            status TEXT NOT NULL DEFAULT 'queued',
+            result JSONB,
+            error TEXT,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            started_at TIMESTAMPTZ,
+            completed_at TIMESTAMPTZ,
+            CONSTRAINT research_signal_diagnostics_jobs_status_check
+                CHECK (status IN ('queued', 'running', 'completed', 'failed'))
+        )
+        """,
+    )
+    for statement in statements:
+        conn.execute(statement)
+
+
+def enqueue_signal_diagnostics_job(
+    conn: psycopg.Connection,
+    *,
+    timeframe: str,
+    dataset_id: int | None = None,
+    architectures: Sequence[str] | None = None,
+    max_variants: int = 3,
+    max_symbols: int = 4,
+) -> dict[str, Any]:
+    """Queue a measurement and return immediately. Does not run anything.
+
+    This is the entire body of what the API request should do: one INSERT,
+    one commit, no candle reads, no decide() calls -- the request returns in
+    milliseconds regardless of how long the actual measurement takes.
+    """
+    ensure_signal_diagnostics_jobs_table(conn)
+    row = conn.execute(
+        """
+        INSERT INTO research_signal_diagnostics_jobs(
+            timeframe, dataset_id, architectures, max_variants, max_symbols
+        )
+        VALUES (%s, %s, %s, %s, %s)
+        RETURNING *
+        """,
+        (
+            timeframe,
+            dataset_id,
+            Jsonb(list(architectures)) if architectures is not None else None,
+            max_variants,
+            max_symbols,
+        ),
+    ).fetchone()
+    conn.commit()
+    return dict(row)
+
+
+def get_signal_diagnostics_job(conn: psycopg.Connection, job_id: int) -> dict[str, Any] | None:
+    ensure_signal_diagnostics_jobs_table(conn)
+    row = conn.execute(
+        "SELECT * FROM research_signal_diagnostics_jobs WHERE id = %s", (job_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def claim_next_signal_diagnostics_job(conn: psycopg.Connection) -> dict[str, Any] | None:
+    """Atomically claim the oldest queued job, or None if the queue is empty.
+
+    `FOR UPDATE SKIP LOCKED` is the same claiming pattern the campaign job
+    queue uses, so two worker processes can run concurrently without ever
+    claiming the same row.
+    """
+    ensure_signal_diagnostics_jobs_table(conn)
+    row = conn.execute(
+        """
+        UPDATE research_signal_diagnostics_jobs
+        SET status = 'running', started_at = NOW()
+        WHERE id = (
+            SELECT id FROM research_signal_diagnostics_jobs
+            WHERE status = 'queued'
+            ORDER BY id
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        RETURNING *
+        """
+    ).fetchone()
+    conn.commit()
+    return dict(row) if row else None
+
+
+def run_claimed_signal_diagnostics_job(conn: psycopg.Connection, job: dict[str, Any]) -> dict[str, Any]:
+    """Run one already-claimed job to completion and record the outcome.
+
+    Failures are caught and stored rather than raised, so one bad job (an
+    unreadable dataset, a missing symbol) cannot crash the worker loop -- the
+    same principle `run_signal_diagnostics` already applies per-family, one
+    level up.
+    """
+    try:
+        result = run_signal_diagnostics(
+            conn,
+            timeframe=job["timeframe"],
+            dataset_id=job["dataset_id"],
+            architectures=job["architectures"],
+            max_variants=job["max_variants"],
+            max_symbols=job["max_symbols"],
+        )
+    except Exception as error:  # noqa: BLE001 - store the failure, do not crash the worker
+        row = conn.execute(
+            """
+            UPDATE research_signal_diagnostics_jobs
+            SET status = 'failed', error = %s, completed_at = NOW()
+            WHERE id = %s
+            RETURNING *
+            """,
+            (str(error), job["id"]),
+        ).fetchone()
+        conn.commit()
+        return dict(row)
+
+    row = conn.execute(
+        """
+        UPDATE research_signal_diagnostics_jobs
+        SET status = 'completed', result = %s, completed_at = NOW()
+        WHERE id = %s
+        RETURNING *
+        """,
+        (Jsonb(result), job["id"]),
+    ).fetchone()
+    conn.commit()
+    return dict(row)
+
+
+def run_one_signal_diagnostics_job(conn: psycopg.Connection) -> dict[str, Any] | None:
+    """Claim and run one job. Returns None if the queue was empty."""
+    job = claim_next_signal_diagnostics_job(conn)
+    if job is None:
+        return None
+    return run_claimed_signal_diagnostics_job(conn, job)
+
+
 def _load_dataset(conn, candidate, symbol: str, timeframe: str, dataset_id: int) -> dict[str, Any]:
     """The same dataset the campaign would run this candidate against.
 
     Cross-sectional families need their peer-derived percentile feature, so
     dispatch mirrors `run_campaign_job` rather than re-deciding it here.
+
+    Uncached: prefer `_load_dataset_cached` for anything that loops over
+    multiple families or variants, which is every real caller in this module.
     """
     from app.services.labs.intraday.cross_sectional_dataset import (
         is_cross_sectional_candidate,
@@ -598,6 +780,29 @@ def _load_dataset(conn, candidate, symbol: str, timeframe: str, dataset_id: int)
             lookback_bars=int(candidate.parameters.get("cross_sectional_lookback_bars", 8)),
         )
     return load_intraday_backtest_dataset(conn, symbol, timeframe, dataset_id=dataset_id)
+
+
+def _load_dataset_cached(
+    conn, candidate, symbol: str, timeframe: str, dataset_id: int, cache: dict[Any, Any]
+) -> dict[str, Any]:
+    """`_load_dataset`, deduplicated across the whole sweep.
+
+    The cache key is exactly the inputs that determine the query result: a
+    plain family's dataset depends only on (symbol, timeframe, dataset_id),
+    and a cross-sectional family's additionally on lookback_bars. It does NOT
+    depend on architecture or on any other candidate parameter, which is why
+    the same key -- and therefore the same cached dataset -- is correctly
+    shared across every family and every variant that resolves to it.
+    """
+    from app.services.labs.intraday.cross_sectional_dataset import is_cross_sectional_candidate
+
+    payload = {"parameters": dict(candidate.parameters)}
+    is_cross_sectional = is_cross_sectional_candidate(payload)
+    lookback_bars = int(candidate.parameters.get("cross_sectional_lookback_bars", 8)) if is_cross_sectional else None
+    key = (is_cross_sectional, symbol, timeframe, dataset_id, lookback_bars)
+    if key not in cache:
+        cache[key] = _load_dataset(conn, candidate, symbol, timeframe, dataset_id)
+    return cache[key]
 
 
 def _pool_measurements(

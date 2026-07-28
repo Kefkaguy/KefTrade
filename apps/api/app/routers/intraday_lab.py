@@ -579,32 +579,49 @@ def confirm_frozen_candidate(
 
 
 @router.post("/research/intraday/signal-diagnostics")
-def run_signal_diagnostics_endpoint(
+def enqueue_signal_diagnostics_endpoint(
     timeframe: str = Query(..., description="Timeframe to measure, e.g. 30m."),
     dataset_id: int | None = Query(None, description="Defaults to the latest intraday snapshot."),
     max_variants: int = Query(3, ge=1, le=12, description="Parameter points sampled per family."),
     max_symbols: int = Query(4, ge=1, le=25, description="Symbols pooled per family."),
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
-    """Measure whether each active family's signal predicts anything, before
-    spending a campaign on it.
+    """Queue a measurement of whether each active family's signal predicts
+    anything, before spending a campaign on it. Returns immediately.
 
-    Runs the family's own decide() with no stops, targets or position sizing,
-    nets out the unconditional drift, and compares the remaining edge against
-    the round-trip cost. Results are stored, so the UI reads them without
-    triggering a recompute. See app/services/signal_diagnostics.py."""
-    from app.services.signal_diagnostics import run_signal_diagnostics
+    This used to run the whole measurement inline -- reading bars for every
+    (family, variant, symbol) and running decide() over each one -- which held
+    the request's DB transaction open for 100+ seconds and, on a single-worker
+    API process, starved the event loop of GIL time long enough that
+    unrelated endpoints started returning 502. The actual work now runs in
+    app/workers/signal_diagnostics_runner.py; poll
+    GET /research/intraday/signal-diagnostics/jobs/{job_id} for the result.
+    See app/services/signal_diagnostics.py."""
+    from app.services.signal_diagnostics import enqueue_signal_diagnostics_job
 
-    try:
-        return run_signal_diagnostics(
-            conn,
-            timeframe=timeframe,
-            dataset_id=dataset_id,
-            max_variants=max_variants,
-            max_symbols=max_symbols,
-        )
-    except ValueError as error:
-        raise HTTPException(status_code=422, detail=str(error)) from error
+    job = enqueue_signal_diagnostics_job(
+        conn,
+        timeframe=timeframe,
+        dataset_id=dataset_id,
+        max_variants=max_variants,
+        max_symbols=max_symbols,
+    )
+    return {"job_id": job["id"], "status": job["status"]}
+
+
+@router.get("/research/intraday/signal-diagnostics/jobs/{job_id}")
+def get_signal_diagnostics_job_endpoint(
+    job_id: int,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Poll a queued measurement's status. `status` is one of queued,
+    running, completed, failed; `result` is populated once completed."""
+    from app.services.signal_diagnostics import get_signal_diagnostics_job
+
+    job = get_signal_diagnostics_job(conn, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"signal diagnostics job {job_id} not found")
+    return job
 
 
 @router.get("/research/intraday/signal-diagnostics")

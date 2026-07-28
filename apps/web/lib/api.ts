@@ -2056,8 +2056,16 @@ export async function getIntradaySignalDiagnostics(timeframe?: string): Promise<
   }
 }
 
-/** Runs the measurement. Slow by design — it reads bars, not cached rows. */
-export function runIntradaySignalDiagnostics(options: {
+export type IntradaySignalDiagnosticsJob = {
+  id: number;
+  status: "queued" | "running" | "completed" | "failed";
+  result?: Record<string, any> | null;
+  error?: string | null;
+};
+
+/** Queues the measurement and returns immediately — the actual run happens in
+ * a background worker, not in this request. See enqueue_signal_diagnostics_job. */
+export function enqueueIntradaySignalDiagnostics(options: {
   timeframe: string;
   maxVariants?: number;
   maxSymbols?: number;
@@ -2066,10 +2074,35 @@ export function runIntradaySignalDiagnostics(options: {
   params.append("timeframe", options.timeframe);
   params.append("max_variants", String(options.maxVariants ?? 3));
   params.append("max_symbols", String(options.maxSymbols ?? 4));
-  return request<Record<string, any>>(`/research/intraday/signal-diagnostics?${params.toString()}`, {
-    method: "POST",
-    timeoutMs: 600000
+  return request<{ job_id: number; status: string }>(
+    `/research/intraday/signal-diagnostics?${params.toString()}`,
+    { method: "POST", timeoutMs: 30000 }
+  );
+}
+
+export function getIntradaySignalDiagnosticsJob(jobId: number) {
+  return request<IntradaySignalDiagnosticsJob>(`/research/intraday/signal-diagnostics/jobs/${jobId}`, {
+    cache: "no-store",
+    timeoutMs: 30000
   });
+}
+
+/** Queues the measurement, then polls until it finishes (or the queue never
+ * drains within the timeout — the worker process must be running for this
+ * to ever resolve; see app/workers/signal_diagnostics_runner.py). */
+export async function runIntradaySignalDiagnostics(
+  options: { timeframe: string; maxVariants?: number; maxSymbols?: number },
+  onStatus?: (job: IntradaySignalDiagnosticsJob) => void
+): Promise<IntradaySignalDiagnosticsJob> {
+  const { job_id } = await enqueueIntradaySignalDiagnostics(options);
+  const deadline = Date.now() + 10 * 60 * 1000;
+  while (Date.now() < deadline) {
+    const job = await getIntradaySignalDiagnosticsJob(job_id);
+    onStatus?.(job);
+    if (job.status === "completed" || job.status === "failed") return job;
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+  throw new Error(`Signal diagnostics job ${job_id} did not finish within 10 minutes.`);
 }
 
 export type IntradayFamilyDiagnostic = {

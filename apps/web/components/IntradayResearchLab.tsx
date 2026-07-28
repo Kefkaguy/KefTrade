@@ -361,6 +361,8 @@ function FamilyRoster({
     };
   }, [latestCampaignId]);
 
+  const [measureStatus, setMeasureStatus] = useState<string | null>(null);
+
   const loadSignals = () => {
     getIntradaySignalDiagnostics().then((result) => setSignals(result));
   };
@@ -370,11 +372,20 @@ function FamilyRoster({
     if (measuring) return;
     setMeasuring(true);
     setMeasureError(null);
+    setMeasureStatus(null);
     try {
-      // One timeframe at a time: this reads bars rather than cached rows.
+      // Queues each timeframe and polls for completion — the actual
+      // measurement runs in a background worker, not in this request.
       for (const timeframe of timeframes) {
-        await runIntradaySignalDiagnostics({ timeframe });
+        setMeasureStatus(`Queuing ${timeframe}…`);
+        const job = await runIntradaySignalDiagnostics({ timeframe }, (update) => {
+          setMeasureStatus(`${timeframe}: ${update.status}…`);
+        });
+        if (job.status === "failed") {
+          throw new Error(job.error ?? `Signal diagnostics failed for ${timeframe}.`);
+        }
       }
+      setMeasureStatus(null);
       loadSignals();
     } catch (reason) {
       setMeasureError(reason instanceof Error ? reason.message : "Could not measure signals.");
@@ -449,7 +460,7 @@ function FamilyRoster({
       <div className="eliteChampionActions" style={{ marginTop: 14 }}>
         <button type="button" className="button secondary" disabled={measuring} onClick={() => void measure()}>
           <TrendingUp size={15} />
-          {measuring ? "Measuring signals…" : signals?.length ? "Re-measure signals" : "Measure family signals"}
+          {measuring ? measureStatus ?? "Queuing…" : signals?.length ? "Re-measure signals" : "Measure family signals"}
         </button>
       </div>
       {measureError ? <div className="strategyLibraryError" role="alert" style={{ marginTop: 12 }}>{measureError}</div> : null}
