@@ -485,6 +485,7 @@ def run_signal_diagnostics(
     max_variants: int = 3,
     max_symbols: int = 4,
     persist: bool = True,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Measure every active family's signal on one timeframe.
 
@@ -522,6 +523,11 @@ def run_signal_diagnostics(
     if architectures is not None:
         wanted = set(architectures)
         families = [family for family in families if family["architecture"] in wanted]
+    measurable_families = [family for family in families if timeframe in family["supported_timeframes"]]
+    total_families = len(measurable_families)
+    completed_families = 0
+    if progress_callback:
+        progress_callback({"total": total_families, "completed": 0, "current": None})
 
     # Shared across every family in this sweep: the candle query behind
     # _load_dataset depends only on (symbol, timeframe, dataset_id[,
@@ -529,9 +535,15 @@ def run_signal_diagnostics(
     # cache dict turns up to families*variants reads per symbol into one.
     dataset_cache: dict[Any, Any] = {}
     reports: list[dict[str, Any]] = []
-    for family in families:
-        if timeframe not in family["supported_timeframes"]:
-            continue
+    for family in measurable_families:
+        if progress_callback:
+            progress_callback(
+                {
+                    "total": total_families,
+                    "completed": completed_families,
+                    "current": family["name"],
+                }
+            )
         try:
             report = family_signal_diagnostics(
                 conn,
@@ -553,6 +565,15 @@ def run_signal_diagnostics(
                     "summary": {"verdict": "not_measurable", "detail": str(error)},
                 }
             )
+            completed_families += 1
+            if progress_callback:
+                progress_callback(
+                    {
+                        "total": total_families,
+                        "completed": completed_families,
+                        "current": None if completed_families >= total_families else family["name"],
+                    }
+                )
             continue
         if persist:
             # Commit per family rather than once at the end. A single
@@ -564,6 +585,15 @@ def run_signal_diagnostics(
             persist_signal_diagnostics(conn, report)
             conn.commit()
         reports.append(report)
+        completed_families += 1
+        if progress_callback:
+            progress_callback(
+                {
+                    "total": total_families,
+                    "completed": completed_families,
+                    "current": None if completed_families >= total_families else family["name"],
+                }
+            )
 
     verdicts: dict[str, int] = {}
     for report in reports:
@@ -638,6 +668,9 @@ def ensure_signal_diagnostics_jobs_table(conn: psycopg.Connection) -> None:
             status TEXT NOT NULL DEFAULT 'queued',
             result JSONB,
             error TEXT,
+            progress_total INTEGER NOT NULL DEFAULT 0,
+            progress_completed INTEGER NOT NULL DEFAULT 0,
+            progress_current TEXT,
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             started_at TIMESTAMPTZ,
             completed_at TIMESTAMPTZ,
@@ -648,6 +681,36 @@ def ensure_signal_diagnostics_jobs_table(conn: psycopg.Connection) -> None:
     )
     for statement in statements:
         conn.execute(statement)
+    conn.execute(
+        """
+        ALTER TABLE research_signal_diagnostics_jobs
+            ADD COLUMN IF NOT EXISTS progress_total INTEGER NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS progress_completed INTEGER NOT NULL DEFAULT 0,
+            ADD COLUMN IF NOT EXISTS progress_current TEXT
+        """
+    )
+
+
+def update_signal_diagnostics_job_progress(
+    conn: psycopg.Connection,
+    job_id: int,
+    *,
+    total: int,
+    completed: int,
+    current: str | None,
+) -> None:
+    """Persist worker progress so the polling UI can show useful movement."""
+    conn.execute(
+        """
+        UPDATE research_signal_diagnostics_jobs
+        SET progress_total = %s,
+            progress_completed = %s,
+            progress_current = %s
+        WHERE id = %s
+        """,
+        (total, completed, current, job_id),
+    )
+    conn.commit()
 
 
 def enqueue_signal_diagnostics_job(
@@ -787,12 +850,19 @@ def run_claimed_signal_diagnostics_job(conn: psycopg.Connection, job: dict[str, 
             architectures=job["architectures"],
             max_variants=job["max_variants"],
             max_symbols=job["max_symbols"],
+            progress_callback=lambda progress: update_signal_diagnostics_job_progress(
+                conn,
+                int(job["id"]),
+                total=int(progress["total"]),
+                completed=int(progress["completed"]),
+                current=progress["current"],
+            ),
         )
     except Exception as error:  # noqa: BLE001 - store the failure, do not crash the worker
         row = conn.execute(
             """
             UPDATE research_signal_diagnostics_jobs
-            SET status = 'failed', error = %s, completed_at = NOW()
+            SET status = 'failed', error = %s, progress_current = NULL, completed_at = NOW()
             WHERE id = %s
             RETURNING *
             """,
@@ -804,7 +874,11 @@ def run_claimed_signal_diagnostics_job(conn: psycopg.Connection, job: dict[str, 
     row = conn.execute(
         """
         UPDATE research_signal_diagnostics_jobs
-        SET status = 'completed', result = %s, completed_at = NOW()
+        SET status = 'completed',
+            result = %s,
+            progress_completed = GREATEST(progress_completed, progress_total),
+            progress_current = NULL,
+            completed_at = NOW()
         WHERE id = %s
         RETURNING *
         """,

@@ -2059,6 +2059,9 @@ export async function getIntradaySignalDiagnostics(timeframe?: string): Promise<
 export type IntradaySignalDiagnosticsJob = {
   id: number;
   status: "queued" | "running" | "completed" | "failed";
+  progress_total?: number;
+  progress_completed?: number;
+  progress_current?: string | null;
   result?: Record<string, any> | null;
   error?: string | null;
   queue?: {

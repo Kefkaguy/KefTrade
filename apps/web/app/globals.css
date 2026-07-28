@@ -629,6 +629,10 @@ kbd { padding: 3px 5px; border: 1px solid var(--line); border-radius: 4px; backg
 .dashboardGrid.wideLeft, .wideLeft { grid-template-columns: minmax(0, 1.35fr) minmax(280px, .65fr); }
 .progressTrack { position: relative; height: 5px; margin-top: 13px; overflow: hidden; border-radius: 3px; background: var(--panel-soft); }
 .progressTrack i { display: block; height: 100%; border-radius: inherit; background: var(--accent); box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 58%, transparent); }
+.signalDiagnosticsProgress { max-width: 520px; margin-top: 12px; color: var(--muted); font-size: 10px; }
+.signalDiagnosticsProgress > div:first-child { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.signalDiagnosticsProgress strong { color: var(--text); font: 650 11px var(--font-mono); }
+.signalDiagnosticsProgress p { margin-top: 7px; }
 .compactMetrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; margin-top: 24px; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-small); background: var(--line); }
 .compactMetrics.twoColumns { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .compactMetrics > div { padding: 13px; background: var(--panel-soft); }

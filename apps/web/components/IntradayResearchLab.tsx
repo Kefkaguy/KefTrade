@@ -18,6 +18,7 @@ import {
   type IntradayLabOverview,
   type IntradaySampleJob,
   type IntradaySignalDiagnostic,
+  type IntradaySignalDiagnosticsJob,
   type IntradayStrategyRosterEntry
 } from "@/lib/api";
 import { Card, EmptyState, PageTitle } from "@/components/ResearchUI";
@@ -350,6 +351,7 @@ function FamilyRoster({
   const [signals, setSignals] = useState<IntradaySignalDiagnostic[] | null>(null);
   const [measuring, setMeasuring] = useState(false);
   const [measureError, setMeasureError] = useState<string | null>(null);
+  const [measureJob, setMeasureJob] = useState<IntradaySignalDiagnosticsJob | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -373,19 +375,30 @@ function FamilyRoster({
     setMeasuring(true);
     setMeasureError(null);
     setMeasureStatus(null);
+    setMeasureJob(null);
     try {
       // Queues each timeframe and polls for completion — the actual
       // measurement runs in a background worker, not in this request.
       for (const timeframe of timeframes) {
         setMeasureStatus(`Queuing ${timeframe}…`);
         const job = await runIntradaySignalDiagnostics({ timeframe }, (update) => {
-          setMeasureStatus(`${timeframe}: ${update.status}…`);
+          setMeasureJob(update);
+          const total = update.progress_total ?? 0;
+          const completed = update.progress_completed ?? 0;
+          const current = update.progress_current ? ` · ${update.progress_current}` : "";
+          setMeasureStatus(
+            total > 0
+              ? `${timeframe}: ${completed} of ${total} families${current}`
+              : `${timeframe}: ${update.status}…`
+          );
         });
+        setMeasureJob(job);
         if (job.status === "failed") {
           throw new Error(job.error ?? `Signal diagnostics failed for ${timeframe}.`);
         }
       }
       setMeasureStatus(null);
+      setMeasureJob(null);
       loadSignals();
     } catch (reason) {
       setMeasureError(reason instanceof Error ? reason.message : "Could not measure signals.");
@@ -463,8 +476,37 @@ function FamilyRoster({
           {measuring ? measureStatus ?? "Queuing…" : signals?.length ? "Re-measure signals" : "Measure family signals"}
         </button>
       </div>
+      {measuring ? <SignalDiagnosticsProgress job={measureJob} status={measureStatus} /> : null}
       {measureError ? <div className="strategyLibraryError" role="alert" style={{ marginTop: 12 }}>{measureError}</div> : null}
     </Card>
+  );
+}
+
+function SignalDiagnosticsProgress({
+  job,
+  status
+}: {
+  job: IntradaySignalDiagnosticsJob | null;
+  status: string | null;
+}) {
+  const total = job?.progress_total ?? 0;
+  const completed = job?.progress_completed ?? 0;
+  const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((completed / total) * 100))) : 0;
+  return (
+    <div className="signalDiagnosticsProgress" aria-live="polite">
+      <div>
+        <span>{status ?? "Queued"}</span>
+        <strong>{total > 0 ? `${pct}%` : job?.status ?? "queued"}</strong>
+      </div>
+      <div className="progressTrack" aria-label={`Signal diagnostics ${pct}% complete`}>
+        <i style={{ width: `${total > 0 ? pct : 8}%` }} />
+      </div>
+      {job?.queue ? (
+        <p>
+          Queue: {job.queue.queued.toLocaleString()} waiting · {job.queue.running.toLocaleString()} running
+        </p>
+      ) : null}
+    </div>
   );
 }
 

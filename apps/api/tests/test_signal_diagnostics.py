@@ -22,6 +22,7 @@ from app.services.signal_diagnostics import (
     run_claimed_signal_diagnostics_job,
     run_one_signal_diagnostics_job,
     summarize_edge,
+    update_signal_diagnostics_job_progress,
 )
 from app.services.strategy import StrategyDecision
 
@@ -360,7 +361,7 @@ class _FakeJobsConn:
         text = " ".join(str(query).split())
         params = params or ()
 
-        if text.startswith("CREATE TABLE") or text.startswith("CREATE INDEX"):
+        if text.startswith("CREATE TABLE") or text.startswith("CREATE INDEX") or text.startswith("ALTER TABLE"):
             return _FakeJobsResult(None)
 
         if text.startswith("INSERT INTO research_signal_diagnostics_jobs"):
@@ -377,6 +378,9 @@ class _FakeJobsConn:
                 "status": "queued",
                 "result": None,
                 "error": None,
+                "progress_total": 0,
+                "progress_completed": 0,
+                "progress_current": None,
             }
             self.rows[row_id] = row
             return _FakeJobsResult(dict(row))
@@ -393,6 +397,8 @@ class _FakeJobsConn:
             row = self.rows[job_id]
             row["status"] = "completed"
             row["result"] = result.obj if hasattr(result, "obj") else result
+            row["progress_completed"] = max(row["progress_completed"], row["progress_total"])
+            row["progress_current"] = None
             return _FakeJobsResult(dict(row))
 
         if "SET status = 'failed'" in text:
@@ -400,6 +406,15 @@ class _FakeJobsConn:
             row = self.rows[job_id]
             row["status"] = "failed"
             row["error"] = error
+            row["progress_current"] = None
+            return _FakeJobsResult(dict(row))
+
+        if "SET progress_total" in text:
+            total, completed, current, job_id = params
+            row = self.rows[job_id]
+            row["progress_total"] = total
+            row["progress_completed"] = completed
+            row["progress_current"] = current
             return _FakeJobsResult(dict(row))
 
         if text.startswith("SELECT * FROM research_signal_diagnostics_jobs WHERE id"):
@@ -468,6 +483,24 @@ def test_a_successful_job_stores_its_result(monkeypatch):
 
     assert completed["status"] == "completed"
     assert completed["result"] == fake_result
+
+
+def test_job_progress_is_persisted_independently():
+    conn = _FakeJobsConn()
+    job = enqueue_signal_diagnostics_job(conn, timeframe="15m")
+
+    update_signal_diagnostics_job_progress(
+        conn,
+        job["id"],
+        total=7,
+        completed=3,
+        current="VWAP Bounce",
+    )
+    stored = conn.rows[job["id"]]
+
+    assert stored["progress_total"] == 7
+    assert stored["progress_completed"] == 3
+    assert stored["progress_current"] == "VWAP Bounce"
 
 
 def test_a_failing_job_is_recorded_as_failed_not_raised(monkeypatch):
