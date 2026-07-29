@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from calendar import monthrange
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from statistics import fmean, pstdev
 from typing import Any
@@ -127,7 +127,16 @@ def _time_of_day(bar: dict[str, Any]) -> Any:
     return timestamp.time() if isinstance(timestamp, datetime) else None
 
 
-FEATURE_GROUPS = ("session", "vwap", "opening_range", "gap", "relative_volume", "volatility", "market_structure")
+FEATURE_GROUPS = (
+    "session",
+    "vwap",
+    "opening_range",
+    "gap",
+    "relative_volume",
+    "volatility",
+    "market_structure",
+    "microstructure",
+)
 
 
 def compute_v2_features(
@@ -176,6 +185,19 @@ def compute_v2_features(
         result.update(_volatility_features(candle, feature, bars, config))
     if "market_structure" in selected:
         result.update(_market_structure_features(candle, feature, bars, config))
+    if "microstructure" in selected:
+        result.update(
+            {
+                "quote_count": feature.get("quote_count"),
+                "median_spread_bps": _f(feature.get("median_spread_bps")),
+                "p90_spread_bps": _f(feature.get("p90_spread_bps")),
+                "mean_depth": _f(feature.get("mean_depth")),
+                "order_flow_imbalance": _f(feature.get("order_flow_imbalance")),
+                "normalized_order_flow_imbalance": _f(
+                    feature.get("normalized_order_flow_imbalance")
+                ),
+            }
+        )
     return result
 
 
@@ -190,6 +212,7 @@ def _session_features(candle, feature, bars, config) -> dict[str, Any]:
 
     same_time_returns: list[float] = []
     same_time_ranges: list[float] = []
+    next_same_time_returns: list[float] = []
     current_time = _time_of_day(candle)
     current_session = _session_key(candle)
     if current_time is not None:
@@ -209,7 +232,31 @@ def _session_features(candle, feature, bars, config) -> dict[str, Any]:
         same_time_returns = same_time_returns[-config.same_time_of_day_maximum_samples :]
         same_time_ranges = same_time_ranges[-config.same_time_of_day_maximum_samples :]
 
+    current_session_bars = [bar for bar in bars if _session_key(bar) == current_session]
+    bar_minutes = _typical_bar_minutes(current_session_bars)
+    next_time = None
+    if isinstance(timestamp, datetime) and bar_minutes:
+        next_time = (timestamp + timedelta(minutes=bar_minutes)).timetz().replace(tzinfo=None)
+        for index in range(1, len(bars)):
+            bar = bars[index]
+            if _session_key(bar) == current_session or _time_of_day(bar) != next_time:
+                continue
+            open_price = float(bar["open"])
+            if open_price <= 0:
+                continue
+            next_same_time_returns.append((float(bar["close"]) - open_price) / open_price)
+        next_same_time_returns = next_same_time_returns[-config.same_time_of_day_maximum_samples :]
+
     enough = len(same_time_returns) >= config.same_time_of_day_minimum_samples
+    first_half_hour_return = None
+    gap_percent = _f(feature.get("gap_percent"))
+    if current_session_bars and gap_percent is not None and (1 + gap_percent) != 0:
+        session_open = float(current_session_bars[0]["open"])
+        prior_close = session_open / (1 + gap_percent)
+        if prior_close > 0:
+            first_half_hour_return = (
+                float(current_session_bars[0]["close"]) - prior_close
+            ) / prior_close
 
     month_end_proximity_days = None
     if isinstance(timestamp, datetime):
@@ -232,6 +279,17 @@ def _session_features(candle, feature, bars, config) -> dict[str, Any]:
         "same_time_of_day_mean_return": round(fmean(same_time_returns), 8) if enough else None,
         "same_time_of_day_return_volatility": round(pstdev(same_time_returns), 8) if enough and len(same_time_returns) > 1 else None,
         "same_time_of_day_mean_range": round(fmean(same_time_ranges), 8) if enough and same_time_ranges else None,
+        "next_same_time_of_day_sample_count": len(next_same_time_returns),
+        "next_same_time_of_day_mean_return": (
+            round(fmean(next_same_time_returns), 8)
+            if len(next_same_time_returns) >= config.same_time_of_day_minimum_samples
+            else None
+        ),
+        "first_half_hour_return_from_prior_close": (
+            round(first_half_hour_return, 8)
+            if first_half_hour_return is not None
+            else None
+        ),
     }
 
 

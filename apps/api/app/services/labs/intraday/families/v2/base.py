@@ -104,6 +104,7 @@ class V2Strategy:
     supported_timeframes: tuple[str, ...] = SUPPORTED_V2_TIMEFRAMES
     uses_absolute_targets: bool = False
     supports_short: bool = True
+    minimum_entry_cutoff_minutes: int | None = None
 
     def __init__(self, params: dict[str, Any], *, timeframe: str):
         if timeframe not in self.supported_timeframes:
@@ -156,8 +157,17 @@ class V2Strategy:
         if self.state.entries_taken >= int(params.get("maximum_entries_per_session", 1)):
             return _avoid("Maximum entries for this session already reached.")
 
+        structural_required = (
+            self.minimum_entry_cutoff_minutes
+            if self.minimum_entry_cutoff_minutes is not None
+            else minimum_entry_lookahead_minutes(
+                self.timeframe,
+                entry_offset_bars=1,
+                minimum_holding_bars=1,
+            )
+        )
         required_minutes = max(
-            minimum_entry_lookahead_minutes(self.timeframe, entry_offset_bars=1, minimum_holding_bars=1),
+            structural_required,
             int(params.get("minimum_minutes_before_close_for_entry") or 0),
         )
         minutes_to_close = feature.get("minutes_to_close")

@@ -16,6 +16,7 @@ from typing import Any
 import psycopg
 
 from app.services.labs.intraday.cross_sectional import (
+    compute_next_same_slot_percentiles,
     compute_cross_sectional_percentiles,
     merge_percentiles_into_features,
 )
@@ -24,7 +25,11 @@ from app.services.labs.intraday.cross_sectional import (
 # their own symbol's) to compute their signal. Checked by
 # run_campaign_job's dispatch BEFORE the ordinary intraday-lab check, so
 # every existing single-symbol family's dispatch is completely unaffected.
-CROSS_SECTIONAL_ARCHITECTURES = {"cross_sectional_momentum_v2", "cross_sectional_reversal_v2"}
+CROSS_SECTIONAL_ARCHITECTURES = {
+    "cross_sectional_momentum_v2",
+    "cross_sectional_reversal_v2",
+    "same_slot_institutional_flow_v1",
+}
 
 
 def is_cross_sectional_candidate(candidate_payload: dict[str, Any]) -> bool:
@@ -66,7 +71,23 @@ def load_cross_sectional_intraday_dataset(
     candles_by_symbol = {peer: load_snapshot_candles(conn, dataset_id, peer, timeframe) for peer in universe}
     candles_by_symbol = {peer: rows for peer, rows in candles_by_symbol.items() if rows}
     percentiles = compute_cross_sectional_percentiles(candles_by_symbol, lookback_bars=lookback_bars)
+    same_slot = compute_next_same_slot_percentiles(
+        candles_by_symbol,
+        lookback_sessions=lookback_bars,
+    )
 
     dataset["features"] = merge_percentiles_into_features(dataset["features"], percentiles.get(symbol, {}))
+    enriched_features = []
+    for row in dataset["features"]:
+        enriched = dict(row)
+        same_slot_row = same_slot.get(symbol, {}).get(row["timestamp"])
+        enriched["cross_sectional_next_same_slot_score"] = (
+            same_slot_row["score"] if same_slot_row else None
+        )
+        enriched["cross_sectional_next_same_slot_percentile"] = (
+            same_slot_row["percentile"] if same_slot_row else None
+        )
+        enriched_features.append(enriched)
+    dataset["features"] = enriched_features
     dataset["cross_sectional_universe"] = sorted(candles_by_symbol)
     return dataset

@@ -1493,6 +1493,369 @@ register_v2_family(
 )
 
 
+# ===========================================================================
+# Participant-flow research sequence (not campaign-eligible)
+# ===========================================================================
+
+class FirstToLastHalfHourMomentumV1(V2Strategy):
+    architecture = "first_to_last_half_hour_momentum_v1"
+    feature_groups = ("session", "volatility")
+    supported_timeframes = ("30m",)
+    supports_short = True
+    # A decision after the penultimate bar enters the final half-hour. This is
+    # an intentional family-specific close-auction horizon, not a relaxation
+    # applied to any other strategy.
+    minimum_entry_cutoff_minutes = 30
+    hypothesis = HypothesisSpec(
+        title="First-to-Last Half-Hour Market Momentum v1",
+        market_behavior=(
+            "Information and forced benchmark trading visible in the first half-hour can "
+            "persist into the final half-hour as closing-auction demand completes."
+        ),
+        hypothesis=(
+            "For broad market ETFs, the return from the prior close through the first "
+            "half-hour predicts the direction of the final regular-session half-hour."
+        ),
+        required_conditions=(
+            "30-minute regular-session bars.",
+            "SPY or QQQ.",
+            "A completed opening half-hour.",
+            "Decision at the close of the penultimate half-hour.",
+        ),
+        invalidation_conditions=(
+            "Opening return is below the pre-declared minimum magnitude.",
+            "The signal is not available before the final bar opens.",
+            "Chronological validation or locked forward confirmation fails.",
+        ),
+        success_criteria={
+            "minimum_trades": 50,
+            "minimum_net_profit_factor": 1.2,
+            "minimum_net_expectancy": 0,
+            "minimum_validation_t_statistic": 2.0,
+            "maximum_false_discovery_rate": 0.1,
+            "must_clear_stressed_observed_cost": True,
+        },
+    )
+
+    def evaluate(self, candle, feature, v2, params) -> EntryPlan | str:
+        if int(v2.get("minutes_to_close") or -1) != 30:
+            return "The final-half-hour signal is evaluated only after the penultimate bar."
+        opening_return = v2.get("first_half_hour_return_from_prior_close")
+        if opening_return is None:
+            return "The first-half-hour return from the prior close is unavailable."
+        threshold = float(params.get("minimum_opening_return", 0.002))
+        if abs(float(opening_return)) < threshold:
+            return "Opening information flow is below the pre-declared magnitude threshold."
+        direction = "long" if float(opening_return) > 0 else "short"
+        stop = candle["low"] if direction == "long" else candle["high"]
+        return EntryPlan(
+            direction,
+            _d(stop),
+            f"First-half-hour market return {float(opening_return):.3%} points toward the close.",
+        )
+
+
+register_v2_family(
+    FirstToLastHalfHourMomentumV1,
+    dna={
+        **_INTRADAY_DNA_COMMON,
+        "strategy_version": "v1",
+        "family_architecture": "first_to_last_half_hour_momentum_v1",
+        "direction_support": ["long", "short"],
+        "entry_structure": "first_to_last_half_hour_flow",
+        "confirmation_structure": ["opening_flow_direction", "session_window"],
+        "exit_structure": ["session_close_forced", "stop_loss"],
+        "holding_horizon_class": "intraday_minutes",
+        "timeframe_class": "intraday_30m",
+        "expected_frequency_class": "roughly_daily",
+        "trend_dependency": "agnostic",
+        "volatility_dependency": "agnostic",
+        "volume_dependency": "agnostic",
+        "session_dependency": "power_hour_only",
+        "gap_dependency": "agnostic",
+        "market_structure_dependency": "agnostic",
+        "behavior_class": "momentum",
+        "required_regime": ["any"],
+        "invalidation_regime": ["none_declared"],
+        "feature_dependencies": ["first_half_hour_return_from_prior_close", "minutes_to_close"],
+        "evidence_confidence": "untested",
+    },
+    parameter_grid={
+        "minimum_opening_return": (Decimal("0.001"), Decimal("0.002"), Decimal("0.003")),
+        "direction": ("long", "short"),
+        "max_holding_bars": (1,),
+    },
+    blocks={"entry": "first_to_last_half_hour_flow", "exit": "session_close"},
+)
+
+
+class SameSlotInstitutionalFlowV1(V2Strategy):
+    architecture = "same_slot_institutional_flow_v1"
+    feature_groups = ("session",)
+    supported_timeframes = ("15m", "30m")
+    supports_short = True
+    hypothesis = HypothesisSpec(
+        title="Cross-Sectional Same-Slot Institutional Flow v1",
+        market_behavior=(
+            "Large execution programs split orders through time and can repeat at the same "
+            "intraday slot over successive sessions."
+        ),
+        hypothesis=(
+            "The cross-sectional rank of a symbol's prior-session mean return at the next "
+            "time slot predicts that next bar's open-to-close return."
+        ),
+        required_conditions=(
+            "At least five prior sessions at the next slot.",
+            "At least four simultaneously ranked symbols.",
+            "Next-bar score computed before the next bar opens.",
+        ),
+        invalidation_conditions=(
+            "The universe is too narrow for a cross-section.",
+            "Chronological validation rank IC is non-positive.",
+            "The long-short spread does not clear stressed turnover costs.",
+        ),
+        success_criteria={
+            "minimum_trades": 100,
+            "minimum_net_profit_factor": 1.2,
+            "minimum_net_expectancy": 0,
+            "minimum_validation_t_statistic": 2.0,
+            "maximum_false_discovery_rate": 0.1,
+            "must_clear_stressed_observed_cost": True,
+        },
+    )
+
+    def evaluate(self, candle, feature, v2, params) -> EntryPlan | str:
+        percentile = feature.get("cross_sectional_next_same_slot_percentile")
+        score = feature.get("cross_sectional_next_same_slot_score")
+        if percentile is None or score is None:
+            return "The next-slot cross-sectional rank is not measurable."
+        upper = float(params.get("upper_percentile", 0.8))
+        lower = float(params.get("lower_percentile", 0.2))
+        if float(percentile) >= upper and float(score) > 0:
+            return EntryPlan("long", _d(candle["low"]), "Positive next-slot flow ranks in the long tail.")
+        if float(percentile) <= lower and float(score) < 0:
+            return EntryPlan("short", _d(candle["high"]), "Negative next-slot flow ranks in the short tail.")
+        return "Next-slot institutional-flow score is not in a directionally consistent tail."
+
+
+register_v2_family(
+    SameSlotInstitutionalFlowV1,
+    dna={
+        **_INTRADAY_DNA_COMMON,
+        "strategy_version": "v1",
+        "family_architecture": "same_slot_institutional_flow_v1",
+        "direction_support": ["long", "short"],
+        "entry_structure": "same_slot_cross_sectional_rank",
+        "confirmation_structure": ["session_window"],
+        "exit_structure": ["time_stop", "stop_loss", "session_close_forced"],
+        "holding_horizon_class": "intraday_minutes",
+        "timeframe_class": "intraday_15m_30m",
+        "expected_frequency_class": "multiple_per_session",
+        "trend_dependency": "agnostic",
+        "volatility_dependency": "agnostic",
+        "volume_dependency": "agnostic",
+        "session_dependency": "any_session_time",
+        "gap_dependency": "agnostic",
+        "market_structure_dependency": "agnostic",
+        "behavior_class": "momentum",
+        "required_regime": ["any"],
+        "invalidation_regime": ["none_declared"],
+        "feature_dependencies": [
+            "cross_sectional_next_same_slot_percentile",
+            "cross_sectional_next_same_slot_score",
+        ],
+        "evidence_confidence": "untested",
+    },
+    parameter_grid={
+        "cross_sectional_lookback_bars": (20, 40),
+        "upper_percentile": (Decimal("0.8"),),
+        "lower_percentile": (Decimal("0.2"),),
+        "direction": ("long", "short"),
+        "max_holding_bars": (1,),
+    },
+    blocks={"entry": "same_slot_cross_sectional_rank", "exit": "one_bar_time_stop"},
+)
+
+
+class GapDownAcceptanceShortConfirmationV1(OpeningRepricingFlowV1):
+    """The single 93-signal lead frozen from dataset 36; no new parameter grid."""
+
+    architecture = "gap_down_acceptance_short_confirmation_v1"
+    supported_timeframes = ("30m",)
+    hypothesis = HypothesisSpec(
+        title="Gap-Down Acceptance Short — Locked Confirmation v1",
+        market_behavior=(
+            "Urgent negative overnight repricing may continue when the second half-hour "
+            "accepts price below the opening range on elevated participation."
+        ),
+        hypothesis=(
+            "The exact dataset-36 lead (short, acceptance, gap >= 0.5 ATR, same-slot "
+            "relative volume >= 1.5) has positive one-bar excess return on untouched dates."
+        ),
+        required_conditions=(
+            "A frozen dataset strictly later than dataset 36's observed window.",
+            "No parameter changes from the original eight-variant screen.",
+            "30-minute bars.",
+        ),
+        invalidation_conditions=(
+            "Any reuse of dates observed by the source audit.",
+            "Fewer than 50 forward signals.",
+            "Failure to clear stressed observed costs after multiplicity control.",
+        ),
+        success_criteria={
+            "minimum_trades": 50,
+            "minimum_net_profit_factor": 1.2,
+            "minimum_net_expectancy": 0,
+            "minimum_confirmation_t_statistic": 2.0,
+            "must_clear_stressed_observed_cost": True,
+            "source_dataset_id": 36,
+        },
+    )
+
+    def evaluate(self, candle, feature, v2, params) -> EntryPlan | str:
+        frozen = {
+            **params,
+            "flow_mode": "acceptance",
+            "minimum_gap_atr": Decimal("0.5"),
+            "minimum_relative_volume": Decimal("1.5"),
+            "maximum_acceptance_fill_fraction": Decimal("0.25"),
+            "direction": "short",
+        }
+        outcome = super().evaluate(candle, feature, v2, frozen)
+        if isinstance(outcome, EntryPlan) and outcome.direction != "short":
+            return "Locked confirmation permits the gap-down short lead only."
+        return outcome
+
+
+register_v2_family(
+    GapDownAcceptanceShortConfirmationV1,
+    dna={
+        **_INTRADAY_DNA_COMMON,
+        "strategy_version": "v1",
+        "family_architecture": "gap_down_acceptance_short_confirmation_v1",
+        "direction_support": ["short"],
+        "entry_structure": "opening_repricing_flow",
+        "confirmation_structure": ["relative_volume", "vwap_alignment", "session_window"],
+        "exit_structure": ["time_stop", "stop_loss", "session_close_forced"],
+        "holding_horizon_class": "intraday_minutes",
+        "timeframe_class": "intraday_30m",
+        "expected_frequency_class": "few_per_week",
+        "trend_dependency": "agnostic",
+        "volatility_dependency": "requires_expansion",
+        "volume_dependency": "requires_elevated",
+        "session_dependency": "open_only",
+        "gap_dependency": "requires_gap",
+        "market_structure_dependency": "uses_structure_context",
+        "behavior_class": "momentum",
+        "required_regime": ["any"],
+        "invalidation_regime": ["none_declared"],
+        "feature_dependencies": ["gap_atr", "or30_low", "same_time_of_day_relative_volume", "session_vwap"],
+        "evidence_confidence": "tested_mixed",
+    },
+    parameter_grid={
+        "flow_mode": ("acceptance",),
+        "minimum_gap_atr": (Decimal("0.5"),),
+        "minimum_relative_volume": (Decimal("1.5"),),
+        "maximum_acceptance_fill_fraction": (Decimal("0.25"),),
+        "direction": ("short",),
+        "max_holding_bars": (1,),
+    },
+    blocks={"entry": "locked_gap_down_acceptance_short", "exit": "one_bar_time_stop"},
+)
+
+
+class LiquidityShockReversalV1(V2Strategy):
+    architecture = "liquidity_shock_reversal_v1"
+    feature_groups = ("session", "relative_volume", "volatility", "microstructure")
+    supported_timeframes = ("15m", "30m")
+    supports_short = True
+    hypothesis = HypothesisSpec(
+        title="Liquidity-Shock Reversal v1",
+        market_behavior=(
+            "A temporary liquidity demand shock creates an abnormal price/range move; "
+            "quote-flow exhaustion identifies shocks likely to reverse."
+        ),
+        hypothesis=(
+            "Bars with at least 2x normal volume and range reverse on the next bar when "
+            "the price shock and terminal normalized quote imbalance disagree."
+        ),
+        required_conditions=(
+            "Historical bid/ask prices and sizes.",
+            "Bar-level normalized order-flow imbalance.",
+            "At least twenty prior bars for range and volume baselines.",
+        ),
+        invalidation_conditions=(
+            "Quote coverage is absent or IEX-only coverage is represented as consolidated.",
+            "The move is market-wide rather than idiosyncratic.",
+            "Forward validation fails after spread/slippage costs.",
+        ),
+        success_criteria={
+            "minimum_trades": 100,
+            "minimum_net_profit_factor": 1.2,
+            "minimum_net_expectancy": 0,
+            "minimum_validation_t_statistic": 2.0,
+            "maximum_false_discovery_rate": 0.1,
+            "must_clear_stressed_observed_cost": True,
+        },
+    )
+
+    def evaluate(self, candle, feature, v2, params) -> EntryPlan | str:
+        ofi = v2.get("normalized_order_flow_imbalance")
+        if ofi is None:
+            return "Quote-derived order-flow imbalance is unavailable."
+        relative_volume = v2.get("same_time_of_day_relative_volume")
+        range_expansion = v2.get("range_expansion_ratio")
+        if relative_volume is None or float(relative_volume) < 2:
+            return "Volume is below the 2x liquidity-shock threshold."
+        if range_expansion is None or float(range_expansion) < 2:
+            return "Range is below the 2x liquidity-shock threshold."
+        bar_return = (float(candle["close"]) - float(candle["open"])) / float(candle["open"])
+        if bar_return * float(ofi) >= 0:
+            return "Price and quote flow agree; exhaustion is not visible."
+        direction = "short" if bar_return > 0 else "long"
+        stop = candle["high"] if direction == "short" else candle["low"]
+        return EntryPlan(direction, _d(stop), "Abnormal price shock conflicts with terminal quote flow.")
+
+
+register_v2_family(
+    LiquidityShockReversalV1,
+    dna={
+        **_INTRADAY_DNA_COMMON,
+        "strategy_version": "v1",
+        "family_architecture": "liquidity_shock_reversal_v1",
+        "direction_support": ["long", "short"],
+        "entry_structure": "liquidity_shock_exhaustion",
+        "confirmation_structure": ["relative_volume", "volatility_expansion", "quote_flow_exhaustion"],
+        "exit_structure": ["time_stop", "stop_loss", "session_close_forced"],
+        "holding_horizon_class": "intraday_minutes",
+        "timeframe_class": "intraday_15m_30m",
+        "expected_frequency_class": "few_per_week",
+        "trend_dependency": "agnostic",
+        "volatility_dependency": "requires_expansion",
+        "volume_dependency": "requires_elevated",
+        "session_dependency": "any_session_time",
+        "gap_dependency": "agnostic",
+        "market_structure_dependency": "agnostic",
+        "behavior_class": "mean_reversion",
+        "required_regime": ["high_volatility"],
+        "invalidation_regime": ["none_declared"],
+        "feature_dependencies": [
+            "normalized_order_flow_imbalance",
+            "same_time_of_day_relative_volume",
+            "range_expansion_ratio",
+        ],
+        "evidence_confidence": "untested",
+    },
+    parameter_grid={
+        "minimum_relative_volume": (Decimal("2.0"),),
+        "minimum_range_expansion": (Decimal("2.0"),),
+        "direction": ("long", "short"),
+        "max_holding_bars": (1,),
+    },
+    blocks={"entry": "liquidity_shock_quote_exhaustion", "exit": "one_bar_time_stop"},
+)
+
+
 NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES: tuple[str, ...] = (
     "opening_range_breakout_v2",
     "opening_range_fade_v2",
@@ -1508,9 +1871,29 @@ NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES: tuple[str, ...] = (
     "cross_sectional_reversal_v2",
 )
 
-ACTIVE_V2_ARCHITECTURES: tuple[str, ...] = ("opening_repricing_flow_v1",)
+NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES = (
+    *NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES,
+    "opening_repricing_flow_v1",
+)
+
+RESEARCH_ONLY_V2_ARCHITECTURES: tuple[str, ...] = (
+    "first_to_last_half_hour_momentum_v1",
+    "same_slot_institutional_flow_v1",
+)
+
+CONFIRMATION_ONLY_V2_ARCHITECTURES: tuple[str, ...] = (
+    "gap_down_acceptance_short_confirmation_v1",
+)
+
+BLOCKED_DATA_V2_ARCHITECTURES: tuple[str, ...] = (
+    "liquidity_shock_reversal_v1",
+)
+
+ACTIVE_V2_ARCHITECTURES: tuple[str, ...] = ()
 
 V2_ARCHITECTURES: tuple[str, ...] = (
     *NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES,
-    *ACTIVE_V2_ARCHITECTURES,
+    *RESEARCH_ONLY_V2_ARCHITECTURES,
+    *CONFIRMATION_ONLY_V2_ARCHITECTURES,
+    *BLOCKED_DATA_V2_ARCHITECTURES,
 )

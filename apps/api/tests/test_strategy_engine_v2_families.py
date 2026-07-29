@@ -108,16 +108,19 @@ def run_family(architecture, bar_specs_by_session, param_overrides=None, *, time
 # Registry-level invariants
 # ---------------------------------------------------------------------------
 
-def test_all_thirteen_families_are_registered():
-    assert len(ARCHITECTURES) == 13
+def test_all_seventeen_families_are_registered():
+    assert len(ARCHITECTURES) == 17
     assert set(ARCHITECTURES) == set(V2_FAMILIES)
 
 
-def test_only_opening_repricing_flow_is_active_for_new_research():
-    assert [row["architecture"] for row in active_family_definitions()] == [
-        "opening_repricing_flow_v1"
-    ]
+def test_new_flow_families_are_gated_before_campaigns():
+    assert active_family_definitions() == []
     assert FAMILY_REGISTRY["opening_repricing_flow_v1"].supported_timeframes == ("30m",)
+    assert FAMILY_REGISTRY["opening_repricing_flow_v1"].status == "archived"
+    assert FAMILY_REGISTRY["first_to_last_half_hour_momentum_v1"].status == "research_only"
+    assert FAMILY_REGISTRY["same_slot_institutional_flow_v1"].status == "research_only"
+    assert FAMILY_REGISTRY["gap_down_acceptance_short_confirmation_v1"].status == "confirmation_only"
+    assert FAMILY_REGISTRY["liquidity_shock_reversal_v1"].status == "blocked_data"
     assert all(
         FAMILY_REGISTRY[architecture].status == "archived"
         for architecture in v2_families.NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES
@@ -125,7 +128,7 @@ def test_only_opening_repricing_flow_is_active_for_new_research():
 
 
 def test_archived_negative_signal_family_cannot_launch_a_new_campaign():
-    with pytest.raises(ValueError, match="Archived intraday families cannot launch"):
+    with pytest.raises(ValueError, match="Only families that passed locked confirmation"):
         create_intraday_campaign(
             None,
             family_ids=["intraday_seasonality_v2"],
@@ -148,7 +151,7 @@ def test_every_family_declares_a_complete_hypothesis(architecture):
 def test_every_family_has_valid_dna_with_a_unique_fingerprint(architecture):
     payload = FAMILY_DNA[architecture]
     build_dna_payload(payload)
-    expected_version = "v1" if architecture == "opening_repricing_flow_v1" else "v2"
+    expected_version = "v1" if architecture.endswith("_v1") else "v2"
     assert payload["strategy_version"] == expected_version
     assert payload["execution_capability"] == "simulation_only"
 

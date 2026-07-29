@@ -16,13 +16,30 @@ from app.services.labs.intraday.funnel import (
     screen_campaign_families,
 )
 
-ACTIVE_FAMILY = next(arch for arch, d in FAMILY_REGISTRY.items() if d.status == "active")
+ACTIVE_FAMILY = next(
+    arch for arch, d in FAMILY_REGISTRY.items() if d.status == "research_only"
+)
 OTHER_FAMILY = next(
     arch for arch, d in FAMILY_REGISTRY.items() if d.status == "archived"
 )
 ARCHIVED_FAMILY = next(
     arch for arch, d in FAMILY_REGISTRY.items() if d.status == "archived" and arch != OTHER_FAMILY
 )
+
+
+@pytest.fixture(autouse=True)
+def research_family_as_confirmed_for_funnel_unit_tests(monkeypatch):
+    """The production registry correctly has no campaign-active family.
+
+    Funnel unit tests still need one synthetic confirmed family to exercise
+    ranking and expansion mechanics independently of the current research
+    registry state.
+    """
+    monkeypatch.setitem(
+        FAMILY_REGISTRY,
+        ACTIVE_FAMILY,
+        replace(FAMILY_REGISTRY[ACTIVE_FAMILY], status="active"),
+    )
 
 
 def family_row(
@@ -81,9 +98,9 @@ def fake_analytics(monkeypatch):
 def other_active_family(monkeypatch):
     """Give ranking tests a second active definition without changing policy.
 
-    Production intentionally has one active family while Opening Repricing
-    Flow is being measured. These tests still need two rows to exercise
-    ordering independently of the registry's current research decision.
+    Production intentionally has no active family until locked confirmation.
+    These tests still need two rows to exercise ordering independently of
+    the registry's current research decision.
     """
     monkeypatch.setitem(
         FAMILY_REGISTRY,

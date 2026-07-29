@@ -1,5 +1,7 @@
 """The launch preview and the launch itself must resolve identically."""
 
+from dataclasses import replace
+
 import pytest
 
 from app.services.labs.intraday.campaign_plan import (
@@ -7,8 +9,24 @@ from app.services.labs.intraday.campaign_plan import (
     active_family_definitions,
     build_campaign_plan,
 )
+from app.services.labs.intraday.families.registry import FAMILY_REGISTRY
 
 UNIVERSE = ["AAPL", "AMD", "AMZN", "GOOGL", "META", "MSFT", "NVDA", "QQQ", "SPY", "TSLA"]
+
+
+@pytest.fixture(autouse=True)
+def confirmed_family_for_plan_mechanics(monkeypatch):
+    """Plan arithmetic needs one synthetic confirmed family.
+
+    The production registry has zero active families until locked
+    confirmation; that policy is asserted in the registry tests.
+    """
+    architecture = "opening_repricing_flow_v1"
+    monkeypatch.setitem(
+        FAMILY_REGISTRY,
+        architecture,
+        replace(FAMILY_REGISTRY[architecture], status="active"),
+    )
 
 
 class FakeResult:

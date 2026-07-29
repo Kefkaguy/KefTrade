@@ -17,10 +17,12 @@ logger = logging.getLogger(__name__)
 
 ALPACA_SOURCE = "alpaca_iex"
 ALPACA_STOCK_BARS_ENDPOINT = "/v2/stocks/{symbol}/bars"
+ALPACA_STOCK_QUOTES_ENDPOINT = "/v2/stocks/{symbol}/quotes"
 ALPACA_ASSETS_ENDPOINT = "/v2/assets"
 ALPACA_FEED = "iex"
 MAX_PAGE_LIMIT = 10000
 MAX_STOCK_BAR_PAGES = 25
+MAX_STOCK_QUOTE_PAGES = 100
 SUPPORTED_TIMEFRAMES = {
     "15m": "15Min",
     "30m": "30Min",
@@ -250,6 +252,108 @@ async def fetch_stock_bars(symbol: str, timeframe: str, limit: int) -> tuple[int
     selected = bars[:requested_limit]
     selected.sort(key=lambda row: str(row.get("t") or ""))
     return status, selected, request_log, request_id
+
+
+async def fetch_stock_quotes(
+    symbol: str,
+    *,
+    start: datetime,
+    end: datetime,
+    limit: int = 10_000,
+    feed: str = ALPACA_FEED,
+) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]], str | None]:
+    """Fetch historical NBBO-like quote updates for cost research.
+
+    The configured Basic Alpaca plan uses IEX, so the feed is stored on every
+    observation and is never presented as consolidated-SIP coverage.
+    """
+    if not settings.alpaca_api_key or not settings.alpaca_api_secret:
+        raise RuntimeError("Set ALPACA_API_KEY and ALPACA_API_SECRET to fetch Alpaca quotes.")
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("Quote start/end must be timezone-aware.")
+    if end <= start:
+        raise ValueError("Quote end must be after start.")
+
+    requested_limit = max(1, limit)
+    params: dict[str, Any] = {
+        "start": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "end": end.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "limit": min(MAX_PAGE_LIMIT, requested_limit),
+        "feed": feed,
+        "sort": "asc",
+    }
+    headers = {
+        "APCA-API-KEY-ID": settings.alpaca_api_key,
+        "APCA-API-SECRET-KEY": settings.alpaca_api_secret,
+    }
+    endpoint = ALPACA_STOCK_QUOTES_ENDPOINT.format(symbol=symbol.upper())
+    quotes: list[dict[str, Any]] = []
+    request_log: list[dict[str, Any]] = []
+    status = 200
+    request_id: str | None = None
+
+    async with httpx.AsyncClient(base_url=settings.alpaca_data_base_url, timeout=30, headers=headers) as client:
+        for _ in range(MAX_STOCK_QUOTE_PAGES):
+            response = await client.get(endpoint, params=params)
+            status = response.status_code
+            request_id = response.headers.get("X-Request-ID") or request_id
+            response.raise_for_status()
+            payload = response.json()
+            page_quotes = payload.get("quotes", [])
+            request_log.append(
+                {
+                    "start": params["start"],
+                    "end": params["end"],
+                    "feed": feed,
+                    "received": len(page_quotes),
+                    "request_id": response.headers.get("X-Request-ID"),
+                }
+            )
+            quotes.extend(page_quotes)
+            if len(quotes) >= requested_limit:
+                break
+            token = payload.get("next_page_token")
+            if not token or not page_quotes:
+                break
+            params["page_token"] = token
+
+    selected = quotes[:requested_limit]
+    selected.sort(key=lambda row: str(row.get("t") or ""))
+    return status, selected, request_log, request_id
+
+
+def normalize_stock_quote(
+    symbol: str,
+    row: dict[str, Any],
+    *,
+    feed: str = ALPACA_FEED,
+) -> dict[str, Any] | None:
+    """Normalize one Alpaca quote and reject crossed/empty markets."""
+    try:
+        bid = Decimal(str(row["bp"]))
+        ask = Decimal(str(row["ap"]))
+        bid_size = Decimal(str(row.get("bs", 0)))
+        ask_size = Decimal(str(row.get("as", 0)))
+        timestamp = datetime.fromisoformat(str(row["t"]).replace("Z", "+00:00")).astimezone(UTC)
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        return None
+    if bid <= 0 or ask <= 0 or ask < bid or bid_size < 0 or ask_size < 0:
+        return None
+    midpoint = (bid + ask) / Decimal("2")
+    spread_bps = ((ask - bid) / midpoint) * Decimal("10000")
+    return {
+        "symbol": symbol.upper(),
+        "provider": "alpaca",
+        "feed": feed,
+        "timestamp": timestamp,
+        "bid_price": bid,
+        "ask_price": ask,
+        "bid_size": bid_size,
+        "ask_size": ask_size,
+        "midpoint": midpoint,
+        "spread_bps": spread_bps,
+        "raw_payload": dict(row),
+    }
 
 
 def start_for_limit(timeframe: str, limit: int) -> datetime:

@@ -103,3 +103,62 @@ def merge_percentiles_into_features(
         enriched["cross_sectional_momentum_percentile"] = percentiles_for_symbol.get(row["timestamp"])
         merged.append(enriched)
     return merged
+
+
+def compute_next_same_slot_percentiles(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    lookback_sessions: int = 20,
+) -> dict[str, dict[datetime, dict[str, float]]]:
+    """Rank each symbol's historical mean for the *next* intraday slot.
+
+    The value is keyed to the current signal bar. Its score uses only earlier
+    sessions at the next bar's wall-clock slot; the current next-bar return is
+    therefore not part of its own predictor.
+    """
+    scores_by_time: dict[datetime, dict[str, float]] = {}
+    for symbol, raw_rows in candles_by_symbol.items():
+        rows = sorted(raw_rows, key=lambda row: row["timestamp"])
+        history: dict[tuple[int, int], list[float]] = {}
+        for index, row in enumerate(rows):
+            timestamp = row["timestamp"]
+            slot = (timestamp.hour, timestamp.minute)
+            open_price = float(row["open"])
+            if open_price > 0:
+                history.setdefault(slot, []).append(
+                    (float(row["close"]) - open_price) / open_price
+                )
+            if index + 1 >= len(rows):
+                continue
+            next_row = rows[index + 1]
+            if next_row["timestamp"].date() != timestamp.date():
+                continue
+            next_timestamp = next_row["timestamp"]
+            next_slot = (next_timestamp.hour, next_timestamp.minute)
+            prior = history.get(next_slot, [])[-lookback_sessions:]
+            if len(prior) < 5:
+                continue
+            scores_by_time.setdefault(timestamp, {})[symbol] = sum(prior) / len(prior)
+
+    result: dict[str, dict[datetime, dict[str, float]]] = {
+        symbol: {} for symbol in candles_by_symbol
+    }
+    for timestamp, scores in scores_by_time.items():
+        if len(scores) < MINIMUM_PEERS_FOR_RANKING:
+            continue
+        ordered = sorted(scores.items(), key=lambda item: item[1])
+        count = len(ordered)
+        index = 0
+        while index < count:
+            end = index
+            while end + 1 < count and ordered[end + 1][1] == ordered[index][1]:
+                end += 1
+            rank = (index + end) / 2
+            for position in range(index, end + 1):
+                symbol, score = ordered[position]
+                result[symbol][timestamp] = {
+                    "score": score,
+                    "percentile": rank / (count - 1) if count > 1 else 0.5,
+                }
+            index = end + 1
+    return result

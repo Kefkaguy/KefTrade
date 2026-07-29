@@ -94,6 +94,7 @@ def measure_signal_edge(
     horizons: Sequence[int] = DEFAULT_HORIZONS,
     warmup: int = WARMUP_BARS,
     recent_window_bars: int = 0,
+    signal_start_timestamp: Any | None = None,
 ) -> dict[str, Any]:
     """Signal edge per horizon, with no trading simulation of any kind."""
     from app.services.strategy import reset_strategy_state
@@ -106,6 +107,11 @@ def measure_signal_edge(
         row = rows[index]
         start = max(0, index + 1 - recent_window_bars) if recent_window_bars else 0
         decision = decide(row["candle"], row["feature"], candle_rows[start : index + 1], params)
+        if (
+            signal_start_timestamp is not None
+            and row["candle"]["timestamp"] <= signal_start_timestamp
+        ):
+            continue
         if getattr(decision, "signal", None) != "setup":
             continue
         direction = 1 if str(getattr(decision, "direction", "long")) == "long" else -1
@@ -255,6 +261,8 @@ def family_signal_diagnostics(
     horizons: Sequence[int] = DEFAULT_HORIZONS,
     dataset_cache: dict[Any, Any] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    minimum_timestamp_exclusive: Any | None = None,
+    cost_bps_override: float | None = None,
 ) -> dict[str, Any]:
     """Measure one family's signal across symbols, pooling its firings.
 
@@ -286,7 +294,11 @@ def family_signal_diagnostics(
         raise ValueError(f"family {architecture!r} generated no candidates")
 
     cache: dict[Any, Any] = {} if dataset_cache is None else dataset_cache
-    cost_bps = round_trip_cost_bps()
+    cost_bps = (
+        float(cost_bps_override)
+        if cost_bps_override is not None
+        else round_trip_cost_bps()
+    )
     variants: list[dict[str, Any]] = []
     total_work_units = len(candidates) * len(symbols)
     completed_work_units = 0
@@ -330,6 +342,7 @@ def family_signal_diagnostics(
                 strategy.parameters,
                 horizons=horizons,
                 recent_window_bars=int(strategy.parameters.get("recent_candle_window_bars") or 0),
+                signal_start_timestamp=minimum_timestamp_exclusive,
             )
             per_symbol.append(
                 {
@@ -338,7 +351,14 @@ def family_signal_diagnostics(
                     "summary": summarize_edge(measurement, cost_bps=cost_bps),
                 }
             )
-            pooled_rows.append({"rows": rows, "decide": strategy.decide, "params": strategy.parameters})
+            pooled_rows.append(
+                {
+                    "rows": rows,
+                    "decide": strategy.decide,
+                    "params": strategy.parameters,
+                    "signal_start_timestamp": minimum_timestamp_exclusive,
+                }
+            )
             completed_work_units += 1
 
         pooled = _pool_measurements(pooled_rows, horizons=horizons)
@@ -380,6 +400,7 @@ def family_signal_diagnostics(
         "symbols": list(symbols),
         "diagnostics_version": SIGNAL_DIAGNOSTICS_VERSION,
         "round_trip_cost_bps": cost_bps,
+        "minimum_timestamp_exclusive": minimum_timestamp_exclusive,
         "is_cross_sectional": is_cross_sectional_candidate({"parameters": {"strategy_architecture": architecture}}),
         "variants_measured": len(variants),
         "best_variant": best,
@@ -521,10 +542,21 @@ def run_signal_diagnostics(
     if not selected_symbols:
         raise ValueError("no symbols available to measure")
 
-    families = active_family_definitions()
-    if architectures is not None:
-        wanted = set(architectures)
-        families = [family for family in families if family["architecture"] in wanted]
+    if architectures is None:
+        families = active_family_definitions()
+    else:
+        from app.services.labs.intraday.families.registry import FAMILY_REGISTRY
+
+        families = [
+            {
+                "architecture": architecture,
+                "name": FAMILY_REGISTRY[architecture].name,
+                "status": FAMILY_REGISTRY[architecture].status,
+                "supported_timeframes": list(FAMILY_REGISTRY[architecture].supported_timeframes),
+            }
+            for architecture in architectures
+            if architecture in FAMILY_REGISTRY
+        ]
     measurable_families = [family for family in families if timeframe in family["supported_timeframes"]]
     total_families = len(measurable_families)
     completed_families = 0
@@ -934,6 +966,7 @@ def _pool_measurements(
         rows = entry["rows"]
         decide = entry["decide"]
         params = entry["params"]
+        signal_start_timestamp = entry.get("signal_start_timestamp")
         reset_strategy_state(decide)
         candle_rows = [row["candle"] for row in rows]
         recent_window = int(params.get("recent_candle_window_bars") or 0)
@@ -943,6 +976,11 @@ def _pool_measurements(
             row = rows[index]
             start = max(0, index + 1 - recent_window) if recent_window else 0
             decision = decide(row["candle"], row["feature"], candle_rows[start : index + 1], params)
+            if (
+                signal_start_timestamp is not None
+                and row["candle"]["timestamp"] <= signal_start_timestamp
+            ):
+                continue
             if getattr(decision, "signal", None) != "setup":
                 continue
             direction = 1 if str(getattr(decision, "direction", "long")) == "long" else -1
@@ -955,7 +993,15 @@ def _pool_measurements(
 
         for horizon in horizons:
             forward = _forward_returns(rows, horizon)
-            measurable = [value for value in forward if value is not None]
+            measurable = [
+                value
+                for index, value in enumerate(forward)
+                if value is not None
+                and (
+                    signal_start_timestamp is None
+                    or rows[index]["candle"]["timestamp"] > signal_start_timestamp
+                )
+            ]
             if not measurable:
                 continue
             unconditional = fmean(measurable)

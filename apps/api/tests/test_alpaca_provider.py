@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from app.providers import alpaca
-from app.providers.alpaca import exclude_incomplete_latest, fetch_stock_assets, fetch_stock_bars, normalize_alpaca_asset, normalize_stock_bar, normalize_stock_bars, start_for_limit
+from app.providers.alpaca import exclude_incomplete_latest, fetch_stock_assets, fetch_stock_bars, normalize_alpaca_asset, normalize_stock_bar, normalize_stock_bars, normalize_stock_quote, start_for_limit
 
 
 def test_normalize_stock_bar_maps_alpaca_payload_to_candle() -> None:
@@ -45,6 +45,30 @@ def test_normalize_stock_bars_rejects_invalid_ohlc() -> None:
 
     assert len(candles) == 1
     assert invalid == 1
+
+
+def test_normalize_stock_quote_keeps_feed_and_calculates_spread() -> None:
+    quote = normalize_stock_quote(
+        "aapl",
+        {
+            "t": "2026-01-05T14:30:00Z",
+            "bp": "99.99",
+            "ap": "100.01",
+            "bs": "10",
+            "as": "12",
+        },
+        feed="iex",
+    )
+
+    assert quote is not None
+    assert quote["symbol"] == "AAPL"
+    assert quote["feed"] == "iex"
+    assert quote["midpoint"] == Decimal("100.00")
+    assert quote["spread_bps"] == Decimal("2")
+    assert normalize_stock_quote(
+        "AAPL",
+        {"t": "2026-01-05T14:30:00Z", "bp": "101", "ap": "100"},
+    ) is None
 
 
 def test_exclude_incomplete_latest_intraday_bar() -> None:

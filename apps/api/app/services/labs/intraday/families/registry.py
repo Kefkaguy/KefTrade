@@ -75,7 +75,7 @@ class IntradayFamilyDefinition:
     blocks: dict[str, str]
     candidate_generator: Callable[..., list[Any]]
     supported_timeframes: tuple[str, ...]
-    status: str  # "archived" | "active"
+    status: str  # "archived" | "research_only" | "confirmation_only" | "blocked_data" | "active"
 
 
 FAMILY_REGISTRY: dict[str, IntradayFamilyDefinition] = {
@@ -182,6 +182,17 @@ def _register_strategy_engine_v2_families() -> None:
         generate_v2_candidates,
     )
 
+    def research_status(architecture: str) -> str:
+        if architecture in v2_module.ACTIVE_V2_ARCHITECTURES:
+            return "active"
+        if architecture in v2_module.RESEARCH_ONLY_V2_ARCHITECTURES:
+            return "research_only"
+        if architecture in v2_module.CONFIRMATION_ONLY_V2_ARCHITECTURES:
+            return "confirmation_only"
+        if architecture in v2_module.BLOCKED_DATA_V2_ARCHITECTURES:
+            return "blocked_data"
+        return "archived"
+
     for architecture in v2_module.V2_ARCHITECTURES:
         strategy_cls = V2_FAMILIES[architecture]
         FAMILY_REGISTRY[architecture] = IntradayFamilyDefinition(
@@ -191,7 +202,7 @@ def _register_strategy_engine_v2_families() -> None:
             blocks=V2_BLOCKS[architecture],
             candidate_generator=partial(generate_v2_candidates, architecture),
             supported_timeframes=getattr(strategy_cls, "supported_timeframes", SUPPORTED_V2_TIMEFRAMES),
-            status="active" if architecture in v2_module.ACTIVE_V2_ARCHITECTURES else "archived",
+            status=research_status(architecture),
         )
 
     for architecture in PHASE_12_3_ARCHIVED_FAMILIES:
@@ -251,11 +262,15 @@ def create_intraday_campaign(
         raise ValueError(f"Unknown intraday family id(s): {unknown}. Available: {sorted(FAMILY_REGISTRY)}")
 
     definitions = [FAMILY_REGISTRY[family_id] for family_id in family_ids]
-    inactive = [definition.architecture for definition in definitions if definition.status != "active"]
+    inactive = [
+        f"{definition.architecture} ({definition.status})"
+        for definition in definitions
+        if definition.status != "active"
+    ]
     if inactive:
         raise ValueError(
-            "Archived intraday families cannot launch new campaigns: "
-            f"{inactive}. Their historical evidence remains available."
+            "Only families that passed locked confirmation may launch campaigns. "
+            f"Blocked: {inactive}. Research evidence remains available."
         )
     all_candidates: list[Any] = []
     for definition in definitions:
