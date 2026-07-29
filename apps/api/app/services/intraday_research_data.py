@@ -134,11 +134,7 @@ def research_data_readiness(
         """
         SELECT COUNT(*) AS rows,
                COUNT(DISTINCT symbol) AS symbols,
-               COUNT(DISTINCT session_date) AS sessions,
-               COUNT(*) FILTER (
-                   WHERE midpoint_at_message IS NOT NULL
-                     AND auction_price IS NOT NULL
-               ) AS executable_rows
+               COUNT(DISTINCT session_date) AS sessions
         FROM research_dataset_intraday_features
         WHERE dataset_id = %s AND timeframe = %s
         """,
@@ -167,7 +163,11 @@ def research_data_readiness(
         """
         SELECT COUNT(*) AS rows,
                COUNT(DISTINCT symbol) AS symbols,
-               COUNT(DISTINCT session_date) AS sessions
+               COUNT(DISTINCT session_date) AS sessions,
+               COUNT(*) FILTER (
+                   WHERE midpoint_at_message IS NOT NULL
+                     AND auction_price IS NOT NULL
+               ) AS executable_rows
         FROM intraday_auction_imbalances
         WHERE symbol = ANY(%s)
           AND (%s IS NULL OR timestamp >= %s)
