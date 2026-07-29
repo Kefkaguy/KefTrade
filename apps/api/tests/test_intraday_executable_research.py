@@ -78,6 +78,48 @@ def test_backend_cli_exposes_no_15m_option():
     assert not hasattr(args, "timeframe")
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_status", "expected_completed"),
+    [
+        (None, "completed", True),
+        ("provider failure", "failed", False),
+    ],
+)
+def test_quote_checkpoint_completion_uses_typed_boolean(
+    error,
+    expected_status,
+    expected_completed,
+):
+    class RecordingConnection:
+        def __init__(self):
+            self.query = None
+            self.params = None
+            self.committed = False
+
+        def execute(self, query, params):
+            self.query = query
+            self.params = params
+
+        def commit(self):
+            self.committed = True
+
+    conn = RecordingConnection()
+    intraday_costs._checkpoint_finished(
+        conn,
+        symbol="AAPL",
+        feed="sip",
+        session_date=datetime(2026, 7, 28, tzinfo=UTC).date(),
+        quote_rows=100,
+        microstructure_rows=13,
+        error=error,
+    )
+
+    assert "%s::boolean" in conn.query
+    assert conn.params[0] == expected_status
+    assert conn.params[4] is expected_completed
+    assert conn.committed
+
+
 def test_migration_persists_immutable_funnel_evidence():
     root = Path(__file__).resolve().parents[3]
     sql = (

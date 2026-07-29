@@ -151,7 +151,7 @@ def _checkpoint_finished(
             quote_rows = %s,
             microstructure_rows = %s,
             error = %s,
-            completed_at = CASE WHEN %s IS NULL THEN NOW() ELSE NULL END,
+            completed_at = CASE WHEN %s::boolean THEN NOW() ELSE NULL END,
             updated_at = NOW()
         WHERE provider = 'alpaca'
           AND feed = %s
@@ -163,7 +163,7 @@ def _checkpoint_finished(
             quote_rows,
             microstructure_rows,
             error,
-            error,
+            error is None,
             feed,
             symbol,
             session_date,
