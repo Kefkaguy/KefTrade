@@ -78,11 +78,12 @@ def test_job_count_is_families_by_assets_by_timeframes_after_dedupe():
     )
 
 
-def test_selecting_one_timeframe_halves_the_job_count():
+def test_the_active_participant_flow_family_only_selects_30m():
     both = build_campaign_plan(FakePlanConn(), timeframes=["15m", "30m"])
     one = build_campaign_plan(FakePlanConn(), timeframes=["30m"])
 
-    assert one["estimated_jobs"] * 2 == both["estimated_jobs"]
+    assert one["estimated_jobs"] == both["estimated_jobs"]
+    assert both["timeframes_selected"] == ["30m"]
     assert one["timeframes_selected"] == ["30m"]
 
 
@@ -96,7 +97,8 @@ def test_selecting_no_timeframe_blocks_the_launch():
 def test_an_unsupported_timeframe_is_dropped_rather_than_trusted():
     plan = build_campaign_plan(FakePlanConn(), timeframes=["15m", "1d"])
 
-    assert plan["timeframes_selected"] == ["15m"]
+    assert plan["timeframes_selected"] == []
+    assert any(item["code"] == "NO_TIMEFRAME_SELECTED" for item in plan["blockers"])
 
 
 def test_omitting_timeframes_selects_every_supported_one():

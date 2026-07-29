@@ -254,6 +254,7 @@ def family_signal_diagnostics(
     max_variants: int = 3,
     horizons: Sequence[int] = DEFAULT_HORIZONS,
     dataset_cache: dict[Any, Any] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Measure one family's signal across symbols, pooling its firings.
 
@@ -287,18 +288,35 @@ def family_signal_diagnostics(
     cache: dict[Any, Any] = {} if dataset_cache is None else dataset_cache
     cost_bps = round_trip_cost_bps()
     variants: list[dict[str, Any]] = []
-    for candidate in candidates:
+    total_work_units = len(candidates) * len(symbols)
+    completed_work_units = 0
+    for variant_index, candidate in enumerate(candidates, start=1):
         pooled_rows: list[dict[str, Any]] = []
         per_symbol: list[dict[str, Any]] = []
-        for symbol in symbols:
+        for symbol_index, symbol in enumerate(symbols, start=1):
+            if progress_callback:
+                progress_callback(
+                    {
+                        "total": total_work_units,
+                        "completed": completed_work_units,
+                        "variant": variant_index,
+                        "variants": len(candidates),
+                        "symbol": symbol,
+                        "symbol_index": symbol_index,
+                        "symbols": len(symbols),
+                        "candidate_id": candidate.candidate_id,
+                    }
+                )
             try:
                 dataset = _load_dataset_cached(conn, candidate, symbol, timeframe, dataset_id, cache)
             except Exception as error:  # noqa: BLE001 - one unreadable symbol must not sink the family
                 per_symbol.append({"symbol": symbol, "error": str(error)})
+                completed_work_units += 1
                 continue
             rows = dataset["rows"]
             if len(rows) <= WARMUP_BARS + max(horizons) + 1:
                 per_symbol.append({"symbol": symbol, "error": "not enough bars"})
+                completed_work_units += 1
                 continue
 
             scoped = dataclass_replace(
@@ -321,6 +339,7 @@ def family_signal_diagnostics(
                 }
             )
             pooled_rows.append({"rows": rows, "decide": strategy.decide, "params": strategy.parameters})
+            completed_work_units += 1
 
         pooled = _pool_measurements(pooled_rows, horizons=horizons)
         variants.append(
@@ -334,6 +353,20 @@ def family_signal_diagnostics(
                 "measurement": pooled,
                 "summary": summarize_edge(pooled, cost_bps=cost_bps),
                 "by_symbol": per_symbol,
+            }
+        )
+
+    if progress_callback:
+        progress_callback(
+            {
+                "total": total_work_units,
+                "completed": completed_work_units,
+                "variant": len(candidates),
+                "variants": len(candidates),
+                "symbol": str(symbols[-1]) if symbols else "",
+                "symbol_index": len(symbols),
+                "symbols": len(symbols),
+                "candidate_id": candidates[-1].candidate_id,
             }
         )
 
@@ -365,38 +398,6 @@ def family_signal_diagnostics(
 # ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
-
-def ensure_signal_diagnostics_table(conn: psycopg.Connection) -> None:
-    """Idempotent creation for fresh environments. Migration 057 is
-    authoritative; this mirrors the `ensure_*` convention used by the
-    surrounding research modules."""
-    statements = (
-        """
-        CREATE TABLE IF NOT EXISTS research_signal_diagnostics (
-            id BIGSERIAL PRIMARY KEY,
-            architecture TEXT NOT NULL,
-            family_name TEXT,
-            timeframe TEXT NOT NULL,
-            dataset_id BIGINT NOT NULL,
-            verdict TEXT NOT NULL,
-            detail TEXT NOT NULL,
-            best_horizon_bars INTEGER,
-            excess_edge_bps DOUBLE PRECISION,
-            t_statistic DOUBLE PRECISION,
-            round_trip_cost_bps DOUBLE PRECISION NOT NULL,
-            clears_cost BOOLEAN NOT NULL DEFAULT FALSE,
-            signal_count INTEGER NOT NULL DEFAULT 0,
-            symbols JSONB NOT NULL DEFAULT '[]'::jsonb,
-            horizons JSONB NOT NULL DEFAULT '[]'::jsonb,
-            report JSONB NOT NULL DEFAULT '{}'::jsonb,
-            calculation_version TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            CONSTRAINT research_signal_diagnostics_unique UNIQUE (architecture, timeframe, dataset_id)
-        )
-        """,
-    )
-    for statement in statements:
-        conn.execute(statement)
 
 
 def persist_signal_diagnostics(conn: psycopg.Connection, report: dict[str, Any]) -> dict[str, Any]:
@@ -486,6 +487,7 @@ def run_signal_diagnostics(
     max_symbols: int = 4,
     persist: bool = True,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    work_progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Measure every active family's signal on one timeframe.
 
@@ -553,6 +555,7 @@ def run_signal_diagnostics(
                 symbols=selected_symbols,
                 max_variants=max_variants,
                 dataset_cache=dataset_cache,
+                progress_callback=work_progress_callback,
             )
         except Exception as error:  # noqa: BLE001 - one broken family must not sink the sweep
             reports.append(
@@ -652,44 +655,6 @@ def _sweep_recommendation(predictive: list[str], below_cost: list[str], measured
 # own short-lived connection, exactly the pattern campaign_runner.py already
 # uses for campaign execution.
 # ---------------------------------------------------------------------------
-
-def ensure_signal_diagnostics_jobs_table(conn: psycopg.Connection) -> None:
-    """Idempotent creation for fresh environments. Migration 058 is
-    authoritative; this mirrors the `ensure_*` convention used elsewhere."""
-    statements = (
-        """
-        CREATE TABLE IF NOT EXISTS research_signal_diagnostics_jobs (
-            id BIGSERIAL PRIMARY KEY,
-            timeframe TEXT NOT NULL,
-            dataset_id BIGINT,
-            architectures JSONB,
-            max_variants INTEGER NOT NULL DEFAULT 3,
-            max_symbols INTEGER NOT NULL DEFAULT 4,
-            status TEXT NOT NULL DEFAULT 'queued',
-            result JSONB,
-            error TEXT,
-            progress_total INTEGER NOT NULL DEFAULT 0,
-            progress_completed INTEGER NOT NULL DEFAULT 0,
-            progress_current TEXT,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            started_at TIMESTAMPTZ,
-            completed_at TIMESTAMPTZ,
-            CONSTRAINT research_signal_diagnostics_jobs_status_check
-                CHECK (status IN ('queued', 'running', 'completed', 'failed'))
-        )
-        """,
-    )
-    for statement in statements:
-        conn.execute(statement)
-    conn.execute(
-        """
-        ALTER TABLE research_signal_diagnostics_jobs
-            ADD COLUMN IF NOT EXISTS progress_total INTEGER NOT NULL DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS progress_completed INTEGER NOT NULL DEFAULT 0,
-            ADD COLUMN IF NOT EXISTS progress_current TEXT
-        """
-    )
-
 
 def update_signal_diagnostics_job_progress(
     conn: psycopg.Connection,

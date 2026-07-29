@@ -74,9 +74,9 @@ def test_does_not_fire_when_the_percentile_is_unmeasured():
     assert result["trades"] == []
 
 
-def test_registered_in_the_family_registry_as_active():
+def test_registered_in_the_family_registry_as_archived_after_negative_signal_audit():
     assert "cross_sectional_reversal_v2" in FAMILY_REGISTRY
-    assert FAMILY_REGISTRY["cross_sectional_reversal_v2"].status == "active"
+    assert FAMILY_REGISTRY["cross_sectional_reversal_v2"].status == "archived"
 
 
 def test_reversal_and_momentum_are_genuinely_mirror_images_not_duplicates():

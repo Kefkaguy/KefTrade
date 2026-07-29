@@ -31,7 +31,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-DNA_SCHEMA_VERSION = 1
+DNA_SCHEMA_VERSION = 2
 
 # Closed vocabularies. A DNA payload using a value outside these sets is
 # rejected at build time -- fingerprints are only meaningful if the
@@ -47,7 +47,7 @@ VOCABULARY: dict[str, tuple[str, ...]] = {
         "compression_breakout", "time_of_day_entry", "structure_break",
         "structure_break_failure", "momentum_bar_continuation", "vwap_deviation_fade",
         "indicator_crossover", "opening_range_extension_fade", "trend_pullback",
-        "cross_sectional_rank_extreme",
+        "cross_sectional_rank_extreme", "opening_repricing_flow",
     ),
     "confirmation_structure": (
         "relative_volume", "vwap_alignment", "closing_confirmation", "momentum_direction",
@@ -60,7 +60,7 @@ VOCABULARY: dict[str, tuple[str, ...]] = {
         "time_stop", "failed_signal_exit",
     ),
     "holding_horizon_class": ("intraday_minutes", "intraday_hours", "multi_day", "multi_week"),
-    "timeframe_class": ("intraday_15m_30m", "intraday_1h", "swing_1h_4h", "daily"),
+    "timeframe_class": ("intraday_15m_30m", "intraday_30m", "intraday_1h", "swing_1h_4h", "daily"),
     "expected_frequency_class": ("multiple_per_session", "roughly_daily", "few_per_week", "sparse"),
     "trend_dependency": ("requires_trend", "requires_range", "benefits_from_trend", "agnostic"),
     "volatility_dependency": (

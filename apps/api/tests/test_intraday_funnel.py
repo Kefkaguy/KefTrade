@@ -2,6 +2,8 @@
 elites. See app/services/labs/intraday/funnel.py.
 """
 
+from dataclasses import replace
+
 import pytest
 
 from app.services.labs.intraday.families.registry import FAMILY_REGISTRY
@@ -15,10 +17,12 @@ from app.services.labs.intraday.funnel import (
 )
 
 ACTIVE_FAMILY = next(arch for arch, d in FAMILY_REGISTRY.items() if d.status == "active")
-OTHER_ACTIVE_FAMILY = next(
-    arch for arch, d in FAMILY_REGISTRY.items() if d.status == "active" and arch != ACTIVE_FAMILY
+OTHER_FAMILY = next(
+    arch for arch, d in FAMILY_REGISTRY.items() if d.status == "archived"
 )
-ARCHIVED_FAMILY = next(arch for arch, d in FAMILY_REGISTRY.items() if d.status == "archived")
+ARCHIVED_FAMILY = next(
+    arch for arch, d in FAMILY_REGISTRY.items() if d.status == "archived" and arch != OTHER_FAMILY
+)
 
 
 def family_row(
@@ -71,6 +75,22 @@ def fake_analytics(monkeypatch):
         )
 
     return install
+
+
+@pytest.fixture
+def other_active_family(monkeypatch):
+    """Give ranking tests a second active definition without changing policy.
+
+    Production intentionally has one active family while Opening Repricing
+    Flow is being measured. These tests still need two rows to exercise
+    ordering independently of the registry's current research decision.
+    """
+    monkeypatch.setitem(
+        FAMILY_REGISTRY,
+        OTHER_FAMILY,
+        replace(FAMILY_REGISTRY[OTHER_FAMILY], status="active"),
+    )
+    return OTHER_FAMILY
 
 
 # ---------------------------------------------------------------------------
@@ -163,33 +183,35 @@ def test_promising_families_rank_above_excluded_ones(fake_analytics):
     assert ranked[1]["architecture"] == ARCHIVED_FAMILY
 
 
-def test_stronger_edge_ranks_higher_among_promising_families(fake_analytics):
+def test_stronger_edge_ranks_higher_among_promising_families(fake_analytics, other_active_family):
     fake_analytics(
         [
             family_row(ACTIVE_FAMILY, avg_profit_factor=1.2),
-            family_row(OTHER_ACTIVE_FAMILY, avg_profit_factor=2.4),
+            family_row(other_active_family, avg_profit_factor=2.4),
         ]
     )
 
     ranked = rank_campaign_families(None, 101)
 
-    assert ranked[0]["architecture"] == OTHER_ACTIVE_FAMILY
+    assert ranked[0]["architecture"] == other_active_family
     assert ranked[0]["screen_score"] > ranked[1]["screen_score"]
 
 
-def test_trade_starved_families_rank_below_equally_profitable_frequent_ones(fake_analytics):
+def test_trade_starved_families_rank_below_equally_profitable_frequent_ones(
+    fake_analytics, other_active_family
+):
     """Trade starvation, not absent edge, is the documented reason intraday
     candidates fail the gate -- so frequency has to matter to the ranking."""
     fake_analytics(
         [
             family_row(ACTIVE_FAMILY, trades=60, jobs=60),
-            family_row(OTHER_ACTIVE_FAMILY, trades=1800, jobs=60),
+            family_row(other_active_family, trades=1800, jobs=60),
         ]
     )
 
     ranked = rank_campaign_families(None, 101)
 
-    assert ranked[0]["architecture"] == OTHER_ACTIVE_FAMILY
+    assert ranked[0]["architecture"] == other_active_family
 
 
 # ---------------------------------------------------------------------------
@@ -326,11 +348,13 @@ def captured_launch(monkeypatch):
     return calls
 
 
-def test_expansion_targets_only_the_top_ranked_promising_families(fake_analytics, captured_launch):
+def test_expansion_targets_only_the_top_ranked_promising_families(
+    fake_analytics, captured_launch, other_active_family
+):
     fake_analytics(
         [
             family_row(ACTIVE_FAMILY, avg_profit_factor=2.4),
-            family_row(OTHER_ACTIVE_FAMILY, avg_profit_factor=1.3),
+            family_row(other_active_family, avg_profit_factor=1.3),
             family_row(ARCHIVED_FAMILY, avg_profit_factor=5.0),
         ]
     )

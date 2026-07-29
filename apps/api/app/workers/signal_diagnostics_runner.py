@@ -15,7 +15,7 @@ import argparse
 import time
 
 from app.db import connect
-from app.services.signal_diagnostics import ensure_signal_diagnostics_jobs_table, run_one_signal_diagnostics_job
+from app.services.signal_diagnostics import run_one_signal_diagnostics_job
 
 
 def run_cycle() -> dict | None:
@@ -28,10 +28,6 @@ def main() -> None:
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--max-cycles", type=int, default=None)
     args = parser.parse_args()
-
-    with connect() as conn:
-        ensure_signal_diagnostics_jobs_table(conn)
-        conn.commit()
 
     cycles = 0
     while args.max_cycles is None or cycles < args.max_cycles:

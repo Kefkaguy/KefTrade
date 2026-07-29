@@ -87,6 +87,6 @@ def test_direction_gating_still_applies_on_top_of_the_percentile_signal():
     assert result["trades"] == []
 
 
-def test_registered_in_the_family_registry_as_active():
+def test_registered_in_the_family_registry_as_archived_after_negative_signal_audit():
     assert "cross_sectional_momentum_v2" in FAMILY_REGISTRY
-    assert FAMILY_REGISTRY["cross_sectional_momentum_v2"].status == "active"
+    assert FAMILY_REGISTRY["cross_sectional_momentum_v2"].status == "archived"

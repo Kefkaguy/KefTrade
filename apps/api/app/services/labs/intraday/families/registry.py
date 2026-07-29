@@ -155,7 +155,15 @@ FAMILY_REGISTRY: dict[str, IntradayFamilyDefinition] = {
 
 
 def _register_strategy_engine_v2_families() -> None:
-    """Phase 13.3: fold the ten Strategy Engine V2 families into the same
+    """Fold the Strategy Engine V2 families into the shared registry.
+
+    V2 families remain registered after a negative signal audit so historical
+    campaigns can still be replayed and explained, but only architectures in
+    ``ACTIVE_V2_ARCHITECTURES`` are eligible for new diagnostics or campaigns.
+    This is the backend research gate: negative families cannot silently
+    return to a broad screen just because their strategy classes still exist.
+
+    Originally this folded the ten Strategy Engine V2 families into the same
     registry the Phase 12 families use, so campaign creation, job dispatch,
     and the overview endpoint all pick them up with no new branching.
 
@@ -182,8 +190,8 @@ def _register_strategy_engine_v2_families() -> None:
             strategy_cls=strategy_cls,
             blocks=V2_BLOCKS[architecture],
             candidate_generator=partial(generate_v2_candidates, architecture),
-            supported_timeframes=SUPPORTED_V2_TIMEFRAMES,
-            status="active",
+            supported_timeframes=getattr(strategy_cls, "supported_timeframes", SUPPORTED_V2_TIMEFRAMES),
+            status="active" if architecture in v2_module.ACTIVE_V2_ARCHITECTURES else "archived",
         )
 
     for architecture in PHASE_12_3_ARCHIVED_FAMILIES:
@@ -243,6 +251,12 @@ def create_intraday_campaign(
         raise ValueError(f"Unknown intraday family id(s): {unknown}. Available: {sorted(FAMILY_REGISTRY)}")
 
     definitions = [FAMILY_REGISTRY[family_id] for family_id in family_ids]
+    inactive = [definition.architecture for definition in definitions if definition.status != "active"]
+    if inactive:
+        raise ValueError(
+            "Archived intraday families cannot launch new campaigns: "
+            f"{inactive}. Their historical evidence remains available."
+        )
     all_candidates: list[Any] = []
     for definition in definitions:
         all_candidates.extend(definition.candidate_generator(max_candidates=max_candidates_per_family))

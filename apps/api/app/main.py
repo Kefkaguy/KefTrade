@@ -43,21 +43,9 @@ async def lifespan(app: FastAPI):
             before = time.perf_counter()
             conn.execute("SELECT 1")
             log_event("Database connected", elapsed_ms=elapsed_ms(before), backend_pid=conn.info.backend_pid)
-            # Schema bootstrap happens exactly here and nowhere else. Request
-            # handlers must never issue DDL: `CREATE TABLE IF NOT EXISTS`
-            # takes an ACCESS EXCLUSIVE lock even when the table exists, so a
-            # polled endpoint doing it serialises every caller behind every
-            # other transaction on that table. Migrations remain authoritative;
-            # this only covers environments where they have not been applied.
-            from app.services.signal_diagnostics import (
-                ensure_signal_diagnostics_jobs_table,
-                ensure_signal_diagnostics_table,
-            )
-
-            ensure_signal_diagnostics_table(conn)
-            ensure_signal_diagnostics_jobs_table(conn)
-            conn.commit()
-            log_event("Signal diagnostics schema ready", source="startup")
+            # Production's migrate service owns schema changes. API startup
+            # stays read-only so it can never take an ACCESS EXCLUSIVE lock.
+            log_event("Database schema managed by migrations", source="startup")
         finally:
             conn.close()
             log_event("Connection released", source="startup")

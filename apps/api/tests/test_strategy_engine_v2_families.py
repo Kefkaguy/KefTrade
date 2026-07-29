@@ -17,6 +17,11 @@ from app.services.backtester import (
     run_backtest,
 )
 from app.services.labs.intraday.dataset import build_session_end_index
+from app.services.labs.intraday.campaign_plan import active_family_definitions
+from app.services.labs.intraday.families.registry import (
+    FAMILY_REGISTRY,
+    create_intraday_campaign,
+)
 from app.services.labs.intraday.families.v2 import families as v2_families
 from app.services.labs.intraday.families.v2.base import (
     BASE_V2_PARAMETERS,
@@ -100,12 +105,32 @@ def run_family(architecture, bar_specs_by_session, param_overrides=None, *, time
 
 
 # ---------------------------------------------------------------------------
-# Registry-level invariants (apply to all ten)
+# Registry-level invariants
 # ---------------------------------------------------------------------------
 
-def test_all_twelve_families_are_registered():
-    assert len(ARCHITECTURES) == 12
+def test_all_thirteen_families_are_registered():
+    assert len(ARCHITECTURES) == 13
     assert set(ARCHITECTURES) == set(V2_FAMILIES)
+
+
+def test_only_opening_repricing_flow_is_active_for_new_research():
+    assert [row["architecture"] for row in active_family_definitions()] == [
+        "opening_repricing_flow_v1"
+    ]
+    assert FAMILY_REGISTRY["opening_repricing_flow_v1"].supported_timeframes == ("30m",)
+    assert all(
+        FAMILY_REGISTRY[architecture].status == "archived"
+        for architecture in v2_families.NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES
+    )
+
+
+def test_archived_negative_signal_family_cannot_launch_a_new_campaign():
+    with pytest.raises(ValueError, match="Archived intraday families cannot launch"):
+        create_intraday_campaign(
+            None,
+            family_ids=["intraday_seasonality_v2"],
+            timeframes=["30m"],
+        )
 
 
 @pytest.mark.parametrize("architecture", ARCHITECTURES)
@@ -123,7 +148,8 @@ def test_every_family_declares_a_complete_hypothesis(architecture):
 def test_every_family_has_valid_dna_with_a_unique_fingerprint(architecture):
     payload = FAMILY_DNA[architecture]
     build_dna_payload(payload)
-    assert payload["strategy_version"] == "v2"
+    expected_version = "v1" if architecture == "opening_repricing_flow_v1" else "v2"
+    assert payload["strategy_version"] == expected_version
     assert payload["execution_capability"] == "simulation_only"
 
 
@@ -352,6 +378,81 @@ def test_vwap_bounce_v2_requires_structure_confirmation_by_default():
     decision = strategy(candles[-2], features[-2], candles[:-1], {**BASE_V2_PARAMETERS, "direction": "long"})
 
     assert decision.signal == "avoid"
+
+
+def test_opening_repricing_flow_is_30m_only():
+    strategy_cls = V2_FAMILIES["opening_repricing_flow_v1"]
+
+    strategy_cls({**BASE_V2_PARAMETERS, "direction": "long"}, timeframe="30m")
+    with pytest.raises(ValueError, match="timeframe '15m' not permitted"):
+        strategy_cls({**BASE_V2_PARAMETERS, "direction": "long"}, timeframe="15m")
+
+
+def test_opening_repricing_flow_grid_covers_both_flow_states_and_directions():
+    candidates = generate_v2_candidates("opening_repricing_flow_v1", max_candidates=8)
+
+    assert len(candidates) == 8
+    assert {
+        (
+            candidate.parameters["flow_mode"],
+            candidate.parameters["direction"],
+            candidate.parameters["minimum_gap_atr"],
+        )
+        for candidate in candidates
+    } == {
+        (flow_mode, direction, minimum_gap)
+        for flow_mode in ("acceptance", "absorption")
+        for direction in ("long", "short")
+        for minimum_gap in (Decimal("0.5"), Decimal("1.0"))
+    }
+
+
+def test_opening_repricing_flow_fires_when_gap_up_is_accepted():
+    sessions = warmup()
+    accepted_gap = [
+        (105.0, 106.0, 104.5, 105.5, 1000),
+        (105.5, 108.0, 105.4, 107.5, 3000),
+        (107.5, 111.5, 107.0, 111.0, 2500),
+    ] + [(111.0, 111.5, 110.5, 111.0, 1500) for _ in range(10)]
+    sessions.append(accepted_gap)
+
+    result = run_family(
+        "opening_repricing_flow_v1",
+        sessions,
+        {
+            "direction": "long",
+            "flow_mode": "acceptance",
+            "minimum_gap_atr": Decimal("0.5"),
+            "minimum_relative_volume": Decimal("1.5"),
+        },
+    )
+
+    assert result["trades"], "Opening Repricing Flow produced no trade on accepted gap-up flow"
+    assert result["trades"][0]["side"] == "long"
+
+
+def test_opening_repricing_flow_fires_when_gap_up_is_absorbed():
+    sessions = warmup()
+    absorbed_gap = [
+        (105.0, 106.0, 103.0, 104.0, 1000),
+        (104.0, 104.2, 100.5, 101.0, 3000),
+        (101.0, 101.2, 96.0, 96.5, 2500),
+    ] + [(96.5, 97.0, 96.0, 96.5, 1500) for _ in range(10)]
+    sessions.append(absorbed_gap)
+
+    result = run_family(
+        "opening_repricing_flow_v1",
+        sessions,
+        {
+            "direction": "short",
+            "flow_mode": "absorption",
+            "minimum_gap_atr": Decimal("0.5"),
+            "minimum_relative_volume": Decimal("1.5"),
+        },
+    )
+
+    assert result["trades"], "Opening Repricing Flow produced no trade on absorbed gap-up flow"
+    assert result["trades"][0]["side"] == "short"
 
 
 # ---------------------------------------------------------------------------

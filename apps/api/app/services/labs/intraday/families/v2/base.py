@@ -101,10 +101,16 @@ class V2Strategy:
     architecture: str = ""
     hypothesis: HypothesisSpec
     feature_groups: tuple[str, ...] = ("session",)
+    supported_timeframes: tuple[str, ...] = SUPPORTED_V2_TIMEFRAMES
     uses_absolute_targets: bool = False
     supports_short: bool = True
 
     def __init__(self, params: dict[str, Any], *, timeframe: str):
+        if timeframe not in self.supported_timeframes:
+            raise ValueError(
+                f"{self.architecture}: timeframe {timeframe!r} not permitted; "
+                f"allowed {self.supported_timeframes}"
+            )
         direction = str(params.get("direction", "long"))
         allowed = ("long", "short", "both") if self.supports_short else ("long",)
         if direction not in allowed:

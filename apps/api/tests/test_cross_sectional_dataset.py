@@ -20,7 +20,7 @@ def test_only_the_two_cross_sectional_families_route_to_the_new_path():
     other_families = [
         arch for arch in V2_ARCHITECTURES if arch not in ("cross_sectional_momentum_v2", "cross_sectional_reversal_v2")
     ]
-    assert len(other_families) == 10, "sanity check: the other ten single-symbol families must still exist"
+    assert len(other_families) == 11, "sanity check: the other eleven single-symbol families must still exist"
     for architecture in other_families:
         assert is_cross_sectional_candidate(candidate(architecture)) is False
 

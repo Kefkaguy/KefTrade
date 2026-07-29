@@ -1,4 +1,4 @@
-"""Phase 13.3: the ten Strategy Engine V2 families.
+"""Strategy Engine V2 families and participant-flow research families.
 
 Each family is a genuinely different market hypothesis, not a reparameterized
 EMA/RSI rule. Every one declares what it expects the market to do, what must
@@ -34,7 +34,10 @@ _INTRADAY_DNA_COMMON = {
     "execution_capability": "simulation_only",
     "holding_horizon_class": "intraday_hours",
     "timeframe_class": "intraday_15m_30m",
-    "evidence_confidence": "untested",
+    # The original candle-pattern families failed the full 15m/30m raw-signal
+    # audit. They remain registered for reproducibility, but the registry
+    # archives them and this DNA records the evidence honestly.
+    "evidence_confidence": "tested_negative_archived",
 }
 
 
@@ -1286,7 +1289,211 @@ register_v2_family(
 )
 
 
-V2_ARCHITECTURES: tuple[str, ...] = (
+# ===========================================================================
+# Participant-flow research: Opening Repricing Flow v1
+# ===========================================================================
+
+class OpeningRepricingFlowV1(V2Strategy):
+    """Test whether urgent opening repricing is accepted or absorbed.
+
+    This is deliberately 30m-only. A 15m version would be a separate
+    hypothesis with its own pre-declared timing and thresholds, not a free
+    extra look at the same data.
+    """
+
+    architecture = "opening_repricing_flow_v1"
+    feature_groups = ("session", "gap", "opening_range", "relative_volume", "vwap", "volatility")
+    supported_timeframes = ("30m",)
+    uses_absolute_targets = False
+    supports_short = True
+    hypothesis = HypothesisSpec(
+        title="Opening Repricing Flow v1",
+        market_behavior=(
+            "Overnight news and portfolio adjustment force participants to trade near the open. "
+            "The first completed half-hour shows the price range created by that urgency; the next "
+            "half-hour shows whether regular-session liquidity accepts the repricing or absorbs it."
+        ),
+        hypothesis=(
+            "After a material overnight gap, elevated same-time-of-day volume plus either continued "
+            "price acceptance beyond the first half-hour range or a decisive failure back through "
+            "the session open predicts the next 30 to 240 minutes in the observed flow direction."
+        ),
+        required_conditions=(
+            "30-minute bars and a completed first-half-hour range.",
+            "An overnight gap of at least the pre-declared ATR-normalized size.",
+            "A reliable same-time-of-day volume baseline from at least five prior sessions.",
+            "Elevated volume during the confirmation half-hour.",
+            "Acceptance mode: price extends beyond the opening range, holds the gap, and agrees with VWAP.",
+            "Absorption mode: price rejects the gap through the session open and agrees with VWAP.",
+        ),
+        invalidation_conditions=(
+            "The gap is too small to imply forced repricing.",
+            "Same-time-of-day participation is ordinary or cannot be measured reliably.",
+            "Price remains inside the opening range without accepting or rejecting the gap.",
+            "The signal appears after the first hour, when the opening-flow interpretation is stale.",
+        ),
+        success_criteria={
+            "minimum_trades": 50,
+            "minimum_net_profit_factor": 1.2,
+            "minimum_net_expectancy": 0,
+            "minimum_symbols_with_positive_evidence": 3,
+            "minimum_raw_signal_t_statistic": 2.0,
+            "minimum_raw_edge_bps": 30.0,
+            "notes": (
+                "Declared before any campaign. Diagnose raw entry direction first; only a signal "
+                "that survives drift adjustment and the 30 bps round trip may enter a campaign."
+            ),
+        },
+    )
+
+    def evaluate(self, candle, feature, v2, params) -> EntryPlan | str:
+        minutes_from_open = v2.get("minutes_from_open")
+        if minutes_from_open is None or not (30 <= int(minutes_from_open) <= 60):
+            return "Opening repricing is only measured during the second half-hour or first-hour close."
+
+        if not v2.get("or30_complete"):
+            return "The first 30-minute opening range is not complete."
+
+        opening_high = v2.get("or30_high")
+        opening_low = v2.get("or30_low")
+        session_open = v2.get("session_open")
+        gap_atr = v2.get("gap_atr")
+        gap_direction = v2.get("gap_direction")
+        if (
+            opening_high is None
+            or opening_low is None
+            or session_open is None
+            or gap_atr is None
+            or gap_direction not in ("up", "down")
+        ):
+            return "Opening range or overnight repricing context is unavailable."
+
+        minimum_gap_atr = float(params.get("minimum_gap_atr", 0.5))
+        if abs(float(gap_atr)) < minimum_gap_atr:
+            return f"Overnight gap {abs(float(gap_atr)):.2f} ATR is below the forced-flow threshold."
+
+        if not v2.get("same_time_of_day_volume_reliable"):
+            return "Same-time-of-day volume baseline has fewer than five prior sessions."
+        relative_volume = v2.get("same_time_of_day_relative_volume")
+        minimum_volume = float(params.get("minimum_relative_volume", 1.5))
+        if relative_volume is None or float(relative_volume) < minimum_volume:
+            return "Opening-flow participation is not elevated versus the same time of day."
+
+        close = float(candle["close"])
+        session_vwap = v2.get("session_vwap")
+        if session_vwap is None:
+            return "Session VWAP is unavailable for repricing acceptance."
+        session_vwap = float(session_vwap)
+
+        flow_mode = str(params.get("flow_mode", "acceptance"))
+        gap_fill_fraction = float(v2.get("gap_fill_fraction") or 0.0)
+
+        if flow_mode == "acceptance":
+            maximum_fill = float(params.get("maximum_acceptance_fill_fraction", 0.25))
+            if gap_fill_fraction > maximum_fill:
+                return "Too much of the overnight gap has filled for repricing acceptance."
+            if gap_direction == "up":
+                if close <= float(opening_high) or close <= session_vwap:
+                    return "Gap-up repricing has not been accepted beyond the opening range and VWAP."
+                return EntryPlan(
+                    "long",
+                    _d(session_open),
+                    (
+                        f"Gap-up repricing accepted above the first-half-hour range on "
+                        f"{float(relative_volume):.2f}x same-time volume."
+                    ),
+                )
+            if close >= float(opening_low) or close >= session_vwap:
+                return "Gap-down repricing has not been accepted beyond the opening range and VWAP."
+            return EntryPlan(
+                "short",
+                _d(session_open),
+                (
+                    f"Gap-down repricing accepted below the first-half-hour range on "
+                    f"{float(relative_volume):.2f}x same-time volume."
+                ),
+            )
+
+        if flow_mode != "absorption":
+            return f"Unknown opening repricing flow mode {flow_mode!r}."
+
+        minimum_fill = float(params.get("minimum_absorption_fill_fraction", 0.5))
+        if gap_fill_fraction < minimum_fill:
+            return "The overnight gap has not retraced enough to show absorption."
+        if gap_direction == "up":
+            if close >= float(session_open) or close >= session_vwap:
+                return "Gap-up flow has not failed through the session open and VWAP."
+            return EntryPlan(
+                "short",
+                _d(max(float(opening_high), float(session_open))),
+                (
+                    f"Gap-up repricing absorbed through the session open on "
+                    f"{float(relative_volume):.2f}x same-time volume."
+                ),
+            )
+        if close <= float(session_open) or close <= session_vwap:
+            return "Gap-down flow has not failed through the session open and VWAP."
+        return EntryPlan(
+            "long",
+            _d(min(float(opening_low), float(session_open))),
+            (
+                f"Gap-down repricing absorbed through the session open on "
+                f"{float(relative_volume):.2f}x same-time volume."
+            ),
+        )
+
+
+register_v2_family(
+    OpeningRepricingFlowV1,
+    dna={
+        **_INTRADAY_DNA_COMMON,
+        "strategy_version": "v1",
+        "family_architecture": "opening_repricing_flow_v1",
+        "direction_support": ["long", "short"],
+        "entry_structure": "opening_repricing_flow",
+        "confirmation_structure": ["relative_volume", "vwap_alignment", "closing_confirmation", "session_window"],
+        "exit_structure": ["fixed_r_multiple_target", "stop_loss", "session_close_forced"],
+        "holding_horizon_class": "intraday_hours",
+        "timeframe_class": "intraday_30m",
+        "expected_frequency_class": "few_per_week",
+        "trend_dependency": "agnostic",
+        "volatility_dependency": "requires_expansion",
+        "volume_dependency": "requires_elevated",
+        "session_dependency": "open_only",
+        "gap_dependency": "requires_gap",
+        "market_structure_dependency": "uses_structure_context",
+        "behavior_class": "hybrid",
+        "required_regime": ["any"],
+        "invalidation_regime": ["none_declared"],
+        "feature_dependencies": [
+            "gap_atr",
+            "gap_direction",
+            "gap_fill_fraction",
+            "or30_complete",
+            "or30_high",
+            "or30_low",
+            "same_time_of_day_relative_volume",
+            "same_time_of_day_volume_reliable",
+            "session_open",
+            "session_vwap",
+        ],
+        "evidence_confidence": "untested",
+    },
+    parameter_grid={
+        # Eight pre-declared variants: both observed flow states, both trade
+        # directions, and two economically meaningful gap-size floors.
+        "flow_mode": ("acceptance", "absorption"),
+        "minimum_gap_atr": (Decimal("0.5"), Decimal("1.0")),
+        "minimum_relative_volume": (Decimal("1.5"),),
+        "maximum_acceptance_fill_fraction": (Decimal("0.25"),),
+        "minimum_absorption_fill_fraction": (Decimal("0.5"),),
+        "direction": ("long", "short"),
+    },
+    blocks={"entry": "opening_repricing_acceptance_or_absorption", "exit": "r_multiple_or_session_close"},
+)
+
+
+NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES: tuple[str, ...] = (
     "opening_range_breakout_v2",
     "opening_range_fade_v2",
     "vwap_bounce_v2",
@@ -1299,4 +1506,11 @@ V2_ARCHITECTURES: tuple[str, ...] = (
     "market_structure_break_v2",
     "cross_sectional_momentum_v2",
     "cross_sectional_reversal_v2",
+)
+
+ACTIVE_V2_ARCHITECTURES: tuple[str, ...] = ("opening_repricing_flow_v1",)
+
+V2_ARCHITECTURES: tuple[str, ...] = (
+    *NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES,
+    *ACTIVE_V2_ARCHITECTURES,
 )
