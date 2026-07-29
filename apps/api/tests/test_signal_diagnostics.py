@@ -16,6 +16,7 @@ from app.services.signal_diagnostics import (
     MINIMUM_SIGNALS_FOR_A_VERDICT,
     MINIMUM_T_STATISTIC,
     _load_dataset_cached,
+    _pool_measurements,
     _rows_with_forward_context,
     claim_next_signal_diagnostics_job,
     enqueue_signal_diagnostics_job,
@@ -44,6 +45,40 @@ def test_forward_context_keeps_bounded_warmup_and_all_forward_rows():
 
     assert scoped[0] is rows[9]
     assert scoped[-1] is rows[-1]
+
+
+def test_forward_only_measurement_counts_only_post_cutoff_exposure():
+    rows = _rows([100 + index for index in range(120)])
+    cutoff = rows[89]["candle"]["timestamp"]
+
+    def decide(candle, feature, recent, params):
+        return _setup()
+
+    measurement = measure_signal_edge(
+        rows,
+        decide,
+        {},
+        horizons=(1,),
+        signal_start_timestamp=cutoff,
+    )
+    pooled = _pool_measurements(
+        [
+            {
+                "rows": rows,
+                "decide": decide,
+                "params": {},
+                "signal_start_timestamp": cutoff,
+            }
+        ],
+        horizons=(1,),
+    )
+
+    assert measurement["bars_evaluated"] == 30
+    assert measurement["signal_count"] == 30
+    assert measurement["signal_rate"] == 1.0
+    assert pooled["bars_evaluated"] == 30
+    assert pooled["signal_count"] == 30
+    assert pooled["signal_rate"] == 1.0
 
 
 def test_persisted_report_serializes_forward_cutoff_datetime():

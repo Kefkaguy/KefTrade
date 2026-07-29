@@ -103,6 +103,7 @@ def measure_signal_edge(
     candle_rows = [row["candle"] for row in rows]
 
     signals: list[tuple[int, int]] = []  # (bar index, +1 long / -1 short)
+    eligible_bars = 0
     for index in range(warmup, len(rows)):
         row = rows[index]
         start = max(0, index + 1 - recent_window_bars) if recent_window_bars else 0
@@ -112,6 +113,7 @@ def measure_signal_edge(
             and row["candle"]["timestamp"] <= signal_start_timestamp
         ):
             continue
+        eligible_bars += 1
         if getattr(decision, "signal", None) != "setup":
             continue
         direction = 1 if str(getattr(decision, "direction", "long")) == "long" else -1
@@ -120,7 +122,15 @@ def measure_signal_edge(
     by_horizon: list[dict[str, Any]] = []
     for horizon in horizons:
         forward = _forward_returns(rows, horizon)
-        measurable = [value for value in forward if value is not None]
+        measurable = [
+            value
+            for index, value in enumerate(forward)
+            if value is not None
+            and (
+                signal_start_timestamp is None
+                or rows[index]["candle"]["timestamp"] > signal_start_timestamp
+            )
+        ]
         if not measurable:
             continue
         unconditional = fmean(measurable)
@@ -157,8 +167,8 @@ def measure_signal_edge(
 
     return {
         "signal_count": len(signals),
-        "bars_evaluated": max(0, len(rows) - warmup),
-        "signal_rate": round(len(signals) / max(1, len(rows) - warmup), 6),
+        "bars_evaluated": eligible_bars,
+        "signal_rate": round(len(signals) / max(1, eligible_bars), 6),
         "long_signals": sum(1 for _, direction in signals if direction > 0),
         "short_signals": sum(1 for _, direction in signals if direction < 0),
         "by_horizon": by_horizon,
@@ -1004,6 +1014,7 @@ def _pool_measurements(
         recent_window = int(params.get("recent_candle_window_bars") or 0)
 
         signals: list[tuple[int, int]] = []
+        eligible_bars = 0
         for index in range(WARMUP_BARS, len(rows)):
             row = rows[index]
             start = max(0, index + 1 - recent_window) if recent_window else 0
@@ -1013,13 +1024,14 @@ def _pool_measurements(
                 and row["candle"]["timestamp"] <= signal_start_timestamp
             ):
                 continue
+            eligible_bars += 1
             if getattr(decision, "signal", None) != "setup":
                 continue
             direction = 1 if str(getattr(decision, "direction", "long")) == "long" else -1
             signals.append((index, direction))
 
         total_signals += len(signals)
-        total_bars += max(0, len(rows) - WARMUP_BARS)
+        total_bars += eligible_bars
         long_signals += sum(1 for _, direction in signals if direction > 0)
         short_signals += sum(1 for _, direction in signals if direction < 0)
 
