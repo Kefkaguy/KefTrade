@@ -33,6 +33,7 @@ def record_intraday_dataset_snapshot(
     timeframes: list[str],
     mode: str = "rolling",
     name: str | None = None,
+    universe_key: str | None = None,
 ) -> dict[str, Any]:
     """Materialize an exact immutable candles + intraday_features snapshot.
 
@@ -62,8 +63,24 @@ def record_intraday_dataset_snapshot(
                        ARRAY_AGG(DISTINCT source ORDER BY source) AS sources
                 FROM candles
                 WHERE symbol = %s AND timeframe = %s
+                  AND (
+                      %s IS NULL
+                      OR EXISTS (
+                          SELECT 1
+                          FROM research_point_in_time_universe_membership membership
+                          WHERE membership.universe_key = %s
+                            AND membership.symbol = candles.symbol
+                            AND membership.effective_from <=
+                                (candles.timestamp AT TIME ZONE 'America/New_York')::date
+                            AND (
+                                membership.effective_to IS NULL
+                                OR membership.effective_to >=
+                                    (candles.timestamp AT TIME ZONE 'America/New_York')::date
+                            )
+                      )
+                  )
                 """,
-                (symbol, timeframe),
+                (symbol, timeframe, universe_key, universe_key),
             ).fetchone()
             candle_count = int(candle_row.get("candle_count") or 0)
             if candle_count == 0:
@@ -80,8 +97,22 @@ def record_intraday_dataset_snapshot(
                        ), '')) AS feature_hash
                 FROM intraday_features
                 WHERE symbol = %s AND timeframe = %s
+                  AND (
+                      %s IS NULL
+                      OR EXISTS (
+                          SELECT 1
+                          FROM research_point_in_time_universe_membership membership
+                          WHERE membership.universe_key = %s
+                            AND membership.symbol = intraday_features.symbol
+                            AND membership.effective_from <= intraday_features.session_date
+                            AND (
+                                membership.effective_to IS NULL
+                                OR membership.effective_to >= intraday_features.session_date
+                            )
+                      )
+                  )
                 """,
-                (symbol, timeframe),
+                (symbol, timeframe, universe_key, universe_key),
             ).fetchone()
             feature_count = int(feature_row.get("feature_count") or 0)
             if feature_count == 0:
@@ -111,6 +142,7 @@ def record_intraday_dataset_snapshot(
             "mode": mode,
             "assets": normalized_assets,
             "timeframes": normalized_timeframes,
+            "universe_key": universe_key,
             "datasets": [
                 {key: jsonable(item[key]) for key in ("key", "candle_count", "feature_count", "window_start", "window_end", "candle_hash", "feature_hash", "sources")}
                 for item in summaries
@@ -122,6 +154,9 @@ def record_intraday_dataset_snapshot(
     counts = {item["key"]: item["candle_count"] for item in summaries}
     hashes = {item["key"]: item["candle_hash"] for item in summaries}
     sources = sorted({source for item in summaries for source in item["sources"]})
+    adjusted_prices = bool(sources) and all(
+        str(source).lower().startswith("alpaca") for source in sources
+    )
     window_starts = [item["window_start"] for item in summaries if item["window_start"] is not None]
     window_ends = [item["window_end"] for item in summaries if item["window_end"] is not None]
 
@@ -147,7 +182,18 @@ def record_intraday_dataset_snapshot(
             Jsonb(hashes),
             Jsonb(sources),
             content_hash,
-            Jsonb({"verified_at_creation": True, "dataset_count": len(summaries), "exact_candles_materialized": True, "exact_intraday_features_materialized": True}),
+            Jsonb(
+                {
+                    "verified_at_creation": True,
+                    "dataset_count": len(summaries),
+                    "exact_candles_materialized": True,
+                    "exact_intraday_features_materialized": True,
+                    "point_in_time_universe": universe_key is not None,
+                    "universe_key": universe_key,
+                    "corporate_actions_adjusted": adjusted_prices,
+                    "adjustment_policy": "all" if adjusted_prices else "unverified",
+                }
+            ),
             DATASET_VERSION,
         ),
     ).fetchone()
@@ -162,9 +208,33 @@ def record_intraday_dataset_snapshot(
             SELECT %s, symbol, source, timeframe, timestamp, open, high, low, close, volume
             FROM candles
             WHERE symbol = %s AND timeframe = %s AND timestamp BETWEEN %s AND %s
+              AND (
+                  %s IS NULL
+                  OR EXISTS (
+                      SELECT 1
+                      FROM research_point_in_time_universe_membership membership
+                      WHERE membership.universe_key = %s
+                        AND membership.symbol = candles.symbol
+                        AND membership.effective_from <=
+                            (candles.timestamp AT TIME ZONE 'America/New_York')::date
+                        AND (
+                            membership.effective_to IS NULL
+                            OR membership.effective_to >=
+                                (candles.timestamp AT TIME ZONE 'America/New_York')::date
+                        )
+                  )
+              )
             ON CONFLICT(dataset_id, symbol, timeframe, timestamp, source) DO NOTHING
             """,
-            (dataset_id, item["symbol"], item["timeframe"], item["window_start"], item["window_end"]),
+            (
+                dataset_id,
+                item["symbol"],
+                item["timeframe"],
+                item["window_start"],
+                item["window_end"],
+                universe_key,
+                universe_key,
+            ),
         )
         conn.execute(
             """
@@ -178,9 +248,31 @@ def record_intraday_dataset_snapshot(
                    opening_range_position, gap_percent, session_relative_volume
             FROM intraday_features
             WHERE symbol = %s AND timeframe = %s AND timestamp BETWEEN %s AND %s
+              AND (
+                  %s IS NULL
+                  OR EXISTS (
+                      SELECT 1
+                      FROM research_point_in_time_universe_membership membership
+                      WHERE membership.universe_key = %s
+                        AND membership.symbol = intraday_features.symbol
+                        AND membership.effective_from <= intraday_features.session_date
+                        AND (
+                            membership.effective_to IS NULL
+                            OR membership.effective_to >= intraday_features.session_date
+                        )
+                  )
+              )
             ON CONFLICT (dataset_id, symbol, timeframe, timestamp) DO NOTHING
             """,
-            (dataset_id, item["symbol"], item["timeframe"], item["window_start"], item["window_end"]),
+            (
+                dataset_id,
+                item["symbol"],
+                item["timeframe"],
+                item["window_start"],
+                item["window_end"],
+                universe_key,
+                universe_key,
+            ),
         )
     _ensure_nested_splits(conn, dataset_id)
     conn.commit()
@@ -197,16 +289,41 @@ def _ensure_nested_splits(conn: psycopg.Connection, dataset_id: int) -> None:
     a dataset without splits simply cannot be used for confirmation, which the
     protocol reports rather than silently working around.
     """
-    from app.services.research_splits import compute_nested_splits, persist_dataset_splits
+    from app.services.research_splits import (
+        compute_nested_splits,
+        compute_session_nested_splits,
+        persist_dataset_splits,
+    )
 
     rows = conn.execute(
+        """
+        SELECT DISTINCT timestamp, session_date
+        FROM research_dataset_intraday_features
+        WHERE dataset_id = %s
+        ORDER BY timestamp
+        """,
+        (dataset_id,),
+    ).fetchall()
+    if rows:
+        observations = [(row["timestamp"], row["session_date"]) for row in rows]
+        if len({session for _, session in observations}) >= 3:
+            persist_dataset_splits(
+                conn,
+                dataset_id=dataset_id,
+                splits=compute_session_nested_splits(observations),
+            )
+            return
+    fallback = conn.execute(
         "SELECT DISTINCT timestamp FROM research_dataset_candles WHERE dataset_id = %s ORDER BY timestamp",
         (dataset_id,),
     ).fetchall()
-    timestamps = [row["timestamp"] for row in rows]
-    if len(timestamps) < 3:
-        return
-    persist_dataset_splits(conn, dataset_id=dataset_id, splits=compute_nested_splits(timestamps))
+    timestamps = [row["timestamp"] for row in fallback]
+    if len(timestamps) >= 3:
+        persist_dataset_splits(
+            conn,
+            dataset_id=dataset_id,
+            splits=compute_nested_splits(timestamps),
+        )
 
 
 def load_snapshot_intraday_features(conn: psycopg.Connection, dataset_id: int, symbol: str, timeframe: str) -> list[dict[str, Any]]:

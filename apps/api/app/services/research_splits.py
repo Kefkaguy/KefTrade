@@ -37,6 +37,7 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 SPLIT_VERSION = "nested_research_splits_v1"
+SESSION_SPLIT_VERSION = "nested_research_session_splits_v2"
 CONFIRMATION_PROTOCOL_VERSION = "locked_confirmation_v1"
 
 PHASES = ("discovery", "validation", "confirmation")
@@ -128,6 +129,43 @@ def compute_nested_splits(
         validation_end=ordered[validation_end_index],
         confirmation_start=ordered[validation_end_index + 1],
         confirmation_end=ordered[-1],
+    )
+
+
+def compute_session_nested_splits(
+    observations: Sequence[tuple[datetime, Any]],
+    *,
+    discovery_ratio: float = DEFAULT_DISCOVERY_RATIO,
+    validation_ratio: float = DEFAULT_VALIDATION_RATIO,
+) -> NestedSplits:
+    """Split intraday evidence only between complete exchange sessions."""
+    if discovery_ratio <= 0 or validation_ratio <= 0:
+        raise ValueError("discovery and validation ratios must be positive")
+    if discovery_ratio + validation_ratio >= 1.0:
+        raise ValueError("discovery + validation must leave a non-empty confirmation window")
+    by_session: dict[Any, list[datetime]] = {}
+    for timestamp, session_date in observations:
+        by_session.setdefault(session_date, []).append(timestamp)
+    ordered_sessions = sorted(by_session)
+    if len(ordered_sessions) < len(PHASES):
+        raise ValueError("at least three complete sessions are required to form three windows")
+    total = len(ordered_sessions)
+    discovery_end_index = max(0, min(total - 3, int(total * discovery_ratio) - 1))
+    validation_end_index = max(
+        discovery_end_index + 1,
+        min(total - 2, int(total * (discovery_ratio + validation_ratio)) - 1),
+    )
+    discovery_sessions = ordered_sessions[: discovery_end_index + 1]
+    validation_sessions = ordered_sessions[discovery_end_index + 1 : validation_end_index + 1]
+    confirmation_sessions = ordered_sessions[validation_end_index + 1 :]
+    return NestedSplits(
+        discovery_start=min(by_session[discovery_sessions[0]]),
+        discovery_end=max(by_session[discovery_sessions[-1]]),
+        validation_start=min(by_session[validation_sessions[0]]),
+        validation_end=max(by_session[validation_sessions[-1]]),
+        confirmation_start=min(by_session[confirmation_sessions[0]]),
+        confirmation_end=max(by_session[confirmation_sessions[-1]]),
+        split_version=SESSION_SPLIT_VERSION,
     )
 
 

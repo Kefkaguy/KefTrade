@@ -57,6 +57,7 @@ async def prepare(args: argparse.Namespace) -> dict:
             timeframes=timeframes,
             mode="rolling",
             name=args.name,
+            universe_key=args.universe_key,
         )
     return {
         "candles": synced,
@@ -77,6 +78,13 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--timeframes", default="30m", help="Comma-separated 15m/30m values")
     root.add_argument("--candle-limit", type=int, default=5000)
     root.add_argument("--name")
+    root.add_argument(
+        "--universe-key",
+        help=(
+            "Optional historical universe key. When supplied, snapshot rows are "
+            "materialized only while each symbol was an active member."
+        ),
+    )
     return root
 
 

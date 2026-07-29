@@ -13,11 +13,14 @@ from app.services.intraday_factor_diagnostics import (
     evaluate_factor_discovery,
     evaluate_forward_confirmation,
     frozen_spec_hash,
+    load_auction_imbalances,
     load_cost_model,
     load_dataset_candles,
     load_microstructure,
     persist_factor_run,
 )
+from app.services.intraday_research_integrity import exchange_session_date, rows_after_session
+from app.services.intraday_research_data import research_data_readiness
 
 
 def _factor_keys(value: str | None) -> list[str]:
@@ -90,12 +93,27 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             start=manifest.get("window_start"),
             end=manifest.get("window_end"),
         )
+        auctions = load_auction_imbalances(
+            conn,
+            symbols=list(candles),
+            start=manifest.get("window_start"),
+            end=manifest.get("window_end"),
+        )
+        integrity = dict(manifest.get("integrity") or {})
+        institutional_readiness = research_data_readiness(
+            conn,
+            dataset_id=dataset_id,
+            timeframe=args.timeframe,
+            universe_key=integrity.get("universe_key"),
+        )
         result = evaluate_factor_discovery(
             candles,
             timeframe=args.timeframe,
             factor_keys=keys,
             cost_model=cost_model,
             microstructure_by_symbol=microstructure or None,
+            auction_by_symbol=auctions or None,
+            institutional_data_readiness=institutional_readiness,
         )
         spec_hash = frozen_spec_hash(
             factor_keys=keys,
@@ -150,8 +168,12 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
         cutoff = source["source_window_end"]
         if cutoff is None:
             raise ValueError("The discovery dataset has no window_end; forward non-overlap cannot be proven.")
+        cutoff_session_date = exchange_session_date(cutoff)
         forward = {
-            symbol: [row for row in rows if row["timestamp"] > cutoff]
+            symbol: rows_after_session(
+                rows,
+                session_date_exclusive=cutoff_session_date,
+            )
             for symbol, rows in candles.items()
         }
         forward = {symbol: rows for symbol, rows in forward.items() if rows}
@@ -168,12 +190,27 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
             start=cutoff,
             end=manifest.get("window_end"),
         )
+        auctions = load_auction_imbalances(
+            conn,
+            symbols=list(forward),
+            start=cutoff,
+            end=manifest.get("window_end"),
+        )
+        integrity = dict(manifest.get("integrity") or {})
+        institutional_readiness = research_data_readiness(
+            conn,
+            dataset_id=dataset_id,
+            timeframe=str(source["timeframe"]),
+            universe_key=integrity.get("universe_key"),
+        )
         result = evaluate_forward_confirmation(
             forward,
             timeframe=str(source["timeframe"]),
             factor_keys=keys,
             cost_model=cost_model,
             microstructure_by_symbol=microstructure or None,
+            auction_by_symbol=auctions or None,
+            institutional_data_readiness=institutional_readiness,
         )
         result.update(
             {
@@ -181,6 +218,7 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
                 "source_run_id": args.source_run_id,
                 "source_dataset_id": int(source["dataset_id"]),
                 "forward_only_after": cutoff,
+                "forward_only_after_session": cutoff_session_date,
                 "symbols": sorted(forward),
                 "frozen_spec_hash": source["frozen_spec_hash"],
             }

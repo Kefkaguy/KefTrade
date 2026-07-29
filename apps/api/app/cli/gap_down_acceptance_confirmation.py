@@ -7,6 +7,7 @@ import json
 
 from app.db import connect
 from app.services.intraday_factor_diagnostics import load_cost_model
+from app.services.intraday_research_integrity import exchange_session_date
 from app.cli.intraday_factor_audit import _cost_calibration_id
 from app.services.signal_diagnostics import (
     family_signal_diagnostics,
@@ -64,6 +65,7 @@ def execute(args: argparse.Namespace) -> dict:
         stressed_cost = cost_model.get("stressed_round_trip_bps")
         if stressed_cost is None:
             stressed_cost = cost_model["conservative_round_trip_bps"]
+        source_session_date = exchange_session_date(source["window_end"])
         report = family_signal_diagnostics(
             conn,
             architecture=ARCHITECTURE,
@@ -72,11 +74,13 @@ def execute(args: argparse.Namespace) -> dict:
             symbols=symbols,
             max_variants=1,
             horizons=(1,),
-            minimum_timestamp_exclusive=source["window_end"],
+            minimum_session_date_exclusive=source_session_date,
             cost_bps_override=float(stressed_cost),
+            effective_trials_override=1,
             progress_callback=_progress,
         )
         report["source_dataset_id"] = SOURCE_DATASET_ID
+        report["source_last_session_date"] = source_session_date
         report["cost_model"] = cost_model
         report["forward_only"] = True
         if not args.no_persist:

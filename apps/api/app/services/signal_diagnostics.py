@@ -39,14 +39,23 @@ measures.
 
 from __future__ import annotations
 
-from math import sqrt
-from statistics import fmean, pstdev
+from datetime import date
+from statistics import fmean
 from typing import Any, Callable, Sequence
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-SIGNAL_DIAGNOSTICS_VERSION = "signal_diagnostics_v1"
+from app.services.intraday_research_integrity import (
+    MINIMUM_DAY_CLUSTERED_T,
+    MINIMUM_DISTINCT_SESSIONS,
+    MINIMUM_SIGNALS,
+    clustered_outcome_statistics,
+    exchange_session_date,
+    rows_with_session_context,
+)
+
+SIGNAL_DIAGNOSTICS_VERSION = "signal_diagnostics_v2"
 
 # Horizons in bars. The horizon where edge peaks is itself the finding: it is
 # the natural holding period, and it is the input the cost/horizon arithmetic
@@ -54,11 +63,11 @@ SIGNAL_DIAGNOSTICS_VERSION = "signal_diagnostics_v1"
 DEFAULT_HORIZONS: tuple[int, ...] = (1, 2, 4, 8, 16, 32)
 
 # Below this many firings the mean is not a measurement.
-MINIMUM_SIGNALS_FOR_A_VERDICT = 50
+MINIMUM_SIGNALS_FOR_A_VERDICT = MINIMUM_SIGNALS
 
 # Testing several horizons and keeping the best inflates significance, so the
 # bar is set above the conventional 2.0 rather than at it.
-MINIMUM_T_STATISTIC = 3.0
+MINIMUM_T_STATISTIC = MINIMUM_DAY_CLUSTERED_T
 
 # Warm-up bars before the first signal is honored, matching `run_backtest`'s
 # own `i = max(start_index, 50)` so indicators are comparably warm.
@@ -95,6 +104,8 @@ def measure_signal_edge(
     warmup: int = WARMUP_BARS,
     recent_window_bars: int = 0,
     signal_start_timestamp: Any | None = None,
+    signal_start_session_date: date | None = None,
+    effective_trials: int = 1,
 ) -> dict[str, Any]:
     """Signal edge per horizon, with no trading simulation of any kind."""
     from app.services.strategy import reset_strategy_state
@@ -113,6 +124,11 @@ def measure_signal_edge(
             and row["candle"]["timestamp"] <= signal_start_timestamp
         ):
             continue
+        if (
+            signal_start_session_date is not None
+            and exchange_session_date(row) <= signal_start_session_date
+        ):
+            continue
         eligible_bars += 1
         if getattr(decision, "signal", None) != "setup":
             continue
@@ -129,6 +145,10 @@ def measure_signal_edge(
             and (
                 signal_start_timestamp is None
                 or rows[index]["candle"]["timestamp"] > signal_start_timestamp
+            )
+            and (
+                signal_start_session_date is None
+                or exchange_session_date(rows[index]) > signal_start_session_date
             )
         ]
         if not measurable:
@@ -151,8 +171,19 @@ def measure_signal_edge(
             continue
 
         mean_excess = fmean(excess)
-        deviation = pstdev(excess) if len(excess) > 1 else 0.0
-        t_statistic = mean_excess / (deviation / sqrt(len(excess))) if deviation > 0 else None
+        evidence = clustered_outcome_statistics(
+            [
+                {
+                    "value": direction * (forward[index] - unconditional),
+                    "session_date": exchange_session_date(rows[index]),
+                    "timestamp": rows[index]["candle"]["timestamp"],
+                    "symbol": rows[index]["candle"].get("symbol"),
+                }
+                for index, direction in signals
+                if forward[index] is not None
+            ],
+            effective_trials=effective_trials,
+        )
         by_horizon.append(
             {
                 "horizon_bars": horizon,
@@ -160,8 +191,9 @@ def measure_signal_edge(
                 "raw_edge_bps": round(fmean(raw) * 10_000, 4),
                 "unconditional_drift_bps": round(unconditional * 10_000, 4),
                 "excess_edge_bps": round(mean_excess * 10_000, 4),
-                "t_statistic": round(t_statistic, 4) if t_statistic is not None else None,
+                "t_statistic": evidence["day_clustered_t_statistic"],
                 "hit_rate": round(sum(1 for value in excess if value > 0) / len(excess), 4),
+                "evidence_quality": evidence,
             }
         )
 
@@ -186,12 +218,7 @@ def round_trip_cost_bps(params: dict[str, Any] | None = None) -> float:
 
 
 def summarize_edge(measurement: dict[str, Any], *, cost_bps: float) -> dict[str, Any]:
-    """Pick the decisive horizon and reach a verdict against cost.
-
-    The best horizon is chosen by t-statistic rather than by raw edge: the
-    largest edge in a sweep is frequently the noisiest one, and picking it is
-    how a horizon sweep turns into a selection bias.
-    """
+    """Reach a verdict using independent-session, selection-adjusted evidence."""
     horizons = [row for row in measurement["by_horizon"] if row["t_statistic"] is not None]
     if measurement["signal_count"] < MINIMUM_SIGNALS_FOR_A_VERDICT:
         return {
@@ -216,8 +243,32 @@ def summarize_edge(measurement: dict[str, Any], *, cost_bps: float) -> dict[str,
         }
 
     best = max(horizons, key=lambda row: row["t_statistic"])
-    significant = best["t_statistic"] >= MINIMUM_T_STATISTIC
+    evidence = best.get("evidence_quality") or {}
+    quality_gates = evidence.get("quality_gates") or {}
+    if not evidence.get("independent_evidence_ready", False):
+        return {
+            "verdict": "insufficient_independent_evidence",
+            "detail": (
+                f"{measurement['signal_count']} firings span "
+                f"{evidence.get('distinct_sessions', 0)} distinct sessions; at least "
+                f"{MINIMUM_DISTINCT_SESSIONS} sessions with no day/symbol concentration "
+                "are required before the mean is treated as independent evidence."
+            ),
+            "best_horizon_bars": best["horizon_bars"],
+            "excess_edge_bps": best["excess_edge_bps"],
+            "t_statistic": best["t_statistic"],
+            "clears_cost": False,
+            "evidence_quality": evidence,
+        }
+
+    significant = bool(evidence.get("selection_adjusted_signal"))
     clears_cost = best["excess_edge_bps"] > cost_bps
+    net_evidence = best.get("net_evidence_quality")
+    net_robust = (
+        bool(net_evidence.get("selection_adjusted_signal"))
+        if net_evidence is not None
+        else clears_cost
+    )
 
     if not significant:
         verdict = "no_signal"
@@ -232,6 +283,13 @@ def summarize_edge(measurement: dict[str, Any], *, cost_bps: float) -> dict[str,
             f"Real but uneconomic: {best['excess_edge_bps']:.2f}bps excess at t={best['t_statistic']:.2f} "
             f"against a {cost_bps:.2f}bps round trip. Widen the stop or lengthen the hold before running "
             "a campaign; the signal is not the problem."
+        )
+    elif not net_robust:
+        verdict = "signal_not_robust_after_costs"
+        detail = (
+            f"Gross timing clears the point cost estimate, but net session evidence does not "
+            f"retain selection-adjusted confidence after a {cost_bps:.2f}bps round trip. "
+            "Do not simulate or promote it."
         )
     else:
         verdict = "predictive"
@@ -249,6 +307,11 @@ def summarize_edge(measurement: dict[str, Any], *, cost_bps: float) -> dict[str,
         "hit_rate": best["hit_rate"],
         "clears_cost": clears_cost,
         "statistically_significant": significant,
+        "selection_adjusted": True,
+        "quality_gates": quality_gates,
+        "evidence_quality": evidence,
+        "net_evidence_quality": net_evidence,
+        "net_selection_adjusted_signal": net_robust,
         "cost_bps": cost_bps,
         "edge_to_cost_ratio": (
             round(best["excess_edge_bps"] / cost_bps, 4) if cost_bps > 0 else None
@@ -272,7 +335,9 @@ def family_signal_diagnostics(
     dataset_cache: dict[Any, Any] | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
     minimum_timestamp_exclusive: Any | None = None,
+    minimum_session_date_exclusive: date | None = None,
     cost_bps_override: float | None = None,
+    effective_trials_override: int | None = None,
 ) -> dict[str, Any]:
     """Measure one family's signal across symbols, pooling its firings.
 
@@ -304,6 +369,12 @@ def family_signal_diagnostics(
         raise ValueError(f"family {architecture!r} generated no candidates")
 
     cache: dict[Any, Any] = {} if dataset_cache is None else dataset_cache
+    effective_trials = max(
+        1,
+        int(effective_trials_override)
+        if effective_trials_override is not None
+        else len(candidates) * max(1, len(horizons)),
+    )
     cost_bps = (
         float(cost_bps_override)
         if cost_bps_override is not None
@@ -336,7 +407,18 @@ def family_signal_diagnostics(
                 completed_work_units += 1
                 continue
             rows = dataset["rows"]
-            if minimum_timestamp_exclusive is not None:
+            if minimum_session_date_exclusive is not None:
+                context_bars = max(
+                    WARMUP_BARS,
+                    int(candidate.parameters.get("recent_candle_window_bars") or 0),
+                    max(horizons, default=1) + 1,
+                )
+                rows = rows_with_session_context(
+                    rows,
+                    session_date_exclusive=minimum_session_date_exclusive,
+                    context_bars=context_bars,
+                )
+            elif minimum_timestamp_exclusive is not None:
                 context_bars = max(
                     WARMUP_BARS,
                     int(candidate.parameters.get("recent_candle_window_bars") or 0),
@@ -364,6 +446,8 @@ def family_signal_diagnostics(
                 horizons=horizons,
                 recent_window_bars=int(strategy.parameters.get("recent_candle_window_bars") or 0),
                 signal_start_timestamp=minimum_timestamp_exclusive,
+                signal_start_session_date=minimum_session_date_exclusive,
+                effective_trials=effective_trials,
             )
             per_symbol.append(
                 {
@@ -378,11 +462,17 @@ def family_signal_diagnostics(
                     "decide": strategy.decide,
                     "params": strategy.parameters,
                     "signal_start_timestamp": minimum_timestamp_exclusive,
+                    "signal_start_session_date": minimum_session_date_exclusive,
                 }
             )
             completed_work_units += 1
 
-        pooled = _pool_measurements(pooled_rows, horizons=horizons)
+        pooled = _pool_measurements(
+            pooled_rows,
+            horizons=horizons,
+            effective_trials=effective_trials,
+            cost_bps=cost_bps,
+        )
         variants.append(
             {
                 "candidate_id": candidate.candidate_id,
@@ -422,6 +512,8 @@ def family_signal_diagnostics(
         "diagnostics_version": SIGNAL_DIAGNOSTICS_VERSION,
         "round_trip_cost_bps": cost_bps,
         "minimum_timestamp_exclusive": minimum_timestamp_exclusive,
+        "minimum_session_date_exclusive": minimum_session_date_exclusive,
+        "effective_trials": effective_trials,
         "is_cross_sectional": is_cross_sectional_candidate({"parameters": {"strategy_architecture": architecture}}),
         "variants_measured": len(variants),
         "best_variant": best,
@@ -449,6 +541,7 @@ def persist_signal_diagnostics(conn: psycopg.Connection, report: dict[str, Any])
     blocking every UI read of stored verdicts."""
     from app.services.research_architecture import jsonable
 
+    _persist_signal_trial_rows(conn, report)
     summary = report["summary"]
     best = report.get("best_variant") or {}
     measurement = best.get("measurement") or {}
@@ -495,6 +588,80 @@ def persist_signal_diagnostics(conn: psycopg.Connection, report: dict[str, Any])
         ),
     ).fetchone()
     return dict(row)
+
+
+def _persist_signal_trial_rows(conn: psycopg.Connection, report: dict[str, Any]) -> None:
+    """Append every variant/horizon tried before updating the latest read model."""
+    from hashlib import sha256
+
+    from app.services.research_architecture import jsonable
+
+    phase = (
+        "confirmation"
+        if report.get("minimum_session_date_exclusive") is not None
+        or report.get("minimum_timestamp_exclusive") is not None
+        else "discovery"
+    )
+    split_policy = {
+        "minimum_session_date_exclusive": report.get("minimum_session_date_exclusive"),
+        "minimum_timestamp_exclusive": report.get("minimum_timestamp_exclusive"),
+        "session_safe": report.get("minimum_session_date_exclusive") is not None,
+    }
+    for variant in report.get("variants") or []:
+        measurement = variant.get("measurement") or {}
+        for horizon in measurement.get("by_horizon") or []:
+            fingerprint_payload = "|".join(
+                [
+                    SIGNAL_DIAGNOSTICS_VERSION,
+                    str(report["architecture"]),
+                    str(report["timeframe"]),
+                    str(report["dataset_id"]),
+                    str(variant.get("candidate_id")),
+                    str(horizon.get("horizon_bars")),
+                    repr(sorted((variant.get("parameters") or {}).items())),
+                ]
+            )
+            conn.execute(
+                """
+                INSERT INTO intraday_research_trials(
+                    trial_fingerprint, trial_type, phase, architecture,
+                    family_name, candidate_id, timeframe, dataset_id,
+                    horizon_bars, effective_trials, parameters, symbols,
+                    split_policy, cost_model, outcome, calculation_version
+                )
+                VALUES (%s, 'signal', %s, %s, %s, %s, %s, %s, %s, %s,
+                        %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    sha256(fingerprint_payload.encode()).hexdigest(),
+                    phase,
+                    report["architecture"],
+                    report.get("family_name"),
+                    variant.get("candidate_id"),
+                    report["timeframe"],
+                    report["dataset_id"],
+                    horizon.get("horizon_bars"),
+                    int(report.get("effective_trials") or 1),
+                    Jsonb(jsonable(variant.get("parameters") or {})),
+                    Jsonb(list(report.get("symbols") or [])),
+                    Jsonb(jsonable(split_policy)),
+                    Jsonb(
+                        {
+                            "round_trip_cost_bps": report.get("round_trip_cost_bps"),
+                            "basis": report.get("cost_model") or "configured_round_trip",
+                        }
+                    ),
+                    Jsonb(
+                        jsonable(
+                            {
+                                "variant_summary": variant.get("summary") or {},
+                                "horizon": horizon,
+                            }
+                        )
+                    ),
+                    SIGNAL_DIAGNOSTICS_VERSION,
+                ),
+            )
 
 
 def _rows_with_forward_context(
@@ -601,6 +768,10 @@ def run_signal_diagnostics(
         ]
     measurable_families = [family for family in families if timeframe in family["supported_timeframes"]]
     total_families = len(measurable_families)
+    planned_effective_trials = max(
+        1,
+        total_families * max(1, max_variants) * len(DEFAULT_HORIZONS),
+    )
     completed_families = 0
     if progress_callback:
         progress_callback({"total": total_families, "completed": 0, "current": None})
@@ -630,6 +801,7 @@ def run_signal_diagnostics(
                 max_variants=max_variants,
                 dataset_cache=dataset_cache,
                 progress_callback=work_progress_callback,
+                effective_trials_override=planned_effective_trials,
             )
         except Exception as error:  # noqa: BLE001 - one broken family must not sink the sweep
             reports.append(
@@ -689,6 +861,7 @@ def run_signal_diagnostics(
         "predictive_families": predictive,
         "signal_below_cost_families": below_cost,
         "round_trip_cost_bps": round_trip_cost_bps(),
+        "effective_trials": planned_effective_trials,
         "recommendation": _sweep_recommendation(predictive, below_cost, len(reports)),
         "families": [
             {key: value for key, value in report.items() if key != "variants"} for report in reports
@@ -986,7 +1159,11 @@ def _load_dataset_cached(
 
 
 def _pool_measurements(
-    datasets: list[dict[str, Any]], *, horizons: Sequence[int]
+    datasets: list[dict[str, Any]],
+    *,
+    horizons: Sequence[int],
+    effective_trials: int = 1,
+    cost_bps: float | None = None,
 ) -> dict[str, Any]:
     """Re-measure across every symbol's bars as one sample.
 
@@ -996,7 +1173,7 @@ def _pool_measurements(
     """
     from app.services.strategy import reset_strategy_state
 
-    all_excess: dict[int, list[float]] = {horizon: [] for horizon in horizons}
+    all_excess: dict[int, list[dict[str, Any]]] = {horizon: [] for horizon in horizons}
     all_raw: dict[int, list[float]] = {horizon: [] for horizon in horizons}
     drift: dict[int, list[float]] = {horizon: [] for horizon in horizons}
     total_signals = 0
@@ -1009,6 +1186,7 @@ def _pool_measurements(
         decide = entry["decide"]
         params = entry["params"]
         signal_start_timestamp = entry.get("signal_start_timestamp")
+        signal_start_session_date = entry.get("signal_start_session_date")
         reset_strategy_state(decide)
         candle_rows = [row["candle"] for row in rows]
         recent_window = int(params.get("recent_candle_window_bars") or 0)
@@ -1022,6 +1200,11 @@ def _pool_measurements(
             if (
                 signal_start_timestamp is not None
                 and row["candle"]["timestamp"] <= signal_start_timestamp
+            ):
+                continue
+            if (
+                signal_start_session_date is not None
+                and exchange_session_date(row) <= signal_start_session_date
             ):
                 continue
             eligible_bars += 1
@@ -1045,6 +1228,10 @@ def _pool_measurements(
                     signal_start_timestamp is None
                     or rows[index]["candle"]["timestamp"] > signal_start_timestamp
                 )
+                and (
+                    signal_start_session_date is None
+                    or exchange_session_date(rows[index]) > signal_start_session_date
+                )
             ]
             if not measurable:
                 continue
@@ -1053,17 +1240,43 @@ def _pool_measurements(
             for index, direction in signals:
                 if forward[index] is None:
                     continue
-                all_excess[horizon].append(direction * (forward[index] - unconditional))
+                all_excess[horizon].append(
+                    {
+                        "value": direction * (forward[index] - unconditional),
+                        "session_date": exchange_session_date(rows[index]),
+                        "timestamp": rows[index]["candle"]["timestamp"],
+                        "symbol": rows[index]["candle"].get("symbol"),
+                    }
+                )
                 all_raw[horizon].append(direction * forward[index])
 
     by_horizon: list[dict[str, Any]] = []
     for horizon in horizons:
-        excess = all_excess[horizon]
-        if not excess:
+        outcomes = all_excess[horizon]
+        if not outcomes:
             continue
+        excess = [float(row["value"]) for row in outcomes]
         mean_excess = fmean(excess)
-        deviation = pstdev(excess) if len(excess) > 1 else 0.0
-        t_statistic = mean_excess / (deviation / sqrt(len(excess))) if deviation > 0 else None
+        evidence = clustered_outcome_statistics(
+            outcomes,
+            effective_trials=effective_trials,
+            require_symbol_diversification=len(datasets) > 1,
+        )
+        net_evidence = (
+            clustered_outcome_statistics(
+                [
+                    {
+                        **row,
+                        "value": float(row["value"]) - float(cost_bps) / 10_000,
+                    }
+                    for row in outcomes
+                ],
+                effective_trials=effective_trials,
+                require_symbol_diversification=len(datasets) > 1,
+            )
+            if cost_bps is not None
+            else None
+        )
         by_horizon.append(
             {
                 "horizon_bars": horizon,
@@ -1071,8 +1284,10 @@ def _pool_measurements(
                 "raw_edge_bps": round(fmean(all_raw[horizon]) * 10_000, 4),
                 "unconditional_drift_bps": round(fmean(drift[horizon]) * 10_000, 4) if drift[horizon] else 0.0,
                 "excess_edge_bps": round(mean_excess * 10_000, 4),
-                "t_statistic": round(t_statistic, 4) if t_statistic is not None else None,
+                "t_statistic": evidence["day_clustered_t_statistic"],
                 "hit_rate": round(sum(1 for value in excess if value > 0) / len(excess), 4),
+                "evidence_quality": evidence,
+                "net_evidence_quality": net_evidence,
             }
         )
 

@@ -13,24 +13,34 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import sha256
 from json import dumps
-from math import erfc, sqrt
-from statistics import fmean, pstdev
+from statistics import fmean
 from typing import Any, Callable, Sequence
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from app.services.labs.intraday.cross_sectional_portfolio import spearman
+from app.services.labs.intraday.dataset_snapshot import load_snapshot_intraday_features
 from app.services.research_architecture import load_snapshot_candles
+from app.services.intraday_research_integrity import (
+    clustered_outcome_statistics,
+    cost_model_readiness,
+    dataset_research_readiness,
+    estimated_round_trip_cost_bps,
+    exchange_session_date,
+)
 
-FACTOR_DIAGNOSTICS_VERSION = "intraday_factor_diagnostics_v1"
+FACTOR_DIAGNOSTICS_VERSION = "intraday_factor_diagnostics_v2"
 DEFAULT_FACTOR_KEYS = (
     "first_to_last_half_hour_market_momentum",
+    "overnight_gap_acceptance_absorption",
     "cross_sectional_same_slot_continuation",
+    "vwap_execution_pressure",
     "liquidity_shock_reversal",
+    "auction_imbalance_pressure",
 )
 MINIMUM_OBSERVATIONS = 50
-MINIMUM_VALIDATION_T = 2.0
+MINIMUM_VALIDATION_T = 3.0
 
 
 @dataclass(frozen=True)
@@ -42,6 +52,7 @@ class FactorSpec:
     builder: Callable[..., list[dict[str, Any]]]
     references: tuple[str, ...]
     requires_quotes: bool = False
+    requires_auction_data: bool = False
 
     def frozen(self) -> dict[str, Any]:
         return {
@@ -50,6 +61,7 @@ class FactorSpec:
             "hypothesis": self.hypothesis,
             "supported_timeframes": list(self.supported_timeframes),
             "requires_quotes": self.requires_quotes,
+            "requires_auction_data": self.requires_auction_data,
             "references": list(self.references),
         }
 
@@ -58,7 +70,7 @@ def _session_date(row: dict[str, Any]) -> date:
     value = row.get("session_date")
     if isinstance(value, date):
         return value
-    return row["timestamp"].date()
+    return exchange_session_date(row)
 
 
 def first_to_last_half_hour_observations(
@@ -148,6 +160,131 @@ def cross_sectional_same_slot_observations(
     ]
 
 
+def overnight_gap_acceptance_absorption_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    **_: Any,
+) -> list[dict[str, Any]]:
+    """Opening participation distinguishes accepted gaps from absorbed gaps."""
+    if timeframe not in {"15m", "30m"}:
+        return []
+    decision_index = 3 if timeframe == "15m" else 1
+    output: list[dict[str, Any]] = []
+    for symbol, rows in candles_by_symbol.items():
+        sessions: dict[date, list[dict[str, Any]]] = defaultdict(list)
+        for row in sorted(rows, key=lambda item: item["timestamp"]):
+            sessions[_session_date(row)].append(row)
+        previous_close: float | None = None
+        for session_date in sorted(sessions):
+            session = sorted(sessions[session_date], key=lambda item: item["timestamp"])
+            if previous_close and previous_close > 0 and len(session) > decision_index + 1:
+                session_open = float(session[0]["open"])
+                decision = session[decision_index]
+                decision_close = float(decision["close"])
+                gap = (session_open - previous_close) / previous_close
+                relative_volume = decision.get("session_relative_volume")
+                if (
+                    abs(gap) >= 0.003
+                    and relative_volume is not None
+                    and float(relative_volume) >= 1.5
+                    and session_open > 0
+                ):
+                    gap_fill = (
+                        (session_open - decision_close) / (session_open - previous_close)
+                        if session_open != previous_close
+                        else 0.0
+                    )
+                    next_bar = session[decision_index + 1]
+                    next_open = float(next_bar["open"])
+                    next_return = (
+                        (float(next_bar["close"]) - next_open) / next_open
+                        if next_open > 0
+                        else None
+                    )
+                    if next_return is not None and gap_fill <= 0.25:
+                        output.append(
+                            {
+                                "factor_key": "overnight_gap_acceptance_absorption",
+                                "symbol": symbol,
+                                "session_date": session_date,
+                                "timestamp": decision["timestamp"],
+                                "score": gap,
+                                "target_return": next_return,
+                                "flow_state": "acceptance",
+                            }
+                        )
+                    elif next_return is not None and gap_fill >= 0.50:
+                        output.append(
+                            {
+                                "factor_key": "overnight_gap_acceptance_absorption",
+                                "symbol": symbol,
+                                "session_date": session_date,
+                                "timestamp": decision["timestamp"],
+                                "score": -gap,
+                                "target_return": next_return,
+                                "flow_state": "absorption",
+                            }
+                        )
+            if session:
+                previous_close = float(session[-1]["close"])
+    return output
+
+
+def vwap_execution_pressure_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    **_: Any,
+) -> list[dict[str, Any]]:
+    """Abnormal participation away from VWAP predicts one-bar continuation."""
+    if timeframe not in {"15m", "30m"}:
+        return []
+    output: list[dict[str, Any]] = []
+    for symbol, rows in candles_by_symbol.items():
+        ordered = sorted(rows, key=lambda item: item["timestamp"])
+        for current, following in zip(ordered, ordered[1:]):
+            if _session_date(current) != _session_date(following):
+                continue
+            vwap = current.get("session_vwap")
+            relative_volume = current.get("session_relative_volume")
+            if vwap is None or relative_volume is None or float(vwap) <= 0:
+                continue
+            close = float(current["close"])
+            displacement = (close - float(vwap)) / float(vwap)
+            if abs(displacement) < 0.001 or float(relative_volume) < 1.5:
+                continue
+            next_open = float(following["open"])
+            if next_open <= 0:
+                continue
+            output.append(
+                {
+                    "factor_key": "vwap_execution_pressure",
+                    "symbol": symbol,
+                    "session_date": _session_date(current),
+                    "timestamp": current["timestamp"],
+                    "score": displacement * float(relative_volume),
+                    "target_return": (float(following["close"]) - next_open) / next_open,
+                }
+            )
+    return output
+
+
+def auction_imbalance_pressure_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    auction_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    **_: Any,
+) -> list[dict[str, Any]]:
+    """Auction alpha requires event-time prices; candles are never substituted."""
+    # The eventual target must be midpoint-at-message to auction execution,
+    # which cannot be reconstructed from a 15m/30m OHLC bar.  Persisted
+    # imbalance events are therefore a readiness input, not permission to
+    # manufacture a target from candles.
+    return []
+
+
 def liquidity_shock_reversal_observations(
     candles_by_symbol: dict[str, list[dict[str, Any]]],
     *,
@@ -226,6 +363,17 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         builder=first_to_last_half_hour_observations,
         references=("https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2440866",),
     ),
+    "overnight_gap_acceptance_absorption": FactorSpec(
+        key="overnight_gap_acceptance_absorption",
+        title="Overnight Gap Acceptance / Absorption",
+        hypothesis=(
+            "Urgent overnight repricing continues when elevated opening participation "
+            "accepts the gap and reverses when that flow is absorbed."
+        ),
+        supported_timeframes=("15m", "30m"),
+        builder=overnight_gap_acceptance_absorption_observations,
+        references=(),
+    ),
     "cross_sectional_same_slot_continuation": FactorSpec(
         key="cross_sectional_same_slot_continuation",
         title="Cross-Sectional Same-Slot Continuation",
@@ -236,6 +384,17 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         supported_timeframes=("15m", "30m"),
         builder=cross_sectional_same_slot_observations,
         references=("https://arxiv.org/abs/1005.3535",),
+    ),
+    "vwap_execution_pressure": FactorSpec(
+        key="vwap_execution_pressure",
+        title="VWAP Execution Pressure",
+        hypothesis=(
+            "Abnormal scheduled participation that moves price away from session VWAP "
+            "persists over the next execution interval."
+        ),
+        supported_timeframes=("15m", "30m"),
+        builder=vwap_execution_pressure_observations,
+        references=(),
     ),
     "liquidity_shock_reversal": FactorSpec(
         key="liquidity_shock_reversal",
@@ -248,6 +407,19 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         builder=liquidity_shock_reversal_observations,
         references=("https://arxiv.org/abs/1011.6402",),
         requires_quotes=True,
+    ),
+    "auction_imbalance_pressure": FactorSpec(
+        key="auction_imbalance_pressure",
+        title="Opening / Closing Auction Imbalance Pressure",
+        hypothesis=(
+            "Published auction imbalance pressure moves the executable midpoint toward "
+            "the auction clearing price when contra liquidity cannot absorb forced flow."
+        ),
+        supported_timeframes=("15m", "30m"),
+        builder=auction_imbalance_pressure_observations,
+        references=("https://nasdaqtrader.com/Trader.aspx?id=OpenClose",),
+        requires_quotes=True,
+        requires_auction_data=True,
     ),
 }
 
@@ -270,7 +442,12 @@ def chronological_boundaries(session_dates: Sequence[date]) -> dict[str, Any]:
     }
 
 
-def factor_metrics(observations: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def factor_metrics(
+    observations: Sequence[dict[str, Any]],
+    *,
+    effective_trials: int = 1,
+    cost_model: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     usable = [
         row for row in observations
         if row.get("score") is not None and row.get("target_return") is not None
@@ -281,18 +458,53 @@ def factor_metrics(observations: Sequence[dict[str, Any]]) -> dict[str, Any]:
         (1.0 if score > 0 else -1.0 if score < 0 else 0.0) * target
         for score, target in zip(scores, targets)
     ]
-    by_day: dict[date, list[float]] = defaultdict(list)
-    for row, value in zip(usable, directional):
-        by_day[row["session_date"]].append(value)
-    daily = [fmean(values) for _, values in sorted(by_day.items()) if values]
-    daily_mean = fmean(daily) if daily else None
-    daily_deviation = pstdev(daily) if len(daily) > 1 else 0.0
-    t_stat = (
-        daily_mean / (daily_deviation / sqrt(len(daily)))
-        if daily_mean is not None and daily_deviation > 0
-        else (999.0 if daily_mean is not None and daily_mean > 0 and len(daily) > 1 else None)
+    evidence = clustered_outcome_statistics(
+        [
+            {
+                "value": value,
+                "session_date": row["session_date"],
+                "timestamp": row["timestamp"],
+                "symbol": row["symbol"],
+            }
+            for row, value in zip(usable, directional)
+        ],
+        effective_trials=effective_trials,
+        require_symbol_diversification=len({str(row["symbol"]) for row in usable}) > 1,
     )
-    p_value = erfc(abs(t_stat) / sqrt(2)) if t_stat is not None else None
+    stressed_costs = (
+        [
+            estimated_round_trip_cost_bps(
+                cost_model,
+                symbol=str(row["symbol"]),
+                timestamp=row["timestamp"],
+                stressed=True,
+            )
+            for row in usable
+        ]
+        if cost_model is not None
+        else []
+    )
+    net_directional = [
+        value - cost / 10_000
+        for value, cost in zip(directional, stressed_costs)
+    ]
+    net_evidence = (
+        clustered_outcome_statistics(
+            [
+                {
+                    "value": value,
+                    "session_date": row["session_date"],
+                    "timestamp": row["timestamp"],
+                    "symbol": row["symbol"],
+                }
+                for row, value in zip(usable, net_directional)
+            ],
+            effective_trials=effective_trials,
+            require_symbol_diversification=len({str(row["symbol"]) for row in usable}) > 1,
+        )
+        if net_directional
+        else None
+    )
 
     grouped: dict[datetime, list[dict[str, Any]]] = defaultdict(list)
     for row in usable:
@@ -317,16 +529,30 @@ def factor_metrics(observations: Sequence[dict[str, Any]]) -> dict[str, Any]:
 
     return {
         "observations": len(usable),
-        "distinct_sessions": len(by_day),
+        "distinct_sessions": evidence["distinct_sessions"],
+        "distinct_symbols": evidence["distinct_symbols"],
         "rank_ic": _round(spearman(scores, targets)),
         "mean_cross_sectional_rank_ic": _round(fmean(group_ics)) if group_ics else None,
         "rank_ic_periods": len(group_ics),
         "top_minus_bottom_spread_bps": _round(fmean(spreads) * 10_000) if spreads else None,
         "gross_directional_edge_bps": _round(fmean(directional) * 10_000) if directional else None,
-        "day_clustered_t_statistic": _round(t_stat),
-        "two_sided_normal_p_value": _round(p_value),
+        "net_stressed_edge_bps": (
+            _round(fmean(net_directional) * 10_000) if net_directional else None
+        ),
+        "median_stressed_cost_bps": (
+            _round(sorted(stressed_costs)[len(stressed_costs) // 2])
+            if stressed_costs
+            else None
+        ),
+        "day_clustered_t_statistic": evidence["day_clustered_t_statistic"],
+        "two_sided_normal_p_value": evidence["block_bootstrap"]["two_sided_p_value"],
         "hit_rate": _round(sum(value > 0 for value in directional) / len(directional)) if directional else None,
-        "measurable": len(usable) >= MINIMUM_OBSERVATIONS,
+        "measurable": (
+            len(usable) >= MINIMUM_OBSERVATIONS
+            and evidence["independent_evidence_ready"]
+        ),
+        "evidence_quality": evidence,
+        "net_evidence_quality": net_evidence,
     }
 
 
@@ -353,6 +579,8 @@ def evaluate_factor_discovery(
     factor_keys: Sequence[str],
     cost_model: dict[str, Any],
     microstructure_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
+    auction_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    institutional_data_readiness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     all_dates = [
         _session_date(row)
@@ -360,6 +588,17 @@ def evaluate_factor_discovery(
         for row in rows
     ]
     boundaries = chronological_boundaries(all_dates)
+    data_readiness = dataset_research_readiness(
+        candles_by_symbol,
+        microstructure_by_symbol=microstructure_by_symbol,
+    )
+    cost_readiness = cost_model_readiness(cost_model, symbols=list(candles_by_symbol))
+    institutional_readiness = institutional_data_readiness or {
+        "institutional_candle_ready": False,
+        "institutional_execution_ready": False,
+        "limitations": ["backend_research_data_readiness_not_supplied"],
+    }
+    effective_trials = max(1, len(factor_keys))
     factor_results: dict[str, Any] = {}
     validation_p: dict[str, float | None] = {}
     for key in factor_keys:
@@ -367,11 +606,6 @@ def evaluate_factor_discovery(
         if timeframe not in spec.supported_timeframes:
             factor_results[key] = {"status": "unsupported_timeframe"}
             continue
-        observations = spec.builder(
-            candles_by_symbol,
-            timeframe=timeframe,
-            microstructure_by_symbol=microstructure_by_symbol,
-        )
         if spec.requires_quotes and not microstructure_by_symbol:
             factor_results[key] = {
                 "status": "blocked_missing_quote_data",
@@ -382,6 +616,23 @@ def evaluate_factor_discovery(
                 ],
             }
             continue
+        if spec.requires_auction_data and not auction_by_symbol:
+            factor_results[key] = {
+                "status": "blocked_missing_auction_data",
+                "required_data": [
+                    "event-time opening/closing imbalance messages",
+                    "reference and clearing prices",
+                    "paired and imbalance quantities",
+                    "midpoint at message time",
+                ],
+            }
+            continue
+        observations = spec.builder(
+            candles_by_symbol,
+            timeframe=timeframe,
+            microstructure_by_symbol=microstructure_by_symbol,
+            auction_by_symbol=auction_by_symbol,
+        )
         discovery = [
             row for row in observations
             if boundaries["discovery_start"] <= row["session_date"] <= boundaries["discovery_end"]
@@ -390,8 +641,16 @@ def evaluate_factor_discovery(
             row for row in observations
             if boundaries["validation_start"] <= row["session_date"] <= boundaries["validation_end"]
         ]
-        discovery_metrics = factor_metrics(discovery)
-        validation_metrics = factor_metrics(validation)
+        discovery_metrics = factor_metrics(
+            discovery,
+            effective_trials=effective_trials,
+            cost_model=cost_model,
+        )
+        validation_metrics = factor_metrics(
+            validation,
+            effective_trials=effective_trials,
+            cost_model=cost_model,
+        )
         validation_p[key] = validation_metrics["two_sided_normal_p_value"]
         cost_clearance = _cost_clearance(validation_metrics, cost_model)
         factor_results[key] = {
@@ -426,6 +685,11 @@ def evaluate_factor_discovery(
             and result["cost_clearance"]["clears_stressed"]
             and q_values.get(key) is not None
             and float(q_values[key]) <= 0.1
+            and validation["evidence_quality"]["selection_adjusted_signal"]
+            and validation["net_evidence_quality"]["selection_adjusted_signal"]
+            and data_readiness["candle_research_ready"]
+            and cost_readiness["research_cost_available"]
+            and institutional_readiness["institutional_candle_ready"]
         ):
             selected.append(key)
     return {
@@ -434,6 +698,10 @@ def evaluate_factor_discovery(
         "timeframe": timeframe,
         "split_boundaries": {key: str(value) for key, value in boundaries.items()},
         "cost_model": cost_model,
+        "data_readiness": data_readiness,
+        "institutional_data_readiness": institutional_readiness,
+        "cost_readiness": cost_readiness,
+        "effective_trials": effective_trials,
         "factors": factor_results,
         "selected_for_forward_confirmation": selected,
         "confirmation_data_accessed": False,
@@ -447,7 +715,20 @@ def evaluate_forward_confirmation(
     factor_keys: Sequence[str],
     cost_model: dict[str, Any],
     microstructure_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
+    auction_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    institutional_data_readiness: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    data_readiness = dataset_research_readiness(
+        candles_by_symbol,
+        microstructure_by_symbol=microstructure_by_symbol,
+    )
+    cost_readiness = cost_model_readiness(cost_model, symbols=list(candles_by_symbol))
+    institutional_readiness = institutional_data_readiness or {
+        "institutional_candle_ready": False,
+        "institutional_execution_ready": False,
+        "limitations": ["backend_research_data_readiness_not_supplied"],
+    }
+    effective_trials = max(1, len(factor_keys))
     factors: dict[str, Any] = {}
     p_values: dict[str, float | None] = {}
     for key in factor_keys:
@@ -455,12 +736,20 @@ def evaluate_forward_confirmation(
         if spec.requires_quotes and not microstructure_by_symbol:
             factors[key] = {"status": "blocked_missing_quote_data"}
             continue
+        if spec.requires_auction_data and not auction_by_symbol:
+            factors[key] = {"status": "blocked_missing_auction_data"}
+            continue
         observations = spec.builder(
             candles_by_symbol,
             timeframe=timeframe,
             microstructure_by_symbol=microstructure_by_symbol,
+            auction_by_symbol=auction_by_symbol,
         )
-        metrics = factor_metrics(observations)
+        metrics = factor_metrics(
+            observations,
+            effective_trials=effective_trials,
+            cost_model=cost_model,
+        )
         p_values[key] = metrics["two_sided_normal_p_value"]
         factors[key] = {
             "status": "measured" if metrics["measurable"] else "insufficient_evidence",
@@ -484,6 +773,12 @@ def evaluate_forward_confirmation(
             and result["cost_clearance"]["clears_stressed"]
             and q_values.get(key) is not None
             and float(q_values[key]) <= 0.1
+            and metrics["evidence_quality"]["selection_adjusted_signal"]
+            and metrics["net_evidence_quality"]["selection_adjusted_signal"]
+            and data_readiness["candle_research_ready"]
+            and data_readiness["execution_research_ready"]
+            and cost_readiness["production_cost_ready"]
+            and institutional_readiness["institutional_execution_ready"]
         ):
             passed.append(key)
     return {
@@ -491,6 +786,10 @@ def evaluate_forward_confirmation(
         "mode": "confirmation",
         "timeframe": timeframe,
         "cost_model": cost_model,
+        "data_readiness": data_readiness,
+        "institutional_data_readiness": institutional_readiness,
+        "cost_readiness": cost_readiness,
+        "effective_trials": effective_trials,
         "factors": factors,
         "passed_locked_confirmation": passed,
     }
@@ -514,10 +813,24 @@ def load_dataset_candles(
     selected = [item.upper() for item in symbols] if symbols else available[:max_symbols]
     # Keep benchmark ETFs even when they fall after the ordinary symbol cap.
     selected = list(dict.fromkeys([*selected, *[item for item in ("SPY", "QQQ") if item in available]]))
-    candles = {
-        symbol: load_snapshot_candles(conn, dataset_id, symbol, timeframe)
-        for symbol in selected
-    }
+    candles: dict[str, list[dict[str, Any]]] = {}
+    for symbol in selected:
+        rows = load_snapshot_candles(conn, dataset_id, symbol, timeframe)
+        features = {
+            row["timestamp"]: row
+            for row in load_snapshot_intraday_features(conn, dataset_id, symbol, timeframe)
+        }
+        candles[symbol] = [
+            {
+                **row,
+                **{
+                    key: value
+                    for key, value in (features.get(row["timestamp"]) or {}).items()
+                    if key not in {"symbol", "timeframe", "timestamp"}
+                },
+            }
+            for row in rows
+        ]
     return {symbol: rows for symbol, rows in candles.items() if rows}, dict(manifest)
 
 
@@ -547,6 +860,31 @@ def load_microstructure(
     return dict(output)
 
 
+def load_auction_imbalances(
+    conn: psycopg.Connection,
+    *,
+    symbols: Sequence[str],
+    start: datetime | None,
+    end: datetime | None,
+) -> dict[str, list[dict[str, Any]]]:
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM intraday_auction_imbalances
+        WHERE symbol = ANY(%s)
+          AND (%s IS NULL OR timestamp >= %s)
+          AND (%s IS NULL OR timestamp <= %s)
+        ORDER BY symbol, timestamp
+        """,
+        (list(symbols), start, start, end, end),
+    ).fetchall()
+    output: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        item = dict(row)
+        output[str(item["symbol"]).upper()].append(item)
+    return dict(output)
+
+
 def load_cost_model(conn: psycopg.Connection, calibration_id: int | None) -> dict[str, Any]:
     if calibration_id is None:
         return {
@@ -569,6 +907,12 @@ def load_cost_model(conn: psycopg.Connection, calibration_id: int | None) -> dic
         "conservative_round_trip_bps": float(row["conservative_round_trip_bps"]),
         "quote_observations": int(row["quote_observations"]),
         "matched_fill_observations": int(row["matched_fill_observations"]),
+        "provider": row["provider"],
+        "feed": row["feed"],
+        "by_symbol": dict(row["by_symbol"] or {}),
+        "by_time_slot": dict(row["by_time_slot"] or {}),
+        "window_start": row["window_start"],
+        "window_end": row["window_end"],
         "basis": row["methodology"],
     }
 
@@ -600,6 +944,36 @@ def persist_factor_run(
     result: dict[str, Any],
     spec_hash: str,
 ) -> int:
+    for key in factor_keys:
+        factor_result = (result.get("factors") or {}).get(key) or {}
+        conn.execute(
+            """
+            INSERT INTO intraday_research_trials(
+                trial_fingerprint, trial_type, phase, architecture,
+                family_name, candidate_id, timeframe, dataset_id,
+                horizon_bars, effective_trials, parameters, symbols,
+                split_policy, cost_model, outcome, calculation_version
+            )
+            VALUES (%s, 'factor', %s, %s, %s, %s, %s, %s, NULL, %s,
+                    %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                sha256(f"{spec_hash}|{key}".encode()).hexdigest(),
+                "confirmation" if mode == "confirmation" else "validation",
+                key,
+                FACTOR_SPECS[key].title,
+                key,
+                timeframe,
+                dataset_id,
+                int(result.get("effective_trials") or max(1, len(factor_keys))),
+                Jsonb(FACTOR_SPECS[key].frozen()),
+                Jsonb(list(symbols)),
+                Jsonb(result.get("split_boundaries") or {}),
+                Jsonb(result.get("cost_model") or {}),
+                Jsonb(factor_result),
+                FACTOR_DIAGNOSTICS_VERSION,
+            ),
+        )
     row = conn.execute(
         """
         INSERT INTO intraday_factor_diagnostic_runs(
@@ -630,6 +1004,7 @@ def persist_factor_run(
 
 def _cost_clearance(metrics: dict[str, Any], cost_model: dict[str, Any]) -> dict[str, Any]:
     edge = metrics.get("gross_directional_edge_bps")
+    net_stressed = metrics.get("net_stressed_edge_bps")
 
     def clears(key: str) -> bool:
         value = cost_model.get(key)
@@ -637,8 +1012,13 @@ def _cost_clearance(metrics: dict[str, Any], cost_model: dict[str, Any]) -> dict
 
     return {
         "gross_directional_edge_bps": edge,
+        "net_stressed_edge_bps": net_stressed,
         "clears_observed": clears("observed_round_trip_bps"),
-        "clears_stressed": clears("stressed_round_trip_bps"),
+        "clears_stressed": (
+            bool(net_stressed is not None and float(net_stressed) > 0)
+            if net_stressed is not None
+            else clears("stressed_round_trip_bps")
+        ),
         "clears_conservative_30bps": clears("conservative_round_trip_bps"),
     }
 

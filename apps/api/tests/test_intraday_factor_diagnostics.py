@@ -4,6 +4,8 @@ from decimal import Decimal
 from app.services.intraday_factor_diagnostics import (
     evaluate_factor_discovery,
     first_to_last_half_hour_observations,
+    overnight_gap_acceptance_absorption_observations,
+    vwap_execution_pressure_observations,
 )
 
 
@@ -72,3 +74,42 @@ def test_discovery_never_calculates_withheld_confirmation_metrics():
     assert market["validation"]["observations"] >= 50
     assert market["cost_clearance"]["clears_stressed"] is True
     assert result["factors"]["liquidity_shock_reversal"]["status"] == "blocked_missing_quote_data"
+
+
+def test_gap_acceptance_requires_elevated_opening_participation():
+    first = market_candles("AAPL", sessions=3)
+    by_session = {}
+    for row in first:
+        by_session.setdefault(row["timestamp"].date(), []).append(row)
+    sessions = [sorted(rows, key=lambda row: row["timestamp"]) for _, rows in sorted(by_session.items())]
+    for row in sessions[1]:
+        row["session_relative_volume"] = Decimal("2")
+    previous_close = float(sessions[0][-1]["close"])
+    sessions[1][0]["open"] = Decimal(str(previous_close * 1.01))
+    sessions[1][0]["close"] = sessions[1][0]["open"]
+    sessions[1][1]["open"] = sessions[1][0]["open"]
+    sessions[1][1]["close"] = Decimal(str(float(sessions[1][0]["open"]) * 1.002))
+    sessions[1][2]["open"] = sessions[1][1]["close"]
+    sessions[1][2]["close"] = Decimal(str(float(sessions[1][2]["open"]) * 1.002))
+
+    observations = overnight_gap_acceptance_absorption_observations(
+        {"AAPL": first},
+        timeframe="30m",
+    )
+
+    assert any(row["flow_state"] == "acceptance" for row in observations)
+
+
+def test_vwap_pressure_uses_volume_curve_and_same_session_next_bar():
+    rows = market_candles("AAPL", sessions=2)
+    for row in rows:
+        row["session_vwap"] = Decimal(str(float(row["close"]) * 0.995))
+        row["session_relative_volume"] = Decimal("2")
+
+    observations = vwap_execution_pressure_observations(
+        {"AAPL": rows},
+        timeframe="30m",
+    )
+
+    assert observations
+    assert all(row["score"] > 0 for row in observations)

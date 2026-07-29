@@ -6,7 +6,7 @@ coin-flip signal must not, and — the case that matters most — a signal with 
 skill on a rising market must NOT be credited for the drift it merely sat in.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 import json
 
@@ -118,6 +118,71 @@ def test_persisted_report_serializes_forward_cutoff_datetime():
     assert persisted["id"] == 9
 
 
+def test_persistence_appends_every_variant_horizon_to_the_trial_ledger():
+    class Result:
+        def __init__(self, row=None):
+            self.row = row
+
+        def fetchone(self):
+            return self.row
+
+    class Conn:
+        def __init__(self):
+            self.trials = []
+
+        def execute(self, query, params):
+            text = " ".join(str(query).split())
+            if text.startswith("INSERT INTO intraday_research_trials"):
+                self.trials.append(params)
+                return Result()
+            if text.startswith("INSERT INTO research_signal_diagnostics"):
+                return Result({"id": 10})
+            raise AssertionError(text)
+
+    conn = Conn()
+    report = {
+        "architecture": "participant_flow",
+        "family_name": "Participant Flow",
+        "timeframe": "30m",
+        "dataset_id": 76,
+        "symbols": ["SPY"],
+        "round_trip_cost_bps": 5,
+        "effective_trials": 2,
+        "summary": {
+            "verdict": "no_signal",
+            "detail": "test",
+            "best_horizon_bars": 1,
+            "excess_edge_bps": 0,
+            "t_statistic": 0,
+            "clears_cost": False,
+        },
+        "best_variant": {
+            "measurement": {
+                "signal_count": 50,
+                "by_horizon": [{"horizon_bars": 1}, {"horizon_bars": 2}],
+            }
+        },
+        "variants": [
+            {
+                "candidate_id": "candidate-1",
+                "parameters": {"direction": "long"},
+                "summary": {"verdict": "no_signal"},
+                "measurement": {
+                    "by_horizon": [
+                        {"horizon_bars": 1, "signals": 50},
+                        {"horizon_bars": 2, "signals": 50},
+                    ]
+                },
+            }
+        ],
+    }
+
+    persist_signal_diagnostics(conn, report)
+
+    assert len(conn.trials) == 2
+    assert {params[7] for params in conn.trials} == {1, 2}
+
+
 def _rows(closes, *, opens=None):
     rows = []
     for index, close in enumerate(closes):
@@ -135,7 +200,10 @@ def _rows(closes, *, opens=None):
                     "close": Decimal(str(close)),
                     "volume": Decimal("1000"),
                 },
-                "feature": {"timestamp": timestamp},
+                "feature": {
+                    "timestamp": timestamp,
+                    "session_date": date(2024, 1, 2) + timedelta(days=index // 13),
+                },
             }
         )
     return rows

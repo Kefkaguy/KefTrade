@@ -10,6 +10,7 @@ from app.services.research_splits import (
     VALIDATION_REUSE_WARNING_THRESHOLD,
     ConfirmationAlreadySpentError,
     compute_nested_splits,
+    compute_session_nested_splits,
     confirmation_status,
     filter_rows_to_phase,
     freeze_fingerprint,
@@ -43,6 +44,23 @@ def test_the_three_windows_are_contiguous_and_never_overlap():
     assert splits.validation_end < splits.confirmation_start
     assert splits.discovery_start == _timestamps()[0]
     assert splits.confirmation_end == _timestamps()[-1]
+
+
+def test_intraday_split_never_cuts_a_session_in_half():
+    observations = []
+    for session in range(10):
+        session_date = (START + timedelta(days=session)).date()
+        for bar in range(13):
+            observations.append(
+                (START + timedelta(days=session, minutes=30 * bar), session_date)
+            )
+
+    splits = compute_session_nested_splits(observations)
+
+    phases_by_session = {}
+    for timestamp, session_date in observations:
+        phases_by_session.setdefault(session_date, set()).add(splits.phase_for(timestamp))
+    assert all(len(phases) == 1 for phases in phases_by_session.values())
 
 
 def test_every_bar_belongs_to_exactly_one_phase():
@@ -470,6 +488,8 @@ def test_splits_are_fixed_when_the_dataset_is_snapshotted():
     original_execute = conn.execute
 
     def execute(query, params=None):
+        if "SELECT DISTINCT timestamp, session_date" in query:
+            return FakeResult([])
         if "SELECT DISTINCT timestamp FROM research_dataset_candles" in query:
             return FakeResult([{"timestamp": timestamp} for timestamp in timestamps])
         return original_execute(query, params)
@@ -490,6 +510,8 @@ def test_a_dataset_too_small_to_split_is_left_unsplit_rather_than_faked():
     original_execute = conn.execute
 
     def execute(query, params=None):
+        if "SELECT DISTINCT timestamp, session_date" in query:
+            return FakeResult([])
         if "SELECT DISTINCT timestamp FROM research_dataset_candles" in query:
             return FakeResult([{"timestamp": START}])
         return original_execute(query, params)
