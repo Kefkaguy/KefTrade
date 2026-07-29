@@ -11,8 +11,9 @@ from app.db import connect
 from app.providers.alpaca import fetch_stock_quotes, normalize_stock_quote
 from app.services.intraday_execution_costs import (
     aggregate_microstructure_bars,
-    calibrate_execution_costs,
+    calibrate_regular_session_bar_costs,
     load_execution_evidence,
+    load_regular_session_cost_bars,
     persist_cost_calibration,
     persist_microstructure_bars,
     persist_quote_snapshots,
@@ -35,25 +36,61 @@ def _time(value: str | None, *, fallback: datetime) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _regular_session_windows(
+    start: datetime,
+    end: datetime,
+    *,
+    timeframe: str,
+) -> list[tuple[datetime, datetime]]:
+    """Calendar-correct regular-session windows, including early closes."""
+    from app.services.labs.intraday.session import trading_schedule
+
+    minutes = int(timeframe[:-1])
+    schedule = trading_schedule(start.date(), end.date(), padding_days=0)
+    windows: list[tuple[datetime, datetime]] = []
+    for _, session in schedule.iterrows():
+        cursor = session["market_open"].to_pydatetime().astimezone(UTC)
+        close = session["market_close"].to_pydatetime().astimezone(UTC)
+        while cursor < close:
+            window_end = min(cursor + timedelta(minutes=minutes), close)
+            clipped_start = max(cursor, start)
+            clipped_end = min(window_end, end)
+            if clipped_start < clipped_end:
+                windows.append((clipped_start, clipped_end))
+            cursor = window_end
+    return windows
+
+
 async def sync_quotes(args: argparse.Namespace) -> dict:
     end = _time(args.end, fallback=datetime.now(tz=UTC))
     start = _time(args.start, fallback=end - timedelta(days=args.days))
+    windows = _regular_session_windows(start, end, timeframe=args.quote_window)
+    if not windows:
+        raise ValueError("The requested period contains no completed regular-session windows.")
+    quotes_per_window = max(1000, args.max_quotes // len(windows))
     imported = 0
     microstructure = 0
     for symbol in args.symbols:
-        print(f"quotes {symbol}: fetching {start.isoformat()} to {end.isoformat()}", flush=True)
-        _, raw, _, _ = await fetch_stock_quotes(
-            symbol,
-            start=start,
-            end=end,
-            limit=args.max_quotes,
-            feed=args.feed,
+        print(
+            f"quotes {symbol}: fetching {len(windows)} regular-session "
+            f"{args.quote_window} windows",
+            flush=True,
         )
-        normalized = [
-            quote
-            for row in raw
-            if (quote := normalize_stock_quote(symbol, row, feed=args.feed)) is not None
-        ]
+        normalized_by_timestamp = {}
+        for window_start, window_end in windows:
+            _, raw, _, _ = await fetch_stock_quotes(
+                symbol,
+                start=window_start,
+                end=window_end,
+                limit=quotes_per_window,
+                feed=args.feed,
+            )
+            for row in raw:
+                quote = normalize_stock_quote(symbol, row, feed=args.feed)
+                if quote is not None:
+                    normalized_by_timestamp[quote["timestamp"]] = quote
+        normalized = list(normalized_by_timestamp.values())
+        normalized.sort(key=lambda row: row["timestamp"])
         with connect() as conn:
             imported += persist_quote_snapshots(conn, normalized)
             for timeframe in args.timeframes:
@@ -69,6 +106,8 @@ async def sync_quotes(args: argparse.Namespace) -> dict:
         "quote_rows_stored": imported,
         "microstructure_rows_stored": microstructure,
         "feed": args.feed,
+        "regular_session_windows": len(windows),
+        "quotes_per_window_cap": quotes_per_window,
     }
 
 
@@ -82,7 +121,15 @@ def calibrate(args: argparse.Namespace) -> dict:
             start=start,
             end=end,
         )
-        result = calibrate_execution_costs(
+        bars = load_regular_session_cost_bars(
+            conn,
+            symbols=args.symbols,
+            timeframe=args.timeframe,
+            start=start,
+            end=end,
+        )
+        result = calibrate_regular_session_bar_costs(
+            bars,
             quotes,
             fills,
             regulatory_bps=args.regulatory_bps,
@@ -104,6 +151,12 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument("--days", type=int, default=5)
     sync.add_argument("--max-quotes", type=int, default=100_000)
     sync.add_argument("--feed", default="iex")
+    sync.add_argument(
+        "--quote-window",
+        choices=("15m", "30m"),
+        default="30m",
+        help="Calendar-aligned regular-session sampling window.",
+    )
     sync.add_argument("--timeframes", nargs="+", choices=("15m", "30m"), default=["15m", "30m"])
 
     cost = subparsers.add_parser("calibrate")
@@ -111,6 +164,7 @@ def parser() -> argparse.ArgumentParser:
     cost.add_argument("--start")
     cost.add_argument("--end")
     cost.add_argument("--days", type=int, default=30)
+    cost.add_argument("--timeframe", choices=("15m", "30m"), default="30m")
     cost.add_argument("--regulatory-bps", type=float, default=0.1)
     return root
 

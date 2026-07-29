@@ -183,6 +183,115 @@ def calibrate_execution_costs(
     }
 
 
+def calibrate_regular_session_bar_costs(
+    bars: Sequence[dict[str, Any]],
+    quotes: Sequence[dict[str, Any]] = (),
+    fills: Sequence[dict[str, Any]] = (),
+    *,
+    regulatory_bps: float = 0.1,
+    conservative_round_trip_bps: float = CONSERVATIVE_ROUND_TRIP_BPS,
+) -> dict[str, Any]:
+    """Calibrate costs from equally weighted regular-session bar summaries.
+
+    Raw quote-event weighting is biased toward the most active symbol and
+    minute, and extended-hours quotes are not representative of a strategy
+    that enters during the regular session. Each symbol/bar therefore
+    contributes exactly one median-spread observation. The stress scenario is
+    the 90th percentile across those bar medians, not the 90th percentile of
+    every transient quote update inside every bar.
+    """
+    valid = [
+        row
+        for row in bars
+        if int(row.get("quote_count") or 0) > 0
+        and row.get("median_spread_bps") is not None
+        and float(row["median_spread_bps"]) >= 0
+    ]
+    matched = match_fills_to_quotes(fills, quotes)
+    adverse_slippage = [max(0.0, float(row["signed_slippage_bps"])) for row in matched]
+    bar_medians = [float(row["median_spread_bps"]) for row in valid]
+    median_spread = percentile(bar_medians, 0.5)
+    p90_spread = percentile(bar_medians, 0.9)
+    median_fill = percentile(adverse_slippage, 0.5)
+    p90_fill = percentile(adverse_slippage, 0.9)
+
+    if median_fill is not None:
+        observed = 2 * median_fill + regulatory_bps
+        stressed = max(
+            2 * (p90_fill if p90_fill is not None else median_fill) + regulatory_bps,
+            (p90_spread if p90_spread is not None else 0) + regulatory_bps,
+        )
+        basis = "matched fill slippage versus preceding midpoint, regular-session bars for stress"
+    elif median_spread is not None:
+        observed = median_spread + regulatory_bps
+        stressed = (p90_spread if p90_spread is not None else median_spread * 2) + regulatory_bps
+        basis = "equally weighted regular-session symbol/bar median quoted spread"
+    else:
+        observed = None
+        stressed = None
+        basis = "unavailable; no regular-session quote bars joined to session features"
+
+    by_symbol_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_slot_rows: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in valid:
+        by_symbol_rows[str(row["symbol"]).upper()].append(row)
+        timestamp = row["timestamp"].astimezone(UTC)
+        by_slot_rows[f"{timestamp.hour:02d}:{timestamp.minute:02d}"].append(row)
+
+    def summarize(group: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        values = [float(row["median_spread_bps"]) for row in group]
+        return {
+            "regular_session_bars": len(group),
+            "quote_updates": sum(int(row.get("quote_count") or 0) for row in group),
+            "median_bar_spread_bps": _round(percentile(values, 0.5)),
+            "p90_bar_spread_bps": _round(percentile(values, 0.9)),
+        }
+
+    timestamps = [row["timestamp"] for row in valid]
+    return {
+        "calculation_version": EXECUTION_COST_VERSION,
+        "provider": str(valid[0]["provider"]) if valid else "unknown",
+        "feed": str(valid[0]["feed"]) if valid else "unknown",
+        "window_start": min(timestamps) if timestamps else None,
+        "window_end": max(timestamps) if timestamps else None,
+        "symbols": sorted(by_symbol_rows),
+        "quote_observations": sum(int(row.get("quote_count") or 0) for row in valid),
+        "matched_fill_observations": len(matched),
+        "regulatory_bps": round(float(regulatory_bps), 6),
+        "median_spread_bps": _round(median_spread),
+        "p90_spread_bps": _round(p90_spread),
+        "median_signed_fill_slippage_bps": _round(median_fill),
+        "p90_signed_fill_slippage_bps": _round(p90_fill),
+        "observed_round_trip_bps": _round(observed),
+        "stressed_round_trip_bps": _round(stressed),
+        "conservative_round_trip_bps": round(float(conservative_round_trip_bps), 6),
+        "by_symbol": {
+            key: summarize(rows) for key, rows in sorted(by_symbol_rows.items())
+        },
+        "by_time_slot": {
+            key: summarize(rows) for key, rows in sorted(by_slot_rows.items())
+        },
+        "methodology": {
+            "observed_basis": basis,
+            "regular_session_filter": (
+                "microstructure bars inner-joined to session-aware intraday_features "
+                "at the exact symbol/timeframe/timestamp"
+            ),
+            "event_weighting_guard": (
+                "one observation per symbol/bar; raw quote-update frequency cannot dominate"
+            ),
+            "stress_definition": "90th percentile across regular-session symbol/bar median spreads",
+            "bar_observations": len(valid),
+            "quote_feed_limitation": (
+                "The provider/feed label is retained. IEX observations are not treated as consolidated SIP quotes."
+            ),
+            "matched_quote_rule": "most recent quote at or before fill, maximum age five minutes",
+            "double_counting_guard": "fill midpoint slippage and quoted spread are alternative bases, never summed",
+            "cost_scenarios": ["observed", "stressed", "conservative_30bps"],
+        },
+    }
+
+
 def persist_quote_snapshots(conn: psycopg.Connection, quotes: Sequence[dict[str, Any]]) -> int:
     if not quotes:
         return 0
@@ -259,6 +368,41 @@ def load_execution_evidence(
         ).fetchall()
     ]
     return quotes, fills
+
+
+def load_regular_session_cost_bars(
+    conn: psycopg.Connection,
+    *,
+    symbols: Sequence[str],
+    timeframe: str,
+    start: datetime,
+    end: datetime,
+) -> list[dict[str, Any]]:
+    """Only quote bars that correspond to a real regular-session feature row."""
+    return [
+        dict(row)
+        for row in conn.execute(
+            """
+            SELECT micro.symbol, micro.timeframe, micro.timestamp,
+                   micro.provider, micro.feed, micro.quote_count,
+                   micro.median_spread_bps, micro.p90_spread_bps,
+                   micro.mean_depth, micro.order_flow_imbalance,
+                   micro.normalized_order_flow_imbalance
+            FROM intraday_microstructure_features micro
+            JOIN intraday_features feature
+              ON feature.symbol = micro.symbol
+             AND feature.timeframe = micro.timeframe
+             AND feature.timestamp = micro.timestamp
+            WHERE micro.symbol = ANY(%s)
+              AND micro.timeframe = %s
+              AND micro.timestamp BETWEEN %s AND %s
+              AND feature.minutes_from_open >= 0
+              AND feature.minutes_to_close >= 0
+            ORDER BY micro.symbol, micro.timestamp
+            """,
+            ([symbol.upper() for symbol in symbols], timeframe, start, end),
+        ).fetchall()
+    ]
 
 
 def persist_cost_calibration(conn: psycopg.Connection, result: dict[str, Any]) -> int:

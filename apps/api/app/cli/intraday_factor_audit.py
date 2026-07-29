@@ -53,6 +53,22 @@ def _dataset_id(conn: Any, requested: int | None) -> int:
     return int(row["id"])
 
 
+def _cost_calibration_id(conn: Any, requested: str | None) -> int | None:
+    if requested is None:
+        return None
+    if requested.lower() == "latest":
+        row = conn.execute(
+            "SELECT id FROM intraday_execution_cost_calibrations ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        if not row:
+            raise ValueError("No execution-cost calibration exists.")
+        return int(row["id"])
+    try:
+        return int(requested)
+    except ValueError as error:
+        raise ValueError("--cost-calibration-id must be an integer or 'latest'.") from error
+
+
 def discover(args: argparse.Namespace) -> dict[str, Any]:
     keys = _factor_keys(args.factors)
     with connect() as conn:
@@ -66,7 +82,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
         )
         if not candles:
             raise ValueError("The selected frozen dataset contains no candles for this request.")
-        cost_model = load_cost_model(conn, args.cost_calibration_id)
+        cost_model = load_cost_model(conn, _cost_calibration_id(conn, args.cost_calibration_id))
         microstructure = load_microstructure(
             conn,
             symbols=list(candles),
@@ -197,7 +213,10 @@ def parser() -> argparse.ArgumentParser:
     discovery.add_argument("--symbols")
     discovery.add_argument("--max-symbols", type=int, default=200)
     discovery.add_argument("--factors")
-    discovery.add_argument("--cost-calibration-id", type=int)
+    discovery.add_argument(
+        "--cost-calibration-id",
+        help="Calibration integer id, or 'latest'. Omit to retain the conservative 30bps baseline.",
+    )
 
     confirmation = commands.add_parser("confirm")
     confirmation.add_argument("--source-run-id", type=int, required=True)

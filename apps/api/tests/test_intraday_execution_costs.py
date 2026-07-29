@@ -4,6 +4,7 @@ from decimal import Decimal
 from app.services.intraday_execution_costs import (
     aggregate_microstructure_bars,
     calibrate_execution_costs,
+    calibrate_regular_session_bar_costs,
     match_fills_to_quotes,
 )
 
@@ -75,3 +76,33 @@ def test_quote_updates_aggregate_to_bar_level_ofi():
     assert bars[0]["quote_count"] == 2
     assert bars[0]["order_flow_imbalance"] > 0
     assert bars[0]["normalized_order_flow_imbalance"] is not None
+
+
+def test_regular_session_calibration_weights_each_symbol_bar_once():
+    start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
+    bars = [
+        {
+            "symbol": "SPY",
+            "provider": "alpaca",
+            "feed": "iex",
+            "timestamp": start,
+            "quote_count": 100_000,
+            "median_spread_bps": 1,
+        },
+        {
+            "symbol": "AAPL",
+            "provider": "alpaca",
+            "feed": "iex",
+            "timestamp": start,
+            "quote_count": 10,
+            "median_spread_bps": 3,
+        },
+    ]
+
+    result = calibrate_regular_session_bar_costs(bars, regulatory_bps=0)
+
+    assert result["quote_observations"] == 100_010
+    assert result["median_spread_bps"] == 2
+    assert result["observed_round_trip_bps"] == 2
+    assert result["methodology"]["bar_observations"] == 2
+    assert "one observation per symbol/bar" in result["methodology"]["event_weighting_guard"]

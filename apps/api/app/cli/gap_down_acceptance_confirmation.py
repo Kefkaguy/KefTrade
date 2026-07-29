@@ -7,6 +7,7 @@ import json
 
 from app.db import connect
 from app.services.intraday_factor_diagnostics import load_cost_model
+from app.cli.intraday_factor_audit import _cost_calibration_id
 from app.services.signal_diagnostics import (
     family_signal_diagnostics,
     persist_signal_diagnostics,
@@ -48,7 +49,7 @@ def execute(args: argparse.Namespace) -> dict:
         if manifest["window_end"] is None or manifest["window_end"] <= source["window_end"]:
             raise ValueError("The selected dataset has no sessions later than dataset 36.")
         symbols = [str(item).upper() for item in (manifest["assets"] or [])][: args.max_symbols]
-        cost_model = load_cost_model(conn, args.cost_calibration_id)
+        cost_model = load_cost_model(conn, _cost_calibration_id(conn, args.cost_calibration_id))
         stressed_cost = cost_model.get("stressed_round_trip_bps")
         if stressed_cost is None:
             stressed_cost = cost_model["conservative_round_trip_bps"]
@@ -81,7 +82,7 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--dataset-id", type=int)
     root.add_argument("--max-symbols", type=int, default=100)
-    root.add_argument("--cost-calibration-id", type=int)
+    root.add_argument("--cost-calibration-id", help="Calibration integer id, or 'latest'.")
     root.add_argument("--no-persist", action="store_true")
     return root
 
