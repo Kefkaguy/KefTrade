@@ -8,6 +8,7 @@ skill on a rising market must NOT be credited for the drift it merely sat in.
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -15,9 +16,11 @@ from app.services.signal_diagnostics import (
     MINIMUM_SIGNALS_FOR_A_VERDICT,
     MINIMUM_T_STATISTIC,
     _load_dataset_cached,
+    _rows_with_forward_context,
     claim_next_signal_diagnostics_job,
     enqueue_signal_diagnostics_job,
     measure_signal_edge,
+    persist_signal_diagnostics,
     round_trip_cost_bps,
     run_claimed_signal_diagnostics_job,
     run_one_signal_diagnostics_job,
@@ -27,6 +30,57 @@ from app.services.signal_diagnostics import (
 from app.services.strategy import StrategyDecision
 
 START = datetime(2024, 1, 2, 14, 30, tzinfo=UTC)
+
+
+def test_forward_context_keeps_bounded_warmup_and_all_forward_rows():
+    rows = _rows([100 + index for index in range(20)])
+    cutoff = rows[12]["candle"]["timestamp"]
+
+    scoped = _rows_with_forward_context(
+        rows,
+        minimum_timestamp_exclusive=cutoff,
+        context_bars=4,
+    )
+
+    assert scoped[0] is rows[9]
+    assert scoped[-1] is rows[-1]
+
+
+def test_persisted_report_serializes_forward_cutoff_datetime():
+    class Result:
+        def fetchone(self):
+            return {"id": 9}
+
+    class Conn:
+        def execute(self, query, params):
+            report_json = params[14]
+            json.dumps(report_json.obj)
+            return Result()
+
+    cutoff = datetime(2026, 7, 1, tzinfo=UTC)
+    report = {
+        "architecture": "gap_down_acceptance_short_confirmation_v1",
+        "family_name": "Gap",
+        "timeframe": "30m",
+        "dataset_id": 76,
+        "symbols": ["SPY"],
+        "round_trip_cost_bps": 30,
+        "minimum_timestamp_exclusive": cutoff,
+        "summary": {
+            "verdict": "no_signal",
+            "detail": "test",
+            "best_horizon_bars": 1,
+            "excess_edge_bps": 0,
+            "t_statistic": 0,
+            "clears_cost": False,
+        },
+        "best_variant": {"measurement": {"signal_count": 0, "by_horizon": []}},
+        "variants": [],
+    }
+
+    persisted = persist_signal_diagnostics(Conn(), report)
+
+    assert persisted["id"] == 9
 
 
 def _rows(closes, *, opens=None):

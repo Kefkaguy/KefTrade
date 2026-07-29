@@ -326,6 +326,17 @@ def family_signal_diagnostics(
                 completed_work_units += 1
                 continue
             rows = dataset["rows"]
+            if minimum_timestamp_exclusive is not None:
+                context_bars = max(
+                    WARMUP_BARS,
+                    int(candidate.parameters.get("recent_candle_window_bars") or 0),
+                    max(horizons, default=1) + 1,
+                )
+                rows = _rows_with_forward_context(
+                    rows,
+                    minimum_timestamp_exclusive=minimum_timestamp_exclusive,
+                    context_bars=context_bars,
+                )
             if len(rows) <= WARMUP_BARS + max(horizons) + 1:
                 per_symbol.append({"symbol": symbol, "error": "not enough bars"})
                 completed_work_units += 1
@@ -426,6 +437,8 @@ def persist_signal_diagnostics(conn: psycopg.Connection, report: dict[str, Any])
     and a `CREATE TABLE IF NOT EXISTS` here would hold an ACCESS EXCLUSIVE
     lock on the results table for the rest of the worker's transaction,
     blocking every UI read of stored verdicts."""
+    from app.services.research_architecture import jsonable
+
     summary = report["summary"]
     best = report.get("best_variant") or {}
     measurement = best.get("measurement") or {}
@@ -467,11 +480,30 @@ def persist_signal_diagnostics(conn: psycopg.Connection, report: dict[str, Any])
             int(measurement.get("signal_count") or 0),
             Jsonb(list(report.get("symbols") or [])),
             Jsonb(measurement.get("by_horizon") or []),
-            Jsonb({key: value for key, value in report.items() if key != "variants"}),
+            Jsonb(jsonable({key: value for key, value in report.items() if key != "variants"})),
             SIGNAL_DIAGNOSTICS_VERSION,
         ),
     ).fetchone()
     return dict(row)
+
+
+def _rows_with_forward_context(
+    rows: Sequence[dict[str, Any]],
+    *,
+    minimum_timestamp_exclusive: Any,
+    context_bars: int,
+) -> list[dict[str, Any]]:
+    """Retain only forward observations plus bounded pre-cutoff feature warm-up."""
+    first_forward = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if row["candle"]["timestamp"] > minimum_timestamp_exclusive
+        ),
+        len(rows),
+    )
+    start = max(0, first_forward - max(0, context_bars))
+    return list(rows[start:])
 
 
 def list_signal_diagnostics(

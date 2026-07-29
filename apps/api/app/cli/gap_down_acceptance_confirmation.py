@@ -17,6 +17,17 @@ ARCHITECTURE = "gap_down_acceptance_short_confirmation_v1"
 SOURCE_DATASET_ID = 36
 
 
+def _progress(progress: dict) -> None:
+    print(
+        (
+            f"work {progress['completed']}/{progress['total']} | "
+            f"symbol {progress['symbol_index']}/{progress['symbols']} "
+            f"{progress['symbol']}"
+        ),
+        flush=True,
+    )
+
+
 def execute(args: argparse.Namespace) -> dict:
     with connect() as conn:
         source = conn.execute(
@@ -63,13 +74,19 @@ def execute(args: argparse.Namespace) -> dict:
             horizons=(1,),
             minimum_timestamp_exclusive=source["window_end"],
             cost_bps_override=float(stressed_cost),
+            progress_callback=_progress,
         )
         report["source_dataset_id"] = SOURCE_DATASET_ID
         report["cost_model"] = cost_model
         report["forward_only"] = True
         if not args.no_persist:
-            persist_signal_diagnostics(conn, report)
-            conn.commit()
+            try:
+                persisted = persist_signal_diagnostics(conn, report)
+                conn.commit()
+                report["persistence"] = {"status": "stored", "id": persisted["id"]}
+            except Exception as error:  # noqa: BLE001 - never hide an expensive computed result
+                conn.rollback()
+                report["persistence"] = {"status": "failed", "error": str(error)}
         return report
 
 
