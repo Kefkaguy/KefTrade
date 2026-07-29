@@ -61,53 +61,265 @@ def _regular_session_windows(
     return windows
 
 
+def _regular_sessions(start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    """One provider request window per exchange session.
+
+    The former implementation made one HTTP request per intraday bar. A
+    390-session, 25-symbol backfill therefore required well over 100,000
+    requests. Session chunks retain calendar correctness while reducing that
+    to roughly one paginated request chain per symbol/session.
+    """
+    from app.services.labs.intraday.session import trading_schedule
+
+    schedule = trading_schedule(start.date(), end.date(), padding_days=0)
+    sessions: list[tuple[datetime, datetime]] = []
+    for _, session in schedule.iterrows():
+        market_open = session["market_open"].to_pydatetime().astimezone(UTC)
+        market_close = session["market_close"].to_pydatetime().astimezone(UTC)
+        clipped_start = max(market_open, start)
+        clipped_end = min(market_close, end)
+        if clipped_start < clipped_end:
+            sessions.append((clipped_start, clipped_end))
+    return sessions
+
+
+def _checkpoint_completed(
+    conn,
+    *,
+    symbol: str,
+    feed: str,
+    window_start: datetime,
+) -> bool:
+    row = conn.execute(
+        """
+        SELECT status
+        FROM intraday_quote_ingestion_checkpoints
+        WHERE provider = 'alpaca'
+          AND feed = %s
+          AND symbol = %s
+          AND session_date = %s
+        """,
+        (feed, symbol, window_start.date()),
+    ).fetchone()
+    return bool(row and row["status"] == "completed")
+
+
+def _checkpoint_running(
+    conn,
+    *,
+    symbol: str,
+    feed: str,
+    window_start: datetime,
+    window_end: datetime,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO intraday_quote_ingestion_checkpoints(
+            provider, feed, symbol, session_date, window_start, window_end,
+            status, attempts, started_at, updated_at
+        )
+        VALUES ('alpaca', %s, %s, %s, %s, %s, 'running', 1, NOW(), NOW())
+        ON CONFLICT(provider, feed, symbol, session_date)
+        DO UPDATE SET
+            window_start = EXCLUDED.window_start,
+            window_end = EXCLUDED.window_end,
+            status = 'running',
+            attempts = intraday_quote_ingestion_checkpoints.attempts + 1,
+            error = NULL,
+            started_at = NOW(),
+            updated_at = NOW()
+        """,
+        (feed, symbol, window_start.date(), window_start, window_end),
+    )
+    conn.commit()
+
+
+def _checkpoint_finished(
+    conn,
+    *,
+    symbol: str,
+    feed: str,
+    session_date,
+    quote_rows: int,
+    microstructure_rows: int,
+    error: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE intraday_quote_ingestion_checkpoints
+        SET status = %s,
+            quote_rows = %s,
+            microstructure_rows = %s,
+            error = %s,
+            completed_at = CASE WHEN %s IS NULL THEN NOW() ELSE NULL END,
+            updated_at = NOW()
+        WHERE provider = 'alpaca'
+          AND feed = %s
+          AND symbol = %s
+          AND session_date = %s
+        """,
+        (
+            "completed" if error is None else "failed",
+            quote_rows,
+            microstructure_rows,
+            error,
+            error,
+            feed,
+            symbol,
+            session_date,
+        ),
+    )
+    conn.commit()
+
+
+async def _fetch_complete_session_quotes(
+    *,
+    symbol: str,
+    window_start: datetime,
+    window_end: datetime,
+    limit: int,
+    feed: str,
+) -> list[dict]:
+    """Fetch a session completely, splitting only when pagination exhausts."""
+    _, raw, request_log, _ = await fetch_stock_quotes(
+        symbol,
+        start=window_start,
+        end=window_end,
+        limit=limit,
+        feed=feed,
+    )
+    if not request_log or not request_log[-1].get("next_page_token_present"):
+        return raw
+
+    complete: list[dict] = []
+    for sub_start, sub_end in _regular_session_windows(
+        window_start,
+        window_end,
+        timeframe="30m",
+    ):
+        _, sub_rows, sub_log, _ = await fetch_stock_quotes(
+            symbol,
+            start=sub_start,
+            end=sub_end,
+            limit=limit,
+            feed=feed,
+        )
+        if sub_log and sub_log[-1].get("next_page_token_present"):
+            raise RuntimeError(
+                f"Provider pagination remained incomplete for {symbol} "
+                f"{sub_start.isoformat()} to {sub_end.isoformat()}; the session "
+                "is not being persisted."
+            )
+        complete.extend(sub_rows)
+    return complete
+
+
 async def sync_quotes(args: argparse.Namespace) -> dict:
     end = _time(args.end, fallback=datetime.now(tz=UTC))
     start = _time(args.start, fallback=end - timedelta(days=args.days))
-    windows = _regular_session_windows(start, end, timeframe=args.quote_window)
-    if not windows:
-        raise ValueError("The requested period contains no completed regular-session windows.")
-    quotes_per_window = max(1000, args.max_quotes // len(windows))
-    imported = 0
-    microstructure = 0
-    for symbol in args.symbols:
-        print(
-            f"quotes {symbol}: fetching {len(windows)} regular-session "
-            f"{args.quote_window} windows",
-            flush=True,
+    sessions = _regular_sessions(start, end)
+    if not sessions:
+        raise ValueError("The requested period contains no completed regular sessions.")
+    if args.feed.lower() != "sip" and not args.allow_partial_feed:
+        raise ValueError(
+            "Executable 30m research requires consolidated SIP quotes. "
+            "Pass --allow-partial-feed only for diagnostics that cannot promote an elite."
         )
-        normalized_by_timestamp = {}
-        for window_start, window_end in windows:
-            _, raw, _, _ = await fetch_stock_quotes(
-                symbol,
-                start=window_start,
-                end=window_end,
-                limit=quotes_per_window,
-                feed=args.feed,
-            )
-            for row in raw:
-                quote = normalize_stock_quote(symbol, row, feed=args.feed)
-                if quote is not None:
-                    normalized_by_timestamp[quote["timestamp"]] = quote
-        normalized = list(normalized_by_timestamp.values())
-        normalized.sort(key=lambda row: row["timestamp"])
-        with connect() as conn:
-            imported += persist_quote_snapshots(conn, normalized)
-            for timeframe in args.timeframes:
-                microstructure += persist_microstructure_bars(
+    imported = 0
+    processed_quotes = 0
+    microstructure = 0
+    completed_sessions = 0
+    skipped_sessions = 0
+    failed_sessions = 0
+    for symbol in args.symbols:
+        print(f"quotes {symbol}: {len(sessions)} exchange sessions", flush=True)
+        for session_number, (window_start, window_end) in enumerate(sessions, start=1):
+            with connect() as conn:
+                if args.resume and _checkpoint_completed(
                     conn,
-                    aggregate_microstructure_bars(normalized, timeframe=timeframe),
+                    symbol=symbol,
+                    feed=args.feed,
+                    window_start=window_start,
+                ):
+                    skipped_sessions += 1
+                    continue
+                _checkpoint_running(
+                    conn,
+                    symbol=symbol,
+                    feed=args.feed,
+                    window_start=window_start,
+                    window_end=window_end,
                 )
-        print(f"quotes {symbol}: stored {len(normalized)}", flush=True)
+            try:
+                raw = await _fetch_complete_session_quotes(
+                    symbol=symbol,
+                    window_start=window_start,
+                    window_end=window_end,
+                    limit=args.max_quotes_per_session,
+                    feed=args.feed,
+                )
+                normalized_by_timestamp = {}
+                for row in raw:
+                    quote = normalize_stock_quote(symbol, row, feed=args.feed)
+                    if quote is not None:
+                        normalized_by_timestamp[quote["timestamp"]] = quote
+                normalized = sorted(
+                    normalized_by_timestamp.values(),
+                    key=lambda row: row["timestamp"],
+                )
+                processed_quotes += len(normalized)
+                session_microstructure = 0
+                with connect() as conn:
+                    if window_end >= end - timedelta(days=args.retain_raw_days):
+                        imported += persist_quote_snapshots(conn, normalized)
+                    for timeframe in args.timeframes:
+                        rows = aggregate_microstructure_bars(normalized, timeframe=timeframe)
+                        stored = persist_microstructure_bars(conn, rows)
+                        microstructure += stored
+                        session_microstructure += stored
+                    _checkpoint_finished(
+                        conn,
+                        symbol=symbol,
+                        feed=args.feed,
+                        session_date=window_start.date(),
+                        quote_rows=len(normalized),
+                        microstructure_rows=session_microstructure,
+                    )
+                completed_sessions += 1
+                if session_number == 1 or session_number % 20 == 0 or session_number == len(sessions):
+                    print(
+                        f"quotes {symbol}: {session_number}/{len(sessions)} sessions",
+                        flush=True,
+                    )
+            except Exception as error:
+                failed_sessions += 1
+                with connect() as conn:
+                    _checkpoint_finished(
+                        conn,
+                        symbol=symbol,
+                        feed=args.feed,
+                        session_date=window_start.date(),
+                        quote_rows=0,
+                        microstructure_rows=0,
+                        error=f"{type(error).__name__}: {error}",
+                    )
+                if not args.continue_on_error:
+                    raise
     return {
         "symbols": args.symbols,
         "window_start": start,
         "window_end": end,
         "quote_rows_stored": imported,
+        "quote_rows_processed": processed_quotes,
         "microstructure_rows_stored": microstructure,
         "feed": args.feed,
-        "regular_session_windows": len(windows),
-        "quotes_per_window_cap": quotes_per_window,
+        "regular_sessions": len(sessions),
+        "completed_symbol_sessions": completed_sessions,
+        "skipped_completed_symbol_sessions": skipped_sessions,
+        "failed_symbol_sessions": failed_sessions,
+        "quotes_per_session_cap": args.max_quotes_per_session,
+        "retain_raw_days": args.retain_raw_days,
+        "resumable": True,
     }
 
 
@@ -120,6 +332,7 @@ def calibrate(args: argparse.Namespace) -> dict:
             symbols=args.symbols,
             start=start,
             end=end,
+            feed=args.feed,
         )
         bars = load_regular_session_cost_bars(
             conn,
@@ -127,6 +340,7 @@ def calibrate(args: argparse.Namespace) -> dict:
             timeframe=args.timeframe,
             start=start,
             end=end,
+            feed=args.feed,
         )
         result = calibrate_regular_session_bar_costs(
             bars,
@@ -136,6 +350,55 @@ def calibrate(args: argparse.Namespace) -> dict:
         )
         result["calibration_id"] = persist_cost_calibration(conn, result)
     return result
+
+
+def status(args: argparse.Namespace) -> dict:
+    end = _time(args.end, fallback=datetime.now(tz=UTC))
+    start = _time(args.start, fallback=end - timedelta(days=args.days))
+    with connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT status, COUNT(*) AS sessions,
+                   SUM(quote_rows) AS quote_rows,
+                   SUM(microstructure_rows) AS microstructure_rows,
+                   MIN(session_date) AS first_session,
+                   MAX(session_date) AS last_session
+            FROM intraday_quote_ingestion_checkpoints
+            WHERE provider = 'alpaca' AND feed = %s
+              AND symbol = ANY(%s)
+              AND session_date BETWEEN %s AND %s
+            GROUP BY status
+            ORDER BY status
+            """,
+            (
+                args.feed,
+                args.symbols,
+                start.date(),
+                end.date(),
+            ),
+        ).fetchall()
+    by_status = {
+        str(row["status"]): {
+            "sessions": int(row["sessions"] or 0),
+            "quote_rows": int(row["quote_rows"] or 0),
+            "microstructure_rows": int(row["microstructure_rows"] or 0),
+            "first_session": row["first_session"],
+            "last_session": row["last_session"],
+        }
+        for row in rows
+    }
+    expected = len(_regular_sessions(start, end)) * len(args.symbols)
+    completed = int((by_status.get("completed") or {}).get("sessions") or 0)
+    return {
+        "symbols": args.symbols,
+        "feed": args.feed,
+        "window_start": start,
+        "window_end": end,
+        "expected_symbol_sessions": expected,
+        "completed_symbol_sessions": completed,
+        "completion_fraction": round(completed / expected, 6) if expected else 0,
+        "by_status": by_status,
+    }
 
 
 def parser() -> argparse.ArgumentParser:
@@ -149,30 +412,53 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument("--start")
     sync.add_argument("--end")
     sync.add_argument("--days", type=int, default=5)
-    sync.add_argument("--max-quotes", type=int, default=100_000)
-    sync.add_argument("--feed", default="iex")
+    sync.add_argument("--max-quotes-per-session", type=int, default=1_000_000)
     sync.add_argument(
-        "--quote-window",
-        choices=("15m", "30m"),
-        default="30m",
-        help="Calendar-aligned regular-session sampling window.",
+        "--retain-raw-days",
+        type=int,
+        default=45,
+        help=(
+            "Keep raw quote messages only for this recent window; older sessions "
+            "still persist complete 30m microstructure aggregates."
+        ),
     )
-    sync.add_argument("--timeframes", nargs="+", choices=("15m", "30m"), default=["15m", "30m"])
+    sync.add_argument("--feed", default="sip")
+    sync.add_argument("--timeframes", nargs="+", choices=("30m",), default=["30m"])
+    sync.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
+    sync.add_argument("--continue-on-error", action="store_true")
+    sync.add_argument(
+        "--allow-partial-feed",
+        action="store_true",
+        help="Permit IEX/non-SIP diagnostics; these observations cannot make an elite executable.",
+    )
 
     cost = subparsers.add_parser("calibrate")
     cost.add_argument("--symbols", type=_symbols, required=True)
     cost.add_argument("--start")
     cost.add_argument("--end")
     cost.add_argument("--days", type=int, default=30)
-    cost.add_argument("--timeframe", choices=("15m", "30m"), default="30m")
+    cost.add_argument("--timeframe", choices=("30m",), default="30m")
+    cost.add_argument("--feed", default="sip")
     cost.add_argument("--regulatory-bps", type=float, default=0.1)
+
+    progress = subparsers.add_parser("status")
+    progress.add_argument("--symbols", type=_symbols, required=True)
+    progress.add_argument("--start")
+    progress.add_argument("--end")
+    progress.add_argument("--days", type=int, default=30)
+    progress.add_argument("--feed", default="sip")
     return root
 
 
 def main() -> None:
     args = parser().parse_args()
     print("Intraday execution-cost research | backend only | no broker action", flush=True)
-    result = asyncio.run(sync_quotes(args)) if args.command == "sync-quotes" else calibrate(args)
+    if args.command == "sync-quotes":
+        result = asyncio.run(sync_quotes(args))
+    elif args.command == "calibrate":
+        result = calibrate(args)
+    else:
+        result = status(args)
     print(json.dumps(result, default=str, indent=2))
 
 

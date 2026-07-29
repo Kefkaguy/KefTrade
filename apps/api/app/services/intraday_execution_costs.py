@@ -340,6 +340,7 @@ def load_execution_evidence(
     symbols: Sequence[str],
     start: datetime,
     end: datetime,
+    feed: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     normalized = [symbol.upper() for symbol in symbols]
     quotes = [
@@ -350,9 +351,10 @@ def load_execution_evidence(
                    bid_size, ask_size, midpoint, spread_bps
             FROM intraday_quote_snapshots
             WHERE symbol = ANY(%s) AND timestamp BETWEEN %s AND %s
+              AND (%s IS NULL OR feed = %s)
             ORDER BY symbol, timestamp
             """,
-            (normalized, start, end),
+            (normalized, start, end, feed, feed),
         ).fetchall()
     ]
     fills = [
@@ -377,6 +379,7 @@ def load_regular_session_cost_bars(
     timeframe: str,
     start: datetime,
     end: datetime,
+    feed: str | None = None,
 ) -> list[dict[str, Any]]:
     """Only quote bars that correspond to a real regular-session feature row."""
     return [
@@ -396,11 +399,19 @@ def load_regular_session_cost_bars(
             WHERE micro.symbol = ANY(%s)
               AND micro.timeframe = %s
               AND micro.timestamp BETWEEN %s AND %s
+              AND (%s IS NULL OR micro.feed = %s)
               AND feature.minutes_from_open >= 0
               AND feature.minutes_to_close >= 0
             ORDER BY micro.symbol, micro.timestamp
             """,
-            ([symbol.upper() for symbol in symbols], timeframe, start, end),
+            (
+                [symbol.upper() for symbol in symbols],
+                timeframe,
+                start,
+                end,
+                feed,
+                feed,
+            ),
         ).fetchall()
     ]
 

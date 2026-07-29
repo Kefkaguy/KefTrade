@@ -31,7 +31,7 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-DNA_SCHEMA_VERSION = 3
+DNA_SCHEMA_VERSION = 4
 
 # Closed vocabularies. A DNA payload using a value outside these sets is
 # rejected at build time -- fingerprints are only meaningful if the
@@ -50,12 +50,14 @@ VOCABULARY: dict[str, tuple[str, ...]] = {
         "cross_sectional_rank_extreme", "opening_repricing_flow",
         "first_to_last_half_hour_flow", "same_slot_cross_sectional_rank",
         "liquidity_shock_exhaustion",
+        "overnight_gap_acceptance_absorption", "vwap_execution_pressure",
     ),
     "confirmation_structure": (
         "relative_volume", "vwap_alignment", "closing_confirmation", "momentum_direction",
         "volatility_expansion", "structure_state", "session_window", "range_quality",
         "declining_momentum", "none",
         "opening_flow_direction", "quote_flow_exhaustion",
+        "gap_fill", "vwap_displacement",
     ),
     "exit_structure": (
         "fixed_r_multiple_target", "vwap_target", "prior_close_target",

@@ -16,14 +16,16 @@ future backtest reads from -- the simulation itself is unchanged.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.services.research_architecture import DATASET_VERSION, jsonable, load_snapshot_candles, stable_hash
+from app.services.research_architecture import jsonable, load_snapshot_candles, stable_hash
 
 __all__ = ["record_intraday_dataset_snapshot", "load_snapshot_intraday_features", "load_snapshot_candles"]
+INTRADAY_DATASET_VERSION = "intraday_dataset_v2_sip_microstructure"
 
 
 def record_intraday_dataset_snapshot(
@@ -34,6 +36,7 @@ def record_intraday_dataset_snapshot(
     mode: str = "rolling",
     name: str | None = None,
     universe_key: str | None = None,
+    window_end: datetime | None = None,
 ) -> dict[str, Any]:
     """Materialize an exact immutable candles + intraday_features snapshot.
 
@@ -45,6 +48,8 @@ def record_intraday_dataset_snapshot(
 
     if mode not in {"rolling", "reproducibility"}:
         raise ValueError("dataset mode must be 'rolling' or 'reproducibility'")
+    if window_end is not None and window_end.tzinfo is None:
+        raise ValueError("dataset window_end must be timezone-aware")
     normalized_assets = sorted({item.strip().upper() for item in assets if item.strip()})
     normalized_timeframes = sorted({item.strip() for item in timeframes if item.strip()})
     if not normalized_assets or not normalized_timeframes:
@@ -63,6 +68,7 @@ def record_intraday_dataset_snapshot(
                        ARRAY_AGG(DISTINCT source ORDER BY source) AS sources
                 FROM candles
                 WHERE symbol = %s AND timeframe = %s
+                  AND (%s IS NULL OR timestamp <= %s)
                   AND (
                       %s IS NULL
                       OR EXISTS (
@@ -80,7 +86,14 @@ def record_intraday_dataset_snapshot(
                       )
                   )
                 """,
-                (symbol, timeframe, universe_key, universe_key),
+                (
+                    symbol,
+                    timeframe,
+                    window_end,
+                    window_end,
+                    universe_key,
+                    universe_key,
+                ),
             ).fetchone()
             candle_count = int(candle_row.get("candle_count") or 0)
             if candle_count == 0:
@@ -90,13 +103,40 @@ def record_intraday_dataset_snapshot(
                 """
                 SELECT COUNT(*) AS feature_count,
                        MD5(COALESCE(STRING_AGG(
-                           CONCAT_WS('|', timestamp::text, session_date::text,
-                               COALESCE(minutes_from_open::text, ''), COALESCE(minutes_to_close::text, ''),
-                               COALESCE(session_vwap::text, ''), COALESCE(gap_percent::text, '')),
-                           '||' ORDER BY timestamp
+                           CONCAT_WS(
+                               '|',
+                               intraday_features.timestamp::text,
+                               intraday_features.session_date::text,
+                               COALESCE(intraday_features.minutes_from_open::text, ''),
+                               COALESCE(intraday_features.minutes_to_close::text, ''),
+                               COALESCE(intraday_features.session_vwap::text, ''),
+                               COALESCE(intraday_features.gap_percent::text, ''),
+                               COALESCE(micro.feed, ''),
+                               COALESCE(micro.quote_count::text, ''),
+                               COALESCE(micro.median_spread_bps::text, ''),
+                               COALESCE(
+                                   micro.normalized_order_flow_imbalance::text,
+                                   ''
+                               )
+                           ),
+                           '||' ORDER BY intraday_features.timestamp
                        ), '')) AS feature_hash
                 FROM intraday_features
-                WHERE symbol = %s AND timeframe = %s
+                LEFT JOIN LATERAL (
+                    SELECT provider, feed, quote_count, median_spread_bps,
+                           normalized_order_flow_imbalance
+                    FROM intraday_microstructure_features
+                    WHERE symbol = intraday_features.symbol
+                      AND timeframe = intraday_features.timeframe
+                      AND timestamp = intraday_features.timestamp
+                    ORDER BY
+                        CASE WHEN LOWER(feed) = 'sip' THEN 0 ELSE 1 END,
+                        created_at DESC
+                    LIMIT 1
+                ) micro ON TRUE
+                WHERE intraday_features.symbol = %s
+                  AND intraday_features.timeframe = %s
+                  AND (%s IS NULL OR intraday_features.timestamp <= %s)
                   AND (
                       %s IS NULL
                       OR EXISTS (
@@ -112,7 +152,14 @@ def record_intraday_dataset_snapshot(
                       )
                   )
                 """,
-                (symbol, timeframe, universe_key, universe_key),
+                (
+                    symbol,
+                    timeframe,
+                    window_end,
+                    window_end,
+                    universe_key,
+                    universe_key,
+                ),
             ).fetchone()
             feature_count = int(feature_row.get("feature_count") or 0)
             if feature_count == 0:
@@ -143,11 +190,12 @@ def record_intraday_dataset_snapshot(
             "assets": normalized_assets,
             "timeframes": normalized_timeframes,
             "universe_key": universe_key,
+            "requested_window_end": window_end,
             "datasets": [
                 {key: jsonable(item[key]) for key in ("key", "candle_count", "feature_count", "window_start", "window_end", "candle_hash", "feature_hash", "sources")}
                 for item in summaries
             ],
-            "calculation_version": DATASET_VERSION,
+            "calculation_version": INTRADAY_DATASET_VERSION,
         }
     )
     dataset_key = f"intraday_dataset_{content_hash[:24]}"
@@ -172,7 +220,12 @@ def record_intraday_dataset_snapshot(
         """,
         (
             dataset_key,
-            name or f"Intraday {mode} snapshot: {', '.join(normalized_assets)} / {', '.join(normalized_timeframes)}",
+            name
+            or (
+                f"Intraday {mode} snapshot: {', '.join(normalized_assets)} / "
+                f"{', '.join(normalized_timeframes)}"
+                + (f" through {window_end.isoformat()}" if window_end else "")
+            ),
             mode,
             Jsonb(normalized_assets),
             Jsonb(normalized_timeframes),
@@ -190,11 +243,12 @@ def record_intraday_dataset_snapshot(
                     "exact_intraday_features_materialized": True,
                     "point_in_time_universe": universe_key is not None,
                     "universe_key": universe_key,
+                    "requested_window_end": jsonable(window_end),
                     "corporate_actions_adjusted": adjusted_prices,
                     "adjustment_policy": "all" if adjusted_prices else "unverified",
                 }
             ),
-            DATASET_VERSION,
+            INTRADAY_DATASET_VERSION,
         ),
     ).fetchone()
     if not row:
@@ -241,13 +295,42 @@ def record_intraday_dataset_snapshot(
             INSERT INTO research_dataset_intraday_features(
                 dataset_id, symbol, timeframe, timestamp, session_date, minutes_from_open, minutes_to_close,
                 session_vwap, distance_from_session_vwap, opening_range_high, opening_range_low,
-                opening_range_position, gap_percent, session_relative_volume
+                opening_range_position, gap_percent, session_relative_volume,
+                microstructure_provider, microstructure_feed, quote_count,
+                median_spread_bps, p90_spread_bps, mean_depth,
+                order_flow_imbalance, normalized_order_flow_imbalance
             )
-            SELECT %s, symbol, timeframe, timestamp, session_date, minutes_from_open, minutes_to_close,
-                   session_vwap, distance_from_session_vwap, opening_range_high, opening_range_low,
-                   opening_range_position, gap_percent, session_relative_volume
+            SELECT %s, intraday_features.symbol, intraday_features.timeframe,
+                   intraday_features.timestamp, intraday_features.session_date,
+                   intraday_features.minutes_from_open,
+                   intraday_features.minutes_to_close,
+                   intraday_features.session_vwap,
+                   intraday_features.distance_from_session_vwap,
+                   intraday_features.opening_range_high,
+                   intraday_features.opening_range_low,
+                   intraday_features.opening_range_position,
+                   intraday_features.gap_percent,
+                   intraday_features.session_relative_volume,
+                   micro.provider, micro.feed, micro.quote_count,
+                   micro.median_spread_bps, micro.p90_spread_bps, micro.mean_depth,
+                   micro.order_flow_imbalance, micro.normalized_order_flow_imbalance
             FROM intraday_features
-            WHERE symbol = %s AND timeframe = %s AND timestamp BETWEEN %s AND %s
+            LEFT JOIN LATERAL (
+                SELECT provider, feed, quote_count, median_spread_bps,
+                       p90_spread_bps, mean_depth, order_flow_imbalance,
+                       normalized_order_flow_imbalance
+                FROM intraday_microstructure_features
+                WHERE symbol = intraday_features.symbol
+                  AND timeframe = intraday_features.timeframe
+                  AND timestamp = intraday_features.timestamp
+                ORDER BY
+                    CASE WHEN LOWER(feed) = 'sip' THEN 0 ELSE 1 END,
+                    created_at DESC
+                LIMIT 1
+            ) micro ON TRUE
+            WHERE intraday_features.symbol = %s
+              AND intraday_features.timeframe = %s
+              AND intraday_features.timestamp BETWEEN %s AND %s
               AND (
                   %s IS NULL
                   OR EXISTS (

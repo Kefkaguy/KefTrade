@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+from datetime import UTC, datetime
 
 from app.db import connect
 from app.providers.alpaca import sync_alpaca_candles
@@ -23,6 +24,14 @@ async def prepare(args: argparse.Namespace) -> dict:
 
     symbols = _csv(args.symbols, upper=True)
     timeframes = _csv(args.timeframes)
+    if timeframes != ["30m"]:
+        raise ValueError("Executable intraday research is restricted to 30m.")
+    window_end = None
+    if args.as_of:
+        window_end = datetime.fromisoformat(args.as_of.replace("Z", "+00:00"))
+        if window_end.tzinfo is None:
+            raise ValueError("--as-of must include a timezone.")
+        window_end = window_end.astimezone(UTC)
     synced: list[dict] = []
     for symbol in symbols:
         for timeframe in timeframes:
@@ -58,6 +67,7 @@ async def prepare(args: argparse.Namespace) -> dict:
             mode="rolling",
             name=args.name,
             universe_key=args.universe_key,
+            window_end=window_end,
         )
     return {
         "candles": synced,
@@ -75,8 +85,15 @@ def parser() -> argparse.ArgumentParser:
         )
     )
     root.add_argument("--symbols", required=True, help="Comma-separated research universe")
-    root.add_argument("--timeframes", default="30m", help="Comma-separated 15m/30m values")
-    root.add_argument("--candle-limit", type=int, default=5000)
+    root.add_argument("--timeframes", default="30m", help="30m only")
+    root.add_argument("--candle-limit", type=int, default=10000)
+    root.add_argument(
+        "--as-of",
+        help=(
+            "Optional timezone-aware immutable cutoff. Set this before research "
+            "to create a historical development snapshot."
+        ),
+    )
     root.add_argument("--name")
     root.add_argument(
         "--universe-key",

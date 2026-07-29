@@ -300,6 +300,7 @@ async def fetch_stock_quotes(
             response.raise_for_status()
             payload = response.json()
             page_quotes = payload.get("quotes", [])
+            token = payload.get("next_page_token")
             request_log.append(
                 {
                     "start": params["start"],
@@ -307,12 +308,12 @@ async def fetch_stock_quotes(
                     "feed": feed,
                     "received": len(page_quotes),
                     "request_id": response.headers.get("X-Request-ID"),
+                    "next_page_token_present": bool(token),
                 }
             )
             quotes.extend(page_quotes)
             if len(quotes) >= requested_limit:
                 break
-            token = payload.get("next_page_token")
             if not token or not page_quotes:
                 break
             params["page_token"] = token

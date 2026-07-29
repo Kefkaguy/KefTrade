@@ -119,7 +119,7 @@ def cross_sectional_same_slot_observations(
     **_: Any,
 ) -> list[dict[str, Any]]:
     """Prior-session same-slot mean predicts the current slot cross-section."""
-    if timeframe not in {"15m", "30m"}:
+    if timeframe != "30m":
         return []
     candidates: list[dict[str, Any]] = []
     for symbol, raw_rows in candles_by_symbol.items():
@@ -167,9 +167,9 @@ def overnight_gap_acceptance_absorption_observations(
     **_: Any,
 ) -> list[dict[str, Any]]:
     """Opening participation distinguishes accepted gaps from absorbed gaps."""
-    if timeframe not in {"15m", "30m"}:
+    if timeframe != "30m":
         return []
-    decision_index = 3 if timeframe == "15m" else 1
+    decision_index = 1
     output: list[dict[str, Any]] = []
     for symbol, rows in candles_by_symbol.items():
         sessions: dict[date, list[dict[str, Any]]] = defaultdict(list)
@@ -238,7 +238,7 @@ def vwap_execution_pressure_observations(
     **_: Any,
 ) -> list[dict[str, Any]]:
     """Abnormal participation away from VWAP predicts one-bar continuation."""
-    if timeframe not in {"15m", "30m"}:
+    if timeframe != "30m":
         return []
     output: list[dict[str, Any]] = []
     for symbol, rows in candles_by_symbol.items():
@@ -370,7 +370,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
             "Urgent overnight repricing continues when elevated opening participation "
             "accepts the gap and reverses when that flow is absorbed."
         ),
-        supported_timeframes=("15m", "30m"),
+        supported_timeframes=("30m",),
         builder=overnight_gap_acceptance_absorption_observations,
         references=(),
     ),
@@ -381,7 +381,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
             "Institutional execution schedules repeat at the same intraday slot, so names "
             "with persistently positive same-slot returns outperform negative-score peers."
         ),
-        supported_timeframes=("15m", "30m"),
+        supported_timeframes=("30m",),
         builder=cross_sectional_same_slot_observations,
         references=("https://arxiv.org/abs/1005.3535",),
     ),
@@ -392,7 +392,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
             "Abnormal scheduled participation that moves price away from session VWAP "
             "persists over the next execution interval."
         ),
-        supported_timeframes=("15m", "30m"),
+        supported_timeframes=("30m",),
         builder=vwap_execution_pressure_observations,
         references=(),
     ),
@@ -403,7 +403,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
             "An abnormal idiosyncratic range/volume shock reverses when terminal quote-flow "
             "imbalance opposes the price move, indicating exhaustion rather than information."
         ),
-        supported_timeframes=("15m", "30m"),
+        supported_timeframes=("30m",),
         builder=liquidity_shock_reversal_observations,
         references=("https://arxiv.org/abs/1011.6402",),
         requires_quotes=True,
@@ -415,7 +415,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
             "Published auction imbalance pressure moves the executable midpoint toward "
             "the auction clearing price when contra liquidity cannot absorb forced flow."
         ),
-        supported_timeframes=("15m", "30m"),
+        supported_timeframes=("30m",),
         builder=auction_imbalance_pressure_observations,
         references=("https://nasdaqtrader.com/Trader.aspx?id=OpenClose",),
         requires_quotes=True,
@@ -841,18 +841,47 @@ def load_microstructure(
     timeframe: str,
     start: datetime | None,
     end: datetime | None,
+    dataset_id: int | None = None,
 ) -> dict[str, dict[datetime, dict[str, Any]]]:
-    rows = conn.execute(
-        """
-        SELECT *
-        FROM intraday_microstructure_features
-        WHERE symbol = ANY(%s) AND timeframe = %s
-          AND (%s IS NULL OR timestamp >= %s)
-          AND (%s IS NULL OR timestamp <= %s)
-        ORDER BY symbol, timestamp
-        """,
-        (list(symbols), timeframe, start, start, end, end),
-    ).fetchall()
+    if dataset_id is None:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM intraday_microstructure_features
+            WHERE symbol = ANY(%s) AND timeframe = %s
+              AND (%s IS NULL OR timestamp >= %s)
+              AND (%s IS NULL OR timestamp <= %s)
+            ORDER BY symbol, timestamp
+            """,
+            (list(symbols), timeframe, start, start, end, end),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT symbol, timeframe, timestamp,
+                   microstructure_provider AS provider,
+                   microstructure_feed AS feed,
+                   quote_count, median_spread_bps, p90_spread_bps,
+                   mean_depth, order_flow_imbalance,
+                   normalized_order_flow_imbalance
+            FROM research_dataset_intraday_features
+            WHERE dataset_id = %s
+              AND symbol = ANY(%s) AND timeframe = %s
+              AND quote_count > 0
+              AND (%s IS NULL OR timestamp >= %s)
+              AND (%s IS NULL OR timestamp <= %s)
+            ORDER BY symbol, timestamp
+            """,
+            (
+                dataset_id,
+                list(symbols),
+                timeframe,
+                start,
+                start,
+                end,
+                end,
+            ),
+        ).fetchall()
     output: dict[str, dict[datetime, dict[str, Any]]] = defaultdict(dict)
     for row in rows:
         item = dict(row)

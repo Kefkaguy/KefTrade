@@ -73,6 +73,8 @@ def _cost_calibration_id(conn: Any, requested: str | None) -> int | None:
 
 
 def discover(args: argparse.Namespace) -> dict[str, Any]:
+    if args.timeframe != "30m":
+        raise ValueError("Executable intraday factor research is restricted to 30m.")
     keys = _factor_keys(args.factors)
     with connect() as conn:
         dataset_id = _dataset_id(conn, args.dataset_id)
@@ -92,6 +94,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             timeframe=args.timeframe,
             start=manifest.get("window_start"),
             end=manifest.get("window_end"),
+            dataset_id=dataset_id,
         )
         auctions = load_auction_imbalances(
             conn,
@@ -150,6 +153,8 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
         ).fetchone()
         if not source:
             raise ValueError("The source must be a completed discovery run.")
+        if str(source["timeframe"]) != "30m":
+            raise ValueError("Executable intraday confirmation is restricted to 30m.")
         source_result = source["results"]
         keys = list(source_result.get("selected_for_forward_confirmation") or [])
         if not keys:
@@ -189,6 +194,7 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
             timeframe=str(source["timeframe"]),
             start=cutoff,
             end=manifest.get("window_end"),
+            dataset_id=dataset_id,
         )
         auctions = load_auction_imbalances(
             conn,
@@ -247,7 +253,7 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     discovery = commands.add_parser("discover")
     discovery.add_argument("--dataset-id", type=int)
-    discovery.add_argument("--timeframe", choices=("15m", "30m"), default="30m")
+    discovery.add_argument("--timeframe", choices=("30m",), default="30m")
     discovery.add_argument("--symbols")
     discovery.add_argument("--max-symbols", type=int, default=200)
     discovery.add_argument("--factors")

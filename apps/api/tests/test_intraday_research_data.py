@@ -27,11 +27,18 @@ class ReadinessConnection:
                     "integrity": {},
                 }
             )
-        if "FROM research_dataset_intraday_features" in normalized and "JOIN" not in normalized:
+        if (
+            "FROM research_dataset_intraday_features" in normalized
+            and "JOIN" not in normalized
+            and "quote_count > 0" not in normalized
+        ):
             assert "midpoint_at_message" not in normalized
             assert "auction_price" not in normalized
             return FakeResult({"rows": 100, "symbols": 1, "sessions": 10})
-        if "FROM intraday_microstructure_features" in normalized:
+        if (
+            "FROM research_dataset_intraday_features" in normalized
+            and "quote_count > 0" in normalized
+        ):
             return FakeResult({"rows": 0, "symbols": 0})
         if "FROM intraday_auction_imbalances" in normalized:
             assert "midpoint_at_message" in normalized

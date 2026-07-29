@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from statistics import mean, pstdev
 from typing import Any
@@ -16,6 +16,7 @@ SAME_CANDLE_EXIT_POLICY = "stop_first"
 # ExecutionConstraints.honor_absolute_take_profit.
 EXECUTION_SEMANTICS_BASELINE = "backtest_execution_v1_r_multiple_targets"
 EXECUTION_SEMANTICS_ABSOLUTE_TARGETS = "backtest_execution_v2_absolute_targets"
+EXECUTION_SEMANTICS_CALIBRATED_COSTS = "backtest_execution_v3_calibrated_costs"
 
 
 def combine_candles_features(candles: list[dict[str, Any]], features: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -78,7 +79,9 @@ def run_backtest(
 
     equity = Decimal(str(params["initial_equity"]))
     initial_equity = equity
-    fee_rate = Decimal(str(params["fee_rate"]))
+    execution_cost_model = params.get("execution_cost_model")
+    calibrated_costs = isinstance(execution_cost_model, dict)
+    fee_rate = Decimal("0") if calibrated_costs else Decimal(str(params["fee_rate"]))
     slippage_rate = Decimal(str(params["slippage_rate"]))
     risk_per_trade = Decimal(str(params["risk_per_trade"]))
     trades: list[dict[str, Any]] = []
@@ -86,6 +89,9 @@ def run_backtest(
     entry_delay_bars = max(0, int(params.get("entry_delay_bars") or 0))
     entry_offset = 1 + entry_delay_bars
     entry_cooldown_bars = max(0, int(params.get("entry_cooldown_bars") or 0))
+    signal_start_session_date = _session_date_parameter(
+        params.get("signal_start_session_date")
+    )
 
     start_index = len(train_rows) if validation_rows else 0
     realized_equity_points = [{"timestamp": rows[start_index]["candle"]["timestamp"], "equity": equity}] if rows else []
@@ -97,6 +103,14 @@ def run_backtest(
         current = rows[i]
         candle = current["candle"]
         feature = current["feature"]
+        if signal_start_session_date is not None:
+            from app.services.intraday_research_integrity import exchange_session_date
+
+            if exchange_session_date(
+                feature.get("session_date") or candle["timestamp"]
+            ) <= signal_start_session_date:
+                i += 1
+                continue
         recent_window_bars = max(0, int(params.get("recent_candle_window_bars") or 0))
         recent_start = max(0, i + 1 - recent_window_bars) if recent_window_bars else 0
         recent_candles = candle_rows[recent_start : i + 1]
@@ -108,8 +122,20 @@ def run_backtest(
 
         entry_candle = rows[i + entry_offset]["candle"]
         direction = decision.direction
+        entry_slippage_rate = (
+            _calibrated_side_cost_rate(
+                execution_cost_model,
+                symbol=str(entry_candle["symbol"]),
+                timestamp=entry_candle["timestamp"],
+                stressed=str(params.get("execution_cost_scenario") or "stressed") != "observed",
+            )
+            if calibrated_costs
+            else slippage_rate
+        )
         entry_price = Decimal(entry_candle["open"]) * (
-            Decimal("1") + slippage_rate if direction == "long" else Decimal("1") - slippage_rate
+            Decimal("1") + entry_slippage_rate
+            if direction == "long"
+            else Decimal("1") - entry_slippage_rate
         )
         risk_per_unit = entry_price - decision.stop_loss if direction == "long" else decision.stop_loss - entry_price
         if risk_per_unit <= 0:
@@ -159,12 +185,30 @@ def run_backtest(
             session_end_index=effective_session_end_index,
         )
         exit_candle = rows[exit_index]["candle"]
+        exit_slippage_rate = (
+            _calibrated_side_cost_rate(
+                execution_cost_model,
+                symbol=str(exit_candle["symbol"]),
+                timestamp=exit_candle["timestamp"],
+                stressed=str(params.get("execution_cost_scenario") or "stressed") != "observed",
+            )
+            if calibrated_costs
+            else slippage_rate
+        )
         if exit_reason.startswith("stop_loss"):
             raw_exit_price = decision.stop_loss
-            exit_price = decision.stop_loss * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
+            exit_price = decision.stop_loss * (
+                Decimal("1") - exit_slippage_rate
+                if direction == "long"
+                else Decimal("1") + exit_slippage_rate
+            )
         elif exit_reason == "take_profit":
             raw_exit_price = effective_take_profit
-            exit_price = effective_take_profit * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
+            exit_price = effective_take_profit * (
+                Decimal("1") - exit_slippage_rate
+                if direction == "long"
+                else Decimal("1") + exit_slippage_rate
+            )
         else:
             # Covers both the pre-existing "time_exit"/"end_of_data" reasons
             # and the new "session_close" reason: all three are a forced exit
@@ -172,7 +216,11 @@ def run_backtest(
             # session_close is not a special case here, it's just another
             # value this already-generic branch handles.
             raw_exit_price = Decimal(exit_candle["close"])
-            exit_price = Decimal(exit_candle["close"]) * (Decimal("1") - slippage_rate if direction == "long" else Decimal("1") + slippage_rate)
+            exit_price = Decimal(exit_candle["close"]) * (
+                Decimal("1") - exit_slippage_rate
+                if direction == "long"
+                else Decimal("1") + exit_slippage_rate
+            )
 
         entry_fee = entry_price * quantity * fee_rate
         if persist_bar_series:
@@ -222,6 +270,8 @@ def run_backtest(
                 "gross_pnl": gross_pnl,
                 "fees": fees,
                 "slippage_cost": slippage_cost,
+                "entry_execution_cost_bps": float(entry_slippage_rate * Decimal("10000")),
+                "exit_execution_cost_bps": float(exit_slippage_rate * Decimal("10000")),
                 "pnl": pnl,
                 "pnl_pct": pnl / initial_equity,
                 "exit_reason": exit_reason,
@@ -272,13 +322,21 @@ def run_backtest(
         # fixture and by historical stored results.
         "execution_semantics": {
             "version": (
-                EXECUTION_SEMANTICS_ABSOLUTE_TARGETS
+                EXECUTION_SEMANTICS_CALIBRATED_COSTS
+                if calibrated_costs
+                else EXECUTION_SEMANTICS_ABSOLUTE_TARGETS
                 if constraints.honor_absolute_take_profit
                 else EXECUTION_SEMANTICS_BASELINE
             ),
             "same_candle_exit_policy": SAME_CANDLE_EXIT_POLICY,
             "absolute_take_profit_honored": bool(constraints.honor_absolute_take_profit),
             "flat_by_session_close": bool(constraints.flat_by_session_close),
+            "calibrated_execution_costs": calibrated_costs,
+            "execution_cost_scenario": (
+                str(params.get("execution_cost_scenario") or "stressed")
+                if calibrated_costs
+                else None
+            ),
         },
         "trades": trades,
         "equity_curve": build_equity_curve(realized_equity_points),
@@ -288,6 +346,39 @@ def run_backtest(
         "equity_curve_summary": summarize_equity_curve(equity_curve),
         "bar_series_omitted": not persist_bar_series,
     }
+
+
+def _calibrated_side_cost_rate(
+    cost_model: dict[str, Any],
+    *,
+    symbol: str,
+    timestamp: datetime,
+    stressed: bool,
+) -> Decimal:
+    """Convert a calibrated round trip into one adverse side of a fill.
+
+    The calibrated model already includes spread/slippage and regulatory
+    costs, so fixed simulator fees are disabled whenever this path is active.
+    """
+    from app.services.intraday_research_integrity import estimated_round_trip_cost_bps
+
+    round_trip_bps = estimated_round_trip_cost_bps(
+        cost_model,
+        symbol=symbol,
+        timestamp=timestamp,
+        stressed=stressed,
+    )
+    return Decimal(str(round_trip_bps)) / Decimal("20000")
+
+
+def _session_date_parameter(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 
 def count_setup_opportunities(

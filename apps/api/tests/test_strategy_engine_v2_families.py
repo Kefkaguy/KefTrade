@@ -108,8 +108,8 @@ def run_family(architecture, bar_specs_by_session, param_overrides=None, *, time
 # Registry-level invariants
 # ---------------------------------------------------------------------------
 
-def test_all_seventeen_families_are_registered():
-    assert len(ARCHITECTURES) == 17
+def test_all_nineteen_families_are_registered():
+    assert len(ARCHITECTURES) == 19
     assert set(ARCHITECTURES) == set(V2_FAMILIES)
 
 
@@ -118,6 +118,8 @@ def test_new_flow_families_are_gated_before_campaigns():
     assert FAMILY_REGISTRY["opening_repricing_flow_v1"].supported_timeframes == ("30m",)
     assert FAMILY_REGISTRY["opening_repricing_flow_v1"].status == "archived"
     assert FAMILY_REGISTRY["first_to_last_half_hour_momentum_v1"].status == "research_only"
+    assert FAMILY_REGISTRY["overnight_gap_acceptance_absorption_v1"].status == "research_only"
+    assert FAMILY_REGISTRY["vwap_execution_pressure_v1"].status == "research_only"
     assert FAMILY_REGISTRY["same_slot_institutional_flow_v1"].status == "research_only"
     assert FAMILY_REGISTRY["gap_down_acceptance_short_confirmation_v1"].status == "confirmation_only"
     assert FAMILY_REGISTRY["liquidity_shock_reversal_v1"].status == "blocked_data"
@@ -456,6 +458,59 @@ def test_opening_repricing_flow_fires_when_gap_up_is_absorbed():
 
     assert result["trades"], "Opening Repricing Flow produced no trade on absorbed gap-up flow"
     assert result["trades"][0]["side"] == "short"
+
+
+def test_overnight_gap_acceptance_family_is_30m_only_and_fires():
+    strategy_cls = V2_FAMILIES["overnight_gap_acceptance_absorption_v1"]
+    with pytest.raises(ValueError, match="timeframe '15m' not permitted"):
+        strategy_cls({**BASE_V2_PARAMETERS, "direction": "both"}, timeframe="15m")
+
+    sessions = warmup()
+    sessions.append(
+        [
+            (105.0, 106.0, 104.8, 105.4, 3000),
+            (105.4, 107.0, 105.2, 106.5, 3500),
+            (106.5, 109.0, 106.2, 108.5, 3000),
+        ]
+        + [(108.5, 109.0, 108.0, 108.6, 1500) for _ in range(10)]
+    )
+    result = run_family(
+        "overnight_gap_acceptance_absorption_v1",
+        sessions,
+        {
+            "direction": "both",
+            "flow_mode": "acceptance",
+            "minimum_gap_fraction": Decimal("0.003"),
+            "minimum_relative_volume": Decimal("1.5"),
+            "max_holding_bars": 1,
+        },
+    )
+
+    assert result["trades"]
+    assert result["trades"][0]["side"] == "long"
+
+
+def test_vwap_execution_pressure_family_fires_on_displaced_heavy_flow():
+    sessions = warmup()
+    pressure = [
+        (100.0, 100.2, 99.8, 100.0, 1000),
+        (100.0, 100.4, 99.9, 100.3, 1000),
+        (100.3, 104.0, 100.2, 103.5, 5000),
+        (103.5, 106.0, 103.3, 105.5, 5000),
+    ] + [(105.5, 106.0, 105.0, 105.6, 1500) for _ in range(9)]
+    sessions.append(pressure)
+    result = run_family(
+        "vwap_execution_pressure_v1",
+        sessions,
+        {
+            "direction": "both",
+            "minimum_vwap_displacement": Decimal("0.001"),
+            "minimum_relative_volume": Decimal("1.5"),
+            "max_holding_bars": 1,
+        },
+    )
+
+    assert result["trades"]
 
 
 # ---------------------------------------------------------------------------

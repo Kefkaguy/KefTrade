@@ -132,3 +132,32 @@ def test_record_intraday_dataset_snapshot_rejects_empty_assets_or_timeframes():
         record_intraday_dataset_snapshot(conn, assets=[], timeframes=["30m"])
     with pytest.raises(ValueError, match="requires at least one asset and timeframe"):
         record_intraday_dataset_snapshot(conn, assets=["AMD"], timeframes=[])
+
+
+def test_predeclared_as_of_cutoff_changes_the_immutable_dataset_identity():
+    conn = FakeSnapshotConn()
+
+    first = record_intraday_dataset_snapshot(
+        conn,
+        assets=["AMD"],
+        timeframes=["30m"],
+        window_end=datetime(2026, 1, 31, tzinfo=UTC),
+    )
+    second = record_intraday_dataset_snapshot(
+        conn,
+        assets=["AMD"],
+        timeframes=["30m"],
+        window_end=datetime(2026, 2, 28, tzinfo=UTC),
+    )
+
+    assert first["dataset_key"] != second["dataset_key"]
+
+
+def test_as_of_cutoff_must_be_timezone_aware():
+    with pytest.raises(ValueError, match="timezone-aware"):
+        record_intraday_dataset_snapshot(
+            FakeSnapshotConn(),
+            assets=["AMD"],
+            timeframes=["30m"],
+            window_end=datetime(2026, 1, 31),
+        )

@@ -3,7 +3,15 @@ from decimal import Decimal
 import json
 from pathlib import Path
 
-from app.services.backtester import calculate_metrics, count_setup_opportunities, find_exit_index, mark_to_market_equity, run_backtest, walk_forward_split
+from app.services.backtester import (
+    EXECUTION_SEMANTICS_CALIBRATED_COSTS,
+    calculate_metrics,
+    count_setup_opportunities,
+    find_exit_index,
+    mark_to_market_equity,
+    run_backtest,
+    walk_forward_split,
+)
 from app.services.strategy import StrategyDecision
 
 
@@ -141,6 +149,47 @@ def test_backtest_can_delay_entry_by_additional_bars() -> None:
     assert result["trades"]
     assert result["trades"][0]["entry_time"] == candles[72]["timestamp"]
     assert result["trades"][0]["entry_price"] == candles[72]["open"]
+
+
+def test_backtest_charges_calibrated_stressed_costs_on_both_sides() -> None:
+    candles, features = make_rows()
+    result = run_backtest(
+        candles,
+        features,
+        {
+            **PARAMS,
+            "fee_rate": 0.5,
+            "slippage_rate": 0.5,
+            "execution_cost_model": {
+                "stressed_round_trip_bps": 20,
+                "conservative_round_trip_bps": 30,
+                "by_symbol": {},
+                "by_time_slot": {},
+            },
+            "execution_cost_scenario": "stressed",
+        },
+    )
+
+    trade = result["trades"][0]
+    assert result["execution_semantics"]["version"] == EXECUTION_SEMANTICS_CALIBRATED_COSTS
+    assert trade["entry_execution_cost_bps"] == 10
+    assert trade["exit_execution_cost_bps"] == 10
+    assert trade["fees"] == 0
+    assert trade["entry_price"] == candles[71]["open"] * Decimal("1.001")
+
+
+def test_backtest_locked_cutoff_suppresses_source_session_signals() -> None:
+    candles, features = make_rows()
+    result = run_backtest(
+        candles,
+        features,
+        {
+            **PARAMS,
+            "signal_start_session_date": candles[-1]["timestamp"].date(),
+        },
+    )
+
+    assert result["trades"] == []
 
 
 def test_same_candle_stop_target_policy_is_stop_first() -> None:

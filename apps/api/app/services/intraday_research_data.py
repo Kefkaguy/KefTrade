@@ -142,16 +142,12 @@ def research_data_readiness(
     ).fetchone()
     micro = conn.execute(
         """
-        SELECT COUNT(DISTINCT (micro.symbol, micro.timestamp)) AS rows,
-               COUNT(DISTINCT micro.symbol) AS symbols
-        FROM intraday_microstructure_features micro
-        JOIN research_dataset_intraday_features snapshot
-          ON snapshot.dataset_id = %s
-         AND snapshot.symbol = micro.symbol
-         AND snapshot.timeframe = micro.timeframe
-         AND snapshot.timestamp = micro.timestamp
-        WHERE micro.timeframe = %s
-          AND micro.symbol = ANY(%s)
+        SELECT COUNT(*) FILTER (WHERE quote_count > 0) AS rows,
+               COUNT(DISTINCT symbol) FILTER (WHERE quote_count > 0) AS symbols
+        FROM research_dataset_intraday_features
+        WHERE dataset_id = %s
+          AND timeframe = %s
+          AND symbol = ANY(%s)
         """,
         (
             dataset_id,

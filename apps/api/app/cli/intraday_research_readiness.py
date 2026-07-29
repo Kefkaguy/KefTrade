@@ -21,10 +21,10 @@ def execute(args: argparse.Namespace) -> dict:
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
-        description="Audit backend data required for institutional 15m/30m research."
+        description="Audit backend data required for institutional 30m research."
     )
     root.add_argument("--dataset-id", type=int, required=True)
-    root.add_argument("--timeframe", choices=("15m", "30m"), required=True)
+    root.add_argument("--timeframe", choices=("30m",), required=True)
     root.add_argument("--universe-key")
     return root
 

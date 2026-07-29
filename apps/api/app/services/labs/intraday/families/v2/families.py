@@ -1497,6 +1497,219 @@ register_v2_family(
 # Participant-flow research sequence (not campaign-eligible)
 # ===========================================================================
 
+class OvernightGapAcceptanceAbsorptionV1(V2Strategy):
+    architecture = "overnight_gap_acceptance_absorption_v1"
+    feature_groups = ("session", "gap", "relative_volume", "volatility")
+    supported_timeframes = ("30m",)
+    supports_short = True
+    hypothesis = HypothesisSpec(
+        title="Overnight Gap Acceptance / Absorption v1",
+        market_behavior=(
+            "Overnight repricing forces investors to trade near the open. Elevated "
+            "participation reveals whether regular-session liquidity accepts or absorbs it."
+        ),
+        hypothesis=(
+            "A gap of at least 30 bps continues after the second half-hour when no more "
+            "than 25% has filled, and reverses when at least 50% has filled, provided "
+            "session-relative volume is at least 1.5."
+        ),
+        required_conditions=(
+            "30-minute regular-session bars.",
+            "Decision after the second half-hour.",
+            "Absolute overnight gap of at least 30 bps.",
+            "Session-relative volume of at least 1.5.",
+        ),
+        invalidation_conditions=(
+            "The gap is between the acceptance and absorption thresholds.",
+            "Participation is ordinary.",
+            "Net evidence fails stressed execution costs.",
+        ),
+        success_criteria={
+            "minimum_trades": 50,
+            "minimum_net_profit_factor": 1.2,
+            "minimum_net_expectancy": 0,
+            "must_pass_locked_confirmation": True,
+            "must_clear_stressed_observed_cost": True,
+        },
+    )
+
+    def evaluate(self, candle, feature, v2, params) -> EntryPlan | str:
+        if int(v2.get("minutes_from_open") or -1) != 30:
+            return "Gap acceptance is evaluated only after the second half-hour."
+        gap = v2.get("gap_percent")
+        if gap is None or abs(float(gap)) < float(params.get("minimum_gap_fraction", 0.003)):
+            return "The overnight gap is below the forced-repricing threshold."
+        relative_volume = v2.get("session_relative_volume")
+        if relative_volume is None or float(relative_volume) < float(
+            params.get("minimum_relative_volume", 1.5)
+        ):
+            return "Opening participation is below the required relative-volume threshold."
+        fill = v2.get("gap_fill_fraction")
+        if fill is None:
+            return "Gap-fill state is unavailable."
+        mode = str(params.get("flow_mode") or "acceptance")
+        gap_direction = "long" if float(gap) > 0 else "short"
+        if mode == "acceptance":
+            if float(fill) > float(params.get("maximum_acceptance_fill_fraction", 0.25)):
+                return "Too much of the gap filled for acceptance."
+            direction = gap_direction
+        elif mode == "absorption":
+            if float(fill) < float(params.get("minimum_absorption_fill_fraction", 0.5)):
+                return "Too little of the gap filled for absorption."
+            direction = "short" if gap_direction == "long" else "long"
+        else:
+            return f"Unknown gap flow mode {mode!r}."
+        stop = candle["low"] if direction == "long" else candle["high"]
+        return EntryPlan(
+            direction,
+            _d(stop),
+            f"Overnight gap {mode} confirmed on {float(relative_volume):.2f}x volume.",
+        )
+
+
+register_v2_family(
+    OvernightGapAcceptanceAbsorptionV1,
+    dna={
+        **_INTRADAY_DNA_COMMON,
+        "strategy_version": "v1",
+        "family_architecture": "overnight_gap_acceptance_absorption_v1",
+        "direction_support": ["long", "short"],
+        "entry_structure": "overnight_gap_acceptance_absorption",
+        "confirmation_structure": ["gap_fill", "relative_volume", "session_window"],
+        "exit_structure": ["time_stop", "stop_loss", "session_close_forced"],
+        "holding_horizon_class": "intraday_minutes",
+        "timeframe_class": "intraday_30m",
+        "expected_frequency_class": "few_per_week",
+        "trend_dependency": "agnostic",
+        "volatility_dependency": "requires_expansion",
+        "volume_dependency": "requires_elevated",
+        "session_dependency": "open_only",
+        "gap_dependency": "requires_gap",
+        "market_structure_dependency": "uses_structure_context",
+        "behavior_class": "hybrid",
+        "required_regime": ["any"],
+        "invalidation_regime": ["none_declared"],
+        "feature_dependencies": [
+            "gap_percent",
+            "gap_fill_fraction",
+            "session_relative_volume",
+            "minutes_from_open",
+        ],
+        "evidence_confidence": "untested",
+    },
+    parameter_grid={
+        "flow_mode": ("acceptance", "absorption"),
+        "minimum_gap_fraction": (Decimal("0.003"),),
+        "minimum_relative_volume": (Decimal("1.5"),),
+        "maximum_acceptance_fill_fraction": (Decimal("0.25"),),
+        "minimum_absorption_fill_fraction": (Decimal("0.5"),),
+        "direction": ("both",),
+        "max_holding_bars": (1,),
+    },
+    blocks={
+        "entry": "overnight_gap_acceptance_absorption",
+        "exit": "one_bar_time_stop",
+    },
+)
+
+
+class VwapExecutionPressureV1(V2Strategy):
+    architecture = "vwap_execution_pressure_v1"
+    feature_groups = ("session", "relative_volume", "vwap", "volatility")
+    supported_timeframes = ("30m",)
+    supports_short = True
+    hypothesis = HypothesisSpec(
+        title="VWAP Execution Pressure v1",
+        market_behavior=(
+            "Scheduled institutional execution can keep price displaced from session VWAP "
+            "while participation remains abnormally high."
+        ),
+        hypothesis=(
+            "A close at least 10 bps from VWAP with session-relative volume of at least "
+            "1.5 predicts one more 30-minute bar in the displacement direction."
+        ),
+        required_conditions=(
+            "30-minute regular-session bars.",
+            "Session VWAP is known at decision time.",
+            "Session-relative volume is at least 1.5.",
+            "Absolute VWAP displacement is at least 10 bps.",
+        ),
+        invalidation_conditions=(
+            "Price returns to VWAP before entry.",
+            "Participation falls below the threshold.",
+            "Net evidence fails stressed execution costs.",
+        ),
+        success_criteria={
+            "minimum_trades": 100,
+            "minimum_net_profit_factor": 1.2,
+            "minimum_net_expectancy": 0,
+            "must_pass_locked_confirmation": True,
+            "must_clear_stressed_observed_cost": True,
+        },
+    )
+
+    def evaluate(self, candle, feature, v2, params) -> EntryPlan | str:
+        vwap = v2.get("session_vwap")
+        relative_volume = v2.get("session_relative_volume")
+        if vwap is None or float(vwap) <= 0:
+            return "Session VWAP is unavailable."
+        if relative_volume is None or float(relative_volume) < float(
+            params.get("minimum_relative_volume", 1.5)
+        ):
+            return "Participation is below the execution-pressure threshold."
+        displacement = (float(candle["close"]) - float(vwap)) / float(vwap)
+        if abs(displacement) < float(params.get("minimum_vwap_displacement", 0.001)):
+            return "VWAP displacement is below ten basis points."
+        direction = "long" if displacement > 0 else "short"
+        stop = candle["low"] if direction == "long" else candle["high"]
+        return EntryPlan(
+            direction,
+            _d(stop),
+            (
+                f"Price is {displacement:.3%} from VWAP on "
+                f"{float(relative_volume):.2f}x participation."
+            ),
+        )
+
+
+register_v2_family(
+    VwapExecutionPressureV1,
+    dna={
+        **_INTRADAY_DNA_COMMON,
+        "strategy_version": "v1",
+        "family_architecture": "vwap_execution_pressure_v1",
+        "direction_support": ["long", "short"],
+        "entry_structure": "vwap_execution_pressure",
+        "confirmation_structure": ["relative_volume", "vwap_displacement"],
+        "exit_structure": ["time_stop", "stop_loss", "session_close_forced"],
+        "holding_horizon_class": "intraday_minutes",
+        "timeframe_class": "intraday_30m",
+        "expected_frequency_class": "few_per_week",
+        "trend_dependency": "agnostic",
+        "volatility_dependency": "agnostic",
+        "volume_dependency": "requires_elevated",
+        "session_dependency": "any_session_time",
+        "gap_dependency": "agnostic",
+        "market_structure_dependency": "agnostic",
+        "behavior_class": "momentum",
+        "required_regime": ["any"],
+        "invalidation_regime": ["none_declared"],
+        "feature_dependencies": [
+            "session_vwap",
+            "session_relative_volume",
+        ],
+        "evidence_confidence": "untested",
+    },
+    parameter_grid={
+        "minimum_vwap_displacement": (Decimal("0.001"),),
+        "minimum_relative_volume": (Decimal("1.5"),),
+        "direction": ("both",),
+        "max_holding_bars": (1,),
+    },
+    blocks={"entry": "vwap_execution_pressure", "exit": "one_bar_time_stop"},
+)
+
+
 class FirstToLastHalfHourMomentumV1(V2Strategy):
     architecture = "first_to_last_half_hour_momentum_v1"
     feature_groups = ("session", "volatility")
@@ -1592,7 +1805,7 @@ register_v2_family(
 class SameSlotInstitutionalFlowV1(V2Strategy):
     architecture = "same_slot_institutional_flow_v1"
     feature_groups = ("session",)
-    supported_timeframes = ("15m", "30m")
+    supported_timeframes = ("30m",)
     supports_short = True
     hypothesis = HypothesisSpec(
         title="Cross-Sectional Same-Slot Institutional Flow v1",
@@ -1649,7 +1862,7 @@ register_v2_family(
         "confirmation_structure": ["session_window"],
         "exit_structure": ["time_stop", "stop_loss", "session_close_forced"],
         "holding_horizon_class": "intraday_minutes",
-        "timeframe_class": "intraday_15m_30m",
+        "timeframe_class": "intraday_30m",
         "expected_frequency_class": "multiple_per_session",
         "trend_dependency": "agnostic",
         "volatility_dependency": "agnostic",
@@ -1767,7 +1980,7 @@ register_v2_family(
 class LiquidityShockReversalV1(V2Strategy):
     architecture = "liquidity_shock_reversal_v1"
     feature_groups = ("session", "relative_volume", "volatility", "microstructure")
-    supported_timeframes = ("15m", "30m")
+    supported_timeframes = ("30m",)
     supports_short = True
     hypothesis = HypothesisSpec(
         title="Liquidity-Shock Reversal v1",
@@ -1828,7 +2041,7 @@ register_v2_family(
         "confirmation_structure": ["relative_volume", "volatility_expansion", "quote_flow_exhaustion"],
         "exit_structure": ["time_stop", "stop_loss", "session_close_forced"],
         "holding_horizon_class": "intraday_minutes",
-        "timeframe_class": "intraday_15m_30m",
+        "timeframe_class": "intraday_30m",
         "expected_frequency_class": "few_per_week",
         "trend_dependency": "agnostic",
         "volatility_dependency": "requires_expansion",
@@ -1877,6 +2090,8 @@ NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES = (
 )
 
 RESEARCH_ONLY_V2_ARCHITECTURES: tuple[str, ...] = (
+    "overnight_gap_acceptance_absorption_v1",
+    "vwap_execution_pressure_v1",
     "first_to_last_half_hour_momentum_v1",
     "same_slot_institutional_flow_v1",
 )

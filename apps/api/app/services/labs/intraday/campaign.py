@@ -145,6 +145,7 @@ def _create_intraday_campaign(
     campaign_label: str | None = None,
     hypothesis_version_id: int | None = None,
     assets_override: list[str] | None = None,
+    dataset_id_override: int | None = None,
 ) -> dict[str, Any]:
     from app.services.labs.intraday.dataset_snapshot import record_intraday_dataset_snapshot
     from app.services.research_campaigns import (
@@ -192,7 +193,45 @@ def _create_intraday_campaign(
     # (exactly the ambiguity Phase 12.4 had to caveat manually when comparing
     # Campaign 50 against Campaign 47). Idempotent by content hash: relaunching
     # against unchanged underlying data reuses the same dataset_id.
-    dataset = record_intraday_dataset_snapshot(conn, assets=assets, timeframes=selected_timeframes, mode="rolling")
+    if dataset_id_override is None:
+        dataset = record_intraday_dataset_snapshot(
+            conn,
+            assets=assets,
+            timeframes=selected_timeframes,
+            mode="rolling",
+        )
+    else:
+        dataset_row = conn.execute(
+            """
+            SELECT *
+            FROM research_dataset_manifests
+            WHERE id = %s
+              AND dataset_kind = 'intraday'
+              AND immutable = TRUE
+              AND simulation_only = TRUE
+            """,
+            (dataset_id_override,),
+        ).fetchone()
+        if not dataset_row:
+            raise ValueError(
+                f"dataset_id_override={dataset_id_override} is not an immutable "
+                "intraday research snapshot"
+            )
+        dataset = jsonable(dict(dataset_row))
+        available_assets = {
+            str(value).upper() for value in (dataset.get("assets") or [])
+        }
+        available_timeframes = {
+            str(value) for value in (dataset.get("timeframes") or [])
+        }
+        missing_assets = sorted(set(assets) - available_assets)
+        missing_timeframes = sorted(set(selected_timeframes) - available_timeframes)
+        if missing_assets or missing_timeframes:
+            raise ValueError(
+                "The locked dataset does not contain the requested campaign scope: "
+                f"missing_assets={missing_assets}, "
+                f"missing_timeframes={missing_timeframes}"
+            )
     dataset_id = int(dataset["id"])
 
     # campaign_label lets a caller relaunch the exact same family/asset/
@@ -202,7 +241,10 @@ def _create_intraday_campaign(
     # already-archived campaign (research_campaign_key's own docstring notes
     # exactly this: a variant that changes the research question must not
     # collide with an earlier campaign).
-    variant = architecture if not campaign_label else f"{architecture}|{campaign_label}"
+    variant_parts = [architecture, f"dataset:{dataset_id}"]
+    if campaign_label:
+        variant_parts.append(campaign_label)
+    variant = "|".join(variant_parts)
     campaign_key = research_campaign_key(
         "research_core_ten",
         assets,
@@ -240,7 +282,7 @@ def _create_intraday_campaign(
             SAFETY_STATEMENT,
             architecture,
             dataset_id,
-            "rolling",
+            str(dataset.get("mode") or "rolling"),
             hypothesis_version_id,
         ),
     ).fetchone()
