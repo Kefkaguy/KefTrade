@@ -7,6 +7,8 @@ import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 
+import httpx
+
 from app.db import connect
 from app.providers.alpaca import fetch_stock_quotes, normalize_stock_quote
 from app.services.intraday_execution_costs import (
@@ -179,14 +181,18 @@ async def _fetch_complete_session_quotes(
     window_end: datetime,
     limit: int,
     feed: str,
+    rate_limit_retries: int = 5,
+    rate_limit_base_sleep: float = 60.0,
 ) -> list[dict]:
     """Fetch a session completely, splitting only when pagination exhausts."""
-    _, raw, request_log, _ = await fetch_stock_quotes(
+    _, raw, request_log, _ = await _fetch_stock_quotes_with_rate_limit_retry(
         symbol,
         start=window_start,
         end=window_end,
         limit=limit,
         feed=feed,
+        retries=rate_limit_retries,
+        base_sleep=rate_limit_base_sleep,
     )
     if not request_log or not request_log[-1].get("next_page_token_present"):
         return raw
@@ -197,12 +203,14 @@ async def _fetch_complete_session_quotes(
         window_end,
         timeframe="30m",
     ):
-        _, sub_rows, sub_log, _ = await fetch_stock_quotes(
+        _, sub_rows, sub_log, _ = await _fetch_stock_quotes_with_rate_limit_retry(
             symbol,
             start=sub_start,
             end=sub_end,
             limit=limit,
             feed=feed,
+            retries=rate_limit_retries,
+            base_sleep=rate_limit_base_sleep,
         )
         if sub_log and sub_log[-1].get("next_page_token_present"):
             raise RuntimeError(
@@ -212,6 +220,53 @@ async def _fetch_complete_session_quotes(
             )
         complete.extend(sub_rows)
     return complete
+
+
+def _retry_after_seconds(error: httpx.HTTPStatusError) -> float | None:
+    header = error.response.headers.get("Retry-After")
+    if not header:
+        return None
+    try:
+        value = float(header)
+    except ValueError:
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+async def _fetch_stock_quotes_with_rate_limit_retry(
+    symbol: str,
+    *,
+    start: datetime,
+    end: datetime,
+    limit: int,
+    feed: str,
+    retries: int,
+    base_sleep: float,
+) -> tuple[int, list[dict], list[dict], str | None]:
+    attempts = max(0, retries) + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return await fetch_stock_quotes(
+                symbol,
+                start=start,
+                end=end,
+                limit=limit,
+                feed=feed,
+            )
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code != 429 or attempt == attempts:
+                raise
+            retry_after = _retry_after_seconds(error)
+            sleep_seconds = retry_after if retry_after is not None else base_sleep * attempt
+            print(
+                f"quotes {symbol}: provider rate-limited; retry "
+                f"{attempt}/{attempts - 1} after {sleep_seconds:.1f}s",
+                flush=True,
+            )
+            await asyncio.sleep(sleep_seconds)
+    raise RuntimeError("unreachable quote retry state")
 
 
 async def sync_quotes(args: argparse.Namespace) -> dict:
@@ -257,6 +312,8 @@ async def sync_quotes(args: argparse.Namespace) -> dict:
                     window_end=window_end,
                     limit=args.max_quotes_per_session,
                     feed=args.feed,
+                    rate_limit_retries=args.rate_limit_retries,
+                    rate_limit_base_sleep=args.rate_limit_base_sleep,
                 )
                 normalized_by_timestamp = {}
                 for row in raw:
@@ -291,6 +348,8 @@ async def sync_quotes(args: argparse.Namespace) -> dict:
                         f"quotes {symbol}: {session_number}/{len(sessions)} sessions",
                         flush=True,
                     )
+                if args.request_pause_seconds > 0:
+                    await asyncio.sleep(args.request_pause_seconds)
             except Exception as error:
                 failed_sessions += 1
                 with connect() as conn:
@@ -426,6 +485,24 @@ def parser() -> argparse.ArgumentParser:
     sync.add_argument("--timeframes", nargs="+", choices=("30m",), default=["30m"])
     sync.add_argument("--resume", action=argparse.BooleanOptionalAction, default=True)
     sync.add_argument("--continue-on-error", action="store_true")
+    sync.add_argument(
+        "--rate-limit-retries",
+        type=int,
+        default=8,
+        help="Retry HTTP 429 responses before marking a symbol/session failed.",
+    )
+    sync.add_argument(
+        "--rate-limit-base-sleep",
+        type=float,
+        default=60.0,
+        help="Seconds to wait per retry attempt when the provider does not send Retry-After.",
+    )
+    sync.add_argument(
+        "--request-pause-seconds",
+        type=float,
+        default=0.0,
+        help="Optional pause after each completed symbol/session to stay below provider limits.",
+    )
     sync.add_argument(
         "--allow-partial-feed",
         action="store_true",

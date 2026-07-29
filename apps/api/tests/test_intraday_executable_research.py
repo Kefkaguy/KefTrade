@@ -2,6 +2,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import httpx
 import pytest
 
 from app.cli.intraday_executable_research import parser
@@ -175,3 +176,68 @@ def test_sip_session_fetch_splits_only_when_pagination_is_incomplete(monkeypatch
 
     assert len(calls) == 3
     assert rows == [{"t": "2"}, {"t": "3"}]
+
+
+def test_quote_fetch_retries_rate_limits(monkeypatch):
+    start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
+    calls = 0
+    sleeps = []
+
+    async def fake_fetch(symbol, *, start, end, limit, feed):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            request = httpx.Request("GET", "https://data.alpaca.markets/v2/stocks/AAPL/quotes")
+            response = httpx.Response(429, request=request)
+            raise httpx.HTTPStatusError("Too Many Requests", request=request, response=response)
+        return 200, [{"t": "ok"}], [{"next_page_token_present": False}], "req_2"
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(intraday_costs, "fetch_stock_quotes", fake_fetch)
+    monkeypatch.setattr(intraday_costs.asyncio, "sleep", fake_sleep)
+
+    result = asyncio.run(
+        intraday_costs._fetch_stock_quotes_with_rate_limit_retry(
+            "AAPL",
+            start=start,
+            end=start + timedelta(minutes=30),
+            limit=100,
+            feed="sip",
+            retries=2,
+            base_sleep=3,
+        )
+    )
+
+    assert calls == 2
+    assert sleeps == [3]
+    assert result[1] == [{"t": "ok"}]
+
+
+def test_quote_fetch_uses_retry_after_header(monkeypatch):
+    request = httpx.Request("GET", "https://data.alpaca.markets/v2/stocks/AAPL/quotes")
+    response = httpx.Response(429, headers={"Retry-After": "11"}, request=request)
+    error = httpx.HTTPStatusError("Too Many Requests", request=request, response=response)
+
+    assert intraday_costs._retry_after_seconds(error) == 11
+
+
+def test_sync_quotes_cli_exposes_rate_limit_controls():
+    args = intraday_costs.parser().parse_args(
+        [
+            "sync-quotes",
+            "--symbols",
+            "AAPL",
+            "--rate-limit-retries",
+            "4",
+            "--rate-limit-base-sleep",
+            "7.5",
+            "--request-pause-seconds",
+            "2",
+        ]
+    )
+
+    assert args.rate_limit_retries == 4
+    assert args.rate_limit_base_sleep == 7.5
+    assert args.request_pause_seconds == 2
