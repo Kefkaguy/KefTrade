@@ -51,18 +51,31 @@ from app.services.strategy_discovery import (
     canonical_candidate_key,
 )
 
-EXECUTABLE_RESEARCH_VERSION = "intraday_executable_research_v1"
+EXECUTABLE_RESEARCH_VERSION = "intraday_executable_research_v2_directional_variants"
 TIMEFRAME = "30m"
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 FACTOR_ARCHITECTURES = {
     "first_to_last_half_hour_market_momentum":
         "first_to_last_half_hour_momentum_v1",
+    "first_to_last_half_hour_market_reversal":
+        "first_to_last_half_hour_momentum_v1",
     "overnight_gap_acceptance_absorption":
+        "overnight_gap_acceptance_absorption_v1",
+    "gap_up_acceptance_continuation":
+        "overnight_gap_acceptance_absorption_v1",
+    "gap_down_acceptance_continuation":
+        "overnight_gap_acceptance_absorption_v1",
+    "gap_up_absorption_reversal":
+        "overnight_gap_acceptance_absorption_v1",
+    "gap_down_absorption_reversal":
         "overnight_gap_acceptance_absorption_v1",
     "cross_sectional_same_slot_continuation":
         "same_slot_institutional_flow_v1",
+    "cross_sectional_same_slot_reversal":
+        "same_slot_institutional_flow_v1",
     "vwap_execution_pressure": "vwap_execution_pressure_v1",
+    "vwap_execution_pressure_fade": "vwap_execution_pressure_v1",
     "liquidity_shock_reversal": "liquidity_shock_reversal_v1",
 }
 
@@ -73,6 +86,15 @@ FACTOR_RECIPES: dict[str, tuple[dict[str, Any], ...]] = {
     "first_to_last_half_hour_market_momentum": (
         {
             "minimum_opening_return": 0.002,
+            "signal_polarity": "continuation",
+            "direction": "both",
+            "max_holding_bars": 1,
+        },
+    ),
+    "first_to_last_half_hour_market_reversal": (
+        {
+            "minimum_opening_return": 0.002,
+            "signal_polarity": "reversal",
             "direction": "both",
             "max_holding_bars": 1,
         },
@@ -80,6 +102,7 @@ FACTOR_RECIPES: dict[str, tuple[dict[str, Any], ...]] = {
     "overnight_gap_acceptance_absorption": (
         {
             "flow_mode": "acceptance",
+            "gap_side": "both",
             "minimum_gap_fraction": 0.003,
             "minimum_relative_volume": 1.5,
             "maximum_acceptance_fill_fraction": 0.25,
@@ -89,6 +112,55 @@ FACTOR_RECIPES: dict[str, tuple[dict[str, Any], ...]] = {
         },
         {
             "flow_mode": "absorption",
+            "gap_side": "both",
+            "minimum_gap_fraction": 0.003,
+            "minimum_relative_volume": 1.5,
+            "maximum_acceptance_fill_fraction": 0.25,
+            "minimum_absorption_fill_fraction": 0.5,
+            "direction": "both",
+            "max_holding_bars": 1,
+        },
+    ),
+    "gap_up_acceptance_continuation": (
+        {
+            "flow_mode": "acceptance",
+            "gap_side": "up",
+            "minimum_gap_fraction": 0.003,
+            "minimum_relative_volume": 1.5,
+            "maximum_acceptance_fill_fraction": 0.25,
+            "minimum_absorption_fill_fraction": 0.5,
+            "direction": "both",
+            "max_holding_bars": 1,
+        },
+    ),
+    "gap_down_acceptance_continuation": (
+        {
+            "flow_mode": "acceptance",
+            "gap_side": "down",
+            "minimum_gap_fraction": 0.003,
+            "minimum_relative_volume": 1.5,
+            "maximum_acceptance_fill_fraction": 0.25,
+            "minimum_absorption_fill_fraction": 0.5,
+            "direction": "both",
+            "max_holding_bars": 1,
+        },
+    ),
+    "gap_up_absorption_reversal": (
+        {
+            "flow_mode": "absorption",
+            "gap_side": "up",
+            "minimum_gap_fraction": 0.003,
+            "minimum_relative_volume": 1.5,
+            "maximum_acceptance_fill_fraction": 0.25,
+            "minimum_absorption_fill_fraction": 0.5,
+            "direction": "both",
+            "max_holding_bars": 1,
+        },
+    ),
+    "gap_down_absorption_reversal": (
+        {
+            "flow_mode": "absorption",
+            "gap_side": "down",
             "minimum_gap_fraction": 0.003,
             "minimum_relative_volume": 1.5,
             "maximum_acceptance_fill_fraction": 0.25,
@@ -102,6 +174,17 @@ FACTOR_RECIPES: dict[str, tuple[dict[str, Any], ...]] = {
             "cross_sectional_lookback_bars": 20,
             "upper_percentile": 0.8,
             "lower_percentile": 0.2,
+            "signal_polarity": "continuation",
+            "direction": "both",
+            "max_holding_bars": 1,
+        },
+    ),
+    "cross_sectional_same_slot_reversal": (
+        {
+            "cross_sectional_lookback_bars": 20,
+            "upper_percentile": 0.8,
+            "lower_percentile": 0.2,
+            "signal_polarity": "reversal",
             "direction": "both",
             "max_holding_bars": 1,
         },
@@ -110,6 +193,16 @@ FACTOR_RECIPES: dict[str, tuple[dict[str, Any], ...]] = {
         {
             "minimum_vwap_displacement": 0.001,
             "minimum_relative_volume": 1.5,
+            "signal_polarity": "continuation",
+            "direction": "both",
+            "max_holding_bars": 1,
+        },
+    ),
+    "vwap_execution_pressure_fade": (
+        {
+            "minimum_vwap_displacement": 0.001,
+            "minimum_relative_volume": 1.5,
+            "signal_polarity": "reversal",
             "direction": "both",
             "max_holding_bars": 1,
         },
@@ -1022,7 +1115,10 @@ def _dataset_assets(conn: psycopg.Connection, dataset_id: int) -> list[str]:
 
 def _candidate_symbols(factor_key: str, assets: Sequence[str]) -> list[str]:
     available = list(dict.fromkeys(str(value).upper() for value in assets))
-    if factor_key == "first_to_last_half_hour_market_momentum":
+    if factor_key in {
+        "first_to_last_half_hour_market_momentum",
+        "first_to_last_half_hour_market_reversal",
+    }:
         selected = [symbol for symbol in ("SPY", "QQQ") if symbol in available]
         if len(selected) < 2:
             raise ValueError("First-to-last research requires both SPY and QQQ.")

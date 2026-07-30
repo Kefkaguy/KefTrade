@@ -1549,6 +1549,13 @@ class OvernightGapAcceptanceAbsorptionV1(V2Strategy):
             return "Gap-fill state is unavailable."
         mode = str(params.get("flow_mode") or "acceptance")
         gap_direction = "long" if float(gap) > 0 else "short"
+        requested_gap_side = str(params.get("gap_side") or "both")
+        observed_gap_side = "up" if gap_direction == "long" else "down"
+        if requested_gap_side not in ("both", observed_gap_side):
+            return (
+                f"The observed gap is {observed_gap_side}, outside the frozen "
+                f"{requested_gap_side} hypothesis."
+            )
         if mode == "acceptance":
             if float(fill) > float(params.get("maximum_acceptance_fill_fraction", 0.25)):
                 return "Too much of the gap filled for acceptance."
@@ -1599,6 +1606,7 @@ register_v2_family(
     },
     parameter_grid={
         "flow_mode": ("acceptance", "absorption"),
+        "gap_side": ("both", "up", "down"),
         "minimum_gap_fraction": (Decimal("0.003"),),
         "minimum_relative_volume": (Decimal("1.5"),),
         "maximum_acceptance_fill_fraction": (Decimal("0.25"),),
@@ -1661,6 +1669,11 @@ class VwapExecutionPressureV1(V2Strategy):
         if abs(displacement) < float(params.get("minimum_vwap_displacement", 0.001)):
             return "VWAP displacement is below ten basis points."
         direction = "long" if displacement > 0 else "short"
+        signal_polarity = str(params.get("signal_polarity") or "continuation")
+        if signal_polarity == "reversal":
+            direction = "short" if direction == "long" else "long"
+        elif signal_polarity != "continuation":
+            return f"Unknown VWAP signal polarity {signal_polarity!r}."
         stop = candle["low"] if direction == "long" else candle["high"]
         return EntryPlan(
             direction,
@@ -1703,6 +1716,7 @@ register_v2_family(
     parameter_grid={
         "minimum_vwap_displacement": (Decimal("0.001"),),
         "minimum_relative_volume": (Decimal("1.5"),),
+        "signal_polarity": ("continuation", "reversal"),
         "direction": ("both",),
         "max_holding_bars": (1,),
     },
@@ -1760,6 +1774,11 @@ class FirstToLastHalfHourMomentumV1(V2Strategy):
         if abs(float(opening_return)) < threshold:
             return "Opening information flow is below the pre-declared magnitude threshold."
         direction = "long" if float(opening_return) > 0 else "short"
+        signal_polarity = str(params.get("signal_polarity") or "continuation")
+        if signal_polarity == "reversal":
+            direction = "short" if direction == "long" else "long"
+        elif signal_polarity != "continuation":
+            return f"Unknown first-to-last signal polarity {signal_polarity!r}."
         stop = candle["low"] if direction == "long" else candle["high"]
         return EntryPlan(
             direction,
@@ -1795,6 +1814,7 @@ register_v2_family(
     },
     parameter_grid={
         "minimum_opening_return": (Decimal("0.001"), Decimal("0.002"), Decimal("0.003")),
+        "signal_polarity": ("continuation", "reversal"),
         "direction": ("long", "short"),
         "max_holding_bars": (1,),
     },
@@ -1844,10 +1864,33 @@ class SameSlotInstitutionalFlowV1(V2Strategy):
             return "The next-slot cross-sectional rank is not measurable."
         upper = float(params.get("upper_percentile", 0.8))
         lower = float(params.get("lower_percentile", 0.2))
+        signal_polarity = str(params.get("signal_polarity") or "continuation")
+        if signal_polarity not in ("continuation", "reversal"):
+            return f"Unknown same-slot signal polarity {signal_polarity!r}."
         if float(percentile) >= upper and float(score) > 0:
-            return EntryPlan("long", _d(candle["low"]), "Positive next-slot flow ranks in the long tail.")
+            if signal_polarity == "reversal":
+                return EntryPlan(
+                    "short",
+                    _d(candle["high"]),
+                    "Positive next-slot flow ranks in the reversal short tail.",
+                )
+            return EntryPlan(
+                "long",
+                _d(candle["low"]),
+                "Positive next-slot flow ranks in the long tail.",
+            )
         if float(percentile) <= lower and float(score) < 0:
-            return EntryPlan("short", _d(candle["high"]), "Negative next-slot flow ranks in the short tail.")
+            if signal_polarity == "reversal":
+                return EntryPlan(
+                    "long",
+                    _d(candle["low"]),
+                    "Negative next-slot flow ranks in the reversal long tail.",
+                )
+            return EntryPlan(
+                "short",
+                _d(candle["high"]),
+                "Negative next-slot flow ranks in the short tail.",
+            )
         return "Next-slot institutional-flow score is not in a directionally consistent tail."
 
 
@@ -1883,6 +1926,7 @@ register_v2_family(
         "cross_sectional_lookback_bars": (20, 40),
         "upper_percentile": (Decimal("0.8"),),
         "lower_percentile": (Decimal("0.2"),),
+        "signal_polarity": ("continuation", "reversal"),
         "direction": ("long", "short"),
         "max_holding_bars": (1,),
     },

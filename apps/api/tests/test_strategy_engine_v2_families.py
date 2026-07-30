@@ -30,6 +30,7 @@ from app.services.labs.intraday.families.v2.base import (
     V2_FAMILIES,
     V2_HYPOTHESES,
     V2_PARAMETER_GRIDS,
+    EntryPlan,
     HypothesisSpec,
     generate_v2_candidates,
 )
@@ -511,6 +512,106 @@ def test_vwap_execution_pressure_family_fires_on_displaced_heavy_flow():
     )
 
     assert result["trades"]
+
+
+def test_participant_flow_executable_variants_honor_frozen_polarity_and_gap_side():
+    candle = {
+        "open": Decimal("100"),
+        "high": Decimal("103"),
+        "low": Decimal("99"),
+        "close": Decimal("102"),
+    }
+
+    first_params = {
+        **BASE_V2_PARAMETERS,
+        "minimum_opening_return": Decimal("0.002"),
+        "signal_polarity": "reversal",
+        "direction": "both",
+    }
+    first = V2_FAMILIES["first_to_last_half_hour_momentum_v1"](
+        first_params,
+        timeframe="30m",
+    ).evaluate(
+        candle,
+        {},
+        {
+            "minutes_to_close": 30,
+            "first_half_hour_return_from_prior_close": Decimal("0.01"),
+        },
+        first_params,
+    )
+    assert isinstance(first, EntryPlan)
+    assert first.direction == "short"
+
+    vwap_params = {
+        **BASE_V2_PARAMETERS,
+        "minimum_vwap_displacement": Decimal("0.001"),
+        "minimum_relative_volume": Decimal("1.5"),
+        "signal_polarity": "reversal",
+        "direction": "both",
+    }
+    vwap = V2_FAMILIES["vwap_execution_pressure_v1"](
+        vwap_params,
+        timeframe="30m",
+    ).evaluate(
+        candle,
+        {},
+        {
+            "session_vwap": Decimal("100"),
+            "session_relative_volume": Decimal("2"),
+        },
+        vwap_params,
+    )
+    assert isinstance(vwap, EntryPlan)
+    assert vwap.direction == "short"
+
+    same_slot_params = {
+        **BASE_V2_PARAMETERS,
+        "upper_percentile": Decimal("0.8"),
+        "lower_percentile": Decimal("0.2"),
+        "signal_polarity": "reversal",
+        "direction": "both",
+    }
+    same_slot = V2_FAMILIES["same_slot_institutional_flow_v1"](
+        same_slot_params,
+        timeframe="30m",
+    ).evaluate(
+        candle,
+        {
+            "cross_sectional_next_same_slot_percentile": Decimal("0.9"),
+            "cross_sectional_next_same_slot_score": Decimal("0.01"),
+        },
+        {},
+        same_slot_params,
+    )
+    assert isinstance(same_slot, EntryPlan)
+    assert same_slot.direction == "short"
+
+    gap_params = {
+        **BASE_V2_PARAMETERS,
+        "flow_mode": "acceptance",
+        "gap_side": "down",
+        "minimum_gap_fraction": Decimal("0.003"),
+        "minimum_relative_volume": Decimal("1.5"),
+        "maximum_acceptance_fill_fraction": Decimal("0.25"),
+        "direction": "both",
+    }
+    gap = V2_FAMILIES["overnight_gap_acceptance_absorption_v1"](
+        gap_params,
+        timeframe="30m",
+    ).evaluate(
+        candle,
+        {},
+        {
+            "minutes_from_open": 30,
+            "gap_percent": Decimal("0.01"),
+            "gap_fill_fraction": Decimal("0.1"),
+            "session_relative_volume": Decimal("2"),
+        },
+        gap_params,
+    )
+    assert isinstance(gap, str)
+    assert "outside the frozen down hypothesis" in gap
 
 
 # ---------------------------------------------------------------------------

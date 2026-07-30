@@ -31,6 +31,21 @@ def cost_model(feed="sip"):
 def test_every_tradable_factor_has_a_frozen_candidate_recipe():
     assert set(FACTOR_ARCHITECTURES) == set(FACTOR_RECIPES)
     assert "auction_imbalance_pressure" not in FACTOR_ARCHITECTURES
+    assert FACTOR_RECIPES["first_to_last_half_hour_market_reversal"][0][
+        "signal_polarity"
+    ] == "reversal"
+    assert FACTOR_RECIPES["gap_down_acceptance_continuation"][0][
+        "gap_side"
+    ] == "down"
+    assert FACTOR_RECIPES["gap_up_absorption_reversal"][0]["flow_mode"] == (
+        "absorption"
+    )
+    assert FACTOR_RECIPES["cross_sectional_same_slot_reversal"][0][
+        "signal_polarity"
+    ] == "reversal"
+    assert FACTOR_RECIPES["vwap_execution_pressure_fade"][0][
+        "signal_polarity"
+    ] == "reversal"
 
 
 def test_candidate_translation_is_deterministic_and_cost_aware():
@@ -69,6 +84,10 @@ def test_first_to_last_candidate_requires_both_benchmark_etfs():
             "first_to_last_half_hour_market_momentum",
             ["SPY", "AAPL"],
         )
+    assert _candidate_symbols(
+        "first_to_last_half_hour_market_reversal",
+        ["AAPL", "SPY", "QQQ"],
+    ) == ["SPY", "QQQ"]
 
 
 def test_backend_cli_exposes_no_15m_option():

@@ -30,12 +30,18 @@ from app.services.intraday_research_integrity import (
     exchange_session_date,
 )
 
-FACTOR_DIAGNOSTICS_VERSION = "intraday_factor_diagnostics_v2"
+FACTOR_DIAGNOSTICS_VERSION = "intraday_factor_diagnostics_v3_directional_variants"
 DEFAULT_FACTOR_KEYS = (
     "first_to_last_half_hour_market_momentum",
-    "overnight_gap_acceptance_absorption",
+    "first_to_last_half_hour_market_reversal",
+    "gap_up_acceptance_continuation",
+    "gap_down_acceptance_continuation",
+    "gap_up_absorption_reversal",
+    "gap_down_absorption_reversal",
     "cross_sectional_same_slot_continuation",
+    "cross_sectional_same_slot_reversal",
     "vwap_execution_pressure",
+    "vwap_execution_pressure_fade",
     "liquidity_shock_reversal",
     "auction_imbalance_pressure",
 )
@@ -167,6 +173,28 @@ def first_to_last_half_hour_observations(
     return observations
 
 
+def first_to_last_half_hour_reversal_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Opening half-hour return predicts the opposite final-half-hour return."""
+    return [
+        {
+            **row,
+            "factor_key": "first_to_last_half_hour_market_reversal",
+            "score": -float(row["score"]),
+            "signal_polarity": "reversal",
+        }
+        for row in first_to_last_half_hour_observations(
+            candles_by_symbol,
+            timeframe=timeframe,
+            **kwargs,
+        )
+    ]
+
+
 def cross_sectional_same_slot_observations(
     candles_by_symbol: dict[str, list[dict[str, Any]]],
     *,
@@ -213,6 +241,28 @@ def cross_sectional_same_slot_observations(
         for rows in grouped.values()
         if len(rows) >= 4
         for row in rows
+    ]
+
+
+def cross_sectional_same_slot_reversal_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Persistent same-slot leaders predict underperformance at the next slot."""
+    return [
+        {
+            **row,
+            "factor_key": "cross_sectional_same_slot_reversal",
+            "score": -float(row["score"]),
+            "signal_polarity": "reversal",
+        }
+        for row in cross_sectional_same_slot_observations(
+            candles_by_symbol,
+            timeframe=timeframe,
+            **kwargs,
+        )
     ]
 
 
@@ -268,6 +318,8 @@ def overnight_gap_acceptance_absorption_observations(
                                 "score": gap,
                                 "target_return": next_return,
                                 "flow_state": "acceptance",
+                                "gap_return": gap,
+                                "gap_direction": "up" if gap > 0 else "down",
                             }
                         )
                     elif next_return is not None and gap_fill >= 0.50:
@@ -280,11 +332,105 @@ def overnight_gap_acceptance_absorption_observations(
                                 "score": -gap,
                                 "target_return": next_return,
                                 "flow_state": "absorption",
+                                "gap_return": gap,
+                                "gap_direction": "up" if gap > 0 else "down",
                             }
                         )
             if session:
                 previous_close = float(session[-1]["close"])
     return output
+
+
+def _overnight_gap_variant_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    factor_key: str,
+    gap_direction: str,
+    flow_state: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Select one predeclared gap side/state without changing its economic sign."""
+    return [
+        {
+            **row,
+            "factor_key": factor_key,
+            "signal_polarity": (
+                "continuation" if flow_state == "acceptance" else "reversal"
+            ),
+        }
+        for row in overnight_gap_acceptance_absorption_observations(
+            candles_by_symbol,
+            timeframe=timeframe,
+            **kwargs,
+        )
+        if row["gap_direction"] == gap_direction
+        and row["flow_state"] == flow_state
+    ]
+
+
+def gap_up_acceptance_continuation_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    return _overnight_gap_variant_observations(
+        candles_by_symbol,
+        timeframe=timeframe,
+        factor_key="gap_up_acceptance_continuation",
+        gap_direction="up",
+        flow_state="acceptance",
+        **kwargs,
+    )
+
+
+def gap_down_acceptance_continuation_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    return _overnight_gap_variant_observations(
+        candles_by_symbol,
+        timeframe=timeframe,
+        factor_key="gap_down_acceptance_continuation",
+        gap_direction="down",
+        flow_state="acceptance",
+        **kwargs,
+    )
+
+
+def gap_up_absorption_reversal_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    return _overnight_gap_variant_observations(
+        candles_by_symbol,
+        timeframe=timeframe,
+        factor_key="gap_up_absorption_reversal",
+        gap_direction="up",
+        flow_state="absorption",
+        **kwargs,
+    )
+
+
+def gap_down_absorption_reversal_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    return _overnight_gap_variant_observations(
+        candles_by_symbol,
+        timeframe=timeframe,
+        factor_key="gap_down_absorption_reversal",
+        gap_direction="down",
+        flow_state="absorption",
+        **kwargs,
+    )
 
 
 def vwap_execution_pressure_observations(
@@ -324,6 +470,28 @@ def vwap_execution_pressure_observations(
                 }
             )
     return output
+
+
+def vwap_execution_pressure_fade_observations(
+    candles_by_symbol: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    **kwargs: Any,
+) -> list[dict[str, Any]]:
+    """Abnormal displacement from VWAP predicts a one-bar fade."""
+    return [
+        {
+            **row,
+            "factor_key": "vwap_execution_pressure_fade",
+            "score": -float(row["score"]),
+            "signal_polarity": "reversal",
+        }
+        for row in vwap_execution_pressure_observations(
+            candles_by_symbol,
+            timeframe=timeframe,
+            **kwargs,
+        )
+    ]
 
 
 def auction_imbalance_pressure_observations(
@@ -419,6 +587,17 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         builder=first_to_last_half_hour_observations,
         references=("https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2440866",),
     ),
+    "first_to_last_half_hour_market_reversal": FactorSpec(
+        key="first_to_last_half_hour_market_reversal",
+        title="First-to-Last Half-Hour Market Reversal",
+        hypothesis=(
+            "Opening information pressure is absorbed during the session, so the final "
+            "half-hour moves against the return through the first half-hour."
+        ),
+        supported_timeframes=("30m",),
+        builder=first_to_last_half_hour_reversal_observations,
+        references=("https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2440866",),
+    ),
     "overnight_gap_acceptance_absorption": FactorSpec(
         key="overnight_gap_acceptance_absorption",
         title="Overnight Gap Acceptance / Absorption",
@@ -428,6 +607,50 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=overnight_gap_acceptance_absorption_observations,
+        references=(),
+    ),
+    "gap_up_acceptance_continuation": FactorSpec(
+        key="gap_up_acceptance_continuation",
+        title="Gap-Up Acceptance Continuation",
+        hypothesis=(
+            "Urgent positive overnight repricing continues when elevated opening "
+            "participation accepts a gap up rather than filling it."
+        ),
+        supported_timeframes=("30m",),
+        builder=gap_up_acceptance_continuation_observations,
+        references=(),
+    ),
+    "gap_down_acceptance_continuation": FactorSpec(
+        key="gap_down_acceptance_continuation",
+        title="Gap-Down Acceptance Continuation",
+        hypothesis=(
+            "Urgent negative overnight repricing continues when elevated opening "
+            "participation accepts a gap down rather than filling it."
+        ),
+        supported_timeframes=("30m",),
+        builder=gap_down_acceptance_continuation_observations,
+        references=(),
+    ),
+    "gap_up_absorption_reversal": FactorSpec(
+        key="gap_up_absorption_reversal",
+        title="Gap-Up Absorption Reversal",
+        hypothesis=(
+            "A gap up reverses when elevated opening participation fills at least half "
+            "the gap, revealing that regular-session sellers absorbed overnight demand."
+        ),
+        supported_timeframes=("30m",),
+        builder=gap_up_absorption_reversal_observations,
+        references=(),
+    ),
+    "gap_down_absorption_reversal": FactorSpec(
+        key="gap_down_absorption_reversal",
+        title="Gap-Down Absorption Reversal",
+        hypothesis=(
+            "A gap down reverses when elevated opening participation fills at least half "
+            "the gap, revealing that regular-session buyers absorbed overnight supply."
+        ),
+        supported_timeframes=("30m",),
+        builder=gap_down_absorption_reversal_observations,
         references=(),
     ),
     "cross_sectional_same_slot_continuation": FactorSpec(
@@ -441,6 +664,17 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         builder=cross_sectional_same_slot_observations,
         references=("https://arxiv.org/abs/1005.3535",),
     ),
+    "cross_sectional_same_slot_reversal": FactorSpec(
+        key="cross_sectional_same_slot_reversal",
+        title="Cross-Sectional Same-Slot Reversal",
+        hypothesis=(
+            "Repeated same-slot returns measure temporary execution pressure, so prior "
+            "same-slot leaders underperform laggards when that scheduled flow is absorbed."
+        ),
+        supported_timeframes=("30m",),
+        builder=cross_sectional_same_slot_reversal_observations,
+        references=("https://arxiv.org/abs/1005.3535",),
+    ),
     "vwap_execution_pressure": FactorSpec(
         key="vwap_execution_pressure",
         title="VWAP Execution Pressure",
@@ -450,6 +684,17 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=vwap_execution_pressure_observations,
+        references=(),
+    ),
+    "vwap_execution_pressure_fade": FactorSpec(
+        key="vwap_execution_pressure_fade",
+        title="VWAP Execution Pressure Fade",
+        hypothesis=(
+            "Abnormal participation that displaces price from session VWAP exhausts, "
+            "causing the next execution interval to move back toward VWAP."
+        ),
+        supported_timeframes=("30m",),
+        builder=vwap_execution_pressure_fade_observations,
         references=(),
     ),
     "liquidity_shock_reversal": FactorSpec(
@@ -729,7 +974,9 @@ def evaluate_factor_discovery(
         }
 
     q_values = benjamini_hochberg(validation_p)
+    evidence_survivors: list[str] = []
     selected: list[str] = []
+    survivors_blocked_by_readiness: dict[str, list[str]] = {}
     for key, result in factor_results.items():
         if result.get("status") != "measured":
             continue
@@ -738,7 +985,7 @@ def evaluate_factor_discovery(
         rank_ic = validation["mean_cross_sectional_rank_ic"]
         if rank_ic is None:
             rank_ic = validation["rank_ic"]
-        if (
+        evidence_passes = (
             rank_ic is not None
             and rank_ic > 0
             and (validation["day_clustered_t_statistic"] or 0) >= MINIMUM_VALIDATION_T
@@ -749,9 +996,16 @@ def evaluate_factor_discovery(
             and validation["net_evidence_quality"]["selection_adjusted_signal"]
             and data_readiness["candle_research_ready"]
             and cost_readiness["research_cost_available"]
-            and result["factor_research_readiness"]["ready"]
-        ):
+        )
+        result["evidence_gate_passed"] = evidence_passes
+        if evidence_passes:
+            evidence_survivors.append(key)
+        if evidence_passes and result["factor_research_readiness"]["ready"]:
             selected.append(key)
+        elif evidence_passes:
+            survivors_blocked_by_readiness[key] = list(
+                result["factor_research_readiness"]["limitations"]
+            )
     return {
         "protocol_version": FACTOR_DIAGNOSTICS_VERSION,
         "mode": "discovery",
@@ -763,7 +1017,9 @@ def evaluate_factor_discovery(
         "cost_readiness": cost_readiness,
         "effective_trials": effective_trials,
         "factors": factor_results,
+        "evidence_survivors": evidence_survivors,
         "selected_for_forward_confirmation": selected,
+        "survivors_blocked_by_readiness": survivors_blocked_by_readiness,
         "confirmation_data_accessed": False,
     }
 

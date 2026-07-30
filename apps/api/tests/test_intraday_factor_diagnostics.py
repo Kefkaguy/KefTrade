@@ -5,13 +5,21 @@ import json
 import app.services.intraday_factor_diagnostics as diagnostics
 from app.services.intraday_factor_diagnostics import (
     FACTOR_SPECS,
+    cross_sectional_same_slot_observations,
+    cross_sectional_same_slot_reversal_observations,
     evaluate_forward_confirmation,
     evaluate_factor_discovery,
     factor_research_readiness,
     first_to_last_half_hour_observations,
+    first_to_last_half_hour_reversal_observations,
+    gap_down_absorption_reversal_observations,
+    gap_down_acceptance_continuation_observations,
+    gap_up_absorption_reversal_observations,
+    gap_up_acceptance_continuation_observations,
     overnight_gap_acceptance_absorption_observations,
     persist_factor_run,
     vwap_execution_pressure_observations,
+    vwap_execution_pressure_fade_observations,
 )
 from psycopg.types.json import Jsonb
 
@@ -54,6 +62,21 @@ def test_first_to_last_observation_uses_opening_signal_and_last_bar_target():
     assert len(observations) == 11
     assert observations[0]["score"] < 0
     assert observations[0]["target_return"] < 0
+
+
+def test_first_to_last_reversal_is_a_predeclared_score_inversion():
+    candles = {"SPY": market_candles("SPY", sessions=12)}
+
+    continuation = first_to_last_half_hour_observations(candles, timeframe="30m")
+    reversal = first_to_last_half_hour_reversal_observations(
+        candles,
+        timeframe="30m",
+    )
+
+    assert len(reversal) == len(continuation)
+    assert reversal[0]["score"] == -float(continuation[0]["score"])
+    assert reversal[0]["target_return"] == continuation[0]["target_return"]
+    assert reversal[0]["factor_key"] == "first_to_last_half_hour_market_reversal"
 
 
 def test_discovery_never_calculates_withheld_confirmation_metrics():
@@ -115,6 +138,70 @@ def test_quote_factor_readiness_requires_frozen_sip_coverage():
         "snapshot_frozen_quote_coverage",
         "institutional_frozen_sip_coverage",
     ]
+
+
+def test_discovery_reports_evidence_survivor_blocked_only_by_data_readiness(
+    monkeypatch,
+):
+    passing_metrics = {
+        "observations": 100,
+        "distinct_sessions": 50,
+        "distinct_symbols": 2,
+        "rank_ic": 0.20,
+        "mean_cross_sectional_rank_ic": None,
+        "rank_ic_periods": 0,
+        "gross_directional_edge_bps": 12.0,
+        "net_stressed_edge_bps": 8.0,
+        "day_clustered_t_statistic": 3.5,
+        "two_sided_normal_p_value": 0.01,
+        "measurable": True,
+        "evidence_quality": {"selection_adjusted_signal": True},
+        "net_evidence_quality": {"selection_adjusted_signal": True},
+    }
+    monkeypatch.setattr(
+        diagnostics,
+        "dataset_research_readiness",
+        lambda *args, **kwargs: {
+            "candle_research_ready": True,
+            "execution_research_ready": False,
+        },
+    )
+    monkeypatch.setattr(
+        diagnostics,
+        "cost_model_readiness",
+        lambda *args, **kwargs: {"research_cost_available": True},
+    )
+    monkeypatch.setattr(
+        diagnostics,
+        "factor_metrics",
+        lambda *args, **kwargs: dict(passing_metrics),
+    )
+
+    result = evaluate_factor_discovery(
+        {"SPY": market_candles("SPY", sessions=20)},
+        timeframe="30m",
+        factor_keys=["first_to_last_half_hour_market_momentum"],
+        cost_model={
+            "observed_round_trip_bps": 2.0,
+            "stressed_round_trip_bps": 4.0,
+            "conservative_round_trip_bps": 30.0,
+        },
+        institutional_data_readiness={
+            "institutional_candle_ready": False,
+            "gates": {},
+            "auction_imbalances": {"ready": False},
+        },
+    )
+
+    assert result["evidence_survivors"] == [
+        "first_to_last_half_hour_market_momentum"
+    ]
+    assert result["selected_for_forward_confirmation"] == []
+    assert result["survivors_blocked_by_readiness"] == {
+        "first_to_last_half_hour_market_momentum": [
+            "institutional_candle_ready"
+        ]
+    }
 
 
 def test_forward_confirmation_can_pass_candle_factor_before_production_tca(monkeypatch):
@@ -261,6 +348,96 @@ def test_gap_acceptance_requires_elevated_opening_participation():
     assert any(row["flow_state"] == "acceptance" for row in observations)
 
 
+def gap_state_candles(*, direction: str, flow_state: str):
+    rows = market_candles("AAPL", sessions=3)
+    grouped = {}
+    for row in rows:
+        grouped.setdefault(row["timestamp"].date(), []).append(row)
+    sessions = [
+        sorted(session_rows, key=lambda row: row["timestamp"])
+        for _, session_rows in sorted(grouped.items())
+    ]
+    previous_close = float(sessions[0][-1]["close"])
+    gap_sign = 1 if direction == "up" else -1
+    session_open = previous_close * (1 + gap_sign * 0.01)
+    sessions[1][0]["open"] = Decimal(str(session_open))
+    sessions[1][0]["close"] = Decimal(str(session_open))
+    decision = sessions[1][1]
+    decision["open"] = Decimal(str(session_open))
+    if flow_state == "acceptance":
+        decision_close = session_open * (1 + gap_sign * 0.002)
+    else:
+        decision_close = session_open + 0.6 * (previous_close - session_open)
+    decision["close"] = Decimal(str(decision_close))
+    decision["session_relative_volume"] = Decimal("2")
+    following = sessions[1][2]
+    following["open"] = Decimal(str(decision_close))
+    following["close"] = Decimal(str(decision_close * (1 + gap_sign * 0.001)))
+    return rows
+
+
+def test_gap_variants_partition_side_and_flow_state_without_overlap():
+    up_acceptance = gap_state_candles(direction="up", flow_state="acceptance")
+    down_acceptance = gap_state_candles(direction="down", flow_state="acceptance")
+    up_absorption = gap_state_candles(direction="up", flow_state="absorption")
+    down_absorption = gap_state_candles(direction="down", flow_state="absorption")
+
+    variants = (
+        (
+            gap_up_acceptance_continuation_observations,
+            up_acceptance,
+            "up",
+            "acceptance",
+        ),
+        (
+            gap_down_acceptance_continuation_observations,
+            down_acceptance,
+            "down",
+            "acceptance",
+        ),
+        (
+            gap_up_absorption_reversal_observations,
+            up_absorption,
+            "up",
+            "absorption",
+        ),
+        (
+            gap_down_absorption_reversal_observations,
+            down_absorption,
+            "down",
+            "absorption",
+        ),
+    )
+    for builder, rows, expected_direction, expected_state in variants:
+        observations = builder({"AAPL": rows}, timeframe="30m")
+        assert observations
+        assert {
+            (row["gap_direction"], row["flow_state"])
+            for row in observations
+        } == {(expected_direction, expected_state)}
+
+
+def test_same_slot_reversal_inverts_only_the_score():
+    candles = {
+        symbol: market_candles(symbol, sessions=10)
+        for symbol in ("AAPL", "MSFT", "NVDA", "AMZN")
+    }
+
+    continuation = cross_sectional_same_slot_observations(
+        candles,
+        timeframe="30m",
+    )
+    reversal = cross_sectional_same_slot_reversal_observations(
+        candles,
+        timeframe="30m",
+    )
+
+    assert continuation
+    assert len(reversal) == len(continuation)
+    assert reversal[0]["score"] == -float(continuation[0]["score"])
+    assert reversal[0]["target_return"] == continuation[0]["target_return"]
+
+
 def test_vwap_pressure_uses_volume_curve_and_same_session_next_bar():
     rows = market_candles("AAPL", sessions=2)
     for row in rows:
@@ -274,3 +451,23 @@ def test_vwap_pressure_uses_volume_curve_and_same_session_next_bar():
 
     assert observations
     assert all(row["score"] > 0 for row in observations)
+
+
+def test_vwap_fade_inverts_pressure_score_but_not_realized_target():
+    rows = market_candles("AAPL", sessions=2)
+    for row in rows:
+        row["session_vwap"] = Decimal(str(float(row["close"]) * 0.995))
+        row["session_relative_volume"] = Decimal("2")
+
+    continuation = vwap_execution_pressure_observations(
+        {"AAPL": rows},
+        timeframe="30m",
+    )
+    fade = vwap_execution_pressure_fade_observations(
+        {"AAPL": rows},
+        timeframe="30m",
+    )
+
+    assert len(fade) == len(continuation)
+    assert fade[0]["score"] == -float(continuation[0]["score"])
+    assert fade[0]["target_return"] == continuation[0]["target_return"]
