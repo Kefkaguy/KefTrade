@@ -4,6 +4,13 @@ Discovery reads only the first 80% of chronological sessions (50% discovery,
 30% validation). The final 20% is deliberately not calculated or returned.
 Confirmation requires a different, later immutable dataset and the frozen
 factor list from a completed discovery run.
+
+Every observation carries its own timing provenance -- which bar produced the
+score, when that score became knowable, and which bars the target spans -- so
+that `intraday_research_leakage` can prove mechanically that no factor reads
+its own future.  Session positions resolve through `intraday_session_calendar`
+rather than through list indices, because frozen snapshots contain
+extended-hours bars.
 """
 
 from __future__ import annotations
@@ -29,8 +36,21 @@ from app.services.intraday_research_integrity import (
     estimated_round_trip_cost_bps,
     exchange_session_date,
 )
+from app.services.intraday_research_power import (
+    benchmark_session_context,
+    power_and_stability_report,
+)
+from app.services.intraday_session_calendar import (
+    bar_close_timestamp,
+    bar_slot,
+    closing_bar,
+    extended_hours_audit,
+    opening_bar,
+    ordered_regular_sessions,
+    regular_session_rows,
+)
 
-FACTOR_DIAGNOSTICS_VERSION = "intraday_factor_diagnostics_v3_directional_variants"
+FACTOR_DIAGNOSTICS_VERSION = "intraday_factor_diagnostics_v4_certified_instrument"
 DEFAULT_FACTOR_KEYS = (
     "first_to_last_half_hour_market_momentum",
     "first_to_last_half_hour_market_reversal",
@@ -59,6 +79,14 @@ def _default_institutional_readiness() -> dict[str, Any]:
     }
 
 
+# How a factor claims to earn money decides how it must be measured.  A
+# rank-IC requirement is meaningful for a continuously scored cross-section
+# and meaningless for a rare directional event whose score is a single signed
+# magnitude, so the evidence gate dispatches on this rather than applying one
+# universal rule.  See `factor_evidence_gate`.
+FACTOR_TYPES = ("continuous", "directional_event", "cross_sectional")
+
+
 @dataclass(frozen=True)
 class FactorSpec:
     key: str
@@ -67,14 +95,22 @@ class FactorSpec:
     supported_timeframes: tuple[str, ...]
     builder: Callable[..., list[dict[str, Any]]]
     references: tuple[str, ...]
+    factor_type: str = "continuous"
     requires_quotes: bool = False
     requires_auction_data: bool = False
+
+    def __post_init__(self) -> None:
+        if self.factor_type not in FACTOR_TYPES:
+            raise ValueError(
+                f"{self.key}: factor_type must be one of {FACTOR_TYPES}, got {self.factor_type!r}"
+            )
 
     def frozen(self) -> dict[str, Any]:
         return {
             "key": self.key,
             "title": self.title,
             "hypothesis": self.hypothesis,
+            "factor_type": self.factor_type,
             "supported_timeframes": list(self.supported_timeframes),
             "requires_quotes": self.requires_quotes,
             "requires_auction_data": self.requires_auction_data,
@@ -87,6 +123,50 @@ def _session_date(row: dict[str, Any]) -> date:
     if isinstance(value, date):
         return value
     return exchange_session_date(row)
+
+
+def _exchange_slot(timestamp: datetime) -> str:
+    return bar_slot(timestamp)
+
+
+def _observation(
+    *,
+    factor_key: str,
+    symbol: str,
+    session_date: date,
+    score: float,
+    target_return: float,
+    signal_bar: dict[str, Any],
+    entry_bar: dict[str, Any],
+    exit_bar: dict[str, Any],
+    timeframe: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Build an observation that carries its own timing provenance.
+
+    ``signal_bar`` is the last bar whose data enters the score, so the score
+    is knowable at that bar's close.  ``entry_bar``/``exit_bar`` delimit the
+    target.  These fields are what makes leakage mechanically checkable rather
+    than a matter of reading the builder and trusting it.
+    """
+    return {
+        "factor_key": factor_key,
+        "symbol": symbol,
+        "session_date": session_date,
+        # Retained as the clustering and execution-cost key: costs are charged
+        # at the slot where the position is actually opened.
+        "timestamp": entry_bar["timestamp"],
+        "score": score,
+        "target_return": target_return,
+        "signal_bar_timestamp": signal_bar["timestamp"],
+        "decision_timestamp": bar_close_timestamp(
+            signal_bar["timestamp"], timeframe=timeframe
+        ),
+        "entry_bar_timestamp": entry_bar["timestamp"],
+        "exit_bar_timestamp": exit_bar["timestamp"],
+        "horizon_bars": 1,
+        **extra,
+    }
 
 
 def _jsonable_factor_payload(value: Any) -> Any:
@@ -141,35 +221,48 @@ def first_to_last_half_hour_observations(
     timeframe: str,
     **_: Any,
 ) -> list[dict[str, Any]]:
-    """Opening half-hour return predicts the final half-hour return."""
+    """Opening half-hour return predicts the final half-hour return.
+
+    The score is the published first half-hour return -- the 09:30 bar's close
+    against the previous session's closing price, so it includes the overnight
+    move.  The target is the executable version of the published closing
+    half-hour return: entered at the open of the last regular bar rather than
+    at the preceding bar's close, which is not a price anyone can trade.
+    """
     if timeframe != "30m":
         return []
     observations: list[dict[str, Any]] = []
     for symbol in ("SPY", "QQQ"):
-        rows = sorted(candles_by_symbol.get(symbol, []), key=lambda row: row["timestamp"])
-        sessions: dict[date, list[dict[str, Any]]] = defaultdict(list)
-        for row in rows:
-            sessions[_session_date(row)].append(row)
         previous_close: float | None = None
-        for session_date in sorted(sessions):
-            session = sorted(sessions[session_date], key=lambda row: row["timestamp"])
-            if previous_close and previous_close > 0 and len(session) >= 2:
-                first_close = float(session[0]["close"])
-                last_open = float(session[-1]["open"])
-                last_close = float(session[-1]["close"])
-                if last_open > 0:
+        for session_date, session in ordered_regular_sessions(
+            candles_by_symbol.get(symbol, []),
+            timeframe=timeframe,
+        ):
+            first_bar = opening_bar(session, timeframe=timeframe)
+            last_bar = closing_bar(session, timeframe=timeframe)
+            # A session whose bar complement matches neither the full-day nor
+            # the early-close calendar has no identifiable closing half hour.
+            if first_bar is None or last_bar is None:
+                previous_close = None
+                continue
+            if first_bar["timestamp"] != last_bar["timestamp"]:
+                last_open = float(last_bar["open"])
+                if previous_close and previous_close > 0 and last_open > 0:
                     observations.append(
-                        {
-                            "factor_key": "first_to_last_half_hour_market_momentum",
-                            "symbol": symbol,
-                            "session_date": session_date,
-                            "timestamp": session[-1]["timestamp"],
-                            "score": (first_close - previous_close) / previous_close,
-                            "target_return": (last_close - last_open) / last_open,
-                        }
+                        _observation(
+                            factor_key="first_to_last_half_hour_market_momentum",
+                            symbol=symbol,
+                            session_date=session_date,
+                            score=(float(first_bar["close"]) - previous_close) / previous_close,
+                            target_return=(float(last_bar["close"]) - last_open) / last_open,
+                            signal_bar=first_bar,
+                            entry_bar=last_bar,
+                            exit_bar=last_bar,
+                            timeframe=timeframe,
+                            signal_polarity="continuation",
+                        )
                     )
-            if session:
-                previous_close = float(session[-1]["close"])
+            previous_close = float(last_bar["close"])
     return observations
 
 
@@ -207,10 +300,11 @@ def cross_sectional_same_slot_observations(
         return []
     candidates: list[dict[str, Any]] = []
     for symbol, raw_rows in candles_by_symbol.items():
-        history: dict[tuple[int, int], list[float]] = defaultdict(list)
-        for row in sorted(raw_rows, key=lambda item: item["timestamp"]):
-            timestamp = row["timestamp"]
-            slot = (timestamp.hour, timestamp.minute)
+        # Keyed on the exchange-local slot: a UTC key silently merges 10:00 ET
+        # and 09:00 ET observations across a daylight-saving boundary.
+        history: dict[str, list[tuple[dict[str, Any], float]]] = defaultdict(list)
+        for row in regular_session_rows(raw_rows, timeframe=timeframe):
+            slot = _exchange_slot(row["timestamp"])
             open_price = float(row["open"])
             close = float(row["close"])
             if open_price <= 0:
@@ -219,16 +313,22 @@ def cross_sectional_same_slot_observations(
             prior = history[slot][-lookback_sessions:]
             if len(prior) >= 5:
                 candidates.append(
-                    {
-                        "factor_key": "cross_sectional_same_slot_continuation",
-                        "symbol": symbol,
-                        "session_date": _session_date(row),
-                        "timestamp": timestamp,
-                        "score": fmean(prior),
-                        "target_return": target,
-                    }
+                    _observation(
+                        factor_key="cross_sectional_same_slot_continuation",
+                        symbol=symbol,
+                        session_date=_session_date(row),
+                        score=fmean(value for _, value in prior),
+                        target_return=target,
+                        # The score is complete at the close of the most recent
+                        # prior same-slot bar, a full session before entry.
+                        signal_bar=prior[-1][0],
+                        entry_bar=row,
+                        exit_bar=row,
+                        timeframe=timeframe,
+                        signal_polarity="continuation",
+                    )
                 )
-            history[slot].append(target)
+            history[slot].append((row, target))
 
     # A cross-sectional claim is only observable when at least four symbols
     # share the exact timestamp. Single-name rows are excluded, not converted
@@ -272,20 +372,28 @@ def overnight_gap_acceptance_absorption_observations(
     timeframe: str,
     **_: Any,
 ) -> list[dict[str, Any]]:
-    """Opening participation distinguishes accepted gaps from absorbed gaps."""
+    """Opening participation distinguishes accepted gaps from absorbed gaps.
+
+    The gap is measured from the previous session's regular closing price to
+    the 09:30 open, and acceptance is judged on the bar after the open.  Both
+    positions come from the calendar: on a day carrying a premarket bar, list
+    indices measure the 09:00 open against the previous 16:30 print and judge
+    acceptance on the opening bar itself.
+    """
     if timeframe != "30m":
         return []
     decision_index = 1
     output: list[dict[str, Any]] = []
     for symbol, rows in candles_by_symbol.items():
-        sessions: dict[date, list[dict[str, Any]]] = defaultdict(list)
-        for row in sorted(rows, key=lambda item: item["timestamp"]):
-            sessions[_session_date(row)].append(row)
         previous_close: float | None = None
-        for session_date in sorted(sessions):
-            session = sorted(sessions[session_date], key=lambda item: item["timestamp"])
+        for session_date, session in ordered_regular_sessions(rows, timeframe=timeframe):
+            first_bar = opening_bar(session, timeframe=timeframe)
+            last_bar = closing_bar(session, timeframe=timeframe)
+            if first_bar is None or session[0]["timestamp"] != first_bar["timestamp"]:
+                previous_close = float(last_bar["close"]) if last_bar else None
+                continue
             if previous_close and previous_close > 0 and len(session) > decision_index + 1:
-                session_open = float(session[0]["open"])
+                session_open = float(first_bar["open"])
                 decision = session[decision_index]
                 decision_close = float(decision["close"])
                 gap = (session_open - previous_close) / previous_close
@@ -308,36 +416,35 @@ def overnight_gap_acceptance_absorption_observations(
                         if next_open > 0
                         else None
                     )
-                    if next_return is not None and gap_fill <= 0.25:
+                    flow_state = (
+                        "acceptance"
+                        if gap_fill <= 0.25
+                        else "absorption"
+                        if gap_fill >= 0.50
+                        else None
+                    )
+                    if next_return is not None and flow_state is not None:
                         output.append(
-                            {
-                                "factor_key": "overnight_gap_acceptance_absorption",
-                                "symbol": symbol,
-                                "session_date": session_date,
-                                "timestamp": decision["timestamp"],
-                                "score": gap,
-                                "target_return": next_return,
-                                "flow_state": "acceptance",
-                                "gap_return": gap,
-                                "gap_direction": "up" if gap > 0 else "down",
-                            }
+                            _observation(
+                                factor_key="overnight_gap_acceptance_absorption",
+                                symbol=symbol,
+                                session_date=session_date,
+                                score=gap if flow_state == "acceptance" else -gap,
+                                target_return=next_return,
+                                signal_bar=decision,
+                                entry_bar=next_bar,
+                                exit_bar=next_bar,
+                                timeframe=timeframe,
+                                flow_state=flow_state,
+                                gap_return=gap,
+                                gap_fill_fraction=gap_fill,
+                                gap_direction="up" if gap > 0 else "down",
+                            )
                         )
-                    elif next_return is not None and gap_fill >= 0.50:
-                        output.append(
-                            {
-                                "factor_key": "overnight_gap_acceptance_absorption",
-                                "symbol": symbol,
-                                "session_date": session_date,
-                                "timestamp": decision["timestamp"],
-                                "score": -gap,
-                                "target_return": next_return,
-                                "flow_state": "absorption",
-                                "gap_return": gap,
-                                "gap_direction": "up" if gap > 0 else "down",
-                            }
-                        )
-            if session:
-                previous_close = float(session[-1]["close"])
+            if last_bar is not None:
+                previous_close = float(last_bar["close"])
+            else:
+                previous_close = None
     return output
 
 
@@ -444,7 +551,7 @@ def vwap_execution_pressure_observations(
         return []
     output: list[dict[str, Any]] = []
     for symbol, rows in candles_by_symbol.items():
-        ordered = sorted(rows, key=lambda item: item["timestamp"])
+        ordered = regular_session_rows(rows, timeframe=timeframe)
         for current, following in zip(ordered, ordered[1:]):
             if _session_date(current) != _session_date(following):
                 continue
@@ -460,14 +567,18 @@ def vwap_execution_pressure_observations(
             if next_open <= 0:
                 continue
             output.append(
-                {
-                    "factor_key": "vwap_execution_pressure",
-                    "symbol": symbol,
-                    "session_date": _session_date(current),
-                    "timestamp": current["timestamp"],
-                    "score": displacement * float(relative_volume),
-                    "target_return": (float(following["close"]) - next_open) / next_open,
-                }
+                _observation(
+                    factor_key="vwap_execution_pressure",
+                    symbol=symbol,
+                    session_date=_session_date(current),
+                    score=displacement * float(relative_volume),
+                    target_return=(float(following["close"]) - next_open) / next_open,
+                    signal_bar=current,
+                    entry_bar=following,
+                    exit_bar=following,
+                    timeframe=timeframe,
+                    signal_polarity="continuation",
+                )
             )
     return output
 
@@ -523,7 +634,7 @@ def liquidity_shock_reversal_observations(
     returns_by_symbol: dict[str, list[tuple[dict[str, Any], float]]] = {}
     for symbol, rows in candles_by_symbol.items():
         values: list[tuple[dict[str, Any], float]] = []
-        for row in sorted(rows, key=lambda item: item["timestamp"]):
+        for row in regular_session_rows(rows, timeframe=timeframe):
             open_price = float(row["open"])
             if open_price <= 0:
                 continue
@@ -561,14 +672,18 @@ def liquidity_shock_reversal_observations(
                         next_row, next_return = values[index + 1]
                         if _session_date(next_row) == _session_date(row):
                             output.append(
-                                {
-                                    "factor_key": "liquidity_shock_reversal",
-                                    "symbol": symbol,
-                                    "session_date": _session_date(row),
-                                    "timestamp": row["timestamp"],
-                                    "score": -residual,
-                                    "target_return": next_return,
-                                }
+                                _observation(
+                                    factor_key="liquidity_shock_reversal",
+                                    symbol=symbol,
+                                    session_date=_session_date(row),
+                                    score=-residual,
+                                    target_return=next_return,
+                                    signal_bar=row,
+                                    entry_bar=next_row,
+                                    exit_bar=next_row,
+                                    timeframe=timeframe,
+                                    signal_polarity="reversal",
+                                )
                             )
             volume_history.append(volume)
             range_history.append(bar_range)
@@ -585,6 +700,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=first_to_last_half_hour_observations,
+        factor_type="continuous",
         references=("https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2440866",),
     ),
     "first_to_last_half_hour_market_reversal": FactorSpec(
@@ -596,6 +712,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=first_to_last_half_hour_reversal_observations,
+        factor_type="continuous",
         references=("https://papers.ssrn.com/sol3/papers.cfm?abstract_id=2440866",),
     ),
     "overnight_gap_acceptance_absorption": FactorSpec(
@@ -607,6 +724,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=overnight_gap_acceptance_absorption_observations,
+        factor_type="directional_event",
         references=(),
     ),
     "gap_up_acceptance_continuation": FactorSpec(
@@ -618,6 +736,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=gap_up_acceptance_continuation_observations,
+        factor_type="directional_event",
         references=(),
     ),
     "gap_down_acceptance_continuation": FactorSpec(
@@ -629,6 +748,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=gap_down_acceptance_continuation_observations,
+        factor_type="directional_event",
         references=(),
     ),
     "gap_up_absorption_reversal": FactorSpec(
@@ -640,6 +760,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=gap_up_absorption_reversal_observations,
+        factor_type="directional_event",
         references=(),
     ),
     "gap_down_absorption_reversal": FactorSpec(
@@ -651,6 +772,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=gap_down_absorption_reversal_observations,
+        factor_type="directional_event",
         references=(),
     ),
     "cross_sectional_same_slot_continuation": FactorSpec(
@@ -662,6 +784,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=cross_sectional_same_slot_observations,
+        factor_type="cross_sectional",
         references=("https://arxiv.org/abs/1005.3535",),
     ),
     "cross_sectional_same_slot_reversal": FactorSpec(
@@ -673,6 +796,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=cross_sectional_same_slot_reversal_observations,
+        factor_type="cross_sectional",
         references=("https://arxiv.org/abs/1005.3535",),
     ),
     "vwap_execution_pressure": FactorSpec(
@@ -684,6 +808,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=vwap_execution_pressure_observations,
+        factor_type="continuous",
         references=(),
     ),
     "vwap_execution_pressure_fade": FactorSpec(
@@ -695,6 +820,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=vwap_execution_pressure_fade_observations,
+        factor_type="continuous",
         references=(),
     ),
     "liquidity_shock_reversal": FactorSpec(
@@ -706,6 +832,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=liquidity_shock_reversal_observations,
+        factor_type="directional_event",
         references=("https://arxiv.org/abs/1011.6402",),
         requires_quotes=True,
     ),
@@ -718,6 +845,7 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
         ),
         supported_timeframes=("30m",),
         builder=auction_imbalance_pressure_observations,
+        factor_type="directional_event",
         references=("https://nasdaqtrader.com/Trader.aspx?id=OpenClose",),
         requires_quotes=True,
         requires_auction_data=True,
@@ -828,6 +956,12 @@ def factor_metrics(
             - fmean(float(row["target_return"]) for row in ordered[:tail])
         )
 
+    median_cost = (
+        sorted(stressed_costs)[len(stressed_costs) // 2] if stressed_costs else None
+    )
+    spread_bps = _round(fmean(spreads) * 10_000) if spreads else None
+    quarterly_ic = _quarterly_rank_ic(usable)
+
     return {
         "observations": len(usable),
         "distinct_sessions": evidence["distinct_sessions"],
@@ -835,16 +969,21 @@ def factor_metrics(
         "rank_ic": _round(spearman(scores, targets)),
         "mean_cross_sectional_rank_ic": _round(fmean(group_ics)) if group_ics else None,
         "rank_ic_periods": len(group_ics),
-        "top_minus_bottom_spread_bps": _round(fmean(spreads) * 10_000) if spreads else None,
+        "quarterly_rank_ic": quarterly_ic,
+        "rank_ic_stability": _rank_ic_stability(quarterly_ic),
+        "top_minus_bottom_spread_bps": spread_bps,
+        # A long-short spread is only executable if it survives paying the
+        # round trip on both legs.
+        "net_top_minus_bottom_spread_bps": (
+            _round(spread_bps - 2 * median_cost)
+            if spread_bps is not None and median_cost is not None
+            else None
+        ),
         "gross_directional_edge_bps": _round(fmean(directional) * 10_000) if directional else None,
         "net_stressed_edge_bps": (
             _round(fmean(net_directional) * 10_000) if net_directional else None
         ),
-        "median_stressed_cost_bps": (
-            _round(sorted(stressed_costs)[len(stressed_costs) // 2])
-            if stressed_costs
-            else None
-        ),
+        "median_stressed_cost_bps": _round(median_cost),
         "day_clustered_t_statistic": evidence["day_clustered_t_statistic"],
         "two_sided_normal_p_value": evidence["block_bootstrap"]["two_sided_p_value"],
         "hit_rate": _round(sum(value > 0 for value in directional) / len(directional)) if directional else None,
@@ -854,6 +993,125 @@ def factor_metrics(
         ),
         "evidence_quality": evidence,
         "net_evidence_quality": net_evidence,
+    }
+
+
+def _quarterly_rank_ic(observations: Sequence[dict[str, Any]]) -> dict[str, float | None]:
+    """Rank IC within each calendar quarter, for continuous-factor stability."""
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in observations:
+        session = row["session_date"]
+        grouped[f"{session.year}Q{(session.month - 1) // 3 + 1}"].append(row)
+    output: dict[str, float | None] = {}
+    for label in sorted(grouped):
+        rows = grouped[label]
+        if len(rows) < 20:
+            continue
+        output[label] = _round(
+            spearman(
+                [float(row["score"]) for row in rows],
+                [float(row["target_return"]) for row in rows],
+            )
+        )
+    return output
+
+
+def _rank_ic_stability(quarterly: dict[str, float | None]) -> dict[str, Any]:
+    values = [value for value in quarterly.values() if value is not None]
+    positive = sum(1 for value in values if value > 0)
+    return {
+        "scored_quarters": len(values),
+        "positive_quarters": positive,
+        "positive_share": _round(positive / len(values)) if values else None,
+        "stable": bool(values) and positive / len(values) >= 2 / 3,
+    }
+
+
+def factor_evidence_gate(
+    spec: FactorSpec,
+    metrics: dict[str, Any],
+    *,
+    cost_clearance: dict[str, Any],
+    q_value: float | None,
+    power_report: dict[str, Any] | None,
+    dataset_ready: bool,
+    cost_ready: bool,
+) -> dict[str, Any]:
+    """Apply the evidence rules that match how this factor claims to earn.
+
+    A universal positive-rank-IC requirement is the wrong instrument for a
+    directional event: its score is one signed magnitude conditioned on a rare
+    state, and its rank correlation against a one-bar return is noise.  Each
+    factor type is therefore measured on what it actually asserts, while the
+    integrity requirements that apply to any claim -- clustering, selection
+    adjustment, cost clearance, false-discovery control -- apply to all.
+    """
+    evidence = metrics.get("evidence_quality") or {}
+    net_evidence = metrics.get("net_evidence_quality") or {}
+    net_bootstrap = (net_evidence.get("block_bootstrap") or {}).get(
+        "confidence_interval_95"
+    )
+    net_edge = metrics.get("net_stressed_edge_bps")
+    clustered_t = metrics.get("day_clustered_t_statistic") or 0.0
+
+    universal = {
+        "dataset_research_ready": dataset_ready,
+        "research_cost_available": cost_ready,
+        "independent_clustered_evidence": bool(evidence.get("independent_evidence_ready")),
+        "minimum_day_clustered_t": clustered_t >= MINIMUM_VALIDATION_T,
+        "clears_stressed_costs": bool(cost_clearance.get("clears_stressed")),
+        "false_discovery_rate_controlled": q_value is not None and float(q_value) <= 0.1,
+        "selection_adjusted_gross": bool(evidence.get("selection_adjusted_signal")),
+        "selection_adjusted_net": bool(net_evidence.get("selection_adjusted_signal")),
+    }
+
+    rank_ic = metrics.get("rank_ic")
+    cross_sectional_ic = metrics.get("mean_cross_sectional_rank_ic")
+    subperiods = ((power_report or {}).get("subperiods") or {})
+    quarterly_stable = bool(
+        (subperiods.get("quarterly_stability") or {}).get("stable")
+    )
+
+    if spec.factor_type == "continuous":
+        specific = {
+            "positive_information_coefficient": rank_ic is not None and rank_ic > 0,
+            "stable_rank_performance": bool(
+                (metrics.get("rank_ic_stability") or {}).get("stable")
+            ),
+            "positive_net_return": net_edge is not None and float(net_edge) > 0,
+        }
+    elif spec.factor_type == "directional_event":
+        specific = {
+            "positive_event_conditioned_net_return": (
+                net_edge is not None and float(net_edge) > 0
+            ),
+            "positive_net_bootstrap_lower_bound": bool(
+                net_bootstrap is not None and net_bootstrap[0] > 0
+            ),
+            "stable_subperiods": quarterly_stable,
+        }
+    elif spec.factor_type == "cross_sectional":
+        net_spread = metrics.get("net_top_minus_bottom_spread_bps")
+        specific = {
+            "positive_cross_sectional_information_coefficient": (
+                cross_sectional_ic is not None and cross_sectional_ic > 0
+            ),
+            "executable_long_short_spread": (
+                net_spread is not None and float(net_spread) > 0
+            ),
+            "positive_net_return": net_edge is not None and float(net_edge) > 0,
+        }
+    else:  # pragma: no cover - FactorSpec validates the set
+        raise ValueError(f"unknown factor_type {spec.factor_type!r}")
+
+    gates = {**universal, **specific}
+    return {
+        "factor_type": spec.factor_type,
+        "universal_gates": universal,
+        "factor_type_gates": specific,
+        "gates": gates,
+        "passed": all(gates.values()),
+        "failed": [label for label, ok in gates.items() if not ok],
     }
 
 
@@ -882,6 +1140,10 @@ def evaluate_factor_discovery(
     microstructure_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
     auction_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
     institutional_data_readiness: dict[str, Any] | None = None,
+    effective_trials: int | None = None,
+    trial_ledger: dict[str, Any] | None = None,
+    sector_by_symbol: dict[str, str] | None = None,
+    certification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     all_dates = [
         _session_date(row)
@@ -893,11 +1155,19 @@ def evaluate_factor_discovery(
         candles_by_symbol,
         microstructure_by_symbol=microstructure_by_symbol,
     )
+    calendar_audit = extended_hours_audit(candles_by_symbol, timeframe=timeframe)
     cost_readiness = cost_model_readiness(cost_model, symbols=list(candles_by_symbol))
     institutional_readiness = (
         institutional_data_readiness or _default_institutional_readiness()
     )
-    effective_trials = max(1, len(factor_keys))
+    # The correction is charged against every test ever run against this data,
+    # not just the ones in today's argument list.  The caller supplies that
+    # count from the append-only ledger; falling back to the run size is a
+    # floor, never a substitute.
+    effective_trials = max(1, int(effective_trials or len(factor_keys)))
+    benchmark_context = benchmark_session_context(
+        candles_by_symbol, timeframe=timeframe
+    )
     factor_results: dict[str, Any] = {}
     validation_p: dict[str, float | None] = {}
     for key in factor_keys:
@@ -957,12 +1227,23 @@ def evaluate_factor_discovery(
         )
         validation_p[key] = validation_metrics["two_sided_normal_p_value"]
         cost_clearance = _cost_clearance(validation_metrics, cost_model)
+        power_report = power_and_stability_report(
+            validation,
+            evidence_quality=validation_metrics["evidence_quality"],
+            net_evidence_quality=validation_metrics["net_evidence_quality"],
+            benchmark_context=benchmark_context,
+            sector_by_symbol=sector_by_symbol,
+            discovery_metrics=discovery_metrics,
+            validation_metrics=validation_metrics,
+            trials_recorded=(trial_ledger or {}).get("effective_trials"),
+        )
         factor_results[key] = {
             "status": "measured" if validation_metrics["measurable"] else "insufficient_evidence",
             "spec": spec.frozen(),
             "discovery": discovery_metrics,
             "validation": validation_metrics,
             "cost_clearance": cost_clearance,
+            "power_and_stability": power_report,
             "factor_research_readiness": readiness,
             "confirmation": {
                 "status": "locked",
@@ -980,32 +1261,26 @@ def evaluate_factor_discovery(
     for key, result in factor_results.items():
         if result.get("status") != "measured":
             continue
-        validation = result["validation"]
         result["validation"]["false_discovery_rate_q_value"] = q_values.get(key)
-        rank_ic = validation["mean_cross_sectional_rank_ic"]
-        if rank_ic is None:
-            rank_ic = validation["rank_ic"]
-        evidence_passes = (
-            rank_ic is not None
-            and rank_ic > 0
-            and (validation["day_clustered_t_statistic"] or 0) >= MINIMUM_VALIDATION_T
-            and result["cost_clearance"]["clears_stressed"]
-            and q_values.get(key) is not None
-            and float(q_values[key]) <= 0.1
-            and validation["evidence_quality"]["selection_adjusted_signal"]
-            and validation["net_evidence_quality"]["selection_adjusted_signal"]
-            and data_readiness["candle_research_ready"]
-            and cost_readiness["research_cost_available"]
+        gate = factor_evidence_gate(
+            FACTOR_SPECS[key],
+            result["validation"],
+            cost_clearance=result["cost_clearance"],
+            q_value=q_values.get(key),
+            power_report=result["power_and_stability"],
+            dataset_ready=bool(data_readiness["candle_research_ready"]),
+            cost_ready=bool(cost_readiness["research_cost_available"]),
         )
-        result["evidence_gate_passed"] = evidence_passes
-        if evidence_passes:
+        result["evidence_gate"] = gate
+        result["evidence_gate_passed"] = gate["passed"]
+        if gate["passed"]:
             evidence_survivors.append(key)
-        if evidence_passes and result["factor_research_readiness"]["ready"]:
-            selected.append(key)
-        elif evidence_passes:
-            survivors_blocked_by_readiness[key] = list(
-                result["factor_research_readiness"]["limitations"]
-            )
+            if result["factor_research_readiness"]["ready"]:
+                selected.append(key)
+            else:
+                survivors_blocked_by_readiness[key] = list(
+                    result["factor_research_readiness"]["limitations"]
+                )
     return {
         "protocol_version": FACTOR_DIAGNOSTICS_VERSION,
         "mode": "discovery",
@@ -1013,14 +1288,37 @@ def evaluate_factor_discovery(
         "split_boundaries": {key: str(value) for key, value in boundaries.items()},
         "cost_model": cost_model,
         "data_readiness": data_readiness,
+        "session_calendar_audit": calendar_audit,
         "institutional_data_readiness": institutional_readiness,
         "cost_readiness": cost_readiness,
         "effective_trials": effective_trials,
+        "trial_ledger": trial_ledger,
+        "instrument_certification": _certification_summary(certification),
         "factors": factor_results,
         "evidence_survivors": evidence_survivors,
         "selected_for_forward_confirmation": selected,
         "survivors_blocked_by_readiness": survivors_blocked_by_readiness,
         "confirmation_data_accessed": False,
+    }
+
+
+def _certification_summary(certification: dict[str, Any] | None) -> dict[str, Any]:
+    """Carry the instrument verdict alongside every result it produced."""
+    if not certification:
+        return {
+            "certified": False,
+            "status": "not_supplied",
+            "detail": (
+                "No instrument certification accompanied this run; its results "
+                "cannot distinguish absence of alpha from a broken measurement."
+            ),
+        }
+    return {
+        "certified": bool(certification.get("certified")),
+        "status": "supplied",
+        "controls_version": certification.get("controls_version"),
+        "checks": certification.get("checks"),
+        "certification_id": certification.get("certification_id"),
     }
 
 
@@ -1033,16 +1331,24 @@ def evaluate_forward_confirmation(
     microstructure_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
     auction_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
     institutional_data_readiness: dict[str, Any] | None = None,
+    effective_trials: int | None = None,
+    trial_ledger: dict[str, Any] | None = None,
+    sector_by_symbol: dict[str, str] | None = None,
+    certification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     data_readiness = dataset_research_readiness(
         candles_by_symbol,
         microstructure_by_symbol=microstructure_by_symbol,
     )
+    calendar_audit = extended_hours_audit(candles_by_symbol, timeframe=timeframe)
     cost_readiness = cost_model_readiness(cost_model, symbols=list(candles_by_symbol))
     institutional_readiness = (
         institutional_data_readiness or _default_institutional_readiness()
     )
-    effective_trials = max(1, len(factor_keys))
+    effective_trials = max(1, int(effective_trials or len(factor_keys)))
+    benchmark_context = benchmark_session_context(
+        candles_by_symbol, timeframe=timeframe
+    )
     factors: dict[str, Any] = {}
     p_values: dict[str, float | None] = {}
     for key in factor_keys:
@@ -1072,8 +1378,18 @@ def evaluate_forward_confirmation(
         p_values[key] = metrics["two_sided_normal_p_value"]
         factors[key] = {
             "status": "measured" if metrics["measurable"] else "insufficient_evidence",
+            "spec": spec.frozen(),
             "confirmation": metrics,
             "cost_clearance": _cost_clearance(metrics, cost_model),
+            "power_and_stability": power_and_stability_report(
+                observations,
+                evidence_quality=metrics["evidence_quality"],
+                net_evidence_quality=metrics["net_evidence_quality"],
+                benchmark_context=benchmark_context,
+                sector_by_symbol=sector_by_symbol,
+                validation_metrics=metrics,
+                trials_recorded=(trial_ledger or {}).get("effective_trials"),
+            ),
             "factor_research_readiness": readiness,
         }
     q_values = benjamini_hochberg(p_values)
@@ -1082,23 +1398,18 @@ def evaluate_forward_confirmation(
         if result.get("status") != "measured":
             continue
         result["confirmation"]["false_discovery_rate_q_value"] = q_values.get(key)
-        metrics = result["confirmation"]
-        rank_ic = metrics["mean_cross_sectional_rank_ic"]
-        if rank_ic is None:
-            rank_ic = metrics["rank_ic"]
-        if (
-            rank_ic is not None
-            and rank_ic > 0
-            and (metrics["day_clustered_t_statistic"] or 0) >= MINIMUM_VALIDATION_T
-            and result["cost_clearance"]["clears_stressed"]
-            and q_values.get(key) is not None
-            and float(q_values[key]) <= 0.1
-            and metrics["evidence_quality"]["selection_adjusted_signal"]
-            and metrics["net_evidence_quality"]["selection_adjusted_signal"]
-            and data_readiness["candle_research_ready"]
-            and cost_readiness["research_cost_available"]
-            and result["factor_research_readiness"]["ready"]
-        ):
+        gate = factor_evidence_gate(
+            FACTOR_SPECS[key],
+            result["confirmation"],
+            cost_clearance=result["cost_clearance"],
+            q_value=q_values.get(key),
+            power_report=result["power_and_stability"],
+            dataset_ready=bool(data_readiness["candle_research_ready"]),
+            cost_ready=bool(cost_readiness["research_cost_available"]),
+        )
+        result["evidence_gate"] = gate
+        result["evidence_gate_passed"] = gate["passed"]
+        if gate["passed"] and result["factor_research_readiness"]["ready"]:
             passed.append(key)
     return {
         "protocol_version": FACTOR_DIAGNOSTICS_VERSION,
@@ -1106,9 +1417,12 @@ def evaluate_forward_confirmation(
         "timeframe": timeframe,
         "cost_model": cost_model,
         "data_readiness": data_readiness,
+        "session_calendar_audit": calendar_audit,
         "institutional_data_readiness": institutional_readiness,
         "cost_readiness": cost_readiness,
         "effective_trials": effective_trials,
+        "trial_ledger": trial_ledger,
+        "instrument_certification": _certification_summary(certification),
         "factors": factors,
         "passed_locked_confirmation": passed,
     }
@@ -1280,6 +1594,99 @@ def frozen_spec_hash(
     return sha256(dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
+def persist_certification(
+    conn: psycopg.Connection,
+    *,
+    dataset_id: int | None,
+    timeframe: str,
+    factor_keys: Sequence[str],
+    controls: dict[str, Any],
+    leakage: dict[str, Any],
+    calendar: dict[str, Any],
+) -> dict[str, Any]:
+    """Store the instrument evidence a run's results must be read against."""
+    controls_passed = bool(controls.get("certified"))
+    leakage_passed = bool(leakage.get("passed"))
+    # A snapshot whose sessions are mostly incomplete cannot support a
+    # closing-half-hour claim, so calendar integrity is part of certification.
+    calendar_passed = bool(
+        (calendar.get("complete_session_share") or 0) >= 0.95
+    )
+    row = conn.execute(
+        """
+        INSERT INTO intraday_research_certifications(
+            dataset_id, timeframe, certified, controls_passed, leakage_passed,
+            calendar_passed, controls, leakage, calendar, published_replication,
+            factor_keys, protocol_version
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id, created_at
+        """,
+        (
+            dataset_id,
+            timeframe,
+            controls_passed and leakage_passed and calendar_passed,
+            controls_passed,
+            leakage_passed,
+            calendar_passed,
+            Jsonb(_jsonable_factor_payload(controls)),
+            Jsonb(_jsonable_factor_payload(leakage)),
+            Jsonb(_jsonable_factor_payload(calendar)),
+            Jsonb(_jsonable_factor_payload(controls.get("published_replication") or {})),
+            Jsonb(_jsonable_factor_payload(list(factor_keys))),
+            FACTOR_DIAGNOSTICS_VERSION,
+        ),
+    ).fetchone()
+    conn.commit()
+    return {
+        "certification_id": int(row["id"]),
+        "created_at": row["created_at"],
+        "certified": controls_passed and leakage_passed and calendar_passed,
+        "controls_passed": controls_passed,
+        "leakage_passed": leakage_passed,
+        "calendar_passed": calendar_passed,
+        "controls_version": controls.get("controls_version"),
+        "checks": {
+            **(controls.get("checks") or {}),
+            "no_factor_reads_its_future": leakage_passed,
+            "snapshot_sessions_complete": calendar_passed,
+        },
+    }
+
+
+def load_certification(
+    conn: psycopg.Connection,
+    *,
+    certification_id: int,
+) -> dict[str, Any]:
+    row = conn.execute(
+        "SELECT * FROM intraday_research_certifications WHERE id = %s",
+        (certification_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"No instrument certification id={certification_id}.")
+    item = dict(row)
+    return {
+        "certification_id": int(item["id"]),
+        "certified": bool(item["certified"]),
+        "controls_passed": bool(item["controls_passed"]),
+        "leakage_passed": bool(item["leakage_passed"]),
+        "calendar_passed": bool(item["calendar_passed"]),
+        "controls_version": (item.get("controls") or {}).get("controls_version"),
+        "checks": (item.get("controls") or {}).get("checks"),
+        "created_at": item["created_at"],
+        "dataset_id": item["dataset_id"],
+    }
+
+
+def sector_map(conn: psycopg.Connection, symbols: Sequence[str]) -> dict[str, str]:
+    rows = conn.execute(
+        "SELECT symbol, sector FROM symbols WHERE symbol = ANY(%s) AND sector IS NOT NULL",
+        ([str(symbol).upper() for symbol in symbols],),
+    ).fetchall()
+    return {str(row["symbol"]).upper(): str(row["sector"]) for row in rows}
+
+
 def persist_factor_run(
     conn: psycopg.Connection,
     *,
@@ -1291,6 +1698,8 @@ def persist_factor_run(
     symbols: Sequence[str],
     result: dict[str, Any],
     spec_hash: str,
+    certification_id: int | None = None,
+    declaration_id: int | None = None,
 ) -> int:
     for key in factor_keys:
         factor_result = (result.get("factors") or {}).get(key) or {}
@@ -1325,17 +1734,20 @@ def persist_factor_run(
     row = conn.execute(
         """
         INSERT INTO intraday_factor_diagnostic_runs(
-            mode, status, dataset_id, source_run_id, timeframe, factor_keys,
+            mode, status, dataset_id, source_run_id, certification_id,
+            declaration_id, timeframe, factor_keys,
             symbols, split_boundaries, cost_model, results, frozen_spec_hash,
             protocol_version, completed_at
         )
-        VALUES (%s, 'completed', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        VALUES (%s, 'completed', %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
         RETURNING id
         """,
         (
             mode,
             dataset_id,
             source_run_id,
+            certification_id,
+            declaration_id,
             timeframe,
             Jsonb(_jsonable_factor_payload(list(factor_keys))),
             Jsonb(_jsonable_factor_payload(list(symbols))),

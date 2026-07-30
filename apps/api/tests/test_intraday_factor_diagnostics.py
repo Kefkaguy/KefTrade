@@ -21,6 +21,7 @@ from app.services.intraday_factor_diagnostics import (
     vwap_execution_pressure_observations,
     vwap_execution_pressure_fade_observations,
 )
+from app.services.intraday_session_calendar import NEW_YORK
 from psycopg.types.json import Jsonb
 
 
@@ -34,7 +35,13 @@ def market_candles(symbol: str, sessions: int = 120):
         opening_return = direction * (0.006 + (session_index % 3) * 0.0002)
         first_close = previous_close * (1 + opening_return)
         for bar_index in range(13):
-            timestamp = datetime(day.year, day.month, day.day, 14, 30, tzinfo=UTC) + timedelta(minutes=30 * bar_index)
+            # Anchored to the exchange clock, not to a fixed UTC offset: a
+            # fixed offset walks the whole session an hour out of regular
+            # hours the moment daylight saving changes.
+            timestamp = (
+                datetime(day.year, day.month, day.day, 9, 30, tzinfo=NEW_YORK)
+                + timedelta(minutes=30 * bar_index)
+            ).astimezone(UTC)
             open_price = previous_close if bar_index == 0 else first_close
             target = direction * (0.005 + (session_index % 5) * 0.0001) if bar_index == 12 else 0
             close = open_price * (1 + target) if bar_index == 12 else first_close
@@ -155,8 +162,17 @@ def test_discovery_reports_evidence_survivor_blocked_only_by_data_readiness(
         "day_clustered_t_statistic": 3.5,
         "two_sided_normal_p_value": 0.01,
         "measurable": True,
-        "evidence_quality": {"selection_adjusted_signal": True},
-        "net_evidence_quality": {"selection_adjusted_signal": True},
+        "rank_ic_stability": {"stable": True, "scored_quarters": 4},
+        "net_top_minus_bottom_spread_bps": None,
+        "evidence_quality": {
+            "selection_adjusted_signal": True,
+            "independent_evidence_ready": True,
+        },
+        "net_evidence_quality": {
+            "selection_adjusted_signal": True,
+            "independent_evidence_ready": True,
+            "block_bootstrap": {"confidence_interval_95": [2.0, 14.0]},
+        },
     }
     monkeypatch.setattr(
         diagnostics,
@@ -218,8 +234,17 @@ def test_forward_confirmation_can_pass_candle_factor_before_production_tca(monke
             "day_clustered_t_statistic": 3.5,
             "two_sided_normal_p_value": 0.01,
             "measurable": True,
-            "evidence_quality": {"selection_adjusted_signal": True},
-            "net_evidence_quality": {"selection_adjusted_signal": True},
+            "rank_ic_stability": {"stable": True, "scored_quarters": 4},
+            "net_top_minus_bottom_spread_bps": None,
+            "evidence_quality": {
+                "selection_adjusted_signal": True,
+                "independent_evidence_ready": True,
+            },
+            "net_evidence_quality": {
+                "selection_adjusted_signal": True,
+                "independent_evidence_ready": True,
+                "block_bootstrap": {"confidence_interval_95": [2.0, 14.0]},
+            },
         }
 
     monkeypatch.setattr(
