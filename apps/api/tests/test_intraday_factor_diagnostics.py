@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+import json
 
 import app.services.intraday_factor_diagnostics as diagnostics
 from app.services.intraday_factor_diagnostics import (
@@ -9,8 +10,10 @@ from app.services.intraday_factor_diagnostics import (
     factor_research_readiness,
     first_to_last_half_hour_observations,
     overnight_gap_acceptance_absorption_observations,
+    persist_factor_run,
     vwap_execution_pressure_observations,
 )
+from psycopg.types.json import Jsonb
 
 
 def market_candles(symbol: str, sessions: int = 120):
@@ -171,6 +174,67 @@ def test_forward_confirmation_can_pass_candle_factor_before_production_tca(monke
         ]["ready"]
         is True
     )
+
+
+class PersistResult:
+    def __init__(self, row):
+        self.row = row
+
+    def fetchone(self):
+        return self.row
+
+
+class JsonDumpingPersistConn:
+    def __init__(self):
+        self.committed = False
+
+    def execute(self, query, params=None):
+        for value in params or ():
+            if isinstance(value, Jsonb):
+                json.dumps(value.obj)
+        if query.strip().startswith("INSERT INTO intraday_factor_diagnostic_runs"):
+            return PersistResult({"id": 42})
+        return PersistResult(None)
+
+    def commit(self):
+        self.committed = True
+
+
+def test_persist_factor_run_sanitizes_dates_before_jsonb():
+    result = {
+        "effective_trials": 1,
+        "split_boundaries": {
+            "discovery_start": date(2025, 1, 2),
+            "discovery_end": date(2025, 2, 3),
+        },
+        "cost_model": {
+            "window_start": datetime(2026, 7, 22, tzinfo=UTC),
+            "stressed_round_trip_bps": Decimal("1.5"),
+        },
+        "factors": {
+            "first_to_last_half_hour_market_momentum": {
+                "status": "measured",
+                "confirmation": {
+                    "timestamp": datetime(2026, 7, 30, 20, 30, tzinfo=UTC),
+                    "session_date": date(2026, 7, 30),
+                },
+            }
+        },
+    }
+
+    run_id = persist_factor_run(
+        JsonDumpingPersistConn(),
+        mode="discovery",
+        dataset_id=77,
+        source_run_id=None,
+        timeframe="30m",
+        factor_keys=["first_to_last_half_hour_market_momentum"],
+        symbols=["SPY"],
+        result=result,
+        spec_hash="abc123",
+    )
+
+    assert run_id == 42
 
 
 def test_gap_acceptance_requires_elevated_opening_participation():

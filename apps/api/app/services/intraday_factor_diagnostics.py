@@ -21,7 +21,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.labs.intraday.cross_sectional_portfolio import spearman
 from app.services.labs.intraday.dataset_snapshot import load_snapshot_intraday_features
-from app.services.research_architecture import load_snapshot_candles
+from app.services.research_architecture import jsonable, load_snapshot_candles
 from app.services.intraday_research_integrity import (
     clustered_outcome_statistics,
     cost_model_readiness,
@@ -81,6 +81,16 @@ def _session_date(row: dict[str, Any]) -> date:
     if isinstance(value, date):
         return value
     return exchange_session_date(row)
+
+
+def _jsonable_factor_payload(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _jsonable_factor_payload(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable_factor_payload(item) for item in value]
+    if isinstance(value, date):
+        return value.isoformat()
+    return jsonable(value)
 
 
 def factor_research_readiness(
@@ -1048,11 +1058,11 @@ def persist_factor_run(
                 timeframe,
                 dataset_id,
                 int(result.get("effective_trials") or max(1, len(factor_keys))),
-                Jsonb(FACTOR_SPECS[key].frozen()),
-                Jsonb(list(symbols)),
-                Jsonb(result.get("split_boundaries") or {}),
-                Jsonb(result.get("cost_model") or {}),
-                Jsonb(factor_result),
+                Jsonb(_jsonable_factor_payload(FACTOR_SPECS[key].frozen())),
+                Jsonb(_jsonable_factor_payload(list(symbols))),
+                Jsonb(_jsonable_factor_payload(result.get("split_boundaries") or {})),
+                Jsonb(_jsonable_factor_payload(result.get("cost_model") or {})),
+                Jsonb(_jsonable_factor_payload(factor_result)),
                 FACTOR_DIAGNOSTICS_VERSION,
             ),
         )
@@ -1071,11 +1081,11 @@ def persist_factor_run(
             dataset_id,
             source_run_id,
             timeframe,
-            Jsonb(list(factor_keys)),
-            Jsonb(list(symbols)),
-            Jsonb(result.get("split_boundaries") or {}),
-            Jsonb(result["cost_model"]),
-            Jsonb(result),
+            Jsonb(_jsonable_factor_payload(list(factor_keys))),
+            Jsonb(_jsonable_factor_payload(list(symbols))),
+            Jsonb(_jsonable_factor_payload(result.get("split_boundaries") or {})),
+            Jsonb(_jsonable_factor_payload(result["cost_model"])),
+            Jsonb(_jsonable_factor_payload(result)),
             spec_hash,
             FACTOR_DIAGNOSTICS_VERSION,
         ),
