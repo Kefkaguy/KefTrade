@@ -140,17 +140,15 @@ def test_migration_persists_immutable_funnel_evidence():
     assert "prevent_intraday_research_evidence_mutation()" in sql
 
 
-def test_sip_session_fetch_splits_only_when_pagination_is_incomplete(monkeypatch):
+def test_sip_session_fetch_splits_dense_windows_recursively(monkeypatch):
     start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
     calls = []
 
     async def fake_fetch(symbol, *, start, end, limit, feed):
         calls.append((start, end))
-        if len(calls) == 1:
-            return 200, [{"t": "whole"}], [
-                {"next_page_token_present": True}
-            ], None
-        return 200, [{"t": str(len(calls))}], [
+        if (end - start) == timedelta(minutes=30):
+            return 200, [{"t": "dense"}], [{"next_page_token_present": True}], None
+        return 200, [{"t": f"{start.isoformat()}-{end.isoformat()}"}], [
             {"next_page_token_present": False}
         ], None
 
@@ -160,7 +158,6 @@ def test_sip_session_fetch_splits_only_when_pagination_is_incomplete(monkeypatch
         "_regular_session_windows",
         lambda *_args, **_kwargs: [
             (start, start + timedelta(minutes=30)),
-            (start + timedelta(minutes=30), start + timedelta(minutes=60)),
         ],
     )
 
@@ -171,11 +168,24 @@ def test_sip_session_fetch_splits_only_when_pagination_is_incomplete(monkeypatch
             window_end=start + timedelta(hours=6, minutes=30),
             limit=1_000_000,
             feed="sip",
+            min_split_seconds=60,
         )
     )
 
-    assert len(calls) == 3
-    assert rows == [{"t": "2"}, {"t": "3"}]
+    assert calls == [
+        (start, start + timedelta(minutes=30)),
+        (start, start + timedelta(minutes=15)),
+        (start + timedelta(minutes=15), start + timedelta(minutes=30)),
+    ]
+    assert rows == [
+        {"t": f"{start.isoformat()}-{(start + timedelta(minutes=15)).isoformat()}"},
+        {
+            "t": (
+                f"{(start + timedelta(minutes=15)).isoformat()}-"
+                f"{(start + timedelta(minutes=30)).isoformat()}"
+            )
+        },
+    ]
 
 
 def test_quote_fetch_retries_rate_limits(monkeypatch):

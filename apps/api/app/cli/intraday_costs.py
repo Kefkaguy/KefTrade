@@ -183,9 +183,42 @@ async def _fetch_complete_session_quotes(
     feed: str,
     rate_limit_retries: int = 5,
     rate_limit_base_sleep: float = 60.0,
+    min_split_seconds: int = 60,
 ) -> list[dict]:
-    """Fetch a session completely, splitting only when pagination exhausts."""
-    _, raw, request_log, _ = await _fetch_stock_quotes_with_rate_limit_retry(
+    """Fetch a full session, splitting dense ETF quote windows as needed."""
+    complete: list[dict] = []
+    for sub_start, sub_end in _regular_session_windows(
+        window_start,
+        window_end,
+        timeframe="30m",
+    ):
+        complete.extend(
+            await _fetch_complete_quote_window(
+                symbol=symbol,
+                window_start=sub_start,
+                window_end=sub_end,
+                limit=limit,
+                feed=feed,
+                rate_limit_retries=rate_limit_retries,
+                rate_limit_base_sleep=rate_limit_base_sleep,
+                min_split_seconds=min_split_seconds,
+            )
+        )
+    return complete
+
+
+async def _fetch_complete_quote_window(
+    *,
+    symbol: str,
+    window_start: datetime,
+    window_end: datetime,
+    limit: int,
+    feed: str,
+    rate_limit_retries: int,
+    rate_limit_base_sleep: float,
+    min_split_seconds: int,
+) -> list[dict]:
+    _, rows, request_log, _ = await _fetch_stock_quotes_with_rate_limit_retry(
         symbol,
         start=window_start,
         end=window_end,
@@ -195,31 +228,43 @@ async def _fetch_complete_session_quotes(
         base_sleep=rate_limit_base_sleep,
     )
     if not request_log or not request_log[-1].get("next_page_token_present"):
-        return raw
+        return rows
 
-    complete: list[dict] = []
-    for sub_start, sub_end in _regular_session_windows(
-        window_start,
-        window_end,
-        timeframe="30m",
-    ):
-        _, sub_rows, sub_log, _ = await _fetch_stock_quotes_with_rate_limit_retry(
-            symbol,
-            start=sub_start,
-            end=sub_end,
-            limit=limit,
-            feed=feed,
-            retries=rate_limit_retries,
-            base_sleep=rate_limit_base_sleep,
+    window_seconds = (window_end - window_start).total_seconds()
+    if window_seconds <= min_split_seconds:
+        raise RuntimeError(
+            f"Provider pagination remained incomplete for {symbol} "
+            f"{window_start.isoformat()} to {window_end.isoformat()}; the session "
+            "is not being persisted."
         )
-        if sub_log and sub_log[-1].get("next_page_token_present"):
-            raise RuntimeError(
-                f"Provider pagination remained incomplete for {symbol} "
-                f"{sub_start.isoformat()} to {sub_end.isoformat()}; the session "
-                "is not being persisted."
-            )
-        complete.extend(sub_rows)
-    return complete
+
+    midpoint = window_start + timedelta(seconds=window_seconds / 2)
+    print(
+        f"quotes {symbol}: dense window {window_start.isoformat()} to "
+        f"{window_end.isoformat()}; splitting",
+        flush=True,
+    )
+    left = await _fetch_complete_quote_window(
+        symbol=symbol,
+        window_start=window_start,
+        window_end=midpoint,
+        limit=limit,
+        feed=feed,
+        rate_limit_retries=rate_limit_retries,
+        rate_limit_base_sleep=rate_limit_base_sleep,
+        min_split_seconds=min_split_seconds,
+    )
+    right = await _fetch_complete_quote_window(
+        symbol=symbol,
+        window_start=midpoint,
+        window_end=window_end,
+        limit=limit,
+        feed=feed,
+        rate_limit_retries=rate_limit_retries,
+        rate_limit_base_sleep=rate_limit_base_sleep,
+        min_split_seconds=min_split_seconds,
+    )
+    return left + right
 
 
 def _retry_after_seconds(error: httpx.HTTPStatusError) -> float | None:
