@@ -479,13 +479,15 @@ def calibrate(args: argparse.Namespace) -> dict:
     end = _time(args.end, fallback=datetime.now(tz=UTC))
     start = _time(args.start, fallback=end - timedelta(days=args.days))
     with connect() as conn:
-        quotes, fills = load_execution_evidence(
-            conn,
-            symbols=args.symbols,
-            start=start,
-            end=end,
-            feed=args.feed,
-        )
+        quotes, fills = ([], [])
+        if args.include_raw_quote_fills:
+            quotes, fills = load_execution_evidence(
+                conn,
+                symbols=args.symbols,
+                start=start,
+                end=end,
+                feed=args.feed,
+            )
         bars = load_regular_session_cost_bars(
             conn,
             symbols=args.symbols,
@@ -610,6 +612,14 @@ def parser() -> argparse.ArgumentParser:
     cost.add_argument("--timeframe", choices=("30m",), default="30m")
     cost.add_argument("--feed", default="sip")
     cost.add_argument("--regulatory-bps", type=float, default=0.1)
+    cost.add_argument(
+        "--include-raw-quote-fills",
+        action="store_true",
+        help=(
+            "Load raw quote snapshots to match broker fills. Disabled by default "
+            "because 30m calibration uses persisted microstructure bars."
+        ),
+    )
 
     progress = subparsers.add_parser("status")
     progress.add_argument("--symbols", type=_symbols, required=True)

@@ -9,6 +9,7 @@ from app.services.intraday_execution_costs import (
     load_regular_session_cost_bars,
     match_fills_to_quotes,
 )
+from app.cli import intraday_costs
 
 
 def quote(timestamp, *, bid, ask, bid_size=10, ask_size=10):
@@ -146,3 +147,72 @@ def test_optional_feed_filters_are_typed_for_postgres():
     combined = "\n".join(query for query, _ in conn.queries)
     assert "%s::text IS NULL OR feed = %s::text" in combined
     assert "%s::text IS NULL OR micro.feed = %s::text" in combined
+
+
+def test_calibration_cli_uses_bar_costs_without_raw_quotes_by_default(monkeypatch):
+    calls = {"raw": 0, "bars": 0, "persist": 0}
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    def fail_raw(*_args, **_kwargs):
+        calls["raw"] += 1
+        raise AssertionError("raw quotes should not be loaded by default")
+
+    def fake_bars(*_args, **_kwargs):
+        calls["bars"] += 1
+        return [
+            {
+                "symbol": "AAPL",
+                "provider": "alpaca",
+                "feed": "sip",
+                "timestamp": datetime(2026, 1, 5, 14, 30, tzinfo=UTC),
+                "quote_count": 10,
+                "median_spread_bps": 1.5,
+            }
+        ]
+
+    def fake_persist(_conn, result):
+        calls["persist"] += 1
+        assert result["matched_fill_observations"] == 0
+        return 77
+
+    monkeypatch.setattr(intraday_costs, "connect", lambda: Connection())
+    monkeypatch.setattr(intraday_costs, "load_execution_evidence", fail_raw)
+    monkeypatch.setattr(intraday_costs, "load_regular_session_cost_bars", fake_bars)
+    monkeypatch.setattr(intraday_costs, "persist_cost_calibration", fake_persist)
+
+    args = intraday_costs.parser().parse_args(
+        [
+            "calibrate",
+            "--symbols",
+            "AAPL",
+            "--start",
+            "2026-01-05T14:30:00Z",
+            "--end",
+            "2026-01-05T21:00:00Z",
+            "--feed",
+            "sip",
+        ]
+    )
+    result = intraday_costs.calibrate(args)
+
+    assert calls == {"raw": 0, "bars": 1, "persist": 1}
+    assert result["calibration_id"] == 77
+
+
+def test_calibration_cli_can_opt_into_raw_quote_fill_matching():
+    args = intraday_costs.parser().parse_args(
+        [
+            "calibrate",
+            "--symbols",
+            "AAPL",
+            "--include-raw-quote-fills",
+        ]
+    )
+
+    assert args.include_raw_quote_fills is True
