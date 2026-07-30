@@ -1,8 +1,12 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
+import app.services.intraday_factor_diagnostics as diagnostics
 from app.services.intraday_factor_diagnostics import (
+    FACTOR_SPECS,
+    evaluate_forward_confirmation,
     evaluate_factor_discovery,
+    factor_research_readiness,
     first_to_last_half_hour_observations,
     overnight_gap_acceptance_absorption_observations,
     vwap_execution_pressure_observations,
@@ -74,6 +78,99 @@ def test_discovery_never_calculates_withheld_confirmation_metrics():
     assert market["validation"]["observations"] >= 50
     assert market["cost_clearance"]["clears_stressed"] is True
     assert result["factors"]["liquidity_shock_reversal"]["status"] == "blocked_missing_quote_data"
+
+
+def test_candle_factor_readiness_does_not_require_quote_or_auction_gates():
+    readiness = factor_research_readiness(
+        FACTOR_SPECS["first_to_last_half_hour_market_momentum"],
+        data_readiness={"candle_research_ready": True, "execution_research_ready": False},
+        institutional_readiness={
+            "institutional_candle_ready": True,
+            "gates": {"frozen_microstructure_80pct_coverage": False},
+            "auction_imbalances": {"ready": False},
+        },
+    )
+
+    assert readiness["ready"] is True
+    assert "institutional_frozen_sip_coverage" not in readiness["gates"]
+    assert "auction_imbalance_ready" not in readiness["gates"]
+
+
+def test_quote_factor_readiness_requires_frozen_sip_coverage():
+    readiness = factor_research_readiness(
+        FACTOR_SPECS["liquidity_shock_reversal"],
+        data_readiness={"candle_research_ready": True, "execution_research_ready": False},
+        institutional_readiness={
+            "institutional_candle_ready": True,
+            "gates": {"frozen_microstructure_80pct_coverage": False},
+            "auction_imbalances": {"ready": False},
+        },
+    )
+
+    assert readiness["ready"] is False
+    assert readiness["limitations"] == [
+        "snapshot_frozen_quote_coverage",
+        "institutional_frozen_sip_coverage",
+    ]
+
+
+def test_forward_confirmation_can_pass_candle_factor_before_production_tca(monkeypatch):
+    def passing_metrics(*args, **kwargs):
+        return {
+            "observations": 75,
+            "distinct_sessions": 25,
+            "distinct_symbols": 2,
+            "rank_ic": 0.21,
+            "mean_cross_sectional_rank_ic": None,
+            "rank_ic_periods": 0,
+            "gross_directional_edge_bps": 12.0,
+            "net_stressed_edge_bps": 8.0,
+            "day_clustered_t_statistic": 3.5,
+            "two_sided_normal_p_value": 0.01,
+            "measurable": True,
+            "evidence_quality": {"selection_adjusted_signal": True},
+            "net_evidence_quality": {"selection_adjusted_signal": True},
+        }
+
+    monkeypatch.setattr(
+        diagnostics,
+        "dataset_research_readiness",
+        lambda *args, **kwargs: {
+            "candle_research_ready": True,
+            "execution_research_ready": False,
+        },
+    )
+    monkeypatch.setattr(
+        diagnostics,
+        "cost_model_readiness",
+        lambda *args, **kwargs: {
+            "research_cost_available": True,
+            "production_cost_ready": False,
+        },
+    )
+    monkeypatch.setattr(diagnostics, "factor_metrics", passing_metrics)
+
+    result = evaluate_forward_confirmation(
+        {"SPY": market_candles("SPY", sessions=3)},
+        timeframe="30m",
+        factor_keys=["first_to_last_half_hour_market_momentum"],
+        cost_model={"stressed_round_trip_bps": 4.0},
+        institutional_data_readiness={
+            "institutional_candle_ready": True,
+            "gates": {"frozen_microstructure_80pct_coverage": False},
+            "auction_imbalances": {"ready": False},
+        },
+    )
+
+    assert result["passed_locked_confirmation"] == [
+        "first_to_last_half_hour_market_momentum"
+    ]
+    assert (
+        result["factors"]["first_to_last_half_hour_market_momentum"][
+            "factor_research_readiness"
+        ]["ready"]
+        is True
+    )
 
 
 def test_gap_acceptance_requires_elevated_opening_participation():

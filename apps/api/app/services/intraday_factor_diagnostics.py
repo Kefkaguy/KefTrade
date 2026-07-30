@@ -43,6 +43,16 @@ MINIMUM_OBSERVATIONS = 50
 MINIMUM_VALIDATION_T = 3.0
 
 
+def _default_institutional_readiness() -> dict[str, Any]:
+    return {
+        "institutional_candle_ready": False,
+        "institutional_execution_ready": False,
+        "auction_imbalances": {"ready": False},
+        "gates": {},
+        "limitations": ["backend_research_data_readiness_not_supplied"],
+    }
+
+
 @dataclass(frozen=True)
 class FactorSpec:
     key: str
@@ -71,6 +81,42 @@ def _session_date(row: dict[str, Any]) -> date:
     if isinstance(value, date):
         return value
     return exchange_session_date(row)
+
+
+def factor_research_readiness(
+    spec: FactorSpec,
+    *,
+    data_readiness: dict[str, Any],
+    institutional_readiness: dict[str, Any],
+) -> dict[str, Any]:
+    """Return the dataset gates that apply to this specific factor."""
+    gates = {
+        "snapshot_candle_research_ready": bool(data_readiness.get("candle_research_ready")),
+        "institutional_candle_ready": bool(
+            institutional_readiness.get("institutional_candle_ready")
+        ),
+    }
+    if spec.requires_quotes:
+        gates["snapshot_frozen_quote_coverage"] = bool(
+            data_readiness.get("execution_research_ready")
+        )
+        gates["institutional_frozen_sip_coverage"] = bool(
+            (institutional_readiness.get("gates") or {}).get(
+                "frozen_microstructure_80pct_coverage"
+            )
+        )
+    if spec.requires_auction_data:
+        gates["auction_imbalance_ready"] = bool(
+            (institutional_readiness.get("auction_imbalances") or {}).get("ready")
+        )
+    return {
+        "factor_key": spec.key,
+        "requires_quotes": spec.requires_quotes,
+        "requires_auction_data": spec.requires_auction_data,
+        "gates": gates,
+        "ready": all(gates.values()),
+        "limitations": [label for label, passed in gates.items() if not passed],
+    }
 
 
 def first_to_last_half_hour_observations(
@@ -593,11 +639,9 @@ def evaluate_factor_discovery(
         microstructure_by_symbol=microstructure_by_symbol,
     )
     cost_readiness = cost_model_readiness(cost_model, symbols=list(candles_by_symbol))
-    institutional_readiness = institutional_data_readiness or {
-        "institutional_candle_ready": False,
-        "institutional_execution_ready": False,
-        "limitations": ["backend_research_data_readiness_not_supplied"],
-    }
+    institutional_readiness = (
+        institutional_data_readiness or _default_institutional_readiness()
+    )
     effective_trials = max(1, len(factor_keys))
     factor_results: dict[str, Any] = {}
     validation_p: dict[str, float | None] = {}
@@ -627,6 +671,11 @@ def evaluate_factor_discovery(
                 ],
             }
             continue
+        readiness = factor_research_readiness(
+            spec,
+            data_readiness=data_readiness,
+            institutional_readiness=institutional_readiness,
+        )
         observations = spec.builder(
             candles_by_symbol,
             timeframe=timeframe,
@@ -659,6 +708,7 @@ def evaluate_factor_discovery(
             "discovery": discovery_metrics,
             "validation": validation_metrics,
             "cost_clearance": cost_clearance,
+            "factor_research_readiness": readiness,
             "confirmation": {
                 "status": "locked",
                 "sessions_withheld": (
@@ -689,7 +739,7 @@ def evaluate_factor_discovery(
             and validation["net_evidence_quality"]["selection_adjusted_signal"]
             and data_readiness["candle_research_ready"]
             and cost_readiness["research_cost_available"]
-            and institutional_readiness["institutional_candle_ready"]
+            and result["factor_research_readiness"]["ready"]
         ):
             selected.append(key)
     return {
@@ -723,11 +773,9 @@ def evaluate_forward_confirmation(
         microstructure_by_symbol=microstructure_by_symbol,
     )
     cost_readiness = cost_model_readiness(cost_model, symbols=list(candles_by_symbol))
-    institutional_readiness = institutional_data_readiness or {
-        "institutional_candle_ready": False,
-        "institutional_execution_ready": False,
-        "limitations": ["backend_research_data_readiness_not_supplied"],
-    }
+    institutional_readiness = (
+        institutional_data_readiness or _default_institutional_readiness()
+    )
     effective_trials = max(1, len(factor_keys))
     factors: dict[str, Any] = {}
     p_values: dict[str, float | None] = {}
@@ -739,6 +787,11 @@ def evaluate_forward_confirmation(
         if spec.requires_auction_data and not auction_by_symbol:
             factors[key] = {"status": "blocked_missing_auction_data"}
             continue
+        readiness = factor_research_readiness(
+            spec,
+            data_readiness=data_readiness,
+            institutional_readiness=institutional_readiness,
+        )
         observations = spec.builder(
             candles_by_symbol,
             timeframe=timeframe,
@@ -755,6 +808,7 @@ def evaluate_forward_confirmation(
             "status": "measured" if metrics["measurable"] else "insufficient_evidence",
             "confirmation": metrics,
             "cost_clearance": _cost_clearance(metrics, cost_model),
+            "factor_research_readiness": readiness,
         }
     q_values = benjamini_hochberg(p_values)
     passed: list[str] = []
@@ -776,9 +830,8 @@ def evaluate_forward_confirmation(
             and metrics["evidence_quality"]["selection_adjusted_signal"]
             and metrics["net_evidence_quality"]["selection_adjusted_signal"]
             and data_readiness["candle_research_ready"]
-            and data_readiness["execution_research_ready"]
-            and cost_readiness["production_cost_ready"]
-            and institutional_readiness["institutional_execution_ready"]
+            and cost_readiness["research_cost_available"]
+            and result["factor_research_readiness"]["ready"]
         ):
             passed.append(key)
     return {
