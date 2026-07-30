@@ -8,7 +8,7 @@ from typing import Any, Sequence
 import psycopg
 from psycopg.types.json import Jsonb
 
-RESEARCH_DATA_VERSION = "intraday_research_data_v1"
+RESEARCH_DATA_VERSION = "intraday_research_data_v2_sip_coverage"
 
 
 def persist_auction_imbalances(
@@ -142,12 +142,71 @@ def research_data_readiness(
     ).fetchone()
     micro = conn.execute(
         """
-        SELECT COUNT(*) FILTER (WHERE quote_count > 0) AS rows,
-               COUNT(DISTINCT symbol) FILTER (WHERE quote_count > 0) AS symbols
-        FROM research_dataset_intraday_features
-        WHERE dataset_id = %s
-          AND timeframe = %s
-          AND symbol = ANY(%s)
+        SELECT
+            COUNT(*) FILTER (
+                WHERE snapshot.quote_count > 0
+                  AND LOWER(snapshot.microstructure_feed) = 'sip'
+            ) AS frozen_rows,
+            COUNT(DISTINCT snapshot.symbol) FILTER (
+                WHERE snapshot.quote_count > 0
+                  AND LOWER(snapshot.microstructure_feed) = 'sip'
+            ) AS frozen_symbols,
+            COUNT(*) FILTER (
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM intraday_microstructure_features live
+                    WHERE live.symbol = snapshot.symbol
+                      AND live.timeframe = snapshot.timeframe
+                      AND live.timestamp = snapshot.timestamp
+                      AND LOWER(live.feed) = 'sip'
+                      AND live.quote_count > 0
+                )
+            ) AS live_sip_rows,
+            COUNT(DISTINCT snapshot.symbol) FILTER (
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM intraday_microstructure_features live
+                    WHERE live.symbol = snapshot.symbol
+                      AND live.timeframe = snapshot.timeframe
+                      AND live.timestamp = snapshot.timestamp
+                      AND LOWER(live.feed) = 'sip'
+                      AND live.quote_count > 0
+                )
+            ) AS live_sip_symbols,
+            COUNT(*) FILTER (
+                WHERE (
+                    snapshot.quote_count > 0
+                    AND LOWER(snapshot.microstructure_feed) = 'sip'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM intraday_microstructure_features live
+                    WHERE live.symbol = snapshot.symbol
+                      AND live.timeframe = snapshot.timeframe
+                      AND live.timestamp = snapshot.timestamp
+                      AND LOWER(live.feed) = 'sip'
+                      AND live.quote_count > 0
+                )
+            ) AS available_rows,
+            COUNT(DISTINCT snapshot.symbol) FILTER (
+                WHERE (
+                    snapshot.quote_count > 0
+                    AND LOWER(snapshot.microstructure_feed) = 'sip'
+                )
+                OR EXISTS (
+                    SELECT 1
+                    FROM intraday_microstructure_features live
+                    WHERE live.symbol = snapshot.symbol
+                      AND live.timeframe = snapshot.timeframe
+                      AND live.timestamp = snapshot.timestamp
+                      AND LOWER(live.feed) = 'sip'
+                      AND live.quote_count > 0
+                )
+            ) AS available_symbols
+        FROM research_dataset_intraday_features snapshot
+        WHERE snapshot.dataset_id = %s
+          AND snapshot.timeframe = %s
+          AND snapshot.symbol = ANY(%s)
         """,
         (
             dataset_id,
@@ -194,13 +253,17 @@ def research_data_readiness(
         membership_symbols = int((membership or {}).get("symbols") or 0)
 
     candle_rows = int((candle or {}).get("rows") or 0)
-    micro_rows = int((micro or {}).get("rows") or 0)
+    frozen_micro_rows = int((micro or {}).get("frozen_rows") or 0)
+    live_sip_rows = int((micro or {}).get("live_sip_rows") or 0)
+    micro_rows = int((micro or {}).get("available_rows") or 0)
     quote_coverage = min(1.0, micro_rows / max(1, candle_rows))
+    frozen_quote_coverage = min(1.0, frozen_micro_rows / max(1, candle_rows))
     integrity = dict(manifest["integrity"] or {})
     gates = {
         "minimum_20_symbols": int((candle or {}).get("symbols") or 0) >= 20,
         "minimum_252_sessions": int((candle or {}).get("sessions") or 0) >= 252,
         "microstructure_80pct_coverage": quote_coverage >= 0.80,
+        "frozen_microstructure_80pct_coverage": frozen_quote_coverage >= 0.80,
         "point_in_time_universe": (
             membership_symbols >= max(1, int(len(assets) * 0.80))
             if universe_key
@@ -227,8 +290,17 @@ def research_data_readiness(
         },
         "microstructure": {
             "rows": micro_rows,
-            "symbols": int((micro or {}).get("symbols") or 0),
+            "symbols": int((micro or {}).get("available_symbols") or 0),
             "coverage": round(quote_coverage, 6),
+            "live_sip_rows": live_sip_rows,
+            "live_sip_symbols": int((micro or {}).get("live_sip_symbols") or 0),
+            "frozen_rows": frozen_micro_rows,
+            "frozen_symbols": int((micro or {}).get("frozen_symbols") or 0),
+            "frozen_coverage": round(frozen_quote_coverage, 6),
+            "snapshot_refresh_required": micro_rows > frozen_micro_rows,
+            "matching_rule": (
+                "exact symbol/timeframe/timestamp match; consolidated SIP feed only"
+            ),
         },
         "auction_imbalances": {
             "rows": int((auction or {}).get("rows") or 0),
