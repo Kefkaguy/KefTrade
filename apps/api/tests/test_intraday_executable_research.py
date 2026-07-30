@@ -251,3 +251,67 @@ def test_sync_quotes_cli_exposes_rate_limit_controls():
     assert args.rate_limit_retries == 4
     assert args.rate_limit_base_sleep == 7.5
     assert args.request_pause_seconds == 2
+
+
+def test_session_quote_sync_persists_each_window_incrementally(monkeypatch):
+    start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
+    windows = [
+        (start, start + timedelta(minutes=30)),
+        (start + timedelta(minutes=30), start + timedelta(minutes=60)),
+    ]
+    fetched = []
+    persisted_quotes = []
+    persisted_bars = []
+
+    async def fake_fetch_window(**kwargs):
+        fetched.append((kwargs["window_start"], kwargs["window_end"]))
+        suffix = len(fetched)
+        return [
+            {
+                "t": kwargs["window_start"].isoformat().replace("+00:00", "Z"),
+                "bp": "100",
+                "ap": "100.02",
+                "bs": suffix,
+                "as": suffix + 1,
+            }
+        ]
+
+    class Connection:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    monkeypatch.setattr(intraday_costs, "_regular_session_windows", lambda *_args, **_kwargs: windows)
+    monkeypatch.setattr(intraday_costs, "_fetch_complete_quote_window", fake_fetch_window)
+    monkeypatch.setattr(intraday_costs, "connect", lambda: Connection())
+    monkeypatch.setattr(
+        intraday_costs,
+        "persist_quote_snapshots",
+        lambda conn, rows: persisted_quotes.append(list(rows)) or len(rows),
+    )
+    monkeypatch.setattr(
+        intraday_costs,
+        "persist_microstructure_bars",
+        lambda conn, rows: persisted_bars.append(list(rows)) or len(rows),
+    )
+
+    result = asyncio.run(
+        intraday_costs._persist_complete_session_quotes_incrementally(
+            symbol="QQQ",
+            window_start=start,
+            window_end=start + timedelta(hours=1),
+            limit=1_000_000,
+            feed="sip",
+            timeframes=["30m"],
+            retain_raw=True,
+            rate_limit_retries=1,
+            rate_limit_base_sleep=1,
+        )
+    )
+
+    assert fetched == windows
+    assert result == {"imported": 2, "processed": 2, "microstructure": 2}
+    assert [len(rows) for rows in persisted_quotes] == [1, 1]
+    assert [len(rows) for rows in persisted_bars] == [1, 1]

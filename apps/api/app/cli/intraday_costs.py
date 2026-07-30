@@ -207,6 +207,61 @@ async def _fetch_complete_session_quotes(
     return complete
 
 
+async def _persist_complete_session_quotes_incrementally(
+    *,
+    symbol: str,
+    window_start: datetime,
+    window_end: datetime,
+    limit: int,
+    feed: str,
+    timeframes: list[str],
+    retain_raw: bool,
+    rate_limit_retries: int,
+    rate_limit_base_sleep: float,
+) -> dict[str, int]:
+    """Persist one session a bar at a time so dense ETFs do not require a full-day quote list."""
+    imported = 0
+    processed = 0
+    microstructure = 0
+    for sub_start, sub_end in _regular_session_windows(
+        window_start,
+        window_end,
+        timeframe="30m",
+    ):
+        raw = await _fetch_complete_quote_window(
+            symbol=symbol,
+            window_start=sub_start,
+            window_end=sub_end,
+            limit=limit,
+            feed=feed,
+            rate_limit_retries=rate_limit_retries,
+            rate_limit_base_sleep=rate_limit_base_sleep,
+            min_split_seconds=60,
+        )
+        normalized_by_timestamp = {}
+        for row in raw:
+            quote = normalize_stock_quote(symbol, row, feed=feed)
+            if quote is not None:
+                normalized_by_timestamp[quote["timestamp"]] = quote
+        normalized = sorted(
+            normalized_by_timestamp.values(),
+            key=lambda row: row["timestamp"],
+        )
+        processed += len(normalized)
+        with connect() as conn:
+            if retain_raw:
+                imported += persist_quote_snapshots(conn, normalized)
+            for timeframe in timeframes:
+                rows = aggregate_microstructure_bars(normalized, timeframe=timeframe)
+                stored = persist_microstructure_bars(conn, rows)
+                microstructure += stored
+    return {
+        "imported": imported,
+        "processed": processed,
+        "microstructure": microstructure,
+    }
+
+
 async def _fetch_complete_quote_window(
     *,
     symbol: str,
@@ -351,40 +406,28 @@ async def sync_quotes(args: argparse.Namespace) -> dict:
                     window_end=window_end,
                 )
             try:
-                raw = await _fetch_complete_session_quotes(
+                session_result = await _persist_complete_session_quotes_incrementally(
                     symbol=symbol,
                     window_start=window_start,
                     window_end=window_end,
                     limit=args.max_quotes_per_session,
                     feed=args.feed,
+                    timeframes=args.timeframes,
+                    retain_raw=window_end >= end - timedelta(days=args.retain_raw_days),
                     rate_limit_retries=args.rate_limit_retries,
                     rate_limit_base_sleep=args.rate_limit_base_sleep,
                 )
-                normalized_by_timestamp = {}
-                for row in raw:
-                    quote = normalize_stock_quote(symbol, row, feed=args.feed)
-                    if quote is not None:
-                        normalized_by_timestamp[quote["timestamp"]] = quote
-                normalized = sorted(
-                    normalized_by_timestamp.values(),
-                    key=lambda row: row["timestamp"],
-                )
-                processed_quotes += len(normalized)
-                session_microstructure = 0
+                imported += session_result["imported"]
+                processed_quotes += session_result["processed"]
+                session_microstructure = session_result["microstructure"]
+                microstructure += session_microstructure
                 with connect() as conn:
-                    if window_end >= end - timedelta(days=args.retain_raw_days):
-                        imported += persist_quote_snapshots(conn, normalized)
-                    for timeframe in args.timeframes:
-                        rows = aggregate_microstructure_bars(normalized, timeframe=timeframe)
-                        stored = persist_microstructure_bars(conn, rows)
-                        microstructure += stored
-                        session_microstructure += stored
                     _checkpoint_finished(
                         conn,
                         symbol=symbol,
                         feed=args.feed,
                         session_date=window_start.date(),
-                        quote_rows=len(normalized),
+                        quote_rows=session_result["processed"],
                         microstructure_rows=session_microstructure,
                     )
                 completed_sessions += 1
@@ -397,6 +440,11 @@ async def sync_quotes(args: argparse.Namespace) -> dict:
                     await asyncio.sleep(args.request_pause_seconds)
             except Exception as error:
                 failed_sessions += 1
+                error_text = f"{type(error).__name__}: {error}"
+                print(
+                    f"quotes {symbol}: failed {window_start.date()} - {error_text}",
+                    flush=True,
+                )
                 with connect() as conn:
                     _checkpoint_finished(
                         conn,
@@ -405,7 +453,7 @@ async def sync_quotes(args: argparse.Namespace) -> dict:
                         session_date=window_start.date(),
                         quote_rows=0,
                         microstructure_rows=0,
-                        error=f"{type(error).__name__}: {error}",
+                        error=error_text,
                     )
                 if not args.continue_on_error:
                     raise
