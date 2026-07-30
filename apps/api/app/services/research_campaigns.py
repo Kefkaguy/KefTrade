@@ -1,3 +1,6 @@
+#Hello, if you are modifying this bullshit may God have mercy on your soul. I am not responsible for any damage you cause to the system.
+
+
 from __future__ import annotations
 
 from collections import Counter, defaultdict
@@ -8369,6 +8372,10 @@ def research_campaign_key(
     # A generator variant (e.g. timeframe-scaled thresholds) changes the
     # research question even when universe/assets/timeframes match, so it must
     # not collide with an earlier campaign via ON CONFLICT(campaign_key).
+    # The variant is not used for the campaign_key itself, but it is used to
+    # generate the research_job_key for each candidate, so that the same
+    # candidate can be re-evaluated with a different variant without colliding
+    # idk if this is the right way to do it but it seems like it should work
     variant_suffix = "" if not variant else f"|variant:{variant}"
     raw = f"{CAMPAIGN_VERSION}|{universe_key}|{','.join(assets)}|{','.join(timeframes)}|{max_candidates}{mode_suffix}{dataset_suffix}{variant_suffix}"
     return sha256(raw.encode("utf-8")).hexdigest()

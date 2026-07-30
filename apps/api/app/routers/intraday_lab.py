@@ -577,6 +577,7 @@ def confirm_frozen_candidate(
     except ValueError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
 
+#!HELP ME I DONT KNOW WHAT TO DO
 
 @router.post("/research/intraday/signal-diagnostics")
 def enqueue_signal_diagnostics_endpoint(

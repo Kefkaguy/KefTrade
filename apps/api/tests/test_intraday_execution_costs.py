@@ -5,6 +5,8 @@ from app.services.intraday_execution_costs import (
     aggregate_microstructure_bars,
     calibrate_execution_costs,
     calibrate_regular_session_bar_costs,
+    load_execution_evidence,
+    load_regular_session_cost_bars,
     match_fills_to_quotes,
 )
 
@@ -106,3 +108,41 @@ def test_regular_session_calibration_weights_each_symbol_bar_once():
     assert result["observed_round_trip_bps"] == 2
     assert result["methodology"]["bar_observations"] == 2
     assert "one observation per symbol/bar" in result["methodology"]["event_weighting_guard"]
+
+
+def test_optional_feed_filters_are_typed_for_postgres():
+    class Result:
+        def fetchall(self):
+            return []
+
+    class Connection:
+        def __init__(self):
+            self.queries = []
+
+        def execute(self, query, params):
+            self.queries.append((query, params))
+            return Result()
+
+    conn = Connection()
+    start = datetime(2026, 1, 5, 14, 30, tzinfo=UTC)
+    end = start + timedelta(days=1)
+
+    load_execution_evidence(
+        conn,
+        symbols=["AAPL"],
+        start=start,
+        end=end,
+        feed="sip",
+    )
+    load_regular_session_cost_bars(
+        conn,
+        symbols=["AAPL"],
+        timeframe="30m",
+        start=start,
+        end=end,
+        feed="sip",
+    )
+
+    combined = "\n".join(query for query, _ in conn.queries)
+    assert "%s::text IS NULL OR feed = %s::text" in combined
+    assert "%s::text IS NULL OR micro.feed = %s::text" in combined

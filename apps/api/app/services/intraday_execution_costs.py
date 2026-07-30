@@ -351,7 +351,7 @@ def load_execution_evidence(
                    bid_size, ask_size, midpoint, spread_bps
             FROM intraday_quote_snapshots
             WHERE symbol = ANY(%s) AND timestamp BETWEEN %s AND %s
-              AND (%s IS NULL OR feed = %s)
+              AND (%s::text IS NULL OR feed = %s::text)
             ORDER BY symbol, timestamp
             """,
             (normalized, start, end, feed, feed),
@@ -399,7 +399,7 @@ def load_regular_session_cost_bars(
             WHERE micro.symbol = ANY(%s)
               AND micro.timeframe = %s
               AND micro.timestamp BETWEEN %s AND %s
-              AND (%s IS NULL OR micro.feed = %s)
+              AND (%s::text IS NULL OR micro.feed = %s::text)
               AND feature.minutes_from_open >= 0
               AND feature.minutes_to_close >= 0
             ORDER BY micro.symbol, micro.timestamp
