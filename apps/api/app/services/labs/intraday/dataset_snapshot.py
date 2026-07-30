@@ -68,13 +68,13 @@ def record_intraday_dataset_snapshot(
                        ARRAY_AGG(DISTINCT source ORDER BY source) AS sources
                 FROM candles
                 WHERE symbol = %s AND timeframe = %s
-                  AND (%s IS NULL OR timestamp <= %s)
+                  AND (%s::timestamptz IS NULL OR timestamp <= %s::timestamptz)
                   AND (
-                      %s IS NULL
+                      %s::text IS NULL
                       OR EXISTS (
                           SELECT 1
                           FROM research_point_in_time_universe_membership membership
-                          WHERE membership.universe_key = %s
+                          WHERE membership.universe_key = %s::text
                             AND membership.symbol = candles.symbol
                             AND membership.effective_from <=
                                 (candles.timestamp AT TIME ZONE 'America/New_York')::date
@@ -136,13 +136,13 @@ def record_intraday_dataset_snapshot(
                 ) micro ON TRUE
                 WHERE intraday_features.symbol = %s
                   AND intraday_features.timeframe = %s
-                  AND (%s IS NULL OR intraday_features.timestamp <= %s)
+                  AND (%s::timestamptz IS NULL OR intraday_features.timestamp <= %s::timestamptz)
                   AND (
-                      %s IS NULL
+                      %s::text IS NULL
                       OR EXISTS (
                           SELECT 1
                           FROM research_point_in_time_universe_membership membership
-                          WHERE membership.universe_key = %s
+                          WHERE membership.universe_key = %s::text
                             AND membership.symbol = intraday_features.symbol
                             AND membership.effective_from <= intraday_features.session_date
                             AND (
@@ -263,11 +263,11 @@ def record_intraday_dataset_snapshot(
             FROM candles
             WHERE symbol = %s AND timeframe = %s AND timestamp BETWEEN %s AND %s
               AND (
-                  %s IS NULL
+                  %s::text IS NULL
                   OR EXISTS (
                       SELECT 1
                       FROM research_point_in_time_universe_membership membership
-                      WHERE membership.universe_key = %s
+                      WHERE membership.universe_key = %s::text
                         AND membership.symbol = candles.symbol
                         AND membership.effective_from <=
                             (candles.timestamp AT TIME ZONE 'America/New_York')::date
@@ -332,11 +332,11 @@ def record_intraday_dataset_snapshot(
               AND intraday_features.timeframe = %s
               AND intraday_features.timestamp BETWEEN %s AND %s
               AND (
-                  %s IS NULL
+                  %s::text IS NULL
                   OR EXISTS (
                       SELECT 1
                       FROM research_point_in_time_universe_membership membership
-                      WHERE membership.universe_key = %s
+                      WHERE membership.universe_key = %s::text
                         AND membership.symbol = intraday_features.symbol
                         AND membership.effective_from <= intraday_features.session_date
                         AND (

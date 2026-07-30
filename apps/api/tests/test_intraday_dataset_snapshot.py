@@ -26,9 +26,11 @@ class FakeSnapshotConn:
         self.feature_inserts = 0
         self.split_timestamp_queries = 0
         self.committed = False
+        self.executed: list[tuple[str, tuple]] = []
 
     def execute(self, query, params=None):
         params = params or ()
+        self.executed.append((query, params))
         stripped = query.strip()
         if "FROM candles" in stripped and "COUNT(*)" in stripped:
             return FakeResult(
@@ -91,6 +93,17 @@ def test_record_intraday_dataset_snapshot_creates_a_manifest_tagged_intraday():
     assert conn.candle_inserts == 2  # one per (symbol, timeframe) pair
     assert conn.feature_inserts == 2
     assert conn.committed is True
+
+
+def test_snapshot_queries_cast_nullable_filter_parameters():
+    conn = FakeSnapshotConn()
+
+    record_intraday_dataset_snapshot(conn, assets=["AMD"], timeframes=["30m"])
+    queries = " ".join(query.strip() for query, _ in conn.executed)
+
+    assert "%s::timestamptz IS NULL" in queries
+    assert "%s::text IS NULL" in queries
+    assert "membership.universe_key = %s::text" in queries
 
 
 def test_record_intraday_dataset_snapshot_is_idempotent_by_content_hash():
