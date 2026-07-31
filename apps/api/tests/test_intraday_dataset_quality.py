@@ -219,3 +219,113 @@ def test_session_shapes_classify_full_early_close_and_incomplete():
     assert report["extended_hours_rows"] == 4
     # Two of three complete is below the 95% bar.
     assert report["passed"] is False
+
+
+def jump(symbol, session_date, value=0.4, explained=False):
+    return {
+        "symbol": symbol,
+        "session_date": session_date,
+        "jump": value,
+        "explained": explained,
+    }
+
+
+def corporate_conn(jumps, *, symbol_sessions=383047, recorded_actions=0):
+    return QueryConn(
+        [
+            Result(rows=jumps),
+            Result(row={"symbol_sessions": symbol_sessions}),
+            Result(row={"total": recorded_actions}),
+        ]
+    )
+
+
+def test_isolated_market_shocks_do_not_fail_a_ten_year_dataset():
+    from app.services.intraday_dataset_quality import corporate_action_consistency
+
+    # Seven real one-day moves across 383k symbol-sessions: earnings, a merger
+    # completion, an oil crash. That is the market, not a broken adjustment.
+    jumps = [
+        jump("RTX", "2020-04-03", 0.70),
+        jump("SNAP", "2022-02-04", 0.44),
+        jump("OXY", "2020-03-09", 0.40),
+        jump("BIIB", "2019-10-22", 0.39),
+        jump("AMD", "2025-10-06", 0.38),
+        jump("SNAP", "2022-05-24", 0.36),
+        jump("ZM", "2020-09-01", 0.35),
+    ]
+
+    report = corporate_action_consistency(
+        corporate_conn(jumps), dataset_id=79, timeframe="30m"
+    )
+
+    assert report["unexplained_jumps"] == 7
+    assert report["passed"] is True
+    assert report["checks"]["within_expected_shock_density"] is True
+
+
+def test_one_symbol_gapping_repeatedly_is_an_unapplied_split():
+    from app.services.intraday_dataset_quality import corporate_action_consistency
+
+    jumps = [jump("SPLITCO", f"2020-0{index}-01") for index in range(1, 6)]
+
+    report = corporate_action_consistency(
+        corporate_conn(jumps), dataset_id=79, timeframe="30m"
+    )
+
+    assert report["max_unexplained_per_symbol"] == 5
+    assert report["checks"]["no_symbol_repeatedly_unexplained"] is False
+    assert report["passed"] is False
+
+
+def test_many_symbols_gapping_on_one_date_is_a_boundary_fault():
+    from app.services.intraday_dataset_quality import corporate_action_consistency
+
+    jumps = [jump(f"SYM{index}", "2026-03-02") for index in range(8)]
+
+    report = corporate_action_consistency(
+        corporate_conn(jumps), dataset_id=79, timeframe="30m"
+    )
+
+    assert report["max_unexplained_per_date"] == 8
+    assert report["checks"]["no_date_clustered_unexplained"] is False
+    assert report["passed"] is False
+
+
+def test_a_flood_of_unexplained_jumps_breaches_the_density_limit():
+    from app.services.intraday_dataset_quality import corporate_action_consistency
+
+    jumps = [jump(f"SYM{index}", f"2020-01-{index % 28 + 1:02d}") for index in range(120)]
+
+    report = corporate_action_consistency(
+        corporate_conn(jumps, symbol_sessions=383047), dataset_id=79, timeframe="30m"
+    )
+
+    assert report["checks"]["within_expected_shock_density"] is False
+    assert report["passed"] is False
+
+
+def test_a_small_dataset_still_gets_a_meaningful_density_limit():
+    from app.services.intraday_dataset_quality import corporate_action_consistency
+
+    # Two unexplained jumps in only 5,000 symbol-sessions is a high rate.
+    jumps = [jump("AAA", "2020-01-02"), jump("BBB", "2020-06-02")]
+
+    report = corporate_action_consistency(
+        corporate_conn(jumps, symbol_sessions=5000), dataset_id=79, timeframe="30m"
+    )
+
+    assert report["checks"]["within_expected_shock_density"] is False
+
+
+def test_explained_jumps_are_excluded_before_any_gate():
+    from app.services.intraday_dataset_quality import corporate_action_consistency
+
+    jumps = [jump("SPLITCO", f"2020-0{i}-01", explained=True) for i in range(1, 6)]
+
+    report = corporate_action_consistency(
+        corporate_conn(jumps, recorded_actions=42), dataset_id=79, timeframe="30m"
+    )
+
+    assert report["unexplained_jumps"] == 0
+    assert report["passed"] is True

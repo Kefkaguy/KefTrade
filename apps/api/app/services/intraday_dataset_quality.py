@@ -38,6 +38,11 @@ GAP_EXPERIMENT_OBSERVATION_TARGET = 850
 
 STALE_VOLUME_SHARE_LIMIT = 0.02
 MAX_UNEXPLAINED_JUMP = 0.35
+# One unexplained shock per ten thousand symbol-sessions. Ten years of US
+# equities genuinely contains a handful of >35% single-session moves.
+MAX_UNEXPLAINED_JUMP_DENSITY = 0.0001
+MAX_UNEXPLAINED_PER_SYMBOL = 3
+MAX_UNEXPLAINED_PER_DATE = 5
 
 
 def _round(value: float | None) -> float | None:
@@ -231,6 +236,25 @@ def corporate_action_consistency(
         """,
         (dataset_id, timeframe, MAX_CONSECUTIVE_SESSION_DAYS, MAX_UNEXPLAINED_JUMP),
     ).fetchall()
+    scale = conn.execute(
+        """
+        SELECT COUNT(*) AS symbol_sessions FROM (
+            SELECT symbol, (timestamp AT TIME ZONE 'America/New_York')::date
+            FROM research_dataset_candles
+            WHERE dataset_id = %s AND timeframe = %s
+            GROUP BY 1, 2
+        ) AS s
+        """,
+        (dataset_id, timeframe),
+    ).fetchone()
+    symbol_sessions = int((scale or {}).get("symbol_sessions") or 0)
+    recorded_actions = int(
+        (
+            conn.execute("SELECT COUNT(*) AS total FROM research_corporate_actions").fetchone()
+            or {}
+        ).get("total")
+        or 0
+    )
     unexplained: list[dict[str, Any]] = [
         {
             "symbol": str(row["symbol"]),
@@ -240,14 +264,50 @@ def corporate_action_consistency(
         for row in rows
         if not row["explained"]
     ]
+    # An adjustment failure -- a split the feed never applied -- shows up as
+    # *many* discontinuities, and they cluster: repeatedly on one symbol, or on
+    # one date across many symbols.  Isolated large moves are the market
+    # (earnings shocks, merger completions, an oil price war), and a ten-year
+    # equity dataset will always contain some.  A bare count therefore cannot
+    # separate the two, so the gate tests density and clustering instead.
+    by_symbol: dict[str, int] = {}
+    by_date: dict[str, int] = {}
+    for item in unexplained:
+        by_symbol[item["symbol"]] = by_symbol.get(item["symbol"], 0) + 1
+        by_date[item["session_date"]] = by_date.get(item["session_date"], 0) + 1
+    worst_symbol = max(by_symbol.values(), default=0)
+    worst_date = max(by_date.values(), default=0)
+    density = len(unexplained) / symbol_sessions if symbol_sessions else 0.0
+
+    checks = {
+        # Roughly one permitted per ten thousand symbol-sessions.
+        "within_expected_shock_density": density <= MAX_UNEXPLAINED_JUMP_DENSITY,
+        # One symbol repeatedly gapping is an unapplied split, not news.
+        "no_symbol_repeatedly_unexplained": worst_symbol <= MAX_UNEXPLAINED_PER_SYMBOL,
+        # Many symbols gapping on one date is a boundary or adjustment fault.
+        "no_date_clustered_unexplained": worst_date <= MAX_UNEXPLAINED_PER_DATE,
+    }
     return {
         "large_overnight_jumps": len(rows),
         "unexplained_jumps": len(unexplained),
+        "symbol_sessions": symbol_sessions,
+        "unexplained_density": _round(density),
+        "max_unexplained_per_symbol": worst_symbol,
+        "max_unexplained_per_date": worst_date,
         "examples": unexplained[:10],
         "threshold": MAX_UNEXPLAINED_JUMP,
-        # Reported, not fatal: a real 40% earnings move exists.  It becomes a
-        # blocker only when the count is large enough to be systematic.
-        "passed": len(unexplained) <= max(5, int(0.001 * max(1, len(rows)))),
+        "density_limit": MAX_UNEXPLAINED_JUMP_DENSITY,
+        "checks": checks,
+        "recorded_corporate_actions": recorded_actions,
+        "detail": (
+            "No corporate-action feed is loaded, so every large move is "
+            "unexplained by construction. The gate therefore tests whether the "
+            "pattern looks like an adjustment failure rather than counting "
+            "individual market shocks."
+        )
+        if recorded_actions == 0
+        else None,
+        "passed": all(checks.values()),
     }
 
 
