@@ -99,12 +99,33 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
     from app.services.labs.intraday.dataset_snapshot import record_intraday_dataset_snapshot
     from app.services.labs.intraday.features import backfill_intraday_features
 
-    symbols = _symbols(args.symbols)
     window_end = (
         datetime.fromisoformat(args.as_of.replace("Z", "+00:00")) if args.as_of else None
     )
     source = feed_source(args.feed)
     with connect() as conn:
+        # The snapshot's assets are the universe's members, not the candidate
+        # pool it was chosen from. A pool symbol that never qualified has no
+        # rows under the membership filter, and asking for it would abort the
+        # snapshot over a symbol that was correctly excluded.
+        if args.from_universe:
+            if not args.universe_key:
+                raise ValueError("--from-universe requires --universe-key")
+            rows = conn.execute(
+                """
+                SELECT DISTINCT symbol
+                FROM research_point_in_time_universe_membership
+                WHERE universe_key = %s
+                ORDER BY symbol
+                """,
+                (args.universe_key,),
+            ).fetchall()
+            symbols = [str(row["symbol"]) for row in rows]
+            if not symbols:
+                raise ValueError(f"Universe {args.universe_key!r} has no members.")
+            print(f"universe {args.universe_key}: {len(symbols)} members", flush=True)
+        else:
+            symbols = _symbols(args.symbols)
         print(f"session-aware features: backfilling from {source}", flush=True)
         features = backfill_intraday_features(
             conn,
@@ -181,7 +202,12 @@ def parser() -> argparse.ArgumentParser:
     snapshot_command = commands.add_parser(
         "snapshot", help="Backfill features and materialize an immutable snapshot."
     )
-    snapshot_command.add_argument("--symbols", required=True)
+    snapshot_command.add_argument("--symbols")
+    snapshot_command.add_argument(
+        "--from-universe",
+        action="store_true",
+        help="Take the asset list from the universe's members instead of --symbols.",
+    )
     snapshot_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
     snapshot_command.add_argument("--universe-key")
     snapshot_command.add_argument("--as-of")
