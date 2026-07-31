@@ -162,6 +162,135 @@ def _calendar_audit_sql(conn: Any, *, dataset_id: int, timeframe: str) -> dict[s
     }
 
 
+def _stream_observations(
+    conn: Any,
+    *,
+    dataset_id: int,
+    timeframe: str,
+    universe: list[str],
+    factor_keys: list[str],
+    batch_size: int,
+    microstructure_by_symbol: Any = None,
+    auction_by_symbol: Any = None,
+) -> dict[str, Any]:
+    """Build every factor's observations without holding the universe in memory.
+
+    A ten-year, 237-symbol snapshot is roughly seven million candle rows, which
+    as Python dicts exceeds the machine.  Every factor streamed here is
+    per-symbol, so its observations are identical whether the symbols are
+    processed together or a batch at a time, and only the observations -- far
+    smaller than the bars -- are retained.
+    """
+    from app.services.intraday_research_power import benchmark_session_context
+    from app.services.intraday_session_calendar import extended_hours_audit
+
+    observations: dict[str, list[dict[str, Any]]] = {key: [] for key in factor_keys}
+    session_dates: set[Any] = set()
+    symbols_with_rows: set[str] = set()
+    candle_rows = 0
+    calendar: dict[str, Any] = {"session_shapes": {}}
+
+    step = max(1, batch_size)
+    for start in range(0, len(universe), step):
+        batch = universe[start : start + step]
+        candles, _ = load_dataset_candles(
+            conn,
+            dataset_id=dataset_id,
+            timeframe=timeframe,
+            symbols=batch,
+            max_symbols=len(batch),
+            include_benchmarks=False,
+        )
+        if not candles:
+            continue
+        print(f"  observations: {min(start + step, len(universe))}/{len(universe)} symbols", flush=True)
+        for symbol, rows in candles.items():
+            symbols_with_rows.add(symbol)
+            candle_rows += len(rows)
+            for row in rows:
+                session_dates.add(exchange_session_date(row["timestamp"]))
+        audit = extended_hours_audit(candles, timeframe=timeframe)
+        for field in (
+            "extended_hours_rows",
+            "duplicate_symbol_timestamp_rows",
+            "naive_timestamps",
+            "misaligned_bar_starts",
+        ):
+            calendar[field] = calendar.get(field, 0) + audit[field]
+        for shape, count in (audit.get("session_shapes") or {}).items():
+            calendar["session_shapes"][shape] = calendar["session_shapes"].get(shape, 0) + count
+
+        for key in factor_keys:
+            spec = FACTOR_SPECS[key]
+            if timeframe not in spec.supported_timeframes:
+                continue
+            observations[key].extend(
+                spec.builder(
+                    candles,
+                    timeframe=timeframe,
+                    microstructure_by_symbol=microstructure_by_symbol,
+                    auction_by_symbol=auction_by_symbol,
+                )
+            )
+        del candles
+
+    # The market-direction and volatility regimes need the benchmark, which a
+    # batch may not contain, so it is loaded once on its own.
+    benchmark_candles, _ = load_dataset_candles(
+        conn,
+        dataset_id=dataset_id,
+        timeframe=timeframe,
+        symbols=["SPY"],
+        max_symbols=1,
+        include_benchmarks=False,
+    )
+    benchmark = benchmark_session_context(benchmark_candles, timeframe=timeframe)
+
+    shapes = calendar["session_shapes"]
+    total_sessions = sum(shapes.values()) or 1
+    calendar.update(
+        {
+            "timeframe": timeframe,
+            "candle_rows": candle_rows,
+            "timestamps_normalized": (
+                calendar.get("naive_timestamps", 0) == 0
+                and calendar.get("misaligned_bar_starts", 0) == 0
+            ),
+            "complete_session_share": round(
+                (shapes.get("full", 0) + shapes.get("early_close", 0)) / total_sessions, 6
+            ),
+        }
+    )
+    quote_bars = sum(len(rows) for rows in (microstructure_by_symbol or {}).values())
+    coverage = quote_bars / candle_rows if candle_rows else 0.0
+    gates = {
+        "minimum_symbols": len(symbols_with_rows) >= 20,
+        "minimum_sessions": len(session_dates) >= 252,
+        "candle_data_present": candle_rows > 0,
+        "quote_coverage_for_execution": coverage >= 0.80,
+    }
+    return {
+        "observations_by_factor": observations,
+        "session_dates": sorted(session_dates),
+        "calendar_audit": calendar,
+        "benchmark_context": benchmark,
+        "data_readiness": {
+            "symbols": len(symbols_with_rows),
+            "distinct_sessions": len(session_dates),
+            "candle_rows": candle_rows,
+            "microstructure_bars": quote_bars,
+            "microstructure_coverage": round(coverage, 6),
+            "gates": gates,
+            "candle_research_ready": all(
+                gates[key]
+                for key in ("minimum_symbols", "minimum_sessions", "candle_data_present")
+            ),
+            "execution_research_ready": all(gates.values()),
+            "limitations": [key for key, ok in gates.items() if not ok],
+        },
+    }
+
+
 def certify(args: argparse.Namespace) -> dict[str, Any]:
     """Prove the instrument before it is pointed at a real hypothesis."""
     keys = _factor_keys(args.factors)
@@ -316,19 +445,22 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
                 "Expand the dataset, or pass --allow-underpowered to record an "
                 "explicitly non-interpretable exploratory run."
             )
-        candles, manifest = load_dataset_candles(
-            conn,
-            dataset_id=dataset_id,
-            timeframe=args.timeframe,
-            symbols=_symbols(args.symbols),
-            max_symbols=args.max_symbols,
+        manifest = dict(
+            conn.execute(
+                "SELECT * FROM research_dataset_manifests WHERE id = %s", (dataset_id,)
+            ).fetchone()
+            or {}
         )
-        if not candles:
+        universe = (
+            _symbols(args.symbols)
+            or _dataset_symbols(conn, dataset_id=dataset_id, timeframe=args.timeframe)
+        )[: args.max_symbols]
+        if not universe:
             raise ValueError("The selected frozen dataset contains no candles for this request.")
         cost_model = load_cost_model(conn, _cost_calibration_id(conn, args.cost_calibration_id))
         microstructure = load_microstructure(
             conn,
-            symbols=list(candles),
+            symbols=universe,
             timeframe=args.timeframe,
             start=manifest.get("window_start"),
             end=manifest.get("window_end"),
@@ -336,7 +468,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
         )
         auctions = load_auction_imbalances(
             conn,
-            symbols=list(candles),
+            symbols=universe,
             start=manifest.get("window_start"),
             end=manifest.get("window_end"),
         )
@@ -361,8 +493,24 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             factor_keys=keys,
             spec_hash=spec_hash,
         )
+        streamed = _stream_observations(
+            conn,
+            dataset_id=dataset_id,
+            timeframe=args.timeframe,
+            universe=universe,
+            factor_keys=keys,
+            batch_size=args.symbol_batch,
+            microstructure_by_symbol=microstructure or None,
+            auction_by_symbol=auctions or None,
+        )
         result = evaluate_factor_discovery(
-            candles,
+            {},
+            observations_by_factor=streamed["observations_by_factor"],
+            session_dates=streamed["session_dates"],
+            symbols=universe,
+            data_readiness=streamed["data_readiness"],
+            calendar_audit=streamed["calendar_audit"],
+            benchmark_context=streamed["benchmark_context"],
             timeframe=args.timeframe,
             factor_keys=keys,
             cost_model=cost_model,
@@ -375,7 +523,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             certification=certification,
         )
         result["dataset_id"] = dataset_id
-        result["symbols"] = sorted(candles)
+        result["symbols"] = sorted(universe)
         result["frozen_spec_hash"] = spec_hash
         result["trial_declaration"] = declaration_check
         result["dataset_quality_report"] = {
@@ -392,7 +540,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             source_run_id=None,
             timeframe=args.timeframe,
             factor_keys=keys,
-            symbols=sorted(candles),
+            symbols=sorted(universe),
             result=result,
             spec_hash=spec_hash,
             certification_id=certification["certification_id"],
@@ -697,7 +845,13 @@ def parser() -> argparse.ArgumentParser:
     discovery.add_argument("--dataset-id", type=int)
     discovery.add_argument("--timeframe", choices=("30m",), default="30m")
     discovery.add_argument("--symbols")
-    discovery.add_argument("--max-symbols", type=int, default=200)
+    discovery.add_argument("--max-symbols", type=int, default=400)
+    discovery.add_argument(
+        "--symbol-batch",
+        type=int,
+        default=20,
+        help="Symbols loaded at once while building observations.",
+    )
     discovery.add_argument("--factors")
     discovery.add_argument("--certification-id", type=int, required=True)
     discovery.add_argument("--declaration-id", type=int, required=True)

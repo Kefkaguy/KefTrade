@@ -1358,19 +1358,34 @@ def evaluate_factor_discovery(
     sector_by_symbol: dict[str, str] | None = None,
     certification: dict[str, Any] | None = None,
     embargo_sessions: int = 1,
+    observations_by_factor: dict[str, list[dict[str, Any]]] | None = None,
+    session_dates: Sequence[date] | None = None,
+    symbols: Sequence[str] | None = None,
+    data_readiness: dict[str, Any] | None = None,
+    calendar_audit: dict[str, Any] | None = None,
+    benchmark_context: dict[date, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    all_dates = [
+    # A universe-scale snapshot does not fit in memory as candle dicts, so the
+    # caller may stream it: build each factor's observations symbol by symbol
+    # and pass them in with the aggregate facts computed alongside.  Every
+    # per-symbol factor gives an identical answer either way, because its
+    # observations never depend on another symbol's bars.
+    streamed = observations_by_factor is not None
+    all_dates = list(session_dates) if session_dates is not None else [
         _session_date(row)
         for rows in candles_by_symbol.values()
         for row in rows
     ]
     boundaries = chronological_boundaries(all_dates, embargo_sessions=embargo_sessions)
-    data_readiness = dataset_research_readiness(
-        candles_by_symbol,
-        microstructure_by_symbol=microstructure_by_symbol,
-    )
-    calendar_audit = extended_hours_audit(candles_by_symbol, timeframe=timeframe)
-    cost_readiness = cost_model_readiness(cost_model, symbols=list(candles_by_symbol))
+    if data_readiness is None:
+        data_readiness = dataset_research_readiness(
+            candles_by_symbol,
+            microstructure_by_symbol=microstructure_by_symbol,
+        )
+    if calendar_audit is None:
+        calendar_audit = extended_hours_audit(candles_by_symbol, timeframe=timeframe)
+    universe = list(symbols) if symbols is not None else list(candles_by_symbol)
+    cost_readiness = cost_model_readiness(cost_model, symbols=universe)
     institutional_readiness = (
         institutional_data_readiness or _default_institutional_readiness()
     )
@@ -1379,13 +1394,20 @@ def evaluate_factor_discovery(
     # count from the append-only ledger; falling back to the run size is a
     # floor, never a substitute.
     effective_trials = max(1, int(effective_trials or len(factor_keys)))
-    benchmark_context = benchmark_session_context(
-        candles_by_symbol, timeframe=timeframe
-    )
+    if benchmark_context is None:
+        benchmark_context = benchmark_session_context(
+            candles_by_symbol, timeframe=timeframe
+        )
     factor_results: dict[str, Any] = {}
     validation_p: dict[str, float | None] = {}
     for key in factor_keys:
         spec = FACTOR_SPECS[key]
+        if streamed and spec.factor_type == "cross_sectional":
+            raise ValueError(
+                f"{key} is cross-sectional: its score compares symbols at the same "
+                "instant, so it cannot be built one symbol at a time. Run it with "
+                "the full candle set."
+            )
         if timeframe not in spec.supported_timeframes:
             factor_results[key] = {"status": "unsupported_timeframe"}
             continue
@@ -1415,11 +1437,15 @@ def evaluate_factor_discovery(
             data_readiness=data_readiness,
             institutional_readiness=institutional_readiness,
         )
-        observations = spec.builder(
-            candles_by_symbol,
-            timeframe=timeframe,
-            microstructure_by_symbol=microstructure_by_symbol,
-            auction_by_symbol=auction_by_symbol,
+        observations = (
+            list(observations_by_factor.get(key) or [])
+            if streamed
+            else spec.builder(
+                candles_by_symbol,
+                timeframe=timeframe,
+                microstructure_by_symbol=microstructure_by_symbol,
+                auction_by_symbol=auction_by_symbol,
+            )
         )
         discovery = [
             row for row in observations
@@ -1673,6 +1699,7 @@ def load_dataset_candles(
     timeframe: str,
     symbols: Sequence[str] | None = None,
     max_symbols: int = 200,
+    include_benchmarks: bool = True,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     manifest = conn.execute(
         "SELECT * FROM research_dataset_manifests WHERE id = %s",
@@ -1683,7 +1710,12 @@ def load_dataset_candles(
     available = [str(item).upper() for item in (manifest["assets"] or [])]
     selected = [item.upper() for item in symbols] if symbols else available[:max_symbols]
     # Keep benchmark ETFs even when they fall after the ordinary symbol cap.
-    selected = list(dict.fromkeys([*selected, *[item for item in ("SPY", "QQQ") if item in available]]))
+    # A batched caller must switch this off: injecting them into every batch
+    # would count their observations once per batch.
+    if include_benchmarks:
+        selected = list(
+            dict.fromkeys([*selected, *[item for item in ("SPY", "QQQ") if item in available]])
+        )
     candles: dict[str, list[dict[str, Any]]] = {}
     for symbol in selected:
         rows = load_snapshot_candles(conn, dataset_id, symbol, timeframe)
