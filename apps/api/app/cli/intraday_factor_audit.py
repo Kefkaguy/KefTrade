@@ -519,7 +519,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             institutional_data_readiness=institutional_readiness,
             effective_trials=trial_ledger["effective_trials"],
             trial_ledger=trial_ledger,
-            sector_by_symbol=sector_map(conn, list(candles)),
+            sector_by_symbol=sector_map(conn, universe),
             certification=certification,
         )
         result["dataset_id"] = dataset_id
