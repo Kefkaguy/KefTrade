@@ -23,6 +23,14 @@ from app.services.intraday_factor_diagnostics import (
     persist_factor_run,
     sector_map,
 )
+from app.services.intraday_hypotheses import (
+    GAP_EXPERIMENT_KEY,
+    assert_not_retired,
+    gap_experiment_hypotheses,
+    persist_hypotheses,
+    retire_factor_version,
+    retired_factor_versions,
+)
 from app.services.intraday_research_controls import certify_measurement_instrument
 from app.services.intraday_research_integrity import exchange_session_date, rows_after_session
 from app.services.intraday_research_data import research_data_readiness
@@ -36,6 +44,25 @@ from app.services.intraday_trial_ledger import (
     record_declaration_use,
     trial_ledger_summary,
 )
+
+
+def _latest_quality_report(conn: Any, *, dataset_id: int, timeframe: str) -> dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT id, ready_for_discovery, quality_passed, power_passed, report
+        FROM intraday_dataset_quality_reports
+        WHERE dataset_id = %s AND timeframe = %s
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (dataset_id, timeframe),
+    ).fetchone()
+    if not row:
+        raise ValueError(
+            f"No dataset quality report exists for dataset {dataset_id}. Run "
+            "`intraday_dataset_pipeline quality` before discovery: a factor "
+            "result from an unmeasured dataset cannot be interpreted."
+        )
+    return dict(row)
 
 
 def _factor_keys(value: str | None) -> list[str]:
@@ -197,6 +224,18 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
         declaration_check = assert_declared(
             declaration, timeframe=args.timeframe, factor_keys=keys
         )
+        # A dataset that cannot resolve the effect produces a reading, not a
+        # result, so the power gate is checked before anything is calculated.
+        quality = _latest_quality_report(
+            conn, dataset_id=dataset_id, timeframe=args.timeframe
+        )
+        if not quality["ready_for_discovery"] and not args.allow_underpowered:
+            raise ValueError(
+                f"Dataset {dataset_id} did not clear the quality and power gate "
+                f"(quality={quality['quality_passed']}, power={quality['power_passed']}). "
+                "Expand the dataset, or pass --allow-underpowered to record an "
+                "explicitly non-interpretable exploratory run."
+            )
         candles, manifest = load_dataset_candles(
             conn,
             dataset_id=dataset_id,
@@ -233,6 +272,9 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             timeframe=args.timeframe,
             cost_model=cost_model,
         )
+        assert_not_retired(
+            conn, timeframe=args.timeframe, factor_keys=keys, spec_hash=spec_hash
+        )
         trial_ledger = effective_trials_for_run(
             conn,
             timeframe=args.timeframe,
@@ -256,6 +298,13 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
         result["symbols"] = sorted(candles)
         result["frozen_spec_hash"] = spec_hash
         result["trial_declaration"] = declaration_check
+        result["dataset_quality_report"] = {
+            "quality_report_id": int(quality["id"]),
+            "ready_for_discovery": bool(quality["ready_for_discovery"]),
+            "quality_passed": bool(quality["quality_passed"]),
+            "power_passed": bool(quality["power_passed"]),
+            "gap_experiment_power": (quality["report"] or {}).get("gap_experiment_power"),
+        }
         result["run_id"] = persist_factor_run(
             conn,
             mode="discovery",
@@ -276,6 +325,62 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             factor_keys=keys,
         )
         return result
+
+
+def declare_experiment(args: argparse.Namespace) -> dict[str, Any]:
+    """Predeclare the bounded gap experiment: six hypotheses, six trials."""
+    hypotheses = gap_experiment_hypotheses(required_event_count=args.required_event_count)
+    with connect() as conn:
+        stored = persist_hypotheses(
+            conn,
+            hypotheses,
+            experiment_key=GAP_EXPERIMENT_KEY,
+            timeframe=args.timeframe,
+            dataset_id=args.dataset_id,
+        )
+        declaration = declare_trials(
+            conn,
+            purpose=f"{GAP_EXPERIMENT_KEY}: bounded six-test gap-down experiment",
+            timeframe=args.timeframe,
+            factor_keys=[item.factor_key for item in hypotheses],
+            dataset_id=args.dataset_id,
+            hypothesis=(
+                "Gap-down acceptance continues and gap-down absorption reverses, "
+                "measured over 1, 2 and 4 bar holds at fixed predeclared thresholds."
+            ),
+            protocol_version=FACTOR_DIAGNOSTICS_VERSION,
+        )
+        return {
+            "experiment_key": GAP_EXPERIMENT_KEY,
+            "declaration_id": int(declaration["id"]),
+            "already_declared": declaration["already_declared"],
+            "tests": len(hypotheses),
+            "hypotheses": stored,
+            "factor_keys": [item.factor_key for item in hypotheses],
+            "fixed_parameters": dict(hypotheses[0].parameters),
+        }
+
+
+def retire(args: argparse.Namespace) -> dict[str, Any]:
+    with connect() as conn:
+        if args.list:
+            return {
+                "timeframe": args.timeframe,
+                "retired": retired_factor_versions(conn, timeframe=args.timeframe),
+            }
+        if not (args.factor_key and args.spec_hash and args.reason):
+            raise ValueError("--factor-key, --spec-hash and --reason are required to retire.")
+        return {
+            "factor_key": args.factor_key,
+            **retire_factor_version(
+                conn,
+                factor_key=args.factor_key,
+                timeframe=args.timeframe,
+                spec_hash=args.spec_hash,
+                reason=args.reason,
+                evidence={"retired_by": "intraday_factor_audit", "run_id": args.run_id},
+            ),
+        }
 
 
 def confirm(args: argparse.Namespace) -> dict[str, Any]:
@@ -325,6 +430,39 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
                 "The confirmation dataset contains no candles after the discovery window. "
                 "Create a later snapshot after new sessions arrive."
             )
+        # Locked confirmation runs exactly once against exactly the frozen
+        # specification. A second attempt, or a changed specification, would
+        # turn the untouched sample into another validation set.
+        previous = conn.execute(
+            """
+            SELECT id FROM intraday_factor_diagnostic_runs
+            WHERE mode = 'confirmation' AND source_run_id = %s AND status = 'completed'
+            """,
+            (args.source_run_id,),
+        ).fetchall()
+        if previous and not args.allow_repeat:
+            raise ValueError(
+                f"Discovery run {args.source_run_id} has already been confirmed by run(s) "
+                f"{[int(row['id']) for row in previous]}. The confirmation sample is "
+                "consumed; it cannot be used to diagnose, tune or retry."
+            )
+        expected_hash = frozen_spec_hash(
+            factor_keys=keys,
+            timeframe=str(source["timeframe"]),
+            cost_model=dict(source["cost_model"]),
+        )
+        if expected_hash != str(source["frozen_spec_hash"]):
+            raise ValueError(
+                "The frozen specification does not reproduce the discovery hash "
+                f"({expected_hash[:12]} vs {str(source['frozen_spec_hash'])[:12]}). "
+                "Confirmation requires the exact declared specification."
+            )
+        assert_not_retired(
+            conn,
+            timeframe=str(source["timeframe"]),
+            factor_keys=keys,
+            spec_hash=str(source["frozen_spec_hash"]),
+        )
         cost_model = dict(source["cost_model"])
         microstructure = load_microstructure(
             conn,
@@ -401,6 +539,29 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
             certification_id=(certification or {}).get("certification_id"),
             declaration_id=source["declaration_id"],
         )
+        # Failing locked confirmation is terminal for that factor version.
+        retired: list[dict[str, Any]] = []
+        for key in result.get("failed_locked_confirmation") or []:
+            retired.append(
+                {
+                    "factor_key": key,
+                    **retire_factor_version(
+                        conn,
+                        factor_key=key,
+                        timeframe=str(source["timeframe"]),
+                        spec_hash=str(source["frozen_spec_hash"]),
+                        reason="failed_locked_confirmation",
+                        evidence={
+                            "confirmation_run_id": result["run_id"],
+                            "source_run_id": args.source_run_id,
+                            "failed_gates": (
+                                (result["factors"].get(key) or {}).get("evidence_gate") or {}
+                            ).get("failed"),
+                        },
+                    ),
+                }
+            )
+        result["retired_factor_versions"] = retired
         return result
 
 
@@ -461,21 +622,57 @@ def parser() -> argparse.ArgumentParser:
         ),
     )
     discovery.add_argument(
+        "--allow-underpowered",
+        action="store_true",
+        help=(
+            "Record a run on a dataset that failed the power gate. The result "
+            "cannot distinguish absence of alpha from an unresolvable sample."
+        ),
+    )
+    discovery.add_argument(
         "--cost-calibration-id",
         help="Calibration integer id, or 'latest'. Omit to retain the conservative 30bps baseline.",
     )
+
+    experiment = commands.add_parser(
+        "declare-experiment",
+        help=(
+            "Predeclare the bounded six-test gap-down experiment: six "
+            "hypotheses and one trial declaration."
+        ),
+    )
+    experiment.add_argument("--timeframe", choices=("15m", "30m"), default="30m")
+    experiment.add_argument("--dataset-id", type=int)
+    experiment.add_argument("--required-event-count", type=int, default=850)
+
+    retirement = commands.add_parser(
+        "retire", help="Permanently retire a factor version, or list retirements."
+    )
+    retirement.add_argument("--timeframe", choices=("15m", "30m"), default="30m")
+    retirement.add_argument("--list", action="store_true")
+    retirement.add_argument("--factor-key")
+    retirement.add_argument("--spec-hash")
+    retirement.add_argument("--reason")
+    retirement.add_argument("--run-id", type=int)
 
     confirmation = commands.add_parser("confirm")
     confirmation.add_argument("--source-run-id", type=int, required=True)
     confirmation.add_argument("--dataset-id", type=int)
     confirmation.add_argument("--max-symbols", type=int, default=200)
     confirmation.add_argument("--certification-id", type=int)
+    confirmation.add_argument(
+        "--allow-repeat",
+        action="store_true",
+        help="Re-run a confirmation that already executed. The sample is no longer untouched.",
+    )
     return root
 
 
 COMMANDS = {
     "certify": certify,
     "declare": declare,
+    "declare-experiment": declare_experiment,
+    "retire": retire,
     "ledger": ledger,
     "discover": discover,
     "confirm": confirm,

@@ -1,0 +1,474 @@
+"""Data-quality and power checks that must clear before factor calculation.
+
+Two different questions are answered here, and the plan is right to separate
+them.  Quality asks whether the rows describe the market at all: complete
+sessions, coherent OHLC, plausible prices, live membership, features that line
+up with their candles.  Power asks whether there are enough of the *events*
+the hypothesis is about -- a dataset can be flawless and still be unable to
+resolve a 30 bps effect across forty sessions.
+
+Both run before discovery, not after, because after is too late: once the
+numbers exist, the decision about whether the sample was adequate is no longer
+independent of what the numbers said.
+
+The module contains no campaign, broker, order-submission, or UI code.
+"""
+
+from __future__ import annotations
+
+from datetime import date
+from typing import Any, Sequence
+
+import psycopg
+from psycopg.types.json import Jsonb
+
+from app.services.intraday_research_power import required_sessions_for_power
+from app.services.intraday_session_calendar import (
+    early_close_session_slots,
+    regular_session_slots,
+)
+
+DATASET_QUALITY_VERSION = "intraday_dataset_quality_v1"
+
+# Targets for the bounded gap-down experiment, carrying margin above the
+# 396/707 minimum the power report derived from the current sample.
+GAP_EXPERIMENT_SESSION_TARGET = 475
+GAP_EXPERIMENT_OBSERVATION_TARGET = 850
+
+STALE_VOLUME_SHARE_LIMIT = 0.02
+MAX_UNEXPLAINED_JUMP = 0.35
+
+
+def _round(value: float | None) -> float | None:
+    return round(float(value), 6) if value is not None else None
+
+
+def duplicate_rows(conn: psycopg.Connection, *, dataset_id: int, timeframe: str) -> dict[str, Any]:
+    """A snapshot must hold exactly one row per symbol/timestamp.
+
+    Two feeds under two source labels both land in the snapshot, which would
+    put two different prices on the same bar and double every observation.
+    """
+    rows = conn.execute(
+        """
+        SELECT symbol, timestamp, COUNT(*) AS rows, COUNT(DISTINCT source) AS sources
+        FROM research_dataset_candles
+        WHERE dataset_id = %s AND timeframe = %s
+        GROUP BY symbol, timestamp
+        HAVING COUNT(*) > 1
+        LIMIT 200
+        """,
+        (dataset_id, timeframe),
+    ).fetchall()
+    sources = conn.execute(
+        """
+        SELECT source, COUNT(*) AS rows
+        FROM research_dataset_candles
+        WHERE dataset_id = %s AND timeframe = %s
+        GROUP BY source ORDER BY source
+        """,
+        (dataset_id, timeframe),
+    ).fetchall()
+    return {
+        "duplicate_symbol_timestamp_rows": len(rows),
+        "examples": [
+            {"symbol": str(row["symbol"]), "timestamp": str(row["timestamp"]), "rows": int(row["rows"])}
+            for row in rows[:10]
+        ],
+        "sources": {str(row["source"]): int(row["rows"]) for row in sources},
+        "single_source": len(sources) == 1,
+        "passed": len(rows) == 0 and len(sources) == 1,
+    }
+
+
+def session_shape_report(
+    conn: psycopg.Connection,
+    *,
+    dataset_id: int,
+    timeframe: str,
+) -> dict[str, Any]:
+    """Normal sessions must hold exactly the full regular-hours complement."""
+    full = len(regular_session_slots(timeframe))
+    early = len(early_close_session_slots(timeframe))
+    rows = conn.execute(
+        """
+        SELECT symbol,
+               (timestamp AT TIME ZONE 'America/New_York')::date AS session_date,
+               COUNT(*) FILTER (
+                   WHERE (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30'
+                     AND (timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00'
+               ) AS regular_bars,
+               COUNT(*) FILTER (
+                   WHERE (timestamp AT TIME ZONE 'America/New_York')::time < TIME '09:30'
+                      OR (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '16:00'
+               ) AS extended_bars
+        FROM research_dataset_candles
+        WHERE dataset_id = %s AND timeframe = %s
+        GROUP BY 1, 2
+        """,
+        (dataset_id, timeframe),
+    ).fetchall()
+    counts = {"full": 0, "early_close": 0, "incomplete": 0}
+    extended = 0
+    for row in rows:
+        regular = int(row["regular_bars"])
+        extended += int(row["extended_bars"])
+        if regular == full:
+            counts["full"] += 1
+        elif regular == early:
+            counts["early_close"] += 1
+        else:
+            counts["incomplete"] += 1
+    total = sum(counts.values())
+    complete_share = (counts["full"] + counts["early_close"]) / total if total else None
+    return {
+        "expected_full_session_bars": full,
+        "expected_early_close_bars": early,
+        "symbol_sessions": total,
+        "session_shapes": counts,
+        "extended_hours_rows": extended,
+        "complete_session_share": _round(complete_share),
+        "passed": complete_share is not None and complete_share >= 0.95,
+    }
+
+
+def price_integrity(conn: psycopg.Connection, *, dataset_id: int, timeframe: str) -> dict[str, Any]:
+    """OHLC coherence, impossible prices, and stale or absent volume."""
+    row = conn.execute(
+        """
+        SELECT COUNT(*) AS rows,
+               COUNT(*) FILTER (WHERE high < low) AS inverted_range,
+               COUNT(*) FILTER (WHERE high < open OR high < close) AS high_below_body,
+               COUNT(*) FILTER (WHERE low > open OR low > close) AS low_above_body,
+               COUNT(*) FILTER (WHERE open <= 0 OR high <= 0 OR low <= 0 OR close <= 0)
+                   AS nonpositive_price,
+               COUNT(*) FILTER (WHERE volume IS NULL OR volume <= 0) AS zero_volume
+        FROM research_dataset_candles
+        WHERE dataset_id = %s AND timeframe = %s
+        """,
+        (dataset_id, timeframe),
+    ).fetchone()
+    total = int((row or {}).get("rows") or 0)
+    zero_volume = int((row or {}).get("zero_volume") or 0)
+    violations = sum(
+        int((row or {}).get(key) or 0)
+        for key in ("inverted_range", "high_below_body", "low_above_body", "nonpositive_price")
+    )
+    stale_share = zero_volume / total if total else None
+    return {
+        "candle_rows": total,
+        "inverted_range": int((row or {}).get("inverted_range") or 0),
+        "high_below_body": int((row or {}).get("high_below_body") or 0),
+        "low_above_body": int((row or {}).get("low_above_body") or 0),
+        "nonpositive_price": int((row or {}).get("nonpositive_price") or 0),
+        "zero_or_null_volume": zero_volume,
+        "zero_volume_share": _round(stale_share),
+        "passed": (
+            total > 0
+            and violations == 0
+            and stale_share is not None
+            and stale_share <= STALE_VOLUME_SHARE_LIMIT
+        ),
+    }
+
+
+def corporate_action_consistency(
+    conn: psycopg.Connection,
+    *,
+    dataset_id: int,
+    timeframe: str,
+) -> dict[str, Any]:
+    """Overnight jumps that no recorded corporate action explains.
+
+    Adjusted candles should not gap by a third overnight.  Where they do, a
+    matching split or dividend must exist, or the adjustment policy did not
+    reach that symbol.
+    """
+    rows = conn.execute(
+        """
+        WITH session_closes AS (
+            SELECT symbol,
+                   (timestamp AT TIME ZONE 'America/New_York')::date AS session_date,
+                   (ARRAY_AGG(close ORDER BY timestamp DESC))[1] AS session_close,
+                   (ARRAY_AGG(open ORDER BY timestamp ASC))[1] AS session_open
+            FROM research_dataset_candles
+            WHERE dataset_id = %s AND timeframe = %s
+              AND (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30'
+              AND (timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00'
+            GROUP BY 1, 2
+        ), gaps AS (
+            SELECT symbol, session_date, session_open,
+                   LAG(session_close) OVER (PARTITION BY symbol ORDER BY session_date)
+                       AS previous_close
+            FROM session_closes
+        )
+        SELECT symbol, session_date,
+               ABS(session_open / NULLIF(previous_close, 0) - 1) AS jump
+        FROM gaps
+        WHERE previous_close IS NOT NULL
+          AND ABS(session_open / NULLIF(previous_close, 0) - 1) > %s
+        ORDER BY jump DESC
+        LIMIT 500
+        """,
+        (dataset_id, timeframe, MAX_UNEXPLAINED_JUMP),
+    ).fetchall()
+    unexplained: list[dict[str, Any]] = []
+    for row in rows:
+        action = conn.execute(
+            """
+            SELECT 1 FROM research_corporate_actions
+            WHERE symbol = %s AND effective_date BETWEEN %s::date - 3 AND %s::date + 3
+            LIMIT 1
+            """,
+            (str(row["symbol"]), row["session_date"], row["session_date"]),
+        ).fetchone()
+        if not action:
+            unexplained.append(
+                {
+                    "symbol": str(row["symbol"]),
+                    "session_date": str(row["session_date"]),
+                    "jump": _round(float(row["jump"])),
+                }
+            )
+    return {
+        "large_overnight_jumps": len(rows),
+        "unexplained_jumps": len(unexplained),
+        "examples": unexplained[:10],
+        "threshold": MAX_UNEXPLAINED_JUMP,
+        # Reported, not fatal: a real 40% earnings move exists.  It becomes a
+        # blocker only when the count is large enough to be systematic.
+        "passed": len(unexplained) <= max(5, int(0.001 * max(1, len(rows)))),
+    }
+
+
+def feature_alignment(conn: psycopg.Connection, *, dataset_id: int, timeframe: str) -> dict[str, Any]:
+    """Every regular-session candle should carry exactly one feature row."""
+    row = conn.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM research_dataset_candles
+              WHERE dataset_id = %s AND timeframe = %s
+                AND (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30'
+                AND (timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00') AS regular_candles,
+            (SELECT COUNT(*) FROM research_dataset_intraday_features
+              WHERE dataset_id = %s AND timeframe = %s) AS feature_rows,
+            (SELECT COUNT(*) FROM research_dataset_intraday_features feature
+              WHERE feature.dataset_id = %s AND feature.timeframe = %s
+                AND NOT EXISTS (
+                    SELECT 1 FROM research_dataset_candles candle
+                    WHERE candle.dataset_id = feature.dataset_id
+                      AND candle.symbol = feature.symbol
+                      AND candle.timeframe = feature.timeframe
+                      AND candle.timestamp = feature.timestamp
+                )) AS orphan_features
+        """,
+        (dataset_id, timeframe) * 3,
+    ).fetchone()
+    regular = int((row or {}).get("regular_candles") or 0)
+    features = int((row or {}).get("feature_rows") or 0)
+    orphans = int((row or {}).get("orphan_features") or 0)
+    coverage = features / regular if regular else None
+    return {
+        "regular_session_candles": regular,
+        "feature_rows": features,
+        "orphan_feature_rows": orphans,
+        "feature_coverage": _round(coverage),
+        "passed": orphans == 0 and coverage is not None and coverage >= 0.98,
+    }
+
+
+def gap_event_power(
+    conn: psycopg.Connection,
+    *,
+    dataset_id: int,
+    timeframe: str,
+    minimum_gap: float = 0.003,
+    minimum_relative_volume: float = 1.5,
+    session_target: int = GAP_EXPERIMENT_SESSION_TARGET,
+    observation_target: int = GAP_EXPERIMENT_OBSERVATION_TARGET,
+) -> dict[str, Any]:
+    """Count the gap events the bounded experiment would actually get.
+
+    This is the gate the current dataset fails.  It is measured on the
+    dataset before any factor runs, so the decision to proceed never depends
+    on having seen a result.
+    """
+    row = conn.execute(
+        """
+        WITH regular AS (
+            SELECT candle.symbol, candle.timestamp,
+                   (candle.timestamp AT TIME ZONE 'America/New_York')::date AS session_date,
+                   (candle.timestamp AT TIME ZONE 'America/New_York')::time AS session_time,
+                   candle.open, candle.close,
+                   feature.session_relative_volume
+            FROM research_dataset_candles candle
+            LEFT JOIN research_dataset_intraday_features feature
+              ON feature.dataset_id = candle.dataset_id
+             AND feature.symbol = candle.symbol
+             AND feature.timeframe = candle.timeframe
+             AND feature.timestamp = candle.timestamp
+            WHERE candle.dataset_id = %s AND candle.timeframe = %s
+              AND (candle.timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30'
+              AND (candle.timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00'
+        ), sessions AS (
+            SELECT symbol, session_date,
+                   MIN(session_time) AS first_slot,
+                   (ARRAY_AGG(open ORDER BY timestamp ASC))[1] AS session_open,
+                   (ARRAY_AGG(close ORDER BY timestamp DESC))[1] AS session_close,
+                   COUNT(*) AS bars
+            FROM regular GROUP BY 1, 2
+        ), decision AS (
+            SELECT symbol, session_date, session_relative_volume
+            FROM regular WHERE session_time = TIME '10:00'
+        ), gapped AS (
+            SELECT s.symbol, s.session_date,
+                   s.session_open / NULLIF(
+                       LAG(s.session_close) OVER (PARTITION BY s.symbol ORDER BY s.session_date), 0
+                   ) - 1 AS gap,
+                   d.session_relative_volume,
+                   s.bars
+            FROM sessions s
+            LEFT JOIN decision d ON d.symbol = s.symbol AND d.session_date = s.session_date
+            WHERE s.first_slot = TIME '09:30'
+        )
+        SELECT
+            COUNT(*) FILTER (WHERE gap <= -%s AND session_relative_volume >= %s AND bars >= 3)
+                AS gap_down_observations,
+            COUNT(DISTINCT session_date) FILTER (
+                WHERE gap <= -%s AND session_relative_volume >= %s AND bars >= 3
+            ) AS gap_down_sessions,
+            COUNT(*) FILTER (WHERE gap >= %s AND session_relative_volume >= %s AND bars >= 3)
+                AS gap_up_observations,
+            COUNT(DISTINCT session_date) AS total_sessions,
+            COUNT(DISTINCT symbol) AS symbols
+        FROM gapped
+        """,
+        (
+            dataset_id,
+            timeframe,
+            minimum_gap,
+            minimum_relative_volume,
+            minimum_gap,
+            minimum_relative_volume,
+            minimum_gap,
+            minimum_relative_volume,
+        ),
+    ).fetchone()
+    observations = int((row or {}).get("gap_down_observations") or 0)
+    sessions = int((row or {}).get("gap_down_sessions") or 0)
+    return {
+        "minimum_gap": minimum_gap,
+        "minimum_relative_volume": minimum_relative_volume,
+        "gap_down_observations": observations,
+        "gap_down_sessions": sessions,
+        "gap_up_observations": int((row or {}).get("gap_up_observations") or 0),
+        "dataset_sessions": int((row or {}).get("total_sessions") or 0),
+        "dataset_symbols": int((row or {}).get("symbols") or 0),
+        "session_target": session_target,
+        "observation_target": observation_target,
+        "sessions_short_by": max(0, session_target - sessions),
+        "observations_short_by": max(0, observation_target - observations),
+        "passed": sessions >= session_target and observations >= observation_target,
+    }
+
+
+def factor_power_requirement(
+    *,
+    effect_bps: float,
+    session_dispersion_bps: float,
+    observations_per_session: float,
+) -> dict[str, Any]:
+    """Restate a power requirement for a predeclared effect size."""
+    sessions = required_sessions_for_power(
+        effect_bps=effect_bps, session_dispersion_bps=session_dispersion_bps
+    )
+    return {
+        "assumed_effect_bps": effect_bps,
+        "assumed_session_dispersion_bps": session_dispersion_bps,
+        "sessions_required_for_80pct_power": sessions,
+        "observations_required_for_80pct_power": (
+            int(round(sessions * observations_per_session)) if sessions else None
+        ),
+    }
+
+
+def dataset_quality_report(
+    conn: psycopg.Connection,
+    *,
+    dataset_id: int,
+    timeframe: str,
+    universe_key: str | None = None,
+) -> dict[str, Any]:
+    """Every quality and power check, with one overall verdict."""
+    from app.services.intraday_universe import membership_coverage
+
+    checks = {
+        "no_duplicate_rows": duplicate_rows(conn, dataset_id=dataset_id, timeframe=timeframe),
+        "session_shapes": session_shape_report(conn, dataset_id=dataset_id, timeframe=timeframe),
+        "price_integrity": price_integrity(conn, dataset_id=dataset_id, timeframe=timeframe),
+        "corporate_actions": corporate_action_consistency(
+            conn, dataset_id=dataset_id, timeframe=timeframe
+        ),
+        "feature_alignment": feature_alignment(conn, dataset_id=dataset_id, timeframe=timeframe),
+    }
+    if universe_key:
+        coverage = membership_coverage(
+            conn, universe_key=universe_key, dataset_id=dataset_id, timeframe=timeframe
+        )
+        checks["point_in_time_membership"] = {
+            **coverage,
+            "passed": bool(coverage["every_observation_inside_membership"]),
+        }
+    else:
+        checks["point_in_time_membership"] = {
+            "passed": False,
+            "detail": "No universe_key supplied; membership at observation time is unverified.",
+        }
+
+    power = gap_event_power(conn, dataset_id=dataset_id, timeframe=timeframe)
+    quality_passed = all(item["passed"] for item in checks.values())
+    return {
+        "quality_version": DATASET_QUALITY_VERSION,
+        "dataset_id": dataset_id,
+        "timeframe": timeframe,
+        "universe_key": universe_key,
+        "checks": {key: value["passed"] for key, value in checks.items()},
+        "detail": checks,
+        "gap_experiment_power": power,
+        "quality_passed": quality_passed,
+        "power_passed": power["passed"],
+        # Both must hold: clean rows that cannot resolve the effect are not a
+        # dataset the experiment may run on.
+        "ready_for_discovery": quality_passed and power["passed"],
+        "limitations": [key for key, value in checks.items() if not value["passed"]],
+    }
+
+
+def persist_quality_report(
+    conn: psycopg.Connection,
+    *,
+    dataset_id: int,
+    timeframe: str,
+    report: dict[str, Any],
+) -> int:
+    row = conn.execute(
+        """
+        INSERT INTO intraday_dataset_quality_reports(
+            dataset_id, timeframe, quality_passed, power_passed,
+            ready_for_discovery, report, quality_version
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+        """,
+        (
+            dataset_id,
+            timeframe,
+            bool(report["quality_passed"]),
+            bool(report["power_passed"]),
+            bool(report["ready_for_discovery"]),
+            Jsonb(report),
+            DATASET_QUALITY_VERSION,
+        ),
+    ).fetchone()
+    conn.commit()
+    return int(row["id"])

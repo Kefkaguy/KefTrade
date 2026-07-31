@@ -370,6 +370,7 @@ def overnight_gap_acceptance_absorption_observations(
     candles_by_symbol: dict[str, list[dict[str, Any]]],
     *,
     timeframe: str,
+    horizon_bars: int = 1,
     **_: Any,
 ) -> list[dict[str, Any]]:
     """Opening participation distinguishes accepted gaps from absorbed gaps.
@@ -379,10 +380,19 @@ def overnight_gap_acceptance_absorption_observations(
     positions come from the calendar: on a day carrying a premarket bar, list
     indices measure the 09:00 open against the previous 16:30 print and judge
     acceptance on the opening bar itself.
+
+    ``horizon_bars`` holds the position for that many bars, entered at the open
+    of the bar after the decision.  The position is never carried past the
+    session close: an event whose horizon would run past the last regular bar
+    is dropped rather than silently shortened, because a shortened horizon is a
+    different hypothesis from the one that was declared.
     """
     if timeframe != "30m":
         return []
+    if horizon_bars < 1:
+        raise ValueError("horizon_bars must be at least 1")
     decision_index = 1
+    entry_index = decision_index + 1
     output: list[dict[str, Any]] = []
     for symbol, rows in candles_by_symbol.items():
         previous_close: float | None = None
@@ -392,7 +402,8 @@ def overnight_gap_acceptance_absorption_observations(
             if first_bar is None or session[0]["timestamp"] != first_bar["timestamp"]:
                 previous_close = float(last_bar["close"]) if last_bar else None
                 continue
-            if previous_close and previous_close > 0 and len(session) > decision_index + 1:
+            exit_index = entry_index + horizon_bars - 1
+            if previous_close and previous_close > 0 and len(session) > exit_index:
                 session_open = float(first_bar["open"])
                 decision = session[decision_index]
                 decision_close = float(decision["close"])
@@ -409,11 +420,12 @@ def overnight_gap_acceptance_absorption_observations(
                         if session_open != previous_close
                         else 0.0
                     )
-                    next_bar = session[decision_index + 1]
-                    next_open = float(next_bar["open"])
-                    next_return = (
-                        (float(next_bar["close"]) - next_open) / next_open
-                        if next_open > 0
+                    entry_bar = session[entry_index]
+                    exit_bar = session[exit_index]
+                    entry_price = float(entry_bar["open"])
+                    horizon_return = (
+                        (float(exit_bar["close"]) - entry_price) / entry_price
+                        if entry_price > 0
                         else None
                     )
                     flow_state = (
@@ -423,18 +435,19 @@ def overnight_gap_acceptance_absorption_observations(
                         if gap_fill >= 0.50
                         else None
                     )
-                    if next_return is not None and flow_state is not None:
+                    if horizon_return is not None and flow_state is not None:
                         output.append(
                             _observation(
                                 factor_key="overnight_gap_acceptance_absorption",
                                 symbol=symbol,
                                 session_date=session_date,
                                 score=gap if flow_state == "acceptance" else -gap,
-                                target_return=next_return,
+                                target_return=horizon_return,
                                 signal_bar=decision,
-                                entry_bar=next_bar,
-                                exit_bar=next_bar,
+                                entry_bar=entry_bar,
+                                exit_bar=exit_bar,
                                 timeframe=timeframe,
+                                horizon_bars=horizon_bars,
                                 flow_state=flow_state,
                                 gap_return=gap,
                                 gap_fill_fraction=gap_fill,
@@ -853,21 +866,210 @@ FACTOR_SPECS: dict[str, FactorSpec] = {
 }
 
 
-def chronological_boundaries(session_dates: Sequence[date]) -> dict[str, Any]:
+# --------------------------------------------------------------------------
+# Holding-horizon variants
+# --------------------------------------------------------------------------
+# A holding horizon is part of the hypothesis, not a knob to be tried after
+# the fact.  Each horizon is therefore its own registered factor with its own
+# key, so it lands in the ledger as its own trial and cannot be swapped in
+# after a one-bar result disappoints.
+GAP_HORIZON_BARS = (2, 4)
+GAP_VARIANTS = {
+    "gap_up_acceptance_continuation": ("up", "acceptance"),
+    "gap_down_acceptance_continuation": ("down", "acceptance"),
+    "gap_up_absorption_reversal": ("up", "absorption"),
+    "gap_down_absorption_reversal": ("down", "absorption"),
+}
+
+
+def _gap_horizon_builder(
+    *,
+    factor_key: str,
+    gap_direction: str,
+    flow_state: str,
+    horizon_bars: int,
+) -> Callable[..., list[dict[str, Any]]]:
+    def builder(
+        candles_by_symbol: dict[str, list[dict[str, Any]]],
+        *,
+        timeframe: str,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        kwargs.pop("horizon_bars", None)
+        return _overnight_gap_variant_observations(
+            candles_by_symbol,
+            timeframe=timeframe,
+            factor_key=factor_key,
+            gap_direction=gap_direction,
+            flow_state=flow_state,
+            horizon_bars=horizon_bars,
+            **kwargs,
+        )
+
+    builder.__name__ = f"{factor_key}_observations"
+    builder.__doc__ = (
+        f"{gap_direction.title()} gap {flow_state}, held {horizon_bars} bars from the "
+        "open of the bar after the decision to that bar's close."
+    )
+    return builder
+
+
+for _base_key, (_direction, _state) in GAP_VARIANTS.items():
+    for _horizon in GAP_HORIZON_BARS:
+        _key = f"{_base_key}_{_horizon}bar"
+        _base_spec = FACTOR_SPECS[_base_key]
+        FACTOR_SPECS[_key] = FactorSpec(
+            key=_key,
+            title=f"{_base_spec.title} ({_horizon}-bar hold)",
+            hypothesis=(
+                f"{_base_spec.hypothesis} Measured over a {_horizon}-bar hold, exited at "
+                "that bar's close and never carried past the session close."
+            ),
+            supported_timeframes=_base_spec.supported_timeframes,
+            builder=_gap_horizon_builder(
+                factor_key=_key,
+                gap_direction=_direction,
+                flow_state=_state,
+                horizon_bars=_horizon,
+            ),
+            factor_type="directional_event",
+            references=_base_spec.references,
+        )
+del _base_key, _direction, _state, _horizon, _key, _base_spec
+
+
+def chronological_boundaries(
+    session_dates: Sequence[date],
+    *,
+    embargo_sessions: int = 1,
+) -> dict[str, Any]:
+    """Chronological 50/30/20 split with an embargo between the splits.
+
+    ``embargo_sessions`` sessions are dropped either side of each boundary and
+    belong to no split.  Without it, a position opened near the end of
+    discovery can still be open into the first validation session, so the two
+    samples share an outcome and validation is no longer out of sample.  One
+    session covers every horizon that is closed at the session close; a
+    hypothesis that carries risk overnight needs a larger embargo.
+    """
     ordered = sorted(set(session_dates))
-    if len(ordered) < 10:
-        raise ValueError("At least 10 distinct sessions are required for chronological factor splits.")
+    embargo = max(0, int(embargo_sessions))
+    minimum = 10 + 2 * embargo
+    if len(ordered) < minimum:
+        raise ValueError(
+            f"At least {minimum} distinct sessions are required for chronological "
+            f"factor splits with a {embargo}-session embargo."
+        )
     discovery_end_index = max(0, int(len(ordered) * 0.5) - 1)
-    validation_end_index = max(discovery_end_index + 1, int(len(ordered) * 0.8) - 1)
-    validation_end_index = min(validation_end_index, len(ordered) - 2)
+    validation_start_index = discovery_end_index + 1 + embargo
+    validation_end_index = max(validation_start_index, int(len(ordered) * 0.8) - 1)
+    validation_end_index = min(validation_end_index, len(ordered) - 2 - embargo)
+    confirmation_start_index = validation_end_index + 1 + embargo
+    if not (
+        discovery_end_index
+        < validation_start_index
+        <= validation_end_index
+        < confirmation_start_index
+        <= len(ordered) - 1
+    ):
+        raise ValueError(
+            "The session history is too short to carve discovery, validation and "
+            f"confirmation splits separated by a {embargo}-session embargo."
+        )
     return {
         "discovery_start": ordered[0],
         "discovery_end": ordered[discovery_end_index],
-        "validation_start": ordered[discovery_end_index + 1],
+        "validation_start": ordered[validation_start_index],
         "validation_end": ordered[validation_end_index],
-        "confirmation_start": ordered[validation_end_index + 1],
+        "confirmation_start": ordered[confirmation_start_index],
         "confirmation_end": ordered[-1],
         "distinct_sessions": len(ordered),
+        "embargo_sessions": embargo,
+        "embargoed_sessions": [
+            str(item)
+            for item in (
+                ordered[discovery_end_index + 1 : validation_start_index]
+                + ordered[validation_end_index + 1 : confirmation_start_index]
+            )
+        ],
+    }
+
+
+def interpret_factor_failure(
+    result: dict[str, Any],
+    *,
+    metrics_key: str = "validation",
+) -> dict[str, Any]:
+    """Say what a failure means, so the same null is not re-tested forever.
+
+    The distinction that matters is whether the sample could have detected the
+    effect. An interpretable null retires the hypothesis; an underpowered null
+    retires nothing, because nothing was measured.
+    """
+    if result.get("status") != "measured":
+        return {
+            "verdict": "not_measured",
+            "action": "repair_data_or_gather_more",
+            "detail": result.get("status"),
+            "retire_hypothesis": False,
+        }
+    gate = result.get("evidence_gate") or {}
+    if gate.get("passed"):
+        return {
+            "verdict": "survivor",
+            "action": "proceed_to_locked_confirmation",
+            "retire_hypothesis": False,
+        }
+
+    failed = set(gate.get("failed") or [])
+    power = ((result.get("power_and_stability") or {}).get("power") or {})
+    interpretable = bool(power.get("null_result_is_interpretable"))
+    readiness = result.get("factor_research_readiness") or {}
+
+    if not readiness.get("ready", True):
+        return {
+            "verdict": "data_not_ready",
+            "action": "repair_data_before_confirmation",
+            "failed_gates": sorted(failed),
+            "limitations": list(readiness.get("limitations") or []),
+            "retire_hypothesis": False,
+        }
+    if not interpretable:
+        return {
+            "verdict": "underpowered_null",
+            "action": "gather_more_data",
+            "detail": (
+                "The sample could not have detected the claimed effect, so this "
+                "reading is neither a rejection nor support."
+            ),
+            "sessions_required_for_80pct_power": power.get("sessions_required_for_80pct_power"),
+            "observed_sessions": power.get("observed_sessions"),
+            "failed_gates": sorted(failed),
+            "retire_hypothesis": False,
+        }
+    if failed & {"clears_stressed_costs", "positive_net_return", "positive_event_conditioned_net_return", "executable_long_short_spread"}:
+        return {
+            "verdict": "fails_on_cost",
+            "action": "retire_or_redesign_holding_horizon",
+            "failed_gates": sorted(failed),
+            "retire_hypothesis": True,
+        }
+    if failed & {"stable_subperiods", "stable_rank_performance"}:
+        return {
+            "verdict": "unstable",
+            "action": "retire_or_declare_a_genuinely_new_regime_hypothesis",
+            "failed_gates": sorted(failed),
+            "retire_hypothesis": True,
+        }
+    return {
+        "verdict": "interpretable_null",
+        "action": "retire_hypothesis",
+        "detail": (
+            "The sample was powered to detect the claimed effect and did not "
+            "find it."
+        ),
+        "failed_gates": sorted(failed),
+        "retire_hypothesis": True,
     }
 
 
@@ -1144,13 +1346,14 @@ def evaluate_factor_discovery(
     trial_ledger: dict[str, Any] | None = None,
     sector_by_symbol: dict[str, str] | None = None,
     certification: dict[str, Any] | None = None,
+    embargo_sessions: int = 1,
 ) -> dict[str, Any]:
     all_dates = [
         _session_date(row)
         for rows in candles_by_symbol.values()
         for row in rows
     ]
-    boundaries = chronological_boundaries(all_dates)
+    boundaries = chronological_boundaries(all_dates, embargo_sessions=embargo_sessions)
     data_readiness = dataset_research_readiness(
         candles_by_symbol,
         microstructure_by_symbol=microstructure_by_symbol,
@@ -1273,6 +1476,7 @@ def evaluate_factor_discovery(
         )
         result["evidence_gate"] = gate
         result["evidence_gate_passed"] = gate["passed"]
+        result["interpretation"] = interpret_factor_failure(result)
         if gate["passed"]:
             evidence_survivors.append(key)
             if result["factor_research_readiness"]["ready"]:
@@ -1298,6 +1502,15 @@ def evaluate_factor_discovery(
         "evidence_survivors": evidence_survivors,
         "selected_for_forward_confirmation": selected,
         "survivors_blocked_by_readiness": survivors_blocked_by_readiness,
+        "interpretation": {
+            key: (result.get("interpretation") or {}).get("verdict")
+            for key, result in factor_results.items()
+        },
+        "hypotheses_to_retire": sorted(
+            key
+            for key, result in factor_results.items()
+            if (result.get("interpretation") or {}).get("retire_hypothesis")
+        ),
         "confirmation_data_accessed": False,
     }
 
@@ -1409,6 +1622,9 @@ def evaluate_forward_confirmation(
         )
         result["evidence_gate"] = gate
         result["evidence_gate_passed"] = gate["passed"]
+        result["interpretation"] = interpret_factor_failure(
+            result, metrics_key="confirmation"
+        )
         if gate["passed"] and result["factor_research_readiness"]["ready"]:
             passed.append(key)
     return {
@@ -1425,6 +1641,17 @@ def evaluate_forward_confirmation(
         "instrument_certification": _certification_summary(certification),
         "factors": factors,
         "passed_locked_confirmation": passed,
+        # Confirmation is one shot: anything measured here that did not pass is
+        # a permanently retired version, not a candidate for another attempt.
+        "failed_locked_confirmation": sorted(
+            key
+            for key, result in factors.items()
+            if result.get("status") == "measured" and not result.get("evidence_gate_passed")
+        ),
+        "interpretation": {
+            key: (result.get("interpretation") or {}).get("verdict")
+            for key, result in factors.items()
+        },
     }
 
 
@@ -1608,9 +1835,12 @@ def persist_certification(
     controls_passed = bool(controls.get("certified"))
     leakage_passed = bool(leakage.get("passed"))
     # A snapshot whose sessions are mostly incomplete cannot support a
-    # closing-half-hour claim, so calendar integrity is part of certification.
+    # closing-half-hour claim, and two feeds under two source labels put two
+    # prices on the same bar, so both are part of calendar integrity.
     calendar_passed = bool(
         (calendar.get("complete_session_share") or 0) >= 0.95
+        and calendar.get("duplicate_symbol_timestamp_rows", 0) == 0
+        and calendar.get("timestamps_normalized", True)
     )
     row = conn.execute(
         """

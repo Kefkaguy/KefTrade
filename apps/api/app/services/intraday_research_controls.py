@@ -634,6 +634,23 @@ def certify_measurement_instrument(
         )
     placebos = negative_controls(placebo_source)
 
+    # Certification that varies run to run certifies nothing: the verdict has
+    # to be a property of the code, not of the draw it happened to get.
+    repeat = positive_control(
+        spec.builder,
+        timeframe=timeframe,
+        sessions=sessions,
+        injected_effect_bps=injected_effect_bps,
+        injected_sign=1,
+        label=f"{spec.factor_type}:{reference_factor_key}:repeat",
+        seed=seed,
+    )
+    deterministic = (
+        repeat["measured"]["mean_return_bps"] == positive["measured"]["mean_return_bps"]
+        and repeat["measured"]["day_clustered_t_statistic"]
+        == positive["measured"]["day_clustered_t_statistic"]
+    )
+
     checks = {
         "recovers_injected_continuous_factor": positive["passed"],
         "recovers_inverted_continuous_factor": inverted["passed"],
@@ -643,6 +660,7 @@ def certify_measurement_instrument(
             "detected_either_sign"
         ],
         "every_placebo_fails": placebos["passed"],
+        "certification_is_deterministic": deterministic,
     }
     return {
         "controls_version": RESEARCH_CONTROLS_VERSION,

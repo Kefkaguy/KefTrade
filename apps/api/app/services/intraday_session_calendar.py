@@ -191,13 +191,29 @@ def extended_hours_audit(
     allowed = set(regular_session_slots(timeframe))
     total = 0
     extended = 0
+    naive_timestamps = 0
+    misaligned = 0
+    duplicates = 0
     extended_slots: dict[str, int] = defaultdict(int)
     contaminated_sessions: set[tuple[str, date]] = set()
     shapes: dict[str, int] = defaultdict(int)
+    minutes = timeframe_minutes(timeframe)
     for symbol, rows in candles_by_symbol.items():
+        seen: set[datetime] = set()
         for row in rows:
             timestamp = _row_timestamp(row)
             total += 1
+            if timestamp.tzinfo is None:
+                naive_timestamps += 1
+                continue
+            if timestamp in seen:
+                duplicates += 1
+            seen.add(timestamp)
+            local = exchange_time(timestamp)
+            # A 30m bar must start on a 30m boundary of the exchange clock; a
+            # bar at 09:47 is a normalization failure, not market structure.
+            if local.second or local.microsecond or (local.minute % minutes):
+                misaligned += 1
             slot = bar_slot(timestamp)
             if slot not in allowed:
                 extended += 1
@@ -217,6 +233,11 @@ def extended_hours_audit(
         "symbol_sessions_touched_by_extended_hours": len(contaminated_sessions),
         "symbol_sessions": session_total,
         "session_shapes": dict(shapes),
+        "duplicate_symbol_timestamp_rows": duplicates,
+        "naive_timestamps": naive_timestamps,
+        "misaligned_bar_starts": misaligned,
+        "timestamps_normalized": naive_timestamps == 0 and misaligned == 0,
+        "expected_full_session_bars": len(allowed),
         "complete_session_share": (
             _round((shapes.get("full", 0) + shapes.get("early_close", 0)) / session_total)
             if session_total
