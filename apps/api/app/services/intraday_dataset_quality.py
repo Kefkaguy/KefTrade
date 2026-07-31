@@ -335,38 +335,37 @@ def gap_event_power(
     """
     rows = conn.execute(
         """
-        WITH regular AS (
-            -- Candles only. This CTE is referenced twice, so Postgres
-            -- materializes it; joining features here would materialize an
-            -- 8M-row join whose feature column only the 10:00 bar ever uses.
-            SELECT candle.symbol, candle.timestamp,
-                   (candle.timestamp AT TIME ZONE 'America/New_York')::date AS session_date,
-                   (candle.timestamp AT TIME ZONE 'America/New_York')::time AS session_time,
-                   candle.open, candle.close
-            FROM research_dataset_candles candle
-            WHERE candle.dataset_id = %s AND candle.timeframe = %s
-              AND (candle.timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30'
-              AND (candle.timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00'
-        ), sessions AS (
-            SELECT symbol, session_date,
-                   MIN(session_time) AS first_slot,
+        WITH sessions AS (
+            -- Each stage reads the base table directly. A shared CTE here is
+            -- materialized and then re-scanned once per outer row by a nested
+            -- loop, because the planner cannot estimate selectivity through
+            -- `timestamp AT TIME ZONE ...::time` and believes it holds ~38k
+            -- rows rather than five million.
+            SELECT symbol,
+                   (timestamp AT TIME ZONE 'America/New_York')::date AS session_date,
+                   MIN((timestamp AT TIME ZONE 'America/New_York')::time) AS first_slot,
                    (ARRAY_AGG(open ORDER BY timestamp ASC))[1] AS session_open,
                    (ARRAY_AGG(close ORDER BY timestamp DESC))[1] AS session_close,
                    COUNT(*) AS bars
-            FROM regular GROUP BY 1, 2
+            FROM research_dataset_candles
+            WHERE dataset_id = %s AND timeframe = %s
+              AND (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30'
+              AND (timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00'
+            GROUP BY 1, 2
         ), decision AS (
-            -- Features joined only for the decision bar.
-            SELECT regular.symbol, regular.session_date,
+            SELECT candle.symbol,
+                   (candle.timestamp AT TIME ZONE 'America/New_York')::date AS session_date,
                    feature.session_relative_volume,
-                   regular.close AS decision_close
-            FROM regular
+                   candle.close AS decision_close
+            FROM research_dataset_candles candle
             LEFT JOIN research_dataset_intraday_features feature
-              ON feature.dataset_id = %s
-             AND feature.timeframe = %s
-             AND feature.symbol = regular.symbol
-             AND feature.timestamp = regular.timestamp
-            WHERE regular.session_time = TIME '10:00'
-        ), split AS (
+              ON feature.dataset_id = candle.dataset_id
+             AND feature.timeframe = candle.timeframe
+             AND feature.symbol = candle.symbol
+             AND feature.timestamp = candle.timestamp
+            WHERE candle.dataset_id = %s AND candle.timeframe = %s
+              AND (candle.timestamp AT TIME ZONE 'America/New_York')::time = TIME '10:00'
+                ), split AS (
             SELECT session_date,
                    PERCENT_RANK() OVER (ORDER BY session_date) AS chronological_position
             FROM (SELECT DISTINCT session_date FROM sessions) AS distinct_sessions
