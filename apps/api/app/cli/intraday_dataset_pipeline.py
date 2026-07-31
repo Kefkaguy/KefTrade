@@ -95,6 +95,40 @@ def universe(args: argparse.Namespace) -> dict[str, Any]:
         )
 
 
+def features(args: argparse.Namespace) -> dict[str, Any]:
+    """Compute features only, so a large universe can be split across workers."""
+    from app.services.labs.intraday.features import backfill_intraday_features
+
+    source = feed_source(args.feed)
+    with connect() as conn:
+        symbols = _universe_members(conn, args) if args.from_universe else _symbols(args.symbols)
+        return backfill_intraday_features(
+            conn,
+            symbols,
+            (args.timeframe,),
+            candle_limit=args.candle_limit,
+            source=source,
+        )
+
+
+def _universe_members(conn: Any, args: argparse.Namespace) -> list[str]:
+    if not args.universe_key:
+        raise ValueError("--from-universe requires --universe-key")
+    rows = conn.execute(
+        """
+        SELECT DISTINCT symbol
+        FROM research_point_in_time_universe_membership
+        WHERE universe_key = %s
+        ORDER BY symbol
+        """,
+        (args.universe_key,),
+    ).fetchall()
+    symbols = [str(row["symbol"]) for row in rows]
+    if not symbols:
+        raise ValueError(f"Universe {args.universe_key!r} has no members.")
+    return symbols
+
+
 def snapshot(args: argparse.Namespace) -> dict[str, Any]:
     from app.services.labs.intraday.dataset_snapshot import record_intraday_dataset_snapshot
     from app.services.labs.intraday.features import backfill_intraday_features
@@ -109,31 +143,25 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
         # rows under the membership filter, and asking for it would abort the
         # snapshot over a symbol that was correctly excluded.
         if args.from_universe:
-            if not args.universe_key:
-                raise ValueError("--from-universe requires --universe-key")
-            rows = conn.execute(
-                """
-                SELECT DISTINCT symbol
-                FROM research_point_in_time_universe_membership
-                WHERE universe_key = %s
-                ORDER BY symbol
-                """,
-                (args.universe_key,),
-            ).fetchall()
-            symbols = [str(row["symbol"]) for row in rows]
-            if not symbols:
-                raise ValueError(f"Universe {args.universe_key!r} has no members.")
+            symbols = _universe_members(conn, args)
             print(f"universe {args.universe_key}: {len(symbols)} members", flush=True)
         else:
             symbols = _symbols(args.symbols)
-        print(f"session-aware features: backfilling from {source}", flush=True)
-        features = backfill_intraday_features(
-            conn,
-            symbols,
-            (args.timeframe,),
-            candle_limit=args.candle_limit,
-            source=source,
-        )
+        if args.skip_features:
+            # Features were computed by a separate parallel pass. The snapshot
+            # still refuses to materialize a symbol with no feature rows, so a
+            # missed symbol fails loudly rather than being snapshotted empty.
+            print("session-aware features: skipped (computed separately)", flush=True)
+            features = {"skipped": True}
+        else:
+            print(f"session-aware features: backfilling from {source}", flush=True)
+            features = backfill_intraday_features(
+                conn,
+                symbols,
+                (args.timeframe,),
+                candle_limit=args.candle_limit,
+                source=source,
+            )
         print("snapshot: materializing", flush=True)
         manifest = record_intraday_dataset_snapshot(
             conn,
@@ -214,6 +242,11 @@ def parser() -> argparse.ArgumentParser:
     snapshot_command.add_argument("--name")
     snapshot_command.add_argument("--candle-limit", type=int, default=200_000)
     snapshot_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
+    snapshot_command.add_argument(
+        "--skip-features",
+        action="store_true",
+        help="Assume features were already computed by a separate parallel pass.",
+    )
 
     quality_command = commands.add_parser(
         "quality", help="Data-quality checks and the gap-experiment power gate."
@@ -222,11 +255,22 @@ def parser() -> argparse.ArgumentParser:
     quality_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
     quality_command.add_argument("--universe-key")
 
+    features_command = commands.add_parser(
+        "features", help="Compute session-aware features for a symbol list."
+    )
+    features_command.add_argument("--symbols")
+    features_command.add_argument("--from-universe", action="store_true")
+    features_command.add_argument("--universe-key")
+    features_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    features_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
+    features_command.add_argument("--candle-limit", type=int, default=200_000)
+
     return root
 
 
 COMMANDS = {
     "ingest": ingest,
+    "features": features,
     "universe": universe,
     "snapshot": snapshot,
     "quality": quality,
