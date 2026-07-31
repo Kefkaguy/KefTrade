@@ -31,7 +31,7 @@ python -m app.cli.intraday_dataset_pipeline universe --universe-key liquid_100_v
 ```
 
 ```bash
-python -m app.cli.intraday_dataset_pipeline snapshot --symbols "$SYMBOLS" --universe-key liquid_100_v1 --feed sip --as-of 2026-07-30T20:00:00Z
+python -m app.cli.intraday_dataset_pipeline snapshot --from-universe --universe-key liquid_100_v1 --feed sip --as-of 2026-07-30T20:00:00Z
 ```
 
 ```bash
@@ -102,10 +102,25 @@ sample was adequate is no longer independent of what they said.
 | `feature_alignment` | orphan feature rows, or under 98% feature coverage |
 | `point_in_time_membership` | any observation falls outside its symbol's membership |
 
-The power gate requires **475 qualifying gap-down sessions and 850
-observations**, above the 396/707 minimum the power report derived from the
-current sample. Discovery refuses to run on a dataset that has not cleared
-both quality and power.
+The power gate requires **475 qualifying sessions and 850 observations**,
+above the 396/707 minimum the power report derived from the current sample.
+Two details decide whether that number means anything:
+
+* Acceptance and absorption are **separate hypotheses** drawing on disjoint
+  subsets of the gap-down pool, and the fill band between the two thresholds
+  belongs to neither. The gate scores each flow state on its own and requires
+  both to clear, because the experiment is only as interpretable as its weaker
+  half. Counting the pool would pass a dataset while every individual test
+  stayed underpowered.
+* The 396-session requirement was derived from the **validation** sample, which
+  is 30% of the history, so the gate measures that split rather than the whole
+  dataset.
+
+Discovery refuses to run on a dataset that has not cleared both quality and
+power. The snapshot takes its assets from universe membership
+(`--from-universe`): a candidate-pool symbol that never qualified has no rows
+under the membership filter, and naming it would abort the snapshot over a
+symbol that was correctly excluded.
 
 ## Phase 2 — predeclared hypotheses
 
@@ -169,9 +184,15 @@ turns a failed entry into a tuning exercise.
 Execution semantics reject a fill at the signal's own closing price, a
 decision taken after entry, the wrong side of the spread, an uncharged trade,
 an undeclared overnight position, and any fill without execution evidence.
-Robustness checks concentration by symbol and quarter, participation limits,
-cost stress above the calibrated p90, and whether the edge survives removing
-its best symbol.
+
+Robustness covers concentration by symbol and quarter, participation limits,
+cost stress above the calibrated p90, removal of the best symbol and of the
+best quarter, walk-forward stability across chronological folds, drawdown and
+5% expected shortfall, and two bootstrap lower bounds. The two bootstraps
+answer different questions on purpose: a moving-block resample preserves
+serial dependence, an iid trade-order resample destroys it, and an edge that
+survives only one of the two is an artefact of how the trades happened to be
+ordered rather than a property of the strategy.
 
 Paper-fill calibration measures what execution actually charged rather than
 what the quote advertised, and requires the p90 round trip to stay below the
