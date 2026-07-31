@@ -103,10 +103,15 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
     window_end = (
         datetime.fromisoformat(args.as_of.replace("Z", "+00:00")) if args.as_of else None
     )
+    source = feed_source(args.feed)
     with connect() as conn:
-        print("session-aware features: backfilling", flush=True)
+        print(f"session-aware features: backfilling from {source}", flush=True)
         features = backfill_intraday_features(
-            conn, symbols, (args.timeframe,), candle_limit=args.candle_limit
+            conn,
+            symbols,
+            (args.timeframe,),
+            candle_limit=args.candle_limit,
+            source=source,
         )
         print("snapshot: materializing", flush=True)
         manifest = record_intraday_dataset_snapshot(
@@ -117,6 +122,7 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
             name=args.name,
             universe_key=args.universe_key,
             window_end=window_end,
+            source=source,
         )
     return {"features": features, "dataset": manifest}
 
@@ -181,6 +187,7 @@ def parser() -> argparse.ArgumentParser:
     snapshot_command.add_argument("--as-of")
     snapshot_command.add_argument("--name")
     snapshot_command.add_argument("--candle-limit", type=int, default=200_000)
+    snapshot_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
 
     quality_command = commands.add_parser(
         "quality", help="Data-quality checks and the gap-experiment power gate."

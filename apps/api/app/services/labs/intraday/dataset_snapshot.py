@@ -37,6 +37,7 @@ def record_intraday_dataset_snapshot(
     name: str | None = None,
     universe_key: str | None = None,
     window_end: datetime | None = None,
+    source: str | None = None,
 ) -> dict[str, Any]:
     """Materialize an exact immutable candles + intraday_features snapshot.
 
@@ -68,6 +69,7 @@ def record_intraday_dataset_snapshot(
                        ARRAY_AGG(DISTINCT source ORDER BY source) AS sources
                 FROM candles
                 WHERE symbol = %s AND timeframe = %s
+                  AND (%s::text IS NULL OR source = %s::text)
                   AND (%s::timestamptz IS NULL OR timestamp <= %s::timestamptz)
                   AND (
                       %s::text IS NULL
@@ -89,6 +91,8 @@ def record_intraday_dataset_snapshot(
                 (
                     symbol,
                     timeframe,
+                    source,
+                    source,
                     window_end,
                     window_end,
                     universe_key,
@@ -191,6 +195,9 @@ def record_intraday_dataset_snapshot(
             "timeframes": normalized_timeframes,
             "universe_key": universe_key,
             "requested_window_end": window_end,
+            # The feed is part of the dataset's identity: the same symbols over
+            # the same window on a different feed are different prices.
+            "source": source,
             "datasets": [
                 {key: jsonable(item[key]) for key in ("key", "candle_count", "feature_count", "window_start", "window_end", "candle_hash", "feature_hash", "sources")}
                 for item in summaries
@@ -244,6 +251,8 @@ def record_intraday_dataset_snapshot(
                     "point_in_time_universe": universe_key is not None,
                     "universe_key": universe_key,
                     "requested_window_end": jsonable(window_end),
+                    "pinned_source": source,
+                    "single_source": len(sources) == 1,
                     "corporate_actions_adjusted": adjusted_prices,
                     "adjustment_policy": "all" if adjusted_prices else "unverified",
                 }
@@ -262,6 +271,7 @@ def record_intraday_dataset_snapshot(
             SELECT %s, symbol, source, timeframe, timestamp, open, high, low, close, volume
             FROM candles
             WHERE symbol = %s AND timeframe = %s AND timestamp BETWEEN %s AND %s
+              AND (%s::text IS NULL OR source = %s::text)
               AND (
                   %s::text IS NULL
                   OR EXISTS (
@@ -286,6 +296,8 @@ def record_intraday_dataset_snapshot(
                 item["timeframe"],
                 item["window_start"],
                 item["window_end"],
+                source,
+                source,
                 universe_key,
                 universe_key,
             ),

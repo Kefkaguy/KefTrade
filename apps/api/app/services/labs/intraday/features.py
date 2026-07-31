@@ -45,10 +45,21 @@ def default_relative_volume_lookback_sessions() -> int:
     return 20
 
 
-def load_intraday_candles(conn: psycopg.Connection, symbol: str, timeframe: str, *, limit: int | None = None) -> list[dict[str, Any]]:
+def load_intraday_candles(
+    conn: psycopg.Connection,
+    symbol: str,
+    timeframe: str,
+    *,
+    limit: int | None = None,
+    source: str | None = None,
+) -> list[dict[str, Any]]:
     """Reuses the existing candle loader -- `intraday_features` is derived
-    from the same `candles` table as `features`, just for 15m/30m bars."""
-    return load_candles(conn, symbol, timeframe, limit=limit)
+    from the same `candles` table as `features`, just for 15m/30m bars.
+
+    `source` pins the feed so a symbol carrying both a consolidated and a
+    single-venue history does not compute its features over duplicated bars.
+    """
+    return load_candles(conn, symbol, timeframe, limit=limit, source=source)
 
 
 def compute_intraday_features(
@@ -232,6 +243,7 @@ def sync_intraday_features(
     timeframe: str,
     *,
     candle_limit: int | None = None,
+    source: str | None = None,
     opening_range_minutes: int | None = None,
     relative_volume_lookback_sessions: int | None = None,
 ) -> dict[str, Any]:
@@ -251,7 +263,7 @@ def sync_intraday_features(
     if symbol_row and not is_equity_market_asset(symbol_row.get("asset_class")):
         return {"symbol": symbol, "timeframe": timeframe, "skipped": True, "reason": "not an equity/ETF asset_class; sessions do not apply"}
 
-    candles = load_intraday_candles(conn, symbol, timeframe, limit=candle_limit)
+    candles = load_intraday_candles(conn, symbol, timeframe, limit=candle_limit, source=source)
     feature_rows = compute_intraday_features(
         candles,
         opening_range_minutes=opening_range_minutes,
@@ -278,6 +290,7 @@ def backfill_intraday_features(
     timeframes: tuple[str, ...] = ("15m", "30m"),
     *,
     candle_limit: int | None = None,
+    source: str | None = None,
 ) -> dict[str, Any]:
     """Backfill orchestrator: loops `sync_intraday_features` per (symbol, timeframe).
 
@@ -288,7 +301,11 @@ def backfill_intraday_features(
     results = []
     for symbol in symbols:
         for timeframe in timeframes:
-            results.append(sync_intraday_features(conn, symbol, timeframe, candle_limit=candle_limit))
+            results.append(
+                sync_intraday_features(
+                    conn, symbol, timeframe, candle_limit=candle_limit, source=source
+                )
+            )
     processed = [row for row in results if not row.get("skipped")]
     skipped = [row for row in results if row.get("skipped")]
     return {

@@ -59,6 +59,12 @@ def test_load_candles_can_request_recent_bounded_window() -> None:
     conn = Conn()
     rows = load_candles(conn, "META", "1h", limit=2)
 
-    assert conn.params == ("META", "1h", 2)
+    # A null source leaves every feed in scope, exactly as before.
+    assert conn.params == ("META", "1h", None, None, 2)
     assert len(rows) == 2
+
+    pinned = Conn()
+    load_candles(pinned, "META", "1h", limit=2, source="alpaca_sip")
+
+    assert pinned.params == ("META", "1h", "alpaca_sip", "alpaca_sip", 2)
 

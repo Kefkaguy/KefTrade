@@ -12,7 +12,11 @@ def load_candles(
     timeframe: str = DEFAULT_DEV_TIMEFRAME,
     *,
     limit: int | None = None,
+    source: str | None = None,
 ) -> list[dict[str, Any]]:
+    # `source` pins the feed. Two feeds for one symbol are two different
+    # prices for the same bar, and leaving them blended would compute every
+    # feature over duplicated timestamps.
     if limit is not None:
         rows = conn.execute(
             """
@@ -21,12 +25,13 @@ def load_candles(
                 SELECT symbol, timeframe, timestamp, open, high, low, close, volume
                 FROM candles
                 WHERE symbol = %s AND timeframe = %s
+                  AND (%s::text IS NULL OR source = %s::text)
                 ORDER BY timestamp DESC
                 LIMIT %s
             ) recent
             ORDER BY timestamp ASC
             """,
-            (symbol, timeframe, limit),
+            (symbol, timeframe, source, source, limit),
         ).fetchall()
         return list(rows)
     rows = conn.execute(
@@ -34,9 +39,10 @@ def load_candles(
         SELECT symbol, timeframe, timestamp, open, high, low, close, volume
         FROM candles
         WHERE symbol = %s AND timeframe = %s
+          AND (%s::text IS NULL OR source = %s::text)
         ORDER BY timestamp ASC
         """,
-        (symbol, timeframe),
+        (symbol, timeframe, source, source),
     ).fetchall()
     return list(rows)
 
