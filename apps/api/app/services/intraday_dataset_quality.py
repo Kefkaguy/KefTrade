@@ -201,35 +201,38 @@ def corporate_action_consistency(
                    LAG(session_close) OVER (PARTITION BY symbol ORDER BY session_date)
                        AS previous_close
             FROM session_closes
+        ), jumps AS (
+            SELECT symbol, session_date,
+                   ABS(session_open / NULLIF(previous_close, 0) - 1) AS jump
+            FROM gaps
+            WHERE previous_close IS NOT NULL
+              AND ABS(session_open / NULLIF(previous_close, 0) - 1) > %s
         )
-        SELECT symbol, session_date,
-               ABS(session_open / NULLIF(previous_close, 0) - 1) AS jump
-        FROM gaps
-        WHERE previous_close IS NOT NULL
-          AND ABS(session_open / NULLIF(previous_close, 0) - 1) > %s
-        ORDER BY jump DESC
+        -- One join rather than a query per jump: a universe-scale dataset
+        -- produces enough large moves that per-row lookups dominate the check.
+        SELECT jumps.symbol, jumps.session_date, jumps.jump,
+               (action.symbol IS NOT NULL) AS explained
+        FROM jumps
+        LEFT JOIN LATERAL (
+            SELECT symbol FROM research_corporate_actions
+            WHERE research_corporate_actions.symbol = jumps.symbol
+              AND effective_date BETWEEN jumps.session_date - 3 AND jumps.session_date + 3
+            LIMIT 1
+        ) action ON TRUE
+        ORDER BY jumps.jump DESC
         LIMIT 500
         """,
         (dataset_id, timeframe, MAX_UNEXPLAINED_JUMP),
     ).fetchall()
-    unexplained: list[dict[str, Any]] = []
-    for row in rows:
-        action = conn.execute(
-            """
-            SELECT 1 FROM research_corporate_actions
-            WHERE symbol = %s AND effective_date BETWEEN %s::date - 3 AND %s::date + 3
-            LIMIT 1
-            """,
-            (str(row["symbol"]), row["session_date"], row["session_date"]),
-        ).fetchone()
-        if not action:
-            unexplained.append(
-                {
-                    "symbol": str(row["symbol"]),
-                    "session_date": str(row["session_date"]),
-                    "jump": _round(float(row["jump"])),
-                }
-            )
+    unexplained: list[dict[str, Any]] = [
+        {
+            "symbol": str(row["symbol"]),
+            "session_date": str(row["session_date"]),
+            "jump": _round(float(row["jump"])),
+        }
+        for row in rows
+        if not row["explained"]
+    ]
     return {
         "large_overnight_jumps": len(rows),
         "unexplained_jumps": len(unexplained),
@@ -335,25 +338,29 @@ def gap_event_power(
             SELECT session_date,
                    PERCENT_RANK() OVER (ORDER BY session_date) AS chronological_position
             FROM (SELECT DISTINCT session_date FROM sessions) AS distinct_sessions
+        ), with_previous AS (
+            -- LAG rather than a correlated lookup: the sessions CTE carries no
+            -- index, so a per-row scan for the prior close is quadratic and
+            -- does not finish on a full universe.
+            SELECT symbol, session_date, first_slot, session_open, bars,
+                   LAG(session_close) OVER (
+                       PARTITION BY symbol ORDER BY session_date
+                   ) AS previous_close
+            FROM sessions
         ), gapped AS (
             SELECT s.symbol, s.session_date, s.bars,
                    d.session_relative_volume,
                    split.chronological_position,
-                   s.session_open / NULLIF(previous.session_close, 0) - 1 AS gap,
+                   s.session_open / NULLIF(s.previous_close, 0) - 1 AS gap,
                    CASE
-                       WHEN s.session_open = previous.session_close THEN 0.0
+                       WHEN s.session_open = s.previous_close THEN 0.0
                        ELSE (s.session_open - d.decision_close)
-                            / NULLIF(s.session_open - previous.session_close, 0)
+                            / NULLIF(s.session_open - s.previous_close, 0)
                    END AS gap_fill
-            FROM sessions s
+            FROM with_previous s
             JOIN split ON split.session_date = s.session_date
             LEFT JOIN decision d ON d.symbol = s.symbol AND d.session_date = s.session_date
-            LEFT JOIN LATERAL (
-                SELECT session_close FROM sessions prior
-                WHERE prior.symbol = s.symbol AND prior.session_date < s.session_date
-                ORDER BY prior.session_date DESC LIMIT 1
-            ) previous ON TRUE
-            WHERE s.first_slot = TIME '09:30'
+            WHERE s.first_slot = TIME '09:30' AND s.previous_close IS NOT NULL
         ), qualifying AS (
             SELECT *,
                    CASE
