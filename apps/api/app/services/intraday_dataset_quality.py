@@ -336,17 +336,14 @@ def gap_event_power(
     rows = conn.execute(
         """
         WITH regular AS (
+            -- Candles only. This CTE is referenced twice, so Postgres
+            -- materializes it; joining features here would materialize an
+            -- 8M-row join whose feature column only the 10:00 bar ever uses.
             SELECT candle.symbol, candle.timestamp,
                    (candle.timestamp AT TIME ZONE 'America/New_York')::date AS session_date,
                    (candle.timestamp AT TIME ZONE 'America/New_York')::time AS session_time,
-                   candle.open, candle.close,
-                   feature.session_relative_volume
+                   candle.open, candle.close
             FROM research_dataset_candles candle
-            LEFT JOIN research_dataset_intraday_features feature
-              ON feature.dataset_id = candle.dataset_id
-             AND feature.symbol = candle.symbol
-             AND feature.timeframe = candle.timeframe
-             AND feature.timestamp = candle.timestamp
             WHERE candle.dataset_id = %s AND candle.timeframe = %s
               AND (candle.timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30'
               AND (candle.timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00'
@@ -358,9 +355,17 @@ def gap_event_power(
                    COUNT(*) AS bars
             FROM regular GROUP BY 1, 2
         ), decision AS (
-            SELECT symbol, session_date, session_relative_volume,
-                   close AS decision_close
-            FROM regular WHERE session_time = TIME '10:00'
+            -- Features joined only for the decision bar.
+            SELECT regular.symbol, regular.session_date,
+                   feature.session_relative_volume,
+                   regular.close AS decision_close
+            FROM regular
+            LEFT JOIN research_dataset_intraday_features feature
+              ON feature.dataset_id = %s
+             AND feature.timeframe = %s
+             AND feature.symbol = regular.symbol
+             AND feature.timestamp = regular.timestamp
+            WHERE regular.session_time = TIME '10:00'
         ), split AS (
             SELECT session_date,
                    PERCENT_RANK() OVER (ORDER BY session_date) AS chronological_position
@@ -420,6 +425,8 @@ def gap_event_power(
         GROUP BY flow_state
         """,
         (
+            dataset_id,
+            timeframe,
             dataset_id,
             timeframe,
             MAX_CONSECUTIVE_SESSION_DAYS,
