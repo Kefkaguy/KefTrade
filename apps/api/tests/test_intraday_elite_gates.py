@@ -356,3 +356,107 @@ def test_signal_frequency_outside_bounds_pauses():
     result = evaluate_live_safeguards(live_state(signals_per_session=12.0), LIMITS)
 
     assert "signal_frequency_out_of_bounds" in result["triggered"]
+
+
+def declining_trades(count=120):
+    """An edge that lives entirely in the first stretch of the sample."""
+    trades = []
+    for index in range(count):
+        session = date(2024, 1, 3) + timedelta(days=index * 5)
+        trades.append(
+            trade(
+                symbol=f"SYM{index % 9}",
+                entry_session_date=session,
+                exit_session_date=session,
+                net_return=0.01 if index < count // 4 else -0.002,
+            )
+        )
+    return trades
+
+
+def test_walk_forward_rejects_an_edge_confined_to_one_stretch():
+    report = robustness_report(declining_trades())
+
+    assert report["checks"]["walk_forward_stable"] is False
+    assert report["walk_forward"]["positive_folds"] == 1
+    assert report["passed"] is False
+
+
+def test_walk_forward_accepts_a_consistently_positive_edge():
+    report = robustness_report(spread_of_trades(count=120, net_return=0.0025))
+
+    assert report["checks"]["walk_forward_stable"] is True
+    assert report["walk_forward"]["positive_folds"] == 4
+
+
+def test_both_bootstrap_lower_bounds_are_reported():
+    report = robustness_report(spread_of_trades(count=120, net_return=0.0025))
+
+    assert report["block_bootstrap_lower_bound_bps"] is not None
+    assert report["trade_order_bootstrap_lower_bound_bps"] is not None
+    assert report["checks"]["positive_block_bootstrap_lower_bound"] is True
+    assert report["checks"]["positive_trade_order_bootstrap_lower_bound"] is True
+
+
+def test_a_noisy_zero_mean_edge_fails_the_bootstrap_lower_bound():
+    from random import Random
+
+    rng = Random(5)
+    trades = []
+    for index in range(120):
+        session = date(2024, 1, 3) + timedelta(days=index * 5)
+        trades.append(
+            trade(
+                symbol=f"SYM{index % 9}",
+                entry_session_date=session,
+                exit_session_date=session,
+                net_return=rng.gauss(0.00005, 0.02),
+            )
+        )
+
+    report = robustness_report(trades)
+
+    assert report["checks"]["positive_block_bootstrap_lower_bound"] is False
+
+
+def test_regime_removal_rejects_an_edge_carried_by_one_quarter():
+    trades = []
+    for index in range(80):
+        session = date(2024, 1, 3) + timedelta(days=index * 5)
+        in_hot_quarter = session.month <= 3 and session.year == 2024
+        trades.append(
+            trade(
+                symbol=f"SYM{index % 9}",
+                entry_session_date=session,
+                exit_session_date=session,
+                net_return=0.05 if in_hot_quarter else -0.001,
+            )
+        )
+
+    report = robustness_report(trades)
+
+    assert report["checks"]["survives_best_regime_removal"] is False
+
+
+def test_drawdown_and_tail_loss_are_measured():
+    report = robustness_report(declining_trades())
+
+    assert report["risk"]["max_drawdown_bps"] < 0
+    assert report["risk"]["worst_trade_bps"] < 0
+    assert report["risk"]["expected_shortfall_5pct_bps"] < 0
+
+
+def test_a_drawdown_limit_can_reject_an_otherwise_profitable_edge():
+    trades = spread_of_trades(count=120, net_return=0.0025)
+    trades[10]["net_return"] = -0.9
+
+    report = robustness_report(trades, max_drawdown_bps=100.0)
+
+    assert report["checks"]["within_drawdown_limit"] is False
+
+
+def test_no_drawdown_limit_means_the_check_does_not_fire():
+    report = robustness_report(spread_of_trades(count=120, net_return=0.0025))
+
+    assert report["drawdown_limit_bps"] is None
+    assert report["checks"]["within_drawdown_limit"] is True

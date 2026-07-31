@@ -17,8 +17,10 @@ The module contains no UI code and submits no orders.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from hashlib import sha256
 from json import dumps
+from random import Random
 from statistics import fmean, median, pstdev
 from typing import Any, Sequence
 
@@ -213,8 +215,18 @@ def robustness_report(
     trades: Sequence[dict[str, Any]],
     *,
     cost_stress_multiplier: float = COST_STRESS_MULTIPLIER,
+    bootstrap_samples: int = 1_000,
+    max_drawdown_bps: float | None = None,
+    seed: int = 20260731,
 ) -> dict[str, Any]:
-    """Concentration, cost stress and participation limits on realized trades."""
+    """Every robustness question the protocol asks of realized trades.
+
+    Concentration by symbol and quarter, participation limits, cost stress,
+    walk-forward stability, block and trade-order bootstraps, and drawdown
+    and tail loss.  The two bootstraps are deliberately different: blocks
+    preserve serial dependence, an iid resample destroys it, and an edge that
+    survives only one of the two is an artefact of trade ordering.
+    """
     if not trades:
         return {"trades": 0, "passed": False, "detail": "no simulated trades"}
     net = [float(trade["net_return"]) for trade in trades]
@@ -243,6 +255,19 @@ def robustness_report(
     quarter_share = _profit_share(by_quarter)
     deviation = pstdev(net) if len(net) > 1 else 0.0
 
+    walk_forward = walk_forward_report(trades, net)
+    block_lower = _bootstrap_lower_bound(
+        net, samples=bootstrap_samples, block_length=5, seed=seed
+    )
+    # Trade-order resampling: blocks preserve any serial dependence, an iid
+    # resample deliberately destroys it. An edge that survives only one of the
+    # two is an artefact of how the trades happened to be ordered.
+    order_lower = _bootstrap_lower_bound(
+        net, samples=bootstrap_samples, block_length=1, seed=seed + 1
+    )
+    risk = _drawdown_and_tail(net)
+    quarter_removed = _survives_quarter_removal(trades, net)
+
     checks = {
         "positive_mean_net_return": fmean(net) > 0,
         "survives_cost_stress": fmean(stressed) > 0,
@@ -253,6 +278,16 @@ def robustness_report(
         ),
         # Removing the best symbol must not remove the edge.
         "survives_best_symbol_removal": _survives_removal(trades, net, key="symbol"),
+        "survives_best_regime_removal": quarter_removed,
+        "walk_forward_stable": bool(walk_forward["passed"]),
+        "positive_block_bootstrap_lower_bound": block_lower is not None and block_lower > 0,
+        "positive_trade_order_bootstrap_lower_bound": (
+            order_lower is not None and order_lower > 0
+        ),
+        "within_drawdown_limit": (
+            max_drawdown_bps is None
+            or abs(risk["max_drawdown_bps"] or 0) <= max_drawdown_bps
+        ),
     }
     return {
         "trades": len(trades),
@@ -263,6 +298,11 @@ def robustness_report(
         "max_symbol_profit_share": _round(symbol_share),
         "max_quarter_profit_share": _round(quarter_share),
         "max_participation_rate": _round(max(participation)) if participation else None,
+        "walk_forward": walk_forward,
+        "block_bootstrap_lower_bound_bps": _round(block_lower),
+        "trade_order_bootstrap_lower_bound_bps": _round(order_lower),
+        "risk": risk,
+        "drawdown_limit_bps": max_drawdown_bps,
         "checks": checks,
         "passed": all(checks.values()),
     }
@@ -282,6 +322,99 @@ def _survives_removal(
     best = max(totals, key=lambda item: totals[item])
     remaining = [value for trade, value in zip(trades, net) if str(trade.get(key)) != best]
     return bool(remaining) and fmean(remaining) > 0
+
+
+def _survives_quarter_removal(
+    trades: Sequence[dict[str, Any]],
+    net: Sequence[float],
+) -> bool:
+    """Dropping the single best quarter must not remove the edge."""
+    totals: dict[str, float] = {}
+    for trade, value in zip(trades, net):
+        label = _quarter(trade)
+        totals[label] = totals.get(label, 0.0) + value
+    if len(totals) < 2:
+        return False
+    best = max(totals, key=lambda item: totals[item])
+    remaining = [value for trade, value in zip(trades, net) if _quarter(trade) != best]
+    return bool(remaining) and fmean(remaining) > 0
+
+
+def _quarter(trade: dict[str, Any]) -> str:
+    session = trade.get("entry_session_date")
+    if session is None:
+        return "unknown"
+    return f"{session.year}Q{(session.month - 1) // 3 + 1}"
+
+
+def walk_forward_report(
+    trades: Sequence[dict[str, Any]],
+    net: Sequence[float],
+    *,
+    folds: int = 4,
+) -> dict[str, Any]:
+    """Chronological folds: an edge should not live in one stretch of time."""
+    ordered = sorted(
+        zip(trades, net), key=lambda pair: (pair[0].get("entry_session_date") or date.min)
+    )
+    if len(ordered) < folds * 5:
+        return {"folds": 0, "passed": False, "detail": "too few trades to split"}
+    size = len(ordered) // folds
+    means: list[float] = []
+    for index in range(folds):
+        window = ordered[index * size : (index + 1) * size if index < folds - 1 else None]
+        means.append(fmean(value for _, value in window))
+    positive = sum(1 for value in means if value > 0)
+    return {
+        "folds": folds,
+        "fold_mean_return_bps": [_round(value * 10_000) for value in means],
+        "positive_folds": positive,
+        # Three quarters of the folds pointing the same way is the bar; an
+        # edge carried by a single fold is one regime, not an edge.
+        "passed": positive / folds >= 0.75,
+    }
+
+
+def _bootstrap_lower_bound(
+    values: Sequence[float],
+    *,
+    samples: int,
+    block_length: int,
+    seed: int,
+) -> float | None:
+    """Moving-block bootstrap lower bound on the mean, in bps."""
+    if len(values) < max(8, block_length * 2):
+        return None
+    rng = Random(seed)
+    blocks = [
+        [values[(start + offset) % len(values)] for offset in range(block_length)]
+        for start in range(len(values))
+    ]
+    means: list[float] = []
+    for _ in range(samples):
+        sample: list[float] = []
+        while len(sample) < len(values):
+            sample.extend(blocks[rng.randrange(len(blocks))])
+        means.append(fmean(sample[: len(values)]))
+    means.sort()
+    return means[int(len(means) * 0.05)] * 10_000
+
+
+def _drawdown_and_tail(values: Sequence[float]) -> dict[str, Any]:
+    equity = 0.0
+    peak = 0.0
+    worst = 0.0
+    for value in values:
+        equity += value
+        peak = max(peak, equity)
+        worst = min(worst, equity - peak)
+    ordered = sorted(values)
+    tail = ordered[: max(1, len(ordered) // 20)]
+    return {
+        "max_drawdown_bps": _round(worst * 10_000),
+        "worst_trade_bps": _round(ordered[0] * 10_000),
+        "expected_shortfall_5pct_bps": _round(fmean(tail) * 10_000),
+    }
 
 
 # ---------------------------------------------------------------------------
