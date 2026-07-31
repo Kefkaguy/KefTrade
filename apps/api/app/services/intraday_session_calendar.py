@@ -178,6 +178,32 @@ def ordered_regular_sessions(
     return [(key, grouped[key]) for key in sorted(grouped)]
 
 
+# A Friday-to-Monday gap is three calendar days; a long weekend with a holiday
+# is four.  Anything wider means the two sessions are not adjacent in the data
+# -- a symbol that left and rejoined a point-in-time universe, or a hole in the
+# history -- and the move between them is not an overnight gap.
+MAX_CONSECUTIVE_SESSION_DAYS = 5
+
+
+def is_consecutive_session(
+    previous: date | None,
+    current: date,
+    *,
+    max_calendar_days: int = MAX_CONSECUTIVE_SESSION_DAYS,
+) -> bool:
+    """Are these two sessions adjacent enough to span a single overnight?
+
+    Point-in-time membership means a symbol's rows stop when it leaves the
+    universe and resume when it rejoins.  Measuring a close-to-open move across
+    that hole produces a gap of months, which is not the quantity any overnight
+    hypothesis is about.
+    """
+    if previous is None:
+        return False
+    delta = (current - previous).days
+    return 0 < delta <= max_calendar_days
+
+
 def extended_hours_audit(
     candles_by_symbol: dict[str, Sequence[dict[str, Any]]],
     *,

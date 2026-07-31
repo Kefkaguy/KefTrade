@@ -45,6 +45,7 @@ from app.services.intraday_session_calendar import (
     bar_slot,
     closing_bar,
     extended_hours_audit,
+    is_consecutive_session,
     opening_bar,
     ordered_regular_sessions,
     regular_session_rows,
@@ -234,6 +235,7 @@ def first_to_last_half_hour_observations(
     observations: list[dict[str, Any]] = []
     for symbol in ("SPY", "QQQ"):
         previous_close: float | None = None
+        previous_session: date | None = None
         for session_date, session in ordered_regular_sessions(
             candles_by_symbol.get(symbol, []),
             timeframe=timeframe,
@@ -243,11 +245,12 @@ def first_to_last_half_hour_observations(
             # A session whose bar complement matches neither the full-day nor
             # the early-close calendar has no identifiable closing half hour.
             if first_bar is None or last_bar is None:
-                previous_close = None
+                previous_close, previous_session = None, None
                 continue
+            adjacent = is_consecutive_session(previous_session, session_date)
             if first_bar["timestamp"] != last_bar["timestamp"]:
                 last_open = float(last_bar["open"])
-                if previous_close and previous_close > 0 and last_open > 0:
+                if adjacent and previous_close and previous_close > 0 and last_open > 0:
                     observations.append(
                         _observation(
                             factor_key="first_to_last_half_hour_market_momentum",
@@ -263,6 +266,7 @@ def first_to_last_half_hour_observations(
                         )
                     )
             previous_close = float(last_bar["close"])
+            previous_session = session_date
     return observations
 
 
@@ -396,14 +400,20 @@ def overnight_gap_acceptance_absorption_observations(
     output: list[dict[str, Any]] = []
     for symbol, rows in candles_by_symbol.items():
         previous_close: float | None = None
+        previous_session: date | None = None
         for session_date, session in ordered_regular_sessions(rows, timeframe=timeframe):
             first_bar = opening_bar(session, timeframe=timeframe)
             last_bar = closing_bar(session, timeframe=timeframe)
             if first_bar is None or session[0]["timestamp"] != first_bar["timestamp"]:
                 previous_close = float(last_bar["close"]) if last_bar else None
+                previous_session = session_date if last_bar else None
                 continue
             exit_index = entry_index + horizon_bars - 1
-            if previous_close and previous_close > 0 and len(session) > exit_index:
+            # Point-in-time membership leaves holes where a symbol was out of
+            # the universe. A close-to-open move across such a hole spans
+            # months, not a night, and is not the event being hypothesised.
+            adjacent = is_consecutive_session(previous_session, session_date)
+            if adjacent and previous_close and previous_close > 0 and len(session) > exit_index:
                 session_open = float(first_bar["open"])
                 decision = session[decision_index]
                 decision_close = float(decision["close"])
@@ -456,8 +466,9 @@ def overnight_gap_acceptance_absorption_observations(
                         )
             if last_bar is not None:
                 previous_close = float(last_bar["close"])
+                previous_session = session_date
             else:
-                previous_close = None
+                previous_close, previous_session = None, None
     return output
 
 

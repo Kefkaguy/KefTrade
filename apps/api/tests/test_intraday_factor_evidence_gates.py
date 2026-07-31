@@ -281,3 +281,78 @@ def test_discovery_reports_power_and_stability_for_every_measured_factor():
     assert "concentration" in report
     assert "effect_size_drift" in report
     assert report["effect_size_drift"]["status"] == "measured"
+
+
+def shift_sessions(rows, *, days):
+    from datetime import timedelta
+
+    return [
+        {**row, "timestamp": row["timestamp"] + timedelta(days=days)}
+        for row in rows
+    ]
+
+
+def test_a_gap_is_not_measured_across_a_membership_hole():
+    from datetime import timedelta
+
+    from app.services.intraday_session_calendar import bar_slot, session_date
+
+    early = market_candles("AAPL", sessions=6)
+    for row in early:
+        row["session_relative_volume"] = Decimal("2")
+    # The same symbol rejoining the universe months later. Without an
+    # adjacency rule the first session back is compared against a close from
+    # before the hole, producing an "overnight" gap spanning months.
+    late = shift_sessions(early, days=200)
+
+    joined = overnight_gap_acceptance_absorption_observations(
+        {"AAPL": early + late}, timeframe="30m"
+    )
+    session_dates = {row["session_date"] for row in joined}
+    first_after_hole = min(session_date(row["timestamp"]) for row in late)
+
+    assert first_after_hole not in session_dates
+
+
+def test_the_first_session_of_a_symbol_never_produces_a_gap():
+    clean = market_candles("AAPL", sessions=4)
+    for row in clean:
+        row["session_relative_volume"] = Decimal("2")
+
+    observations = overnight_gap_acceptance_absorption_observations(
+        {"AAPL": clean}, timeframe="30m"
+    )
+    from app.services.intraday_session_calendar import ordered_regular_sessions
+
+    first_session = ordered_regular_sessions(clean, timeframe="30m")[0][0]
+
+    assert all(row["session_date"] != first_session for row in observations)
+
+
+def test_first_to_last_also_refuses_a_stale_previous_close():
+    from app.services.intraday_session_calendar import session_date
+
+    early = market_candles("SPY", sessions=6)
+    late = shift_sessions(early, days=200)
+
+    observations = first_to_last_half_hour_observations(
+        {"SPY": early + late}, timeframe="30m"
+    )
+    session_dates = {row["session_date"] for row in observations}
+    first_after_hole = min(session_date(row["timestamp"]) for row in late)
+
+    assert first_after_hole not in session_dates
+
+
+def test_adjacent_sessions_across_a_weekend_still_count():
+    from datetime import date as _date
+
+    from app.services.intraday_session_calendar import is_consecutive_session
+
+    # Friday to Monday is three calendar days and is a normal overnight.
+    assert is_consecutive_session(_date(2025, 3, 7), _date(2025, 3, 10)) is True
+    # A long weekend with a holiday is four.
+    assert is_consecutive_session(_date(2025, 8, 29), _date(2025, 9, 2)) is True
+    # A membership hole is not.
+    assert is_consecutive_session(_date(2025, 3, 7), _date(2025, 9, 2)) is False
+    assert is_consecutive_session(None, _date(2025, 3, 10)) is False

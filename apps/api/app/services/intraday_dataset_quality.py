@@ -24,6 +24,7 @@ from psycopg.types.json import Jsonb
 
 from app.services.intraday_research_power import required_sessions_for_power
 from app.services.intraday_session_calendar import (
+    MAX_CONSECUTIVE_SESSION_DAYS,
     early_close_session_slots,
     regular_session_slots,
 )
@@ -199,13 +200,19 @@ def corporate_action_consistency(
         ), gaps AS (
             SELECT symbol, session_date, session_open,
                    LAG(session_close) OVER (PARTITION BY symbol ORDER BY session_date)
-                       AS previous_close
+                       AS previous_close,
+                   LAG(session_date) OVER (PARTITION BY symbol ORDER BY session_date)
+                       AS previous_session
             FROM session_closes
         ), jumps AS (
             SELECT symbol, session_date,
                    ABS(session_open / NULLIF(previous_close, 0) - 1) AS jump
             FROM gaps
             WHERE previous_close IS NOT NULL
+              -- Point-in-time membership leaves holes. A move measured across
+              -- one is not an overnight jump and no corporate action explains
+              -- it, so comparing only adjacent sessions is the honest test.
+              AND session_date - previous_session <= %s
               AND ABS(session_open / NULLIF(previous_close, 0) - 1) > %s
         )
         -- One join rather than a query per jump: a universe-scale dataset
@@ -222,7 +229,7 @@ def corporate_action_consistency(
         ORDER BY jumps.jump DESC
         LIMIT 500
         """,
-        (dataset_id, timeframe, MAX_UNEXPLAINED_JUMP),
+        (dataset_id, timeframe, MAX_CONSECUTIVE_SESSION_DAYS, MAX_UNEXPLAINED_JUMP),
     ).fetchall()
     unexplained: list[dict[str, Any]] = [
         {
@@ -245,16 +252,36 @@ def corporate_action_consistency(
 
 
 def feature_alignment(conn: psycopg.Connection, *, dataset_id: int, timeframe: str) -> dict[str, Any]:
-    """Every regular-session candle should carry exactly one feature row."""
+    """Every candle inside a session should carry exactly one feature row.
+
+    The comparison is bounded by the last feature timestamp of each
+    symbol-session rather than by a fixed 09:30-16:00 window.  On an
+    early-close day the exchange stops at 13:00 while the consolidated feed
+    keeps printing, and counting those post-close bars as missing features
+    would fail a dataset that is in fact complete.
+    """
     row = conn.execute(
         """
+        WITH feature_sessions AS (
+            SELECT symbol, session_date, MAX(timestamp) AS last_feature,
+                   COUNT(*) AS feature_rows
+            FROM research_dataset_intraday_features
+            WHERE dataset_id = %s AND timeframe = %s
+            GROUP BY 1, 2
+        ), in_session_candles AS (
+            SELECT COUNT(*) AS candles
+            FROM research_dataset_candles candle
+            JOIN feature_sessions
+              ON feature_sessions.symbol = candle.symbol
+             AND feature_sessions.session_date =
+                 (candle.timestamp AT TIME ZONE 'America/New_York')::date
+            WHERE candle.dataset_id = %s AND candle.timeframe = %s
+              AND candle.timestamp <= feature_sessions.last_feature
+              AND (candle.timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30'
+        )
         SELECT
-            (SELECT COUNT(*) FROM research_dataset_candles
-              WHERE dataset_id = %s AND timeframe = %s
-                AND (timestamp AT TIME ZONE 'America/New_York')::time >= TIME '09:30'
-                AND (timestamp AT TIME ZONE 'America/New_York')::time < TIME '16:00') AS regular_candles,
-            (SELECT COUNT(*) FROM research_dataset_intraday_features
-              WHERE dataset_id = %s AND timeframe = %s) AS feature_rows,
+            (SELECT candles FROM in_session_candles) AS in_session_candles,
+            (SELECT COALESCE(SUM(feature_rows), 0) FROM feature_sessions) AS feature_rows,
             (SELECT COUNT(*) FROM research_dataset_intraday_features feature
               WHERE feature.dataset_id = %s AND feature.timeframe = %s
                 AND NOT EXISTS (
@@ -267,12 +294,12 @@ def feature_alignment(conn: psycopg.Connection, *, dataset_id: int, timeframe: s
         """,
         (dataset_id, timeframe) * 3,
     ).fetchone()
-    regular = int((row or {}).get("regular_candles") or 0)
+    candles = int((row or {}).get("in_session_candles") or 0)
     features = int((row or {}).get("feature_rows") or 0)
     orphans = int((row or {}).get("orphan_features") or 0)
-    coverage = features / regular if regular else None
+    coverage = features / candles if candles else None
     return {
-        "regular_session_candles": regular,
+        "in_session_candles": candles,
         "feature_rows": features,
         "orphan_feature_rows": orphans,
         "feature_coverage": _round(coverage),
@@ -345,7 +372,10 @@ def gap_event_power(
             SELECT symbol, session_date, first_slot, session_open, bars,
                    LAG(session_close) OVER (
                        PARTITION BY symbol ORDER BY session_date
-                   ) AS previous_close
+                   ) AS previous_close,
+                   LAG(session_date) OVER (
+                       PARTITION BY symbol ORDER BY session_date
+                   ) AS previous_session
             FROM sessions
         ), gapped AS (
             SELECT s.symbol, s.session_date, s.bars,
@@ -360,7 +390,10 @@ def gap_event_power(
             FROM with_previous s
             JOIN split ON split.session_date = s.session_date
             LEFT JOIN decision d ON d.symbol = s.symbol AND d.session_date = s.session_date
-            WHERE s.first_slot = TIME '09:30' AND s.previous_close IS NOT NULL
+            WHERE s.first_slot = TIME '09:30'
+              AND s.previous_close IS NOT NULL
+              -- Count only events the factor builder would actually produce.
+              AND s.session_date - s.previous_session <= %s
         ), qualifying AS (
             SELECT *,
                    CASE
@@ -389,6 +422,7 @@ def gap_event_power(
         (
             dataset_id,
             timeframe,
+            MAX_CONSECUTIVE_SESSION_DAYS,
             maximum_acceptance_fill,
             minimum_absorption_fill,
             minimum_gap,
