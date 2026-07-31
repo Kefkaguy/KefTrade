@@ -284,16 +284,26 @@ def gap_event_power(
     timeframe: str,
     minimum_gap: float = 0.003,
     minimum_relative_volume: float = 1.5,
+    maximum_acceptance_fill: float = 0.25,
+    minimum_absorption_fill: float = 0.50,
     session_target: int = GAP_EXPERIMENT_SESSION_TARGET,
     observation_target: int = GAP_EXPERIMENT_OBSERVATION_TARGET,
 ) -> dict[str, Any]:
-    """Count the gap events the bounded experiment would actually get.
+    """Count the events each of the six tests would actually receive.
 
-    This is the gate the current dataset fails.  It is measured on the
-    dataset before any factor runs, so the decision to proceed never depends
-    on having seen a result.
+    Two distinctions decide whether this gate means anything.
+
+    First, acceptance and absorption are separate hypotheses drawing on
+    disjoint subsets of the gap-down pool, and the fill band between the two
+    thresholds belongs to neither.  Counting the pool would let a dataset pass
+    while every individual test stayed underpowered.
+
+    Second, the 396-session requirement was derived from the *validation*
+    sample, which is 30% of the history, so the gate measures the validation
+    split rather than the whole dataset.  Both flow states must clear it: the
+    experiment is only as interpretable as its weaker half.
     """
-    row = conn.execute(
+    rows = conn.execute(
         """
         WITH regular AS (
             SELECT candle.symbol, candle.timestamp,
@@ -318,57 +328,112 @@ def gap_event_power(
                    COUNT(*) AS bars
             FROM regular GROUP BY 1, 2
         ), decision AS (
-            SELECT symbol, session_date, session_relative_volume
+            SELECT symbol, session_date, session_relative_volume,
+                   close AS decision_close
             FROM regular WHERE session_time = TIME '10:00'
+        ), split AS (
+            SELECT session_date,
+                   PERCENT_RANK() OVER (ORDER BY session_date) AS chronological_position
+            FROM (SELECT DISTINCT session_date FROM sessions) AS distinct_sessions
         ), gapped AS (
-            SELECT s.symbol, s.session_date,
-                   s.session_open / NULLIF(
-                       LAG(s.session_close) OVER (PARTITION BY s.symbol ORDER BY s.session_date), 0
-                   ) - 1 AS gap,
+            SELECT s.symbol, s.session_date, s.bars,
                    d.session_relative_volume,
-                   s.bars
+                   split.chronological_position,
+                   s.session_open / NULLIF(previous.session_close, 0) - 1 AS gap,
+                   CASE
+                       WHEN s.session_open = previous.session_close THEN 0.0
+                       ELSE (s.session_open - d.decision_close)
+                            / NULLIF(s.session_open - previous.session_close, 0)
+                   END AS gap_fill
             FROM sessions s
+            JOIN split ON split.session_date = s.session_date
             LEFT JOIN decision d ON d.symbol = s.symbol AND d.session_date = s.session_date
+            LEFT JOIN LATERAL (
+                SELECT session_close FROM sessions prior
+                WHERE prior.symbol = s.symbol AND prior.session_date < s.session_date
+                ORDER BY prior.session_date DESC LIMIT 1
+            ) previous ON TRUE
             WHERE s.first_slot = TIME '09:30'
+        ), qualifying AS (
+            SELECT *,
+                   CASE
+                       WHEN gap_fill <= %s THEN 'acceptance'
+                       WHEN gap_fill >= %s THEN 'absorption'
+                   END AS flow_state
+            FROM gapped
+            WHERE gap <= -%s
+              AND session_relative_volume >= %s
+              -- A 4-bar hold entered on the third bar needs six regular bars.
+              AND bars >= 6
         )
-        SELECT
-            COUNT(*) FILTER (WHERE gap <= -%s AND session_relative_volume >= %s AND bars >= 3)
-                AS gap_down_observations,
-            COUNT(DISTINCT session_date) FILTER (
-                WHERE gap <= -%s AND session_relative_volume >= %s AND bars >= 3
-            ) AS gap_down_sessions,
-            COUNT(*) FILTER (WHERE gap >= %s AND session_relative_volume >= %s AND bars >= 3)
-                AS gap_up_observations,
-            COUNT(DISTINCT session_date) AS total_sessions,
-            COUNT(DISTINCT symbol) AS symbols
-        FROM gapped
+        SELECT flow_state,
+               COUNT(*) AS total_observations,
+               COUNT(DISTINCT session_date) AS total_sessions,
+               COUNT(*) FILTER (
+                   WHERE chronological_position >= 0.5 AND chronological_position < 0.8
+               ) AS validation_observations,
+               COUNT(DISTINCT session_date) FILTER (
+                   WHERE chronological_position >= 0.5 AND chronological_position < 0.8
+               ) AS validation_sessions
+        FROM qualifying
+        WHERE flow_state IS NOT NULL
+        GROUP BY flow_state
         """,
         (
             dataset_id,
             timeframe,
-            minimum_gap,
-            minimum_relative_volume,
-            minimum_gap,
-            minimum_relative_volume,
+            maximum_acceptance_fill,
+            minimum_absorption_fill,
             minimum_gap,
             minimum_relative_volume,
         ),
-    ).fetchone()
-    observations = int((row or {}).get("gap_down_observations") or 0)
-    sessions = int((row or {}).get("gap_down_sessions") or 0)
+    ).fetchall()
+
+    by_state: dict[str, Any] = {
+        str(item["flow_state"]): {
+            "total_observations": int(item["total_observations"]),
+            "total_sessions": int(item["total_sessions"]),
+            "validation_observations": int(item["validation_observations"]),
+            "validation_sessions": int(item["validation_sessions"]),
+        }
+        for item in (rows or [])
+    }
+    for state in ("acceptance", "absorption"):
+        by_state.setdefault(
+            state,
+            {
+                "total_observations": 0,
+                "total_sessions": 0,
+                "validation_observations": 0,
+                "validation_sessions": 0,
+            },
+        )
+    for counts in by_state.values():
+        counts["sessions_short_by"] = max(
+            0, session_target - counts["validation_sessions"]
+        )
+        counts["observations_short_by"] = max(
+            0, observation_target - counts["validation_observations"]
+        )
+        counts["passed"] = (
+            counts["validation_sessions"] >= session_target
+            and counts["validation_observations"] >= observation_target
+        )
+
+    limiting = min(
+        by_state, key=lambda state: by_state[state]["validation_observations"]
+    )
     return {
         "minimum_gap": minimum_gap,
         "minimum_relative_volume": minimum_relative_volume,
-        "gap_down_observations": observations,
-        "gap_down_sessions": sessions,
-        "gap_up_observations": int((row or {}).get("gap_up_observations") or 0),
-        "dataset_sessions": int((row or {}).get("total_sessions") or 0),
-        "dataset_symbols": int((row or {}).get("symbols") or 0),
+        "maximum_acceptance_fill": maximum_acceptance_fill,
+        "minimum_absorption_fill": minimum_absorption_fill,
         "session_target": session_target,
         "observation_target": observation_target,
-        "sessions_short_by": max(0, session_target - sessions),
-        "observations_short_by": max(0, observation_target - observations),
-        "passed": sessions >= session_target and observations >= observation_target,
+        "measured_on": "validation_split_50_to_80_percent",
+        "by_flow_state": by_state,
+        "limiting_flow_state": limiting,
+        "passed": all(counts["passed"] for counts in by_state.values()),
     }
 
 
