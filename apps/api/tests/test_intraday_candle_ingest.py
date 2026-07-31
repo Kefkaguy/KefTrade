@@ -155,3 +155,50 @@ def test_reconciliation_flags_bars_outside_the_exchange_calendar():
     )
 
     assert "2024-07-04" in report["sessions_outside_calendar"]
+
+
+def test_one_unusable_symbol_does_not_abort_the_rest_of_the_batch(monkeypatch):
+    import asyncio
+
+    from app.services import intraday_candle_ingest as ingest
+
+    attempted: list[str] = []
+
+    async def fake_symbol_range(conn, *, symbol, **kwargs):
+        attempted.append(symbol)
+        if symbol == "BADSYM":
+            raise ValueError(f"Unsupported Alpaca stock symbol '{symbol}'.")
+        return {
+            "symbol": symbol,
+            "bars_upserted": 10,
+            "chunks_failed": 0,
+        }
+
+    monkeypatch.setattr(ingest, "ingest_symbol_range", fake_symbol_range)
+
+    class RollbackConn:
+        def __init__(self):
+            self.rollbacks = 0
+
+        def rollback(self):
+            self.rollbacks += 1
+
+    conn = RollbackConn()
+    summary = asyncio.run(
+        ingest.ingest_universe_range(
+            conn,
+            symbols=["AAPL", "BADSYM", "MSFT"],
+            timeframe="30m",
+            start=date(2024, 1, 1),
+            end=date(2024, 1, 31),
+        )
+    )
+
+    # The symbols after the failure must still be ingested; dropping them is
+    # how a truncated universe gets mistaken for a complete one.
+    assert attempted == ["AAPL", "BADSYM", "MSFT"]
+    assert summary["symbols"] == 2
+    assert summary["symbols_requested"] == 3
+    assert [item["symbol"] for item in summary["symbols_unusable"]] == ["BADSYM"]
+    assert "Unsupported" in summary["symbols_unusable"][0]["error"]
+    assert conn.rollbacks == 1

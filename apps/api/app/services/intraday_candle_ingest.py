@@ -373,18 +373,28 @@ async def ingest_universe_range(
 ) -> dict[str, Any]:
     limiter = RateLimiter()
     per_symbol: list[dict[str, Any]] = []
+    unusable: list[dict[str, str]] = []
     for symbol in symbols:
-        summary = await ingest_symbol_range(
-            conn,
-            symbol=symbol,
-            timeframe=timeframe,
-            start=start,
-            end=end,
-            feed=feed,
-            resume=resume,
-            limiter=limiter,
-            progress=progress,
-        )
+        try:
+            summary = await ingest_symbol_range(
+                conn,
+                symbol=symbol,
+                timeframe=timeframe,
+                start=start,
+                end=end,
+                feed=feed,
+                resume=resume,
+                limiter=limiter,
+                progress=progress,
+            )
+        except Exception as error:  # noqa: BLE001 - one bad symbol is not a bad run
+            # Failures reaching here happen before any chunk is attempted --
+            # an unregistered ticker, a bad timeframe.  Aborting would silently
+            # drop every remaining symbol in the batch, which is how a
+            # truncated universe gets mistaken for a complete one.
+            conn.rollback()
+            unusable.append({"symbol": symbol.upper(), "error": f"{type(error).__name__}: {error}"})
+            continue
         per_symbol.append(summary)
     return {
         "ingest_version": CANDLE_INGEST_VERSION,
@@ -393,11 +403,13 @@ async def ingest_universe_range(
         "source": feed_source(feed),
         "requested_start": start,
         "requested_end": end,
+        "symbols_requested": len(list(symbols)),
         "symbols": len(per_symbol),
         "bars_upserted": sum(item["bars_upserted"] for item in per_symbol),
         "symbols_with_failures": [
             item["symbol"] for item in per_symbol if item["chunks_failed"]
         ],
+        "symbols_unusable": unusable,
         "per_symbol": per_symbol,
     }
 
