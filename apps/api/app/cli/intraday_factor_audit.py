@@ -35,7 +35,8 @@ from app.services.intraday_research_controls import certify_measurement_instrume
 from app.services.intraday_research_integrity import exchange_session_date, rows_after_session
 from app.services.intraday_research_data import research_data_readiness
 from app.services.intraday_research_leakage import audit_factor_leakage
-from app.services.intraday_session_calendar import extended_hours_audit
+from app.services.intraday_dataset_quality import duplicate_rows, session_shape_report
+from app.services.intraday_session_calendar import timeframe_minutes
 from app.services.intraday_trial_ledger import (
     assert_declared,
     declare_trials,
@@ -114,21 +115,90 @@ def _cost_calibration_id(conn: Any, requested: str | None) -> int | None:
         raise ValueError("--cost-calibration-id must be an integer or 'latest'.") from error
 
 
+def _dataset_symbols(conn: Any, *, dataset_id: int, timeframe: str) -> list[str]:
+    rows = conn.execute(
+        """
+        SELECT DISTINCT symbol FROM research_dataset_candles
+        WHERE dataset_id = %s AND timeframe = %s ORDER BY symbol
+        """,
+        (dataset_id, timeframe),
+    ).fetchall()
+    return [str(row["symbol"]) for row in rows]
+
+
+def _calendar_audit_sql(conn: Any, *, dataset_id: int, timeframe: str) -> dict[str, Any]:
+    """Calendar integrity over the whole dataset, computed in the database.
+
+    Loading every candle to count bar slots costs gigabytes on a universe-scale
+    snapshot and answers a question SQL answers exactly.
+    """
+    shapes = session_shape_report(conn, dataset_id=dataset_id, timeframe=timeframe)
+    duplicates = duplicate_rows(conn, dataset_id=dataset_id, timeframe=timeframe)
+    row = conn.execute(
+        """
+        SELECT COUNT(*) FILTER (
+                   WHERE EXTRACT(second FROM timestamp) <> 0
+                      OR MOD(EXTRACT(minute FROM timestamp)::int, %s) <> 0
+               ) AS misaligned,
+               COUNT(*) AS rows
+        FROM research_dataset_candles
+        WHERE dataset_id = %s AND timeframe = %s
+        """,
+        (timeframe_minutes(timeframe), dataset_id, timeframe),
+    ).fetchone()
+    misaligned = int((row or {}).get("misaligned") or 0)
+    return {
+        "scope": "full_dataset",
+        "candle_rows": int((row or {}).get("rows") or 0),
+        "extended_hours_rows": shapes["extended_hours_rows"],
+        "session_shapes": shapes["session_shapes"],
+        "complete_session_share": shapes["complete_session_share"],
+        "expected_full_session_bars": shapes["expected_full_session_bars"],
+        "duplicate_symbol_timestamp_rows": duplicates["duplicate_symbol_timestamp_rows"],
+        "sources": duplicates["sources"],
+        "misaligned_bar_starts": misaligned,
+        "naive_timestamps": 0,
+        "timestamps_normalized": misaligned == 0,
+    }
+
+
 def certify(args: argparse.Namespace) -> dict[str, Any]:
     """Prove the instrument before it is pointed at a real hypothesis."""
     keys = _factor_keys(args.factors)
     with connect() as conn:
         dataset_id = _dataset_id(conn, args.dataset_id)
+        # Calendar integrity is a property of every row, so it is measured over
+        # the whole dataset in SQL.  The leakage experiment is a mechanical
+        # invariance check on the builders, so it runs on a bounded, recorded
+        # subsample: loading a universe-scale snapshot into memory and then
+        # copying it once per cut point needs tens of gigabytes and proves
+        # nothing the subsample does not.
+        calendar = _calendar_audit_sql(
+            conn, dataset_id=dataset_id, timeframe=args.timeframe
+        )
+        available = _dataset_symbols(conn, dataset_id=dataset_id, timeframe=args.timeframe)
+        requested = _symbols(args.symbols)
+        if requested:
+            audit_symbols = [item for item in requested if item in set(available)]
+        else:
+            # Deterministic spread across the alphabetically ordered universe,
+            # with the benchmarks always present.
+            step = max(1, len(available) // max(1, args.audit_symbols))
+            audit_symbols = available[::step][: args.audit_symbols]
+            audit_symbols = list(
+                dict.fromkeys(
+                    [*audit_symbols, *[s for s in ("SPY", "QQQ") if s in available]]
+                )
+            )
         candles, _manifest = load_dataset_candles(
             conn,
             dataset_id=dataset_id,
             timeframe=args.timeframe,
-            symbols=_symbols(args.symbols),
-            max_symbols=args.max_symbols,
+            symbols=audit_symbols,
+            max_symbols=len(audit_symbols),
         )
         if not candles:
             raise ValueError("The selected frozen dataset contains no candles.")
-        calendar = extended_hours_audit(candles, timeframe=args.timeframe)
         controls = certify_measurement_instrument(
             FACTOR_SPECS,
             timeframe=args.timeframe,
@@ -161,6 +231,16 @@ def certify(args: argparse.Namespace) -> dict[str, Any]:
         return {
             **stored,
             "dataset_id": dataset_id,
+            "calendar_scope": "full_dataset",
+            "leakage_audit_scope": {
+                "symbols_audited": len(candles),
+                "symbols_in_dataset": len(available),
+                "detail": (
+                    "Leakage is a mechanical invariance property of the builders, "
+                    "so it is proven on a bounded deterministic subsample; "
+                    "calendar integrity is measured over every row."
+                ),
+            },
             "symbols": sorted(candles),
             "session_calendar_audit": calendar,
             "controls": controls,
@@ -587,6 +667,15 @@ def parser() -> argparse.ArgumentParser:
     certification.add_argument("--max-symbols", type=int, default=200)
     certification.add_argument("--factors")
     certification.add_argument("--control-sessions", type=int, default=260)
+    certification.add_argument(
+        "--audit-symbols",
+        type=int,
+        default=24,
+        help=(
+            "Symbols loaded for the leakage experiment. Calendar integrity is "
+            "always measured over the whole dataset in SQL."
+        ),
+    )
 
     declaration = commands.add_parser(
         "declare",
