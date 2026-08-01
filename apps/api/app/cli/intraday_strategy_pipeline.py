@@ -15,9 +15,9 @@ The module contains no campaign, broker, order-submission, or UI code.
 from __future__ import annotations
 
 import argparse
-import json
 from typing import Any
 
+from app.cli._refusal import run_command
 from app.db import connect
 from app.services.intraday_elite_gates import (
     ELITE_GATES_VERSION,
@@ -486,8 +486,11 @@ COMMANDS = {
 
 def main() -> None:
     args = parser().parse_args()
-    print("Intraday strategy pipeline | backend only | research use", flush=True)
-    print(json.dumps(COMMANDS[args.command](args), default=str, indent=2))
+    run_command(
+        COMMANDS[args.command],
+        args,
+        banner="Intraday strategy pipeline | backend only | research use",
+    )
 
 
 if __name__ == "__main__":

@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import argparse
-import json
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
+from app.cli._refusal import run_command
 from app.db import connect
 from app.services.intraday_factor_diagnostics import (
     DEFAULT_FACTOR_KEYS,
@@ -1225,12 +1225,14 @@ COMMANDS = {
 
 def main() -> None:
     args = parser().parse_args()
-    print(
-        "Intraday factor research | backend only | confirmation locked from discovery",
-        flush=True,
+    run_command(
+        COMMANDS[args.command],
+        args,
+        banner=(
+            "Intraday factor research | backend only | "
+            "confirmation locked from discovery"
+        ),
     )
-    result = COMMANDS[args.command](args)
-    print(json.dumps(result, default=str, indent=2))
 
 
 if __name__ == "__main__":

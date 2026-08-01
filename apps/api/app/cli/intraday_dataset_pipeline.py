@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import json
 from datetime import date, datetime
 from typing import Any
 
+from app.cli._refusal import run_command
 from app.db import connect
 from app.services.intraday_candle_ingest import (
     RESEARCH_FEEDS,
@@ -393,8 +393,11 @@ COMMANDS = {
 
 def main() -> None:
     args = parser().parse_args()
-    print("Intraday dataset pipeline | backend only | research use", flush=True)
-    print(json.dumps(COMMANDS[args.command](args), default=str, indent=2))
+    run_command(
+        COMMANDS[args.command],
+        args,
+        banner="Intraday dataset pipeline | backend only | research use",
+    )
 
 
 if __name__ == "__main__":
