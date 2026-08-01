@@ -1049,6 +1049,7 @@ _ORDER_FLOW_FAMILIES: dict[str, dict[str, Any]] = {
 
 def _register_order_flow_specs() -> None:
     from app.services.intraday_order_flow_factors import (
+        calibrated_horizon_builder,
         horizon_builder,
         premarket_undiscovered_gap_observations,
         sector_relative_forced_flow_observations,
@@ -1079,6 +1080,31 @@ def _register_order_flow_specs() -> None:
                 references=definition["references"],
                 **definition["requires"],
             )
+
+    # The v1 0.30 cutoff remains an immutable historical trial.  V2 is a new
+    # factor specification whose numerical cutoff must come from a frozen,
+    # return-blind calibration and therefore hashes as a separate trial.
+    definition = _ORDER_FLOW_FAMILIES["signed_trade_imbalance_continuation"]
+    for horizon in ORDER_FLOW_HORIZON_BARS:
+        key = f"signed_trade_imbalance_continuation_v2_{horizon}bar"
+        FACTOR_SPECS[key] = FactorSpec(
+            key=key,
+            title=f"Signed trade-imbalance continuation v2 ({horizon}-bar hold)",
+            hypothesis=(
+                f"{definition['hypothesis']} Extreme imbalance is defined by an "
+                "immutable return-blind calibration. Measured over a "
+                f"{horizon}-bar hold, entered at the following bar's open."
+            ),
+            supported_timeframes=("30m",),
+            builder=calibrated_horizon_builder(
+                signed_trade_imbalance_observations,
+                factor_key=key,
+                horizon_bars=horizon,
+            ),
+            factor_type="directional_event",
+            references=definition["references"],
+            requires_trade_flow=True,
+        )
 
 
 _register_order_flow_specs()
@@ -1515,6 +1541,7 @@ def evaluate_factor_discovery(
     auction_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
     premarket_by_symbol: dict[str, dict[Any, dict[str, Any]]] | None = None,
     trade_flow_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
+    trade_imbalance_calibration: dict[str, Any] | None = None,
     institutional_data_readiness: dict[str, Any] | None = None,
     effective_trials: int | None = None,
     trial_ledger: dict[str, Any] | None = None,
@@ -1634,6 +1661,7 @@ def evaluate_factor_discovery(
                 auction_by_symbol=auction_by_symbol,
                 premarket_by_symbol=premarket_by_symbol,
                 trade_flow_by_symbol=trade_flow_by_symbol,
+                trade_imbalance_calibration=trade_imbalance_calibration,
                 sector_by_symbol=sector_by_symbol,
             )
         )
@@ -1774,6 +1802,7 @@ def evaluate_forward_confirmation(
     auction_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
     premarket_by_symbol: dict[str, dict[Any, dict[str, Any]]] | None = None,
     trade_flow_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
+    trade_imbalance_calibration: dict[str, Any] | None = None,
     institutional_data_readiness: dict[str, Any] | None = None,
     effective_trials: int | None = None,
     trial_ledger: dict[str, Any] | None = None,
@@ -1826,6 +1855,7 @@ def evaluate_forward_confirmation(
             auction_by_symbol=auction_by_symbol,
             premarket_by_symbol=premarket_by_symbol,
             trade_flow_by_symbol=trade_flow_by_symbol,
+            trade_imbalance_calibration=trade_imbalance_calibration,
             sector_by_symbol=sector_by_symbol,
         )
         metrics = factor_metrics(
@@ -2068,12 +2098,14 @@ def frozen_spec_hash(
     factor_keys: Sequence[str],
     timeframe: str,
     cost_model: dict[str, Any],
+    extra_specification: dict[str, Any] | None = None,
 ) -> str:
     payload = {
         "protocol_version": FACTOR_DIAGNOSTICS_VERSION,
         "timeframe": timeframe,
         "factor_specs": [FACTOR_SPECS[key].frozen() for key in factor_keys],
         "cost_model": cost_model,
+        "extra_specification": extra_specification or {},
     }
     return sha256(dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 

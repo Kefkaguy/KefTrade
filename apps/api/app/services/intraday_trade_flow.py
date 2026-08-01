@@ -30,7 +30,7 @@ from typing import Any, Iterable, Sequence
 
 import psycopg
 
-TRADE_FLOW_VERSION = "intraday_trade_flow_v1"
+TRADE_FLOW_VERSION = "intraday_trade_flow_v2_calibration_moments"
 
 BUY = "buy"
 SELL = "sell"
@@ -213,6 +213,10 @@ class TradeFlowAccumulator:
                 "notional": Decimal(0),
                 "signed_spread_notional": Decimal(0),
                 "spread_volume": Decimal(0),
+                # The second size moment lets the calibration construct a
+                # variance-preserving random-sign null without retaining raw
+                # trades.  It is predictor-only and contains no price outcome.
+                "trade_size_squared_sum": Decimal(0),
             }
         )
 
@@ -230,6 +234,8 @@ class TradeFlowAccumulator:
             bucket = self._bars[bar_start(trade["timestamp"], timeframe=self.timeframe)]
             bucket["trade_count"] += 1
             bucket["total_volume"] += size
+            if trade["side"] in {BUY, SELL}:
+                bucket["trade_size_squared_sum"] += size * size
             bucket["notional"] += price * size
             if size >= LARGE_TRADE_SIZE:
                 bucket["large_volume"] += size
@@ -267,6 +273,7 @@ class TradeFlowAccumulator:
             total = bucket["total_volume"]
             classified = bucket["buy_volume"] + bucket["sell_volume"]
             counted = bucket["buy_trades"] + bucket["sell_trades"]
+            size_squared = bucket["trade_size_squared_sum"]
             rows.append(
                 {
                     "symbol": self.symbol,
@@ -276,6 +283,13 @@ class TradeFlowAccumulator:
                     "feed": self.feed,
                     "trade_count": bucket["trade_count"],
                     "total_volume": _round(total, 4),
+                    "classified_volume": _round(classified, 4),
+                    "trade_size_squared_sum": _round(size_squared, 4),
+                    "effective_trade_count": (
+                        _round(classified * classified / size_squared, 4)
+                        if size_squared > 0
+                        else None
+                    ),
                     "buy_volume": _round(bucket["buy_volume"], 4),
                     "sell_volume": _round(bucket["sell_volume"], 4),
                     # Imbalance is taken over classified volume only. Dividing
@@ -376,7 +390,9 @@ def persist_trade_flow_features(
         "symbol", "timeframe", "timestamp", "provider", "feed", "trade_count",
         "total_volume", "buy_volume", "sell_volume", "signed_trade_imbalance",
         "signed_trade_count_imbalance", "large_trade_share", "unclassified_share",
-        "trade_vwap", "effective_spread_bps", "calculation_version",
+        "trade_vwap", "effective_spread_bps", "classification_method",
+        "classified_volume", "trade_size_squared_sum", "effective_trade_count",
+        "calculation_version",
     )
     for row in rows:
         result = conn.execute(
@@ -386,14 +402,17 @@ def persist_trade_flow_features(
                 total_volume, buy_volume, sell_volume, signed_trade_imbalance,
                 signed_trade_count_imbalance, large_trade_share,
                 unclassified_share, trade_vwap, effective_spread_bps,
-                calculation_version
+                classification_method, classified_volume, trade_size_squared_sum,
+                effective_trade_count, calculation_version
             )
             VALUES (%(symbol)s, %(timeframe)s, %(timestamp)s, %(provider)s,
                     %(feed)s, %(trade_count)s, %(total_volume)s, %(buy_volume)s,
                     %(sell_volume)s, %(signed_trade_imbalance)s,
                     %(signed_trade_count_imbalance)s, %(large_trade_share)s,
                     %(unclassified_share)s, %(trade_vwap)s,
-                    %(effective_spread_bps)s, %(calculation_version)s)
+                    %(effective_spread_bps)s, %(classification_method)s,
+                    %(classified_volume)s, %(trade_size_squared_sum)s,
+                    %(effective_trade_count)s, %(calculation_version)s)
             ON CONFLICT (symbol, timeframe, timestamp, provider, feed) DO UPDATE SET
                 trade_count = EXCLUDED.trade_count,
                 total_volume = EXCLUDED.total_volume,
@@ -405,6 +424,10 @@ def persist_trade_flow_features(
                 unclassified_share = EXCLUDED.unclassified_share,
                 trade_vwap = EXCLUDED.trade_vwap,
                 effective_spread_bps = EXCLUDED.effective_spread_bps,
+                classification_method = EXCLUDED.classification_method,
+                classified_volume = EXCLUDED.classified_volume,
+                trade_size_squared_sum = EXCLUDED.trade_size_squared_sum,
+                effective_trade_count = EXCLUDED.effective_trade_count,
                 calculation_version = EXCLUDED.calculation_version
             """,
             {key: row.get(key) for key in columns},
@@ -458,8 +481,8 @@ def completed_sessions(
         """
         SELECT symbol, session_date
         FROM intraday_trade_ingest_checkpoints
-        WHERE feed = %s AND status = 'completed'
+        WHERE feed = %s AND status = 'completed' AND ingest_version = %s
         """,
-        (feed,),
+        (feed, TRADE_FLOW_VERSION),
     ).fetchall()
     return {(str(row["symbol"]), row["session_date"]) for row in rows}

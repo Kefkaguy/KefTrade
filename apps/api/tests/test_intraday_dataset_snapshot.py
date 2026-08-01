@@ -24,6 +24,7 @@ class FakeSnapshotConn:
         self._next_id = 1
         self.candle_inserts = 0
         self.feature_inserts = 0
+        self.trade_flow_inserts = 0
         self.split_timestamp_queries = 0
         self.committed = False
         self.executed: list[tuple[str, tuple]] = []
@@ -44,6 +45,8 @@ class FakeSnapshotConn:
             )
         if "FROM intraday_features" in stripped and "COUNT(*)" in stripped:
             return FakeResult({"feature_count": self.feature_count, "feature_hash": "featurehash"})
+        if "FROM intraday_trade_flow_features" in stripped and "COUNT(*)" in stripped:
+            return FakeResult({"trade_flow_count": 100, "trade_flow_hash": "flowhash"})
         if stripped.startswith("INSERT INTO research_dataset_manifests"):
             dataset_key = params[0]
             if dataset_key in self.manifests:
@@ -66,6 +69,9 @@ class FakeSnapshotConn:
             return FakeResult(None)
         if stripped.startswith("INSERT INTO research_dataset_intraday_features"):
             self.feature_inserts += 1
+            return FakeResult(None)
+        if stripped.startswith("INSERT INTO research_dataset_trade_flow_features"):
+            self.trade_flow_inserts += 1
             return FakeResult(None)
         # Phase E: splits are fixed at snapshot time, before any research has
         # run against the data. This fake returns too few timestamps to split,
@@ -92,6 +98,7 @@ def test_record_intraday_dataset_snapshot_creates_a_manifest_tagged_intraday():
     assert dataset["dataset_key"].startswith("intraday_dataset_")
     assert conn.candle_inserts == 2  # one per (symbol, timeframe) pair
     assert conn.feature_inserts == 2
+    assert conn.trade_flow_inserts == 2
     assert conn.committed is True
 
 

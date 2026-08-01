@@ -124,6 +124,8 @@ def flow(**overrides):
         "signed_trade_imbalance": 0.6,
         "trade_count": 5_000,
         "unclassified_share": 0.05,
+        "effective_trade_count": 1_000.0,
+        "total_volume": 100_000.0,
     }
     row.update(overrides)
     rows = session()
@@ -173,6 +175,47 @@ def test_a_bar_where_most_volume_could_not_be_signed_is_excluded():
 
 def test_without_the_trade_flow_channel_nothing_is_produced():
     assert imbalance(trade_flow_by_symbol={}) == []
+
+
+def test_v2_refuses_to_run_without_a_frozen_return_blind_calibration():
+    spec = FACTOR_SPECS["signed_trade_imbalance_continuation_v2_1bar"]
+
+    with pytest.raises(ValueError, match="requires a frozen return-blind calibration"):
+        spec.builder(
+            {"AAPL": session()},
+            timeframe="30m",
+            trade_flow_by_symbol=flow(signed_trade_imbalance=0.6),
+        )
+
+
+def test_v2_uses_the_calibrated_threshold_instead_of_the_legacy_point_30():
+    spec = FACTOR_SPECS["signed_trade_imbalance_continuation_v2_1bar"]
+
+    def calibration(threshold):
+        return {
+            "id": 9,
+            "report": {
+                "threshold": {"mode": "global", "global_rounded_up": threshold}
+            },
+        }
+
+    rejected = spec.builder(
+        {"AAPL": session()},
+        timeframe="30m",
+        trade_flow_by_symbol=flow(signed_trade_imbalance=0.6),
+        trade_imbalance_calibration=calibration(0.7),
+    )
+    accepted = spec.builder(
+        {"AAPL": session()},
+        timeframe="30m",
+        trade_flow_by_symbol=flow(signed_trade_imbalance=0.6),
+        trade_imbalance_calibration=calibration(0.5),
+    )
+
+    assert rejected == []
+    assert accepted
+    assert all(row["trade_imbalance_calibration_id"] == 9 for row in accepted)
+    assert all(row["minimum_signed_imbalance"] == 0.5 for row in accepted)
 
 
 def test_no_position_is_opened_that_cannot_be_closed_in_session():

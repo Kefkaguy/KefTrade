@@ -93,6 +93,9 @@ async def ingest_symbol_session(
     session: date,
     timeframe: str,
     feed: str,
+    rate_limit_retries: int = 12,
+    rate_limit_base_sleep: float = 30.0,
+    request_pause_seconds: float = 1.0,
 ) -> dict[str, Any]:
     """Fetch, sign and aggregate one symbol-session, page by page."""
     start, end = session_window(session)
@@ -105,7 +108,13 @@ async def ingest_symbol_session(
     )
     try:
         async for page, meta in iter_stock_trade_pages(
-            symbol, start=start, end=end, feed=feed
+            symbol,
+            start=start,
+            end=end,
+            feed=feed,
+            rate_limit_retries=rate_limit_retries,
+            rate_limit_base_sleep=rate_limit_base_sleep,
+            request_pause_seconds=request_pause_seconds,
         ):
             normalized = [
                 row
@@ -172,6 +181,9 @@ async def ingest_trade_flow(
     timeframe: str = "30m",
     feed: str = "sip",
     max_sessions: int = MAX_SESSIONS_PER_RUN,
+    rate_limit_retries: int = 12,
+    rate_limit_base_sleep: float = 30.0,
+    request_pause_seconds: float = 1.0,
 ) -> dict[str, Any]:
     """Ingest a bounded window, resuming from checkpoints."""
     source = FEED_SOURCES[feed]
@@ -190,7 +202,14 @@ async def ingest_trade_flow(
     for symbol, session in pending:
         results.append(
             await ingest_symbol_session(
-                conn, symbol=symbol, session=session, timeframe=timeframe, feed=feed
+                conn,
+                symbol=symbol,
+                session=session,
+                timeframe=timeframe,
+                feed=feed,
+                rate_limit_retries=rate_limit_retries,
+                rate_limit_base_sleep=rate_limit_base_sleep,
+                request_pause_seconds=request_pause_seconds,
             )
         )
     completed = [row for row in results if row["status"] == "completed"]

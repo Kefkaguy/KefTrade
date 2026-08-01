@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any, AsyncIterator
@@ -368,6 +369,9 @@ async def iter_stock_trade_pages(
     end: datetime,
     feed: str = ALPACA_FEED,
     max_pages: int = MAX_STOCK_TRADE_PAGES,
+    rate_limit_retries: int = 12,
+    rate_limit_base_sleep: float = 30.0,
+    request_pause_seconds: float = 0.0,
 ) -> AsyncIterator[tuple[list[dict[str, Any]], dict[str, Any]]]:
     """Yield pages of historical trades without accumulating the whole range.
 
@@ -400,7 +404,25 @@ async def iter_stock_trade_pages(
         base_url=settings.alpaca_data_base_url, timeout=60, headers=headers
     ) as client:
         for page in range(max_pages):
-            response = await client.get(endpoint, params=params)
+            response = None
+            for attempt in range(rate_limit_retries + 1):
+                response = await client.get(endpoint, params=params)
+                if response.status_code != 429:
+                    break
+                if attempt >= rate_limit_retries:
+                    break
+                retry_after = response.headers.get("Retry-After")
+                delay = (
+                    float(retry_after)
+                    if retry_after and retry_after.replace(".", "", 1).isdigit()
+                    else min(rate_limit_base_sleep * (2 ** min(attempt, 4)), 900.0)
+                )
+                logger.warning(
+                    "Alpaca trade rate limit; retrying",
+                    extra={"symbol": symbol, "page": page, "attempt": attempt + 1, "sleep": delay},
+                )
+                await asyncio.sleep(delay)
+            assert response is not None
             response.raise_for_status()
             payload = response.json()
             trades = payload.get("trades") or []
@@ -418,6 +440,8 @@ async def iter_stock_trade_pages(
             if not token or not trades:
                 return
             params["page_token"] = token
+            if request_pause_seconds > 0:
+                await asyncio.sleep(request_pause_seconds)
 
 
 def normalize_stock_trade(

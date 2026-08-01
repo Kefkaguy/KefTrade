@@ -220,6 +220,7 @@ def gap_experiment_hypotheses(*, required_event_count: int = 850) -> list[Hypoth
 # ---------------------------------------------------------------------------
 
 ORDER_FLOW_EXPERIMENT_KEY = "bounded_order_flow_experiment_v1"
+TRADE_IMBALANCE_V2_EXPERIMENT_KEY = "signed_trade_imbalance_return_blind_v2"
 
 # The required event count is derived from a minimum effect declared in
 # advance, not from an effect that was observed.  The first experiment's
@@ -427,6 +428,75 @@ def order_flow_experiment_hypotheses(
             "sector_relative_forced_flow_reversal",
         )
         for horizon_bars in (1, 2)
+    ]
+
+
+def trade_imbalance_v2_hypotheses(
+    *,
+    calibration: dict[str, Any],
+    required_event_count: int | None = None,
+) -> list[Hypothesis]:
+    """Two horizon trials using one already-frozen return-blind threshold.
+
+    The hypothesis keys deliberately match the v1 signed-flow claims.  The
+    changed calibration parameters therefore become version 2 in the immutable
+    hypothesis registry instead of rewriting the zero-event v1 declaration.
+    """
+    if not calibration.get("ready_for_declaration"):
+        raise ValueError("A v2 declaration requires a calibration that passed all gates.")
+    report = dict(calibration.get("report") or {})
+    threshold = dict(report.get("threshold") or {})
+    calibration_id = int(calibration["id"])
+    mode = str(threshold.get("mode"))
+    rule = (
+        f"global |imbalance| >= {threshold.get('global_rounded_up')}"
+        if mode == "global"
+        else "time-slot and liquidity-bucket 95th-percentile thresholds"
+    )
+    required = required_event_count or order_flow_required_event_count()
+    claim = _ORDER_FLOW_CLAIMS["signed_trade_imbalance_continuation"]
+    common_parameters = (
+        ("calibration_id", calibration_id),
+        ("calibration_dataset_hash", str(calibration["dataset_hash"])),
+        ("calibration_specification_hash", str(calibration["specification_hash"])),
+        ("calibration_calculation_version", str(calibration["calculation_version"])),
+        ("threshold_mode", mode),
+        ("threshold_rule", rule),
+        ("threshold_definition", threshold),
+        ("minimum_trade_count", 200),
+        ("maximum_unclassified_share", 0.25),
+        ("minimum_effective_trade_count", 50.0),
+        ("classifier", "tick_rule_with_lee_ready_agreement_evidence"),
+    ) + _ORDER_FLOW_COMMON
+    return [
+        Hypothesis(
+            key=f"{ORDER_FLOW_EXPERIMENT_KEY}:signed_trade_imbalance_continuation:{horizon}bar",
+            factor_key=f"signed_trade_imbalance_continuation_v2_{horizon}bar",
+            title=f"{claim['title']} v2, {horizon}-bar hold",
+            forced_participant=claim["forced_participant"],
+            why_they_cannot_wait=claim["why_they_cannot_wait"],
+            how_the_flow_appears_in_data=(
+                f"Extreme signed trade imbalance defined as {rule}; the numerical "
+                f"rule was frozen by return-blind calibration {calibration_id}."
+            ),
+            signal_timestamp=claim["signal_timestamp"],
+            decision_timestamp=claim["decision_timestamp"],
+            executable_entry_timestamp=claim["executable_entry_timestamp"],
+            exit_horizon=(
+                f"{horizon} bar(s), exited at that bar's close; never carried "
+                "past the regular session close"
+            ),
+            expected_direction="both",
+            universe="point-in-time liquid US equity membership at the observation timestamp",
+            cost_model="stressed p90 round-trip spread from the SIP execution-cost calibration",
+            required_event_count=required,
+            invalidation_conditions=_ORDER_FLOW_INVALIDATION,
+            success_criteria=_ORDER_FLOW_SUCCESS,
+            horizon_bars=horizon,
+            parameters=common_parameters,
+            version=2,
+        )
+        for horizon in (1, 2)
     ]
 
 

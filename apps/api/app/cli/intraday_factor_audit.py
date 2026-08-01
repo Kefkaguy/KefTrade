@@ -53,6 +53,7 @@ from app.services.intraday_trial_ledger import (
     record_declaration_use,
     trial_ledger_summary,
 )
+from app.services.intraday_trade_imbalance_calibration import load_calibration
 
 
 def _latest_quality_report(conn: Any, *, dataset_id: int, timeframe: str) -> dict[str, Any]:
@@ -234,18 +235,51 @@ def _load_premarket(conn: Any, symbols: list[str], *, timeframe: str, source: st
     return output
 
 
-def _load_trade_flow(conn: Any, symbols: list[str], *, timeframe: str, feed: str) -> dict:
+def _load_trade_flow(
+    conn: Any,
+    symbols: list[str],
+    *,
+    timeframe: str,
+    feed: str,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    dataset_id: int | None = None,
+) -> dict:
     """Signed trade-flow features keyed by symbol and bar timestamp."""
-    rows = conn.execute(
-        """
-        SELECT symbol, timestamp, trade_count, signed_trade_imbalance,
+    if dataset_id is not None:
+        rows = conn.execute(
+            """
+            SELECT symbol, timestamp, trade_count, total_volume, classified_volume,
+                   trade_size_squared_sum, effective_trade_count,
+                   classification_method, signed_trade_imbalance,
+                   signed_trade_count_imbalance, large_trade_share,
+                   unclassified_share, effective_spread_bps
+            FROM research_dataset_trade_flow_features
+            WHERE dataset_id = %s AND symbol = ANY(%s)
+              AND timeframe = %s AND feed = %s
+              AND (%s::timestamptz IS NULL OR timestamp > %s::timestamptz)
+              AND (%s::timestamptz IS NULL OR timestamp <= %s::timestamptz)
+            """,
+            (
+                dataset_id, [item.upper() for item in symbols], timeframe, feed,
+                start, start, end, end,
+            ),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+        SELECT symbol, timestamp, trade_count, total_volume, classified_volume,
+               trade_size_squared_sum, effective_trade_count,
+               classification_method, signed_trade_imbalance,
                signed_trade_count_imbalance, large_trade_share,
                unclassified_share, effective_spread_bps
         FROM intraday_trade_flow_features
         WHERE symbol = ANY(%s) AND timeframe = %s AND feed = %s
-        """,
-        ([item.upper() for item in symbols], timeframe, feed),
-    ).fetchall()
+          AND (%s::timestamptz IS NULL OR timestamp > %s::timestamptz)
+          AND (%s::timestamptz IS NULL OR timestamp <= %s::timestamptz)
+            """,
+            ([item.upper() for item in symbols], timeframe, feed, start, start, end, end),
+        ).fetchall()
     output: dict[str, dict[Any, dict[str, Any]]] = {}
     for row in rows:
         record = dict(row)
@@ -335,8 +369,11 @@ def _stream_observations(
     auction_by_symbol: Any = None,
     premarket_by_symbol: Any = None,
     trade_flow_by_symbol: Any = None,
+    trade_imbalance_calibration: Any = None,
     sector_by_symbol: Any = None,
     session_batch: int = 60,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> dict[str, Any]:
     """Build every factor's observations without holding the universe in memory.
 
@@ -374,6 +411,8 @@ def _stream_observations(
             symbols=batch,
             max_symbols=len(batch),
             include_benchmarks=False,
+            start=start,
+            end=end,
         )
         if not candles:
             continue
@@ -406,6 +445,7 @@ def _stream_observations(
                     auction_by_symbol=auction_by_symbol,
                     premarket_by_symbol=premarket_by_symbol,
                     trade_flow_by_symbol=trade_flow_by_symbol,
+                    trade_imbalance_calibration=trade_imbalance_calibration,
                 )
             )
         del candles
@@ -432,6 +472,8 @@ def _stream_observations(
         symbols=["SPY"],
         max_symbols=1,
         include_benchmarks=False,
+        start=start,
+        end=end,
     )
     benchmark = benchmark_session_context(benchmark_candles, timeframe=timeframe)
 
@@ -643,6 +685,46 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             ).fetchone()
             or {}
         )
+        v2_keys = {
+            "signed_trade_imbalance_continuation_v2_1bar",
+            "signed_trade_imbalance_continuation_v2_2bar",
+        }
+        requested_v2 = bool(set(keys) & v2_keys)
+        calibration = None
+        calibration_spec = None
+        discovery_start = None
+        if requested_v2:
+            if set(keys) - v2_keys:
+                raise ValueError(
+                    "The signed-trade v2 protocol is a bounded signed-flow-only "
+                    "discovery. Do not mix other families into this run."
+                )
+            if not args.trade_imbalance_calibration_id:
+                raise ValueError(
+                    "Signed-trade v2 requires --trade-imbalance-calibration-id."
+                )
+            calibration = load_calibration(
+                conn, args.trade_imbalance_calibration_id, require_ready=True
+            )
+            if calibration["feed"] != TRADE_FLOW_FEEDS[_dataset_source(conn, dataset_id=dataset_id)]:
+                raise ValueError("Calibration and discovery dataset use different feeds.")
+            if manifest.get("window_end") <= calibration["window_end"]:
+                raise ValueError(
+                    "Discovery has no data strictly after the calibration window. "
+                    "Collect later trade flow and build a later immutable snapshot."
+                )
+            discovery_start = calibration["window_end"] + timedelta(microseconds=1)
+            calibration_spec = {
+                "calibration_id": int(calibration["id"]),
+                "dataset_hash": calibration["dataset_hash"],
+                "specification_hash": calibration["specification_hash"],
+                "window_end": calibration["window_end"],
+                "threshold": dict(calibration["report"]).get("threshold"),
+            }
+        elif args.trade_imbalance_calibration_id:
+            raise ValueError(
+                "--trade-imbalance-calibration-id is only valid for signed-trade v2 factors."
+            )
         universe = (
             _symbols(args.symbols)
             or _dataset_symbols(conn, dataset_id=dataset_id, timeframe=args.timeframe)
@@ -675,6 +757,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             factor_keys=keys,
             timeframe=args.timeframe,
             cost_model=cost_model,
+            extra_specification=calibration_spec,
         )
         assert_not_retired(
             conn, timeframe=args.timeframe, factor_keys=keys, spec_hash=spec_hash
@@ -695,6 +778,9 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             universe,
             timeframe=args.timeframe,
             feed=TRADE_FLOW_FEEDS[dataset_source],
+            start=discovery_start,
+            end=manifest.get("window_end"),
+            dataset_id=dataset_id,
         )
         print(
             f"  side channels: premarket {len(premarket)} symbols, "
@@ -712,8 +798,11 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             auction_by_symbol=auctions or None,
             premarket_by_symbol=premarket or None,
             trade_flow_by_symbol=trade_flow or None,
+            trade_imbalance_calibration=calibration,
             sector_by_symbol=sectors,
             session_batch=args.session_batch,
+            start=discovery_start,
+            end=manifest.get("window_end"),
         )
         result = evaluate_factor_discovery(
             {},
@@ -731,6 +820,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             auction_by_symbol=auctions or None,
             premarket_by_symbol=premarket or None,
             trade_flow_by_symbol=trade_flow or None,
+            trade_imbalance_calibration=calibration,
             institutional_data_readiness=institutional_readiness,
             required_event_counts=_declared_event_counts(
                 conn, timeframe=args.timeframe, factor_keys=keys
@@ -745,6 +835,9 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
         result["symbols"] = sorted(universe)
         result["frozen_spec_hash"] = spec_hash
         result["trial_declaration"] = declaration_check
+        if calibration_spec is not None:
+            result["trade_imbalance_calibration"] = calibration_spec
+            result["discovery_strictly_after_calibration"] = discovery_start
         result["dataset_quality_report"] = {
             "quality_report_id": int(quality["id"]),
             "ready_for_discovery": bool(quality["ready_for_discovery"]),
@@ -935,10 +1028,19 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
                 f"{[int(row['id']) for row in previous]}. The confirmation sample is "
                 "consumed; it cannot be used to diagnose, tune or retry."
             )
+        calibration_spec = source_result.get("trade_imbalance_calibration")
+        calibration = (
+            load_calibration(
+                conn, int(calibration_spec["calibration_id"]), require_ready=True
+            )
+            if calibration_spec
+            else None
+        )
         expected_hash = frozen_spec_hash(
             factor_keys=keys,
             timeframe=str(source["timeframe"]),
             cost_model=dict(source["cost_model"]),
+            extra_specification=calibration_spec,
         )
         if expected_hash != str(source["frozen_spec_hash"]):
             raise ValueError(
@@ -1002,17 +1104,21 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
             premarket_by_symbol=_load_premarket(
                 conn,
                 list(forward),
-                timeframe=args.timeframe,
+                timeframe=str(source["timeframe"]),
                 source=confirmation_source,
             )
             or None,
             trade_flow_by_symbol=_load_trade_flow(
                 conn,
                 list(forward),
-                timeframe=args.timeframe,
+                timeframe=str(source["timeframe"]),
                 feed=TRADE_FLOW_FEEDS[confirmation_source],
+                start=cutoff,
+                end=manifest.get("window_end"),
+                dataset_id=dataset_id,
             )
             or None,
+            trade_imbalance_calibration=calibration,
             institutional_data_readiness=institutional_readiness,
             effective_trials=trial_ledger["effective_trials"],
             trial_ledger=trial_ledger,
@@ -1160,6 +1266,14 @@ def parser() -> argparse.ArgumentParser:
     discovery.add_argument(
         "--cost-calibration-id",
         help="Calibration integer id, or 'latest'. Omit to retain the conservative 30bps baseline.",
+    )
+    discovery.add_argument(
+        "--trade-imbalance-calibration-id",
+        type=int,
+        help=(
+            "Required for signed-trade v2. Its immutable return-blind threshold "
+            "is included in the frozen factor specification."
+        ),
     )
 
     experiment = commands.add_parser(

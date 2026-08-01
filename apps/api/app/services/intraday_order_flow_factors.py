@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.services.intraday_sector_flow import sector_relative_bars
 from app.services.intraday_session_calendar import ordered_regular_sessions
@@ -182,6 +183,7 @@ def signed_trade_imbalance_observations(
     timeframe: str,
     horizon_bars: int = 1,
     trade_flow_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
+    trade_imbalance_calibration: dict[str, Any] | None = None,
     **_: Any,
 ) -> list[dict[str, Any]]:
     """Persistent one-sided aggression should keep pushing price.
@@ -222,7 +224,47 @@ def signed_trade_imbalance_observations(
                     and float(unclassified) > MAXIMUM_UNCLASSIFIED_SHARE
                 ):
                     continue
-                if abs(float(imbalance)) < MINIMUM_TRADE_IMBALANCE:
+                if trade_imbalance_calibration is not None and float(
+                    row.get("effective_trade_count") or 0
+                ) < 50.0:
+                    # The calibrated random-sign noise floor is only licensed
+                    # for bars with the same minimum effective sample size.
+                    continue
+                threshold = MINIMUM_TRADE_IMBALANCE
+                calibration_id = None
+                threshold_mode = "legacy_fixed"
+                if trade_imbalance_calibration is not None:
+                    report = dict(trade_imbalance_calibration.get("report") or {})
+                    calibrated = dict(report.get("threshold") or {})
+                    threshold_mode = str(calibrated.get("mode") or "")
+                    calibration_id = trade_imbalance_calibration.get("id")
+                    if threshold_mode == "global":
+                        threshold = float(calibrated["global_rounded_up"])
+                    elif threshold_mode == "time_liquidity_bucket":
+                        timestamp = signal_bar["timestamp"].astimezone(
+                            ZoneInfo("America/New_York")
+                        )
+                        boundaries = calibrated["liquidity_volume_boundaries"]
+                        volume = float(row.get("total_volume") or 0)
+                        bucket = (
+                            "low" if volume <= float(boundaries[0])
+                            else "medium" if volume <= float(boundaries[1])
+                            else "high"
+                        )
+                        bucket_key = f"{timestamp:%H:%M}|{bucket}"
+                        try:
+                            threshold = float(calibrated["bucket_thresholds"][bucket_key])
+                        except KeyError as error:
+                            raise ValueError(
+                                f"Calibration {calibration_id} has no frozen threshold "
+                                f"for discovery bucket {bucket_key}."
+                            ) from error
+                    else:
+                        raise ValueError(
+                            f"Calibration {calibration_id} has unsupported threshold mode "
+                            f"{threshold_mode!r}."
+                        )
+                if abs(float(imbalance)) < threshold:
                     continue
 
                 entry_bar = session[index + 1]
@@ -248,6 +290,9 @@ def signed_trade_imbalance_observations(
                         unclassified_share=(
                             float(unclassified) if unclassified is not None else None
                         ),
+                        minimum_signed_imbalance=float(threshold),
+                        threshold_mode=threshold_mode,
+                        trade_imbalance_calibration_id=calibration_id,
                     )
                 )
     return output
@@ -356,5 +401,29 @@ def horizon_builder(base: Any, *, factor_key: str, horizon_bars: int) -> Any:
                 **kwargs,
             )
         ]
+
+    return builder
+
+
+def calibrated_horizon_builder(base: Any, *, factor_key: str, horizon_bars: int) -> Any:
+    """A v2 factor that refuses to run without its immutable calibration."""
+
+    bound = horizon_builder(base, factor_key=factor_key, horizon_bars=horizon_bars)
+
+    def builder(
+        candles_by_symbol: dict[str, list[dict[str, Any]]],
+        *,
+        timeframe: str,
+        trade_imbalance_calibration: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[dict[str, Any]]:
+        if trade_imbalance_calibration is None:
+            raise ValueError(f"{factor_key} requires a frozen return-blind calibration.")
+        return bound(
+            candles_by_symbol,
+            timeframe=timeframe,
+            trade_imbalance_calibration=trade_imbalance_calibration,
+            **kwargs,
+        )
 
     return builder

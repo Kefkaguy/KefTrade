@@ -23,9 +23,10 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.services.research_architecture import jsonable, load_snapshot_candles, stable_hash
+from app.services.intraday_trade_flow import TRADE_FLOW_VERSION
 
 __all__ = ["record_intraday_dataset_snapshot", "load_snapshot_intraday_features", "load_snapshot_candles"]
-INTRADAY_DATASET_VERSION = "intraday_dataset_v2_sip_microstructure"
+INTRADAY_DATASET_VERSION = "intraday_dataset_v3_frozen_trade_flow"
 
 
 def record_intraday_dataset_snapshot(
@@ -172,6 +173,35 @@ def record_intraday_dataset_snapshot(
                     "Run the intraday features backfill first."
                 )
 
+            trade_feed = "sip" if source == "alpaca_sip" else "iex" if source == "alpaca_iex" else None
+            trade_row = conn.execute(
+                """
+                SELECT COUNT(*) AS trade_flow_count,
+                       MD5(COALESCE(STRING_AGG(
+                           CONCAT_WS(
+                               '|', timestamp::text, trade_count::text,
+                               total_volume::text, classified_volume::text,
+                               trade_size_squared_sum::text,
+                               effective_trade_count::text,
+                               signed_trade_imbalance::text,
+                               unclassified_share::text,
+                               classification_method
+                           ),
+                           '||' ORDER BY timestamp
+                       ), '')) AS trade_flow_hash
+                FROM intraday_trade_flow_features
+                WHERE symbol = %s AND timeframe = %s
+                  AND (%s::text IS NULL OR feed = %s::text)
+                  AND timestamp BETWEEN %s AND %s
+                  AND calculation_version = %s
+                """,
+                (
+                    symbol, timeframe, trade_feed, trade_feed,
+                    candle_row.get("window_start"), candle_row.get("window_end"),
+                    TRADE_FLOW_VERSION,
+                ),
+            ).fetchone()
+
             summaries.append(
                 {
                     "key": f"{symbol}|{timeframe}",
@@ -179,6 +209,8 @@ def record_intraday_dataset_snapshot(
                     "timeframe": timeframe,
                     "candle_count": candle_count,
                     "feature_count": feature_count,
+                    "trade_flow_count": int((trade_row or {}).get("trade_flow_count") or 0),
+                    "trade_flow_hash": str((trade_row or {}).get("trade_flow_hash") or ""),
                     "window_start": candle_row.get("window_start"),
                     "window_end": candle_row.get("window_end"),
                     "candle_hash": str(candle_row.get("candle_hash") or ""),
@@ -199,7 +231,7 @@ def record_intraday_dataset_snapshot(
             # the same window on a different feed are different prices.
             "source": source,
             "datasets": [
-                {key: jsonable(item[key]) for key in ("key", "candle_count", "feature_count", "window_start", "window_end", "candle_hash", "feature_hash", "sources")}
+                {key: jsonable(item[key]) for key in ("key", "candle_count", "feature_count", "trade_flow_count", "window_start", "window_end", "candle_hash", "feature_hash", "trade_flow_hash", "sources")}
                 for item in summaries
             ],
             "calculation_version": INTRADAY_DATASET_VERSION,
@@ -300,6 +332,40 @@ def record_intraday_dataset_snapshot(
                 source,
                 universe_key,
                 universe_key,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO research_dataset_trade_flow_features(
+                dataset_id, symbol, timeframe, timestamp, feed, trade_count,
+                total_volume, signed_trade_imbalance,
+                signed_trade_count_imbalance, large_trade_share,
+                unclassified_share, effective_spread_bps,
+                classification_method, classified_volume,
+                trade_size_squared_sum, effective_trade_count
+            )
+            SELECT %s, symbol, timeframe, timestamp, feed, trade_count,
+                   total_volume, signed_trade_imbalance,
+                   signed_trade_count_imbalance, large_trade_share,
+                   unclassified_share, effective_spread_bps,
+                   classification_method, classified_volume,
+                   trade_size_squared_sum, effective_trade_count
+            FROM intraday_trade_flow_features
+            WHERE symbol = %s AND timeframe = %s
+              AND timestamp BETWEEN %s AND %s
+              AND (%s::text IS NULL OR feed = %s::text)
+              AND calculation_version = %s
+            ON CONFLICT (dataset_id, symbol, timeframe, timestamp) DO NOTHING
+            """,
+            (
+                dataset_id,
+                item["symbol"],
+                item["timeframe"],
+                item["window_start"],
+                item["window_end"],
+                "sip" if source == "alpaca_sip" else "iex" if source == "alpaca_iex" else None,
+                "sip" if source == "alpaca_sip" else "iex" if source == "alpaca_iex" else None,
+                TRADE_FLOW_VERSION,
             ),
         )
         conn.execute(

@@ -228,6 +228,9 @@ def trade_flow(args: argparse.Namespace) -> dict[str, Any]:
                 timeframe=args.timeframe,
                 feed=args.feed,
                 max_sessions=args.max_sessions,
+                rate_limit_retries=args.rate_limit_retries,
+                rate_limit_base_sleep=args.rate_limit_base_sleep,
+                request_pause_seconds=args.request_pause_seconds,
             )
         )
 
@@ -359,6 +362,9 @@ def parser() -> argparse.ArgumentParser:
         default=MAX_SESSIONS_PER_RUN,
         help="Refuse to start beyond this many pending symbol-sessions.",
     )
+    trade_flow_command.add_argument("--rate-limit-retries", type=int, default=20)
+    trade_flow_command.add_argument("--rate-limit-base-sleep", type=float, default=60.0)
+    trade_flow_command.add_argument("--request-pause-seconds", type=float, default=2.0)
 
     agreement_command = commands.add_parser(
         "flow-agreement",
