@@ -1193,10 +1193,36 @@ def interpret_factor_failure(
             "failed_gates": sorted(failed),
             "retire_hypothesis": False,
         }
-    if failed & {"clears_stressed_costs", "positive_net_return", "positive_event_conditioned_net_return", "executable_long_short_spread"}:
+    cost_gates = failed & {
+        "clears_stressed_costs",
+        "positive_net_return",
+        "positive_event_conditioned_net_return",
+        "executable_long_short_spread",
+    }
+    if cost_gates:
+        gross = (result.get(metrics_key) or {}).get("gross_directional_edge_bps")
+        # "Fails on cost" is a claim that an edge existed and execution ate
+        # it, and it points at redesigning the holding horizon. That is the
+        # wrong diagnosis and the wrong next move when there was no edge to
+        # begin with: a factor at zero gross would still be at zero if
+        # trading were free, so no horizon or venue can rescue it.
+        if gross is not None and float(gross) <= 0:
+            return {
+                "verdict": "no_gross_edge",
+                "action": "retire_hypothesis",
+                "detail": (
+                    "Gross directional edge is not positive before any cost is "
+                    "charged, so the failure is the absence of an effect rather "
+                    "than the price of trading it."
+                ),
+                "gross_directional_edge_bps": gross,
+                "failed_gates": sorted(failed),
+                "retire_hypothesis": True,
+            }
         return {
             "verdict": "fails_on_cost",
             "action": "retire_or_redesign_holding_horizon",
+            "gross_directional_edge_bps": gross,
             "failed_gates": sorted(failed),
             "retire_hypothesis": True,
         }

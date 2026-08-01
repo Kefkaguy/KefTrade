@@ -357,3 +357,47 @@ def test_batching_by_session_leaves_the_peer_group_intact():
     key = lambda row: (row["symbol"], row["entry_bar_timestamp"])  # noqa: E731
     assert sorted(batched, key=key) == sorted(both_sessions, key=key)
     assert batched
+
+
+# ---------------------------------------------------------------------------
+# failure interpretation
+# ---------------------------------------------------------------------------
+
+
+def _failed_result(gross_bps):
+    return {
+        "status": "measured",
+        "evidence_gate": {"passed": False, "failed": ["clears_stressed_costs"]},
+        "power_and_stability": {"power": {"null_result_is_interpretable": True}},
+        "factor_research_readiness": {"ready": True},
+        "validation": {"gross_directional_edge_bps": gross_bps},
+    }
+
+
+def test_a_factor_with_no_gross_edge_did_not_fail_on_cost():
+    from app.services.intraday_factor_diagnostics import interpret_factor_failure
+
+    # An edge of zero would still be zero if trading were free, so no holding
+    # horizon or cheaper venue can rescue it.
+    verdict = interpret_factor_failure(_failed_result(-0.05))
+
+    assert verdict["verdict"] == "no_gross_edge"
+    assert verdict["action"] == "retire_hypothesis"
+    assert verdict["retire_hypothesis"] is True
+
+
+def test_a_real_edge_eaten_by_costs_is_still_reported_as_such():
+    from app.services.intraday_factor_diagnostics import interpret_factor_failure
+
+    verdict = interpret_factor_failure(_failed_result(12.0))
+
+    assert verdict["verdict"] == "fails_on_cost"
+    assert verdict["action"] == "retire_or_redesign_holding_horizon"
+
+
+def test_an_unmeasured_gross_edge_is_not_assumed_absent():
+    from app.services.intraday_factor_diagnostics import interpret_factor_failure
+
+    verdict = interpret_factor_failure(_failed_result(None))
+
+    assert verdict["verdict"] == "fails_on_cost"
