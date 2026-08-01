@@ -35,7 +35,11 @@ from app.services.intraday_research_controls import certify_measurement_instrume
 from app.services.intraday_research_integrity import exchange_session_date, rows_after_session
 from app.services.intraday_research_data import research_data_readiness
 from app.services.intraday_research_leakage import audit_factor_leakage
-from app.services.intraday_dataset_quality import duplicate_rows, session_shape_report
+from app.services.intraday_dataset_quality import (
+    GAP_EXPERIMENT_SESSION_TARGET,
+    duplicate_rows,
+    session_shape_report,
+)
 from app.services.intraday_session_calendar import timeframe_minutes
 from app.services.intraday_trial_ledger import (
     assert_declared,
@@ -160,6 +164,27 @@ def _calendar_audit_sql(conn: Any, *, dataset_id: int, timeframe: str) -> dict[s
         "naive_timestamps": 0,
         "timestamps_normalized": misaligned == 0,
     }
+
+
+def _declared_event_counts(
+    conn: Any, *, timeframe: str, factor_keys: list[str]
+) -> dict[str, int]:
+    """The event count each hypothesis declared before any result existed.
+
+    This is what a null is judged against. Deriving the requirement from the
+    measured effect instead is circular, and would let an idea that genuinely
+    does not work sit permanently behind "not enough data".
+    """
+    rows = conn.execute(
+        """
+        SELECT factor_key, MAX(required_event_count) AS required
+        FROM intraday_research_hypotheses
+        WHERE timeframe = %s AND factor_key = ANY(%s)
+        GROUP BY factor_key
+        """,
+        (timeframe, list(factor_keys)),
+    ).fetchall()
+    return {str(row["factor_key"]): int(row["required"]) for row in rows}
 
 
 def _stream_observations(
@@ -517,6 +542,10 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             microstructure_by_symbol=microstructure or None,
             auction_by_symbol=auctions or None,
             institutional_data_readiness=institutional_readiness,
+            required_event_counts=_declared_event_counts(
+                conn, timeframe=args.timeframe, factor_keys=keys
+            ),
+            required_sessions=GAP_EXPERIMENT_SESSION_TARGET,
             effective_trials=trial_ledger["effective_trials"],
             trial_ledger=trial_ledger,
             sector_by_symbol=sector_map(conn, universe),

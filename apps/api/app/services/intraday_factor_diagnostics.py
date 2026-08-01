@@ -1364,6 +1364,8 @@ def evaluate_factor_discovery(
     data_readiness: dict[str, Any] | None = None,
     calendar_audit: dict[str, Any] | None = None,
     benchmark_context: dict[date, dict[str, Any]] | None = None,
+    required_event_counts: dict[str, int] | None = None,
+    required_sessions: int | None = None,
 ) -> dict[str, Any]:
     # A universe-scale snapshot does not fit in memory as candle dicts, so the
     # caller may stream it: build each factor's observations symbol by symbol
@@ -1476,6 +1478,8 @@ def evaluate_factor_discovery(
             discovery_metrics=discovery_metrics,
             validation_metrics=validation_metrics,
             trials_recorded=(trial_ledger or {}).get("effective_trials"),
+            required_event_count=(required_event_counts or {}).get(key),
+            required_sessions=required_sessions,
         )
         factor_results[key] = {
             "status": "measured" if validation_metrics["measurable"] else "insufficient_evidence",

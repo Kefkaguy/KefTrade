@@ -276,6 +276,29 @@ def effect_size_drift(
     }
 
 
+def _meets_predeclared_power(
+    *,
+    observations: int,
+    sessions: int,
+    required_event_count: int | None,
+    required_sessions: int | None,
+    fallback_sessions: int | None,
+) -> bool:
+    """Did the sample reach the size the hypothesis declared it would need?
+
+    When no requirement was predeclared there is nothing to hold the result
+    to, and the observed-effect estimate is the only thing left -- but it is
+    reported as a fallback rather than treated as the standard.
+    """
+    if required_event_count is None and required_sessions is None:
+        return bool(fallback_sessions is not None and sessions >= fallback_sessions)
+    if required_event_count is not None and observations < required_event_count:
+        return False
+    if required_sessions is not None and sessions < required_sessions:
+        return False
+    return True
+
+
 def power_and_stability_report(
     observations: Sequence[dict[str, Any]],
     *,
@@ -286,6 +309,8 @@ def power_and_stability_report(
     discovery_metrics: dict[str, Any] | None = None,
     validation_metrics: dict[str, Any] | None = None,
     trials_recorded: int | None = None,
+    required_event_count: int | None = None,
+    required_sessions: int | None = None,
 ) -> dict[str, Any]:
     """Assemble every diagnostic the confirmation protocol requires."""
     outcomes = [
@@ -336,23 +361,40 @@ def power_and_stability_report(
             "session_dispersion_bps": _round(dispersion_bps),
             "observed_edge_bps": _round(observed_bps),
             "net_edge_bps": _round(net_bps),
-            "sessions_required_for_80pct_power": required_gross,
-            "observations_required_for_80pct_power": (
-                int(round(required_gross * observations_per_session))
-                if required_gross and observations_per_session
-                else None
-            ),
-            "sessions_required_for_80pct_power_net": required_net,
+            # Descriptive only. Sizing a requirement from the effect that was
+            # measured is circular: when the true effect is near zero the
+            # requirement diverges, so a real null would always look
+            # underpowered and could never be retired.
+            "sessions_required_for_the_observed_effect": required_gross,
+            "sessions_required_for_the_observed_net_effect": required_net,
             "minimum_detectable_effect_bps": evidence_quality.get(
                 "minimum_detectable_effect_bps_80pct_power"
             ),
-            "adequately_powered": bool(
-                required_gross is not None and len(session_means) >= required_gross
+            # The predeclared requirement, fixed before any result existed.
+            "required_event_count": required_event_count,
+            "required_sessions": required_sessions,
+            "meets_required_event_count": (
+                required_event_count is None or len(outcomes) >= required_event_count
             ),
-            # Without this, a null reading cannot be separated from a sample
-            # that never had the resolution to see the effect.
-            "null_result_is_interpretable": bool(
-                required_gross is not None and len(session_means) >= required_gross
+            "meets_required_sessions": (
+                required_sessions is None or len(session_means) >= required_sessions
+            ),
+            "adequately_powered": _meets_predeclared_power(
+                observations=len(outcomes),
+                sessions=len(session_means),
+                required_event_count=required_event_count,
+                required_sessions=required_sessions,
+                fallback_sessions=required_gross,
+            ),
+            # A null is interpretable when the sample reached the size the
+            # hypothesis declared it would need. Anything else lets a failed
+            # idea live forever behind "not enough data".
+            "null_result_is_interpretable": _meets_predeclared_power(
+                observations=len(outcomes),
+                sessions=len(session_means),
+                required_event_count=required_event_count,
+                required_sessions=required_sessions,
+                fallback_sessions=required_gross,
             ),
         },
         "subperiods": {

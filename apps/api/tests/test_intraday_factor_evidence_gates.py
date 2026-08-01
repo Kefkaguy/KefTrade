@@ -276,7 +276,8 @@ def test_discovery_reports_power_and_stability_for_every_measured_factor():
         "power_and_stability"
     ]
 
-    assert "sessions_required_for_80pct_power" in report["power"]
+    assert "sessions_required_for_the_observed_effect" in report["power"]
+    assert "required_event_count" in report["power"]
     assert "quarterly" in report["subperiods"]
     assert "concentration" in report
     assert "effect_size_drift" in report

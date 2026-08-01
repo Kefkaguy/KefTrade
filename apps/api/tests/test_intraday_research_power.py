@@ -51,13 +51,58 @@ def test_report_states_what_the_sample_would_have_needed():
     power = report["power"]
 
     assert power["observed_sessions"] > 0
-    assert power["sessions_required_for_80pct_power"] > 0
+    # Reported for context, but not the standard a null is judged against.
+    assert power["sessions_required_for_the_observed_effect"] > 0
+    assert power["minimum_detectable_effect_bps"] is not None
     assert power["adequately_powered"] is True
     assert power["null_result_is_interpretable"] is True
-    assert power["observations_required_for_80pct_power"] is not None
 
 
-def test_an_underpowered_sample_is_reported_as_uninterpretable():
+def test_a_predeclared_requirement_decides_whether_a_null_is_interpretable():
+    _candles, observations, metrics = observations_and_metrics()
+
+    met = power_and_stability_report(
+        observations,
+        evidence_quality=metrics["evidence_quality"],
+        net_evidence_quality=metrics["net_evidence_quality"],
+        required_event_count=100,
+        required_sessions=50,
+    )
+    unmet = power_and_stability_report(
+        observations,
+        evidence_quality=metrics["evidence_quality"],
+        net_evidence_quality=metrics["net_evidence_quality"],
+        required_event_count=10_000_000,
+        required_sessions=50,
+    )
+
+    assert met["power"]["null_result_is_interpretable"] is True
+    assert met["power"]["meets_required_event_count"] is True
+    assert unmet["power"]["null_result_is_interpretable"] is False
+    assert unmet["power"]["meets_required_event_count"] is False
+
+
+def test_a_tiny_observed_effect_does_not_make_a_met_requirement_underpowered():
+    # The circular failure: an effect near zero implies a near-infinite
+    # requirement, so a real null could never be retired. The predeclared
+    # count must override that.
+    _candles, observations, metrics = observations_and_metrics(
+        sessions=400, effect=0.01
+    )
+
+    report = power_and_stability_report(
+        observations,
+        evidence_quality=metrics["evidence_quality"],
+        net_evidence_quality=metrics["net_evidence_quality"],
+        required_event_count=100,
+        required_sessions=50,
+    )
+
+    assert report["power"]["sessions_required_for_the_observed_effect"] > 10_000
+    assert report["power"]["null_result_is_interpretable"] is True
+
+
+def test_without_a_predeclared_requirement_the_observed_estimate_is_the_fallback():
     _candles, observations, metrics = observations_and_metrics(
         sessions=60, effect=0.4
     )
@@ -68,6 +113,7 @@ def test_an_underpowered_sample_is_reported_as_uninterpretable():
         net_evidence_quality=metrics["net_evidence_quality"],
     )
 
+    assert report["power"]["required_event_count"] is None
     assert report["power"]["adequately_powered"] is False
     assert report["power"]["null_result_is_interpretable"] is False
 
