@@ -421,7 +421,21 @@ def _ensure_nested_splits(conn: psycopg.Connection, dataset_id: int) -> None:
         )
 
 
-def load_snapshot_intraday_features(conn: psycopg.Connection, dataset_id: int, symbol: str, timeframe: str) -> list[dict[str, Any]]:
+def load_snapshot_intraday_features(
+    conn: psycopg.Connection,
+    dataset_id: int,
+    symbol: str,
+    timeframe: str,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Snapshot features for one symbol, optionally bounded to a time window.
+
+    The window must match the one used for the candles it is joined to;
+    loading a symbol's whole history beside a single batch of bars is how a
+    time-batched pass would reintroduce the memory it exists to avoid.
+    """
     return [
         dict(row)
         for row in conn.execute(
@@ -431,8 +445,10 @@ def load_snapshot_intraday_features(conn: psycopg.Connection, dataset_id: int, s
                    opening_range_position, gap_percent, session_relative_volume
             FROM research_dataset_intraday_features
             WHERE dataset_id = %s AND symbol = %s AND timeframe = %s
+              AND (%s::timestamptz IS NULL OR timestamp >= %s)
+              AND (%s::timestamptz IS NULL OR timestamp < %s)
             ORDER BY timestamp ASC
             """,
-            (dataset_id, symbol, timeframe),
+            (dataset_id, symbol, timeframe, start, start, end, end),
         ).fetchall()
     ]

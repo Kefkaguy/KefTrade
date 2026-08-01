@@ -1496,6 +1496,7 @@ def evaluate_factor_discovery(
     certification: dict[str, Any] | None = None,
     embargo_sessions: int = 1,
     observations_by_factor: dict[str, list[dict[str, Any]]] | None = None,
+    session_batched_factors: Sequence[str] | None = None,
     session_dates: Sequence[date] | None = None,
     symbols: Sequence[str] | None = None,
     data_readiness: dict[str, Any] | None = None,
@@ -1510,6 +1511,10 @@ def evaluate_factor_discovery(
     # per-symbol factor gives an identical answer either way, because its
     # observations never depend on another symbol's bars.
     streamed = observations_by_factor is not None
+    # Factors the caller states it built with every symbol present at each
+    # instant. Naming one is an assertion about how it was batched, which is
+    # knowledge only the caller has.
+    session_batched = set(session_batched_factors or ())
     all_dates = list(session_dates) if session_dates is not None else [
         _session_date(row)
         for rows in candles_by_symbol.values()
@@ -1541,14 +1546,17 @@ def evaluate_factor_discovery(
     validation_p: dict[str, float | None] = {}
     for key in factor_keys:
         spec = FACTOR_SPECS[key]
-        if streamed and (
-            spec.factor_type == "cross_sectional" or spec.requires_sector_context
+        if (
+            streamed
+            and (spec.factor_type == "cross_sectional" or spec.requires_sector_context)
+            and key not in session_batched
         ):
             raise ValueError(
                 f"{key} scores against a same-instant cross-section of other "
                 "symbols, so it cannot be built one symbol at a time -- a batch "
-                "would silently redefine its peer group. Run it with the full "
-                "candle set."
+                "would silently redefine its peer group. Build it batched by "
+                "session and name it in session_batched_factors, or pass the "
+                "full candle set."
             )
         if timeframe not in spec.supported_timeframes:
             factor_results[key] = {"status": "unsupported_timeframe"}
@@ -1874,6 +1882,8 @@ def load_dataset_candles(
     symbols: Sequence[str] | None = None,
     max_symbols: int = 200,
     include_benchmarks: bool = True,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
     manifest = conn.execute(
         "SELECT * FROM research_dataset_manifests WHERE id = %s",
@@ -1892,10 +1902,14 @@ def load_dataset_candles(
         )
     candles: dict[str, list[dict[str, Any]]] = {}
     for symbol in selected:
-        rows = load_snapshot_candles(conn, dataset_id, symbol, timeframe)
+        rows = load_snapshot_candles(
+            conn, dataset_id, symbol, timeframe, start=start, end=end
+        )
         features = {
             row["timestamp"]: row
-            for row in load_snapshot_intraday_features(conn, dataset_id, symbol, timeframe)
+            for row in load_snapshot_intraday_features(
+                conn, dataset_id, symbol, timeframe, start=start, end=end
+            )
         }
         candles[symbol] = [
             {

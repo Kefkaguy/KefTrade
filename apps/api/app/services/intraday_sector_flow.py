@@ -19,6 +19,8 @@ from datetime import datetime
 from statistics import fmean, median, pstdev
 from typing import Any, Sequence
 
+import psycopg
+
 SECTOR_FLOW_VERSION = "intraday_sector_flow_v1"
 
 # A peer group thinner than this cannot say what "the sector did"; the
@@ -112,34 +114,85 @@ def sector_relative_bars(
     return dict(output)
 
 
-def sector_flow_coverage(
-    candles_by_symbol: dict[str, Sequence[dict[str, Any]]],
+def dataset_sector_coverage(
+    conn: psycopg.Connection,
     *,
-    sector_by_symbol: dict[str, str],
+    dataset_id: int,
+    timeframe: str,
+    minimum_peers: int = MINIMUM_PEERS,
 ) -> dict[str, Any]:
-    """How much of the universe can be measured against a peer group at all."""
-    sectors = {
-        str(key).upper(): str(value)
-        for key, value in (sector_by_symbol or {}).items()
-        if value
+    """Peer-group availability for a snapshot, computed in the database.
+
+    Two questions, and the second is the one that decides whether the factor
+    can produce events at all: not "does this symbol have a sector" but "at the
+    instants it traded, were enough of its peers trading too".  A symbol whose
+    sector is nominally well populated still has no peer group on a bar where
+    the rest of the sector has no row.
+    """
+    members = conn.execute(
+        """
+        SELECT COALESCE(s.sector, 'unknown') AS sector, COUNT(*) AS symbols
+        FROM (
+            SELECT DISTINCT symbol
+            FROM research_dataset_candles
+            WHERE dataset_id = %s AND timeframe = %s
+        ) c
+        LEFT JOIN symbols s ON s.symbol = c.symbol
+        GROUP BY 1
+        ORDER BY 1
+        """,
+        (dataset_id, timeframe),
+    ).fetchall()
+    by_sector = {str(row["sector"]): int(row["symbols"]) for row in members}
+    total_symbols = sum(by_sector.values())
+    unknown = by_sector.pop("unknown", 0)
+    usable = {
+        sector: count for sector, count in by_sector.items() if count > minimum_peers
     }
-    known = [symbol for symbol in candles_by_symbol if str(symbol).upper() in sectors]
-    counts: dict[str, int] = defaultdict(int)
-    for symbol in known:
-        counts[sectors[str(symbol).upper()]] += 1
-    usable = [sector for sector, count in counts.items() if count > MINIMUM_PEERS]
+
+    # Per (sector, bar), how many of the sector's symbols actually have a row.
+    # A plain hash aggregate over the snapshot -- no correlated re-scan, which
+    # is what made the earlier power query pathological.
+    bars = conn.execute(
+        """
+        SELECT COALESCE(SUM(present), 0) AS symbol_bars,
+               COALESCE(SUM(present) FILTER (WHERE present > %s), 0)
+                   AS symbol_bars_with_peers,
+               COUNT(DISTINCT timestamp) AS bars
+        FROM (
+            SELECT c.timestamp, s.sector, COUNT(*) AS present
+            FROM research_dataset_candles c
+            JOIN symbols s ON s.symbol = c.symbol
+            WHERE c.dataset_id = %s AND c.timeframe = %s AND s.sector IS NOT NULL
+            GROUP BY c.timestamp, s.sector
+        ) grouped
+        """,
+        (minimum_peers, dataset_id, timeframe),
+    ).fetchone()
+    sector_bars = int((bars or {}).get("symbol_bars") or 0)
+    with_peers = int((bars or {}).get("symbol_bars_with_peers") or 0)
+
     return {
         "sector_flow_version": SECTOR_FLOW_VERSION,
-        "symbols": len(candles_by_symbol),
-        "symbols_with_sector": len(known),
+        "dataset_id": dataset_id,
+        "timeframe": timeframe,
+        "symbols": total_symbols,
+        "symbols_with_sector": total_symbols - unknown,
+        "symbols_without_sector": unknown,
         "sector_coverage": (
-            _round(len(known) / len(candles_by_symbol)) if candles_by_symbol else None
+            _round((total_symbols - unknown) / total_symbols) if total_symbols else None
         ),
-        "sectors": len(counts),
+        "sectors": len(by_sector),
         "sectors_with_enough_peers": len(usable),
-        "symbols_in_usable_sectors": sum(
-            count for sector, count in counts.items() if sector in usable
+        "symbols_in_usable_sectors": sum(usable.values()),
+        "minimum_peers": minimum_peers,
+        "sector_bars": sector_bars,
+        "sector_bars_with_enough_peers": with_peers,
+        # The share of the snapshot the factor can actually score. This, not
+        # the symbol count, is what bounds its event supply.
+        "bar_level_peer_coverage": (
+            _round(with_peers / sector_bars) if sector_bars else None
         ),
-        "minimum_peers": MINIMUM_PEERS,
-        "by_sector": dict(sorted(counts.items())),
+        "distinct_bars": int((bars or {}).get("bars") or 0),
+        "by_sector": dict(sorted(by_sector.items())),
     }

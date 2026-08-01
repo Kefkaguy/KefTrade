@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from app.services.intraday_sector_flow import (
     MINIMUM_PEERS,
-    sector_flow_coverage,
+    dataset_sector_coverage,
     sector_relative_bars,
 )
 
@@ -113,23 +113,98 @@ def test_excess_participation_flags_a_name_traded_harder_than_its_sector():
     assert bars["T1"][BAR]["excess_participation"] < 1.5
 
 
-def test_coverage_reports_which_sectors_have_enough_peers():
-    sectors = {**TECH, "X0": "Energy", "X1": "Energy"}
-    moves = {symbol: 0.0 for symbol in sectors}
 
-    report = sector_flow_coverage(universe(moves), sector_by_symbol=sectors)
+class FakeConn:
+    """Answers the two coverage queries; records that nothing else is run."""
+
+    def __init__(self, members, bars):
+        self.members = members
+        self.bars = bars
+        self.queries = []
+
+    def execute(self, sql, params=None):
+        self.queries.append((sql, params))
+        if "SUM(present)" in sql:
+            return FakeResult([self.bars])
+        return FakeResult(self.members)
+
+
+class FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+def coverage(members, bars, **kwargs):
+    return dataset_sector_coverage(
+        FakeConn(members, bars), dataset_id=79, timeframe="30m", **kwargs
+    )
+
+
+BARS = {"symbol_bars": 1000, "symbol_bars_with_peers": 900, "bars": 50}
+
+
+def test_coverage_counts_sectors_with_enough_peers():
+    members = [
+        {"sector": "Technology", "symbols": 40},
+        {"sector": "Energy", "symbols": 2},
+    ]
+
+    report = coverage(members, BARS)
 
     assert report["sectors"] == 2
     assert report["sectors_with_enough_peers"] == 1
-    assert report["symbols_in_usable_sectors"] == 6
+    assert report["symbols_in_usable_sectors"] == 40
+
+
+def test_symbols_with_no_sector_are_reported_not_bucketed():
+    members = [
+        {"sector": "Technology", "symbols": 40},
+        {"sector": "unknown", "symbols": 10},
+    ]
+
+    report = coverage(members, BARS)
+
+    assert report["symbols"] == 50
+    assert report["symbols_without_sector"] == 10
+    assert report["sector_coverage"] == 0.8
+    assert "unknown" not in report["by_sector"]
+
+
+def test_bar_level_coverage_is_what_bounds_the_event_supply():
+    # A sector can be well populated overall and still leave a symbol without
+    # peers on the particular bar it traded.
+    members = [{"sector": "Technology", "symbols": 40}]
+
+    report = coverage(
+        members, {"symbol_bars": 1000, "symbol_bars_with_peers": 250, "bars": 50}
+    )
+
+    assert report["bar_level_peer_coverage"] == 0.25
     assert report["sector_coverage"] == 1.0
 
 
-def test_coverage_reports_partial_sector_knowledge():
-    moves = {symbol: 0.0 for symbol in TECH}
-    moves["NOSECTOR"] = 0.0
+def test_an_empty_dataset_reports_null_rather_than_dividing_by_zero():
+    report = coverage([], {"symbol_bars": 0, "symbol_bars_with_peers": 0, "bars": 0})
 
-    report = sector_flow_coverage(universe(moves), sector_by_symbol=TECH)
+    assert report["symbols"] == 0
+    assert report["sector_coverage"] is None
+    assert report["bar_level_peer_coverage"] is None
 
-    assert report["symbols_with_sector"] == 6
-    assert report["sector_coverage"] < 1.0
+
+def test_coverage_never_loads_candles_into_memory():
+    conn = FakeConn([{"sector": "Technology", "symbols": 40}], BARS)
+
+    dataset_sector_coverage(conn, dataset_id=79, timeframe="30m")
+
+    # Both queries aggregate in the database. A SELECT of candle rows here
+    # would be the memory mistake this function exists to avoid.
+    assert len(conn.queries) == 2
+    for sql, _params in conn.queries:
+        assert "COUNT(" in sql or "SUM(" in sql
+        assert "SELECT c.open" not in sql

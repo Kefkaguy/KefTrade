@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import UTC, datetime, time, timedelta
 from typing import Any
 
 from app.db import connect
@@ -252,6 +253,76 @@ def _load_trade_flow(conn: Any, symbols: list[str], *, timeframe: str, feed: str
     return output
 
 
+def needs_peer_cross_section(spec: Any) -> bool:
+    """Does this factor's score depend on other symbols at the same instant?"""
+    return spec.factor_type == "cross_sectional" or spec.requires_sector_context
+
+
+def _stream_cross_section_observations(
+    conn: Any,
+    *,
+    dataset_id: int,
+    timeframe: str,
+    universe: list[str],
+    factor_keys: list[str],
+    observations: dict[str, list[dict[str, Any]]],
+    session_dates: list[Any],
+    session_batch: int,
+    sector_by_symbol: Any,
+) -> None:
+    """Build peer-cross-section factors batched by time rather than by symbol.
+
+    Symbol batching is what bounds memory for every other factor, and it is
+    exactly wrong here: a batch of twenty-four symbols would become the peer
+    group, so a name would be measured against whichever of its peers happened
+    to share its batch. Time batching has the opposite shape -- every symbol,
+    a slice of sessions -- which is what the cross-section actually needs, and
+    it bounds memory just as well because the slice is small.
+
+    A batch boundary is placed only between sessions. These factors score
+    within a session and never carry a position across the close, so no
+    observation straddles a boundary and none is lost to the split.
+    """
+    if not session_dates:
+        return
+    step = max(1, session_batch)
+    for start_index in range(0, len(session_dates), step):
+        window = session_dates[start_index : start_index + step]
+        # The upper bound is exclusive and sits at midnight after the last
+        # session in the window, so a session belongs to exactly one batch.
+        start = datetime.combine(window[0], time.min, tzinfo=UTC)
+        end = datetime.combine(window[-1] + timedelta(days=1), time.min, tzinfo=UTC)
+        candles, _ = load_dataset_candles(
+            conn,
+            dataset_id=dataset_id,
+            timeframe=timeframe,
+            symbols=universe,
+            max_symbols=len(universe),
+            include_benchmarks=False,
+            start=start,
+            end=end,
+        )
+        if not candles:
+            continue
+        print(
+            "  cross-section: sessions "
+            f"{min(start_index + step, len(session_dates))}/{len(session_dates)}",
+            flush=True,
+        )
+        for key in factor_keys:
+            spec = FACTOR_SPECS[key]
+            if timeframe not in spec.supported_timeframes:
+                continue
+            observations[key].extend(
+                spec.builder(
+                    candles,
+                    timeframe=timeframe,
+                    sector_by_symbol=sector_by_symbol,
+                )
+            )
+        del candles
+
+
 def _stream_observations(
     conn: Any,
     *,
@@ -264,6 +335,8 @@ def _stream_observations(
     auction_by_symbol: Any = None,
     premarket_by_symbol: Any = None,
     trade_flow_by_symbol: Any = None,
+    sector_by_symbol: Any = None,
+    session_batch: int = 60,
 ) -> dict[str, Any]:
     """Build every factor's observations without holding the universe in memory.
 
@@ -275,6 +348,15 @@ def _stream_observations(
     """
     from app.services.intraday_research_power import benchmark_session_context
     from app.services.intraday_session_calendar import extended_hours_audit
+
+    # A factor scoring against a same-instant cross-section cannot be batched
+    # by symbol -- the batch would silently become its peer group. It is
+    # batched by time instead: the peer group needs every symbol at one
+    # instant, not every instant for one symbol.
+    cross_section_keys = [
+        key for key in factor_keys if needs_peer_cross_section(FACTOR_SPECS[key])
+    ]
+    per_symbol_keys = [key for key in factor_keys if key not in set(cross_section_keys)]
 
     observations: dict[str, list[dict[str, Any]]] = {key: [] for key in factor_keys}
     session_dates: set[Any] = set()
@@ -312,7 +394,7 @@ def _stream_observations(
         for shape, count in (audit.get("session_shapes") or {}).items():
             calendar["session_shapes"][shape] = calendar["session_shapes"].get(shape, 0) + count
 
-        for key in factor_keys:
+        for key in per_symbol_keys:
             spec = FACTOR_SPECS[key]
             if timeframe not in spec.supported_timeframes:
                 continue
@@ -327,6 +409,19 @@ def _stream_observations(
                 )
             )
         del candles
+
+    if cross_section_keys:
+        _stream_cross_section_observations(
+            conn,
+            dataset_id=dataset_id,
+            timeframe=timeframe,
+            universe=universe,
+            factor_keys=cross_section_keys,
+            observations=observations,
+            session_dates=sorted(session_dates),
+            session_batch=session_batch,
+            sector_by_symbol=sector_by_symbol,
+        )
 
     # The market-direction and volatility regimes need the benchmark, which a
     # batch may not contain, so it is loaded once on its own.
@@ -365,6 +460,9 @@ def _stream_observations(
     }
     return {
         "observations_by_factor": observations,
+        # Named so the evaluator knows these were built with every symbol
+        # present at each instant rather than one symbol batch at a time.
+        "session_batched_factors": cross_section_keys,
         "session_dates": sorted(session_dates),
         "calendar_audit": calendar,
         "benchmark_context": benchmark,
@@ -588,6 +686,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             spec_hash=spec_hash,
         )
         dataset_source = _dataset_source(conn, dataset_id=dataset_id)
+        sectors = sector_map(conn, universe)
         premarket = _load_premarket(
             conn, universe, timeframe=args.timeframe, source=dataset_source
         )
@@ -613,10 +712,13 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             auction_by_symbol=auctions or None,
             premarket_by_symbol=premarket or None,
             trade_flow_by_symbol=trade_flow or None,
+            sector_by_symbol=sectors,
+            session_batch=args.session_batch,
         )
         result = evaluate_factor_discovery(
             {},
             observations_by_factor=streamed["observations_by_factor"],
+            session_batched_factors=streamed["session_batched_factors"],
             session_dates=streamed["session_dates"],
             symbols=universe,
             data_readiness=streamed["data_readiness"],
@@ -636,7 +738,7 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             required_sessions=GAP_EXPERIMENT_SESSION_TARGET,
             effective_trials=trial_ledger["effective_trials"],
             trial_ledger=trial_ledger,
-            sector_by_symbol=sector_map(conn, universe),
+            sector_by_symbol=sectors,
             certification=certification,
         )
         result["dataset_id"] = dataset_id
@@ -1025,6 +1127,15 @@ def parser() -> argparse.ArgumentParser:
         type=int,
         default=20,
         help="Symbols loaded at once while building observations.",
+    )
+    discovery.add_argument(
+        "--session-batch",
+        type=int,
+        default=60,
+        help=(
+            "Sessions loaded at once for peer-cross-section factors, which "
+            "load every symbol and so are bounded by time instead."
+        ),
     )
     discovery.add_argument("--factors")
     discovery.add_argument("--certification-id", type=int, required=True)

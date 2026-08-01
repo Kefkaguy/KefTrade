@@ -247,19 +247,17 @@ def flow_agreement(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def sector_flow(args: argparse.Namespace) -> dict[str, Any]:
-    """Report how much of the universe has a usable sector peer group."""
-    from app.services.intraday_factor_diagnostics import (
-        load_dataset_candles,
-        sector_map,
-    )
-    from app.services.intraday_sector_flow import sector_flow_coverage
+    """Report how much of a snapshot has a usable sector peer group.
+
+    Answered in the database. Loading a universe-scale snapshot into Python to
+    count sectors costs gigabytes and answers a question SQL answers exactly --
+    the same lesson the calendar audit already paid for.
+    """
+    from app.services.intraday_sector_flow import dataset_sector_coverage
 
     with connect() as conn:
-        candles = load_dataset_candles(
+        return dataset_sector_coverage(
             conn, dataset_id=args.dataset_id, timeframe=args.timeframe
-        )
-        return sector_flow_coverage(
-            candles, sector_by_symbol=sector_map(conn, list(candles))
         )
 
 

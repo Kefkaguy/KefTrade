@@ -309,3 +309,51 @@ def test_the_bound_horizon_rewrites_the_factor_key_so_each_is_its_own_trial():
         "signed_trade_imbalance_continuation_2bar"
     }
     assert {row["horizon_bars"] for row in rows} == {2}
+
+
+# ---------------------------------------------------------------------------
+# batching axis
+# ---------------------------------------------------------------------------
+
+
+def test_a_symbol_batch_would_redefine_the_peer_group():
+    """Why the sector factor must never be batched by symbol.
+
+    Splitting the universe into batches leaves each name measured against
+    whichever peers shared its batch, which is a different peer group and so a
+    different score -- silently, with no error.
+    """
+    candles = _with_relative_volume(peer_universe(96.0))
+    half = dict(list(candles.items())[:3])
+
+    whole_universe = forced(candles)
+    one_batch = forced(half)
+
+    assert whole_universe != one_batch
+
+
+def test_batching_by_session_leaves_the_peer_group_intact():
+    other_day = date(2025, 3, 4)
+    candles = _with_relative_volume(peer_universe(96.0))
+    for symbol, rows in candles.items():
+        rows.extend(
+            bar(index, close=rows[0]["close"], day=other_day, volume=rows[0]["volume"])
+            for index in range(SLOTS)
+        )
+        for row in rows:
+            row["session_relative_volume"] = 6.0 if symbol == "T0" else 1.0
+
+    both_sessions = forced(candles)
+
+    # Split by time, every symbol present in each slice, then concatenated.
+    def only(day):
+        return {
+            symbol: [row for row in rows if row["timestamp"].date() == day]
+            for symbol, rows in candles.items()
+        }
+
+    batched = forced(only(SESSION)) + forced(only(other_day))
+
+    key = lambda row: (row["symbol"], row["entry_bar_timestamp"])  # noqa: E731
+    assert sorted(batched, key=key) == sorted(both_sessions, key=key)
+    assert batched

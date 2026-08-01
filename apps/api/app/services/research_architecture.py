@@ -492,7 +492,21 @@ def verify_dataset_snapshot(conn: psycopg.Connection, dataset_id: int) -> dict[s
     }
 
 
-def load_snapshot_candles(conn: psycopg.Connection, dataset_id: int, symbol: str, timeframe: str) -> list[dict[str, Any]]:
+def load_snapshot_candles(
+    conn: psycopg.Connection,
+    dataset_id: int,
+    symbol: str,
+    timeframe: str,
+    *,
+    start: datetime | None = None,
+    end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Snapshot candles for one symbol, optionally bounded to a time window.
+
+    The window is what lets a caller batch by time rather than by symbol --
+    necessary for any factor scoring against a same-instant cross-section,
+    where a symbol batch would silently redefine the peer group.
+    """
     return [
         dict(row)
         for row in conn.execute(
@@ -500,9 +514,11 @@ def load_snapshot_candles(conn: psycopg.Connection, dataset_id: int, symbol: str
             SELECT symbol, timeframe, timestamp, open, high, low, close, volume, source
             FROM research_dataset_candles
             WHERE dataset_id = %s AND symbol = %s AND timeframe = %s
+              AND (%s::timestamptz IS NULL OR timestamp >= %s)
+              AND (%s::timestamptz IS NULL OR timestamp < %s)
             ORDER BY timestamp ASC, source ASC
             """,
-            (dataset_id, symbol, timeframe),
+            (dataset_id, symbol, timeframe, start, start, end, end),
         ).fetchall()
     ]
 

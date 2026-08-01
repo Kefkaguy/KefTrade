@@ -160,10 +160,28 @@ Each factor spec declares the channel it depends on
 reported `blocked_missing_<channel>_data` when that channel is absent. An empty
 side channel is never reported as a null result.
 
-The sector family additionally **refuses the streaming discovery path**. Batching
-symbols to bound memory is safe for per-symbol factors, but this one scores
-against a same-instant cross-section of peers, and a batch would silently
-redefine that peer group. It must run with the full candle set.
+The sector family is **batched by time, not by symbol**. Symbol batching is what
+bounds memory for every other factor and is exactly wrong here: a batch of
+twenty-four symbols would *become* the peer group, so a name would be scored
+against whichever peers happened to share its batch — silently, with no error.
+Time batching has the opposite shape (every symbol, a slice of sessions), which
+is what the cross-section needs, and it bounds memory just as well. Boundaries
+fall only between sessions, and these factors never carry a position across the
+close, so no observation straddles one.
+
+`--session-batch` controls the slice. A factor that needs the cross-section and
+was *not* built this way is still refused rather than measured.
+
+Coverage reporting follows the same rule as the calendar audit: it is a counting
+question, so `sector-flow` answers it in SQL rather than loading a
+universe-scale snapshot into Python. Its `bar_level_peer_coverage` — the share
+of symbol-bars where enough peers were actually trading — is what bounds the
+family's event supply, not the symbol count.
+
+There is no `research_dataset_sector_flow_features` table, by design. Sector
+context is a deterministic function of candles already in the snapshot plus the
+sector map, so storing it would create a second copy that can drift from the
+first.
 
 ## What has not changed
 
