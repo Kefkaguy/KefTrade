@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 import psycopg
@@ -18,11 +18,15 @@ logger = logging.getLogger(__name__)
 ALPACA_SOURCE = "alpaca_iex"
 ALPACA_STOCK_BARS_ENDPOINT = "/v2/stocks/{symbol}/bars"
 ALPACA_STOCK_QUOTES_ENDPOINT = "/v2/stocks/{symbol}/quotes"
+ALPACA_STOCK_TRADES_ENDPOINT = "/v2/stocks/{symbol}/trades"
 ALPACA_ASSETS_ENDPOINT = "/v2/assets"
 ALPACA_FEED = "iex"
 MAX_PAGE_LIMIT = 10000
 MAX_STOCK_BAR_PAGES = 25
 MAX_STOCK_QUOTE_PAGES = 100
+# One session of a liquid name can exceed a million prints, so the ceiling is
+# high; the caller folds each page away rather than holding the range.
+MAX_STOCK_TRADE_PAGES = 400
 SUPPORTED_TIMEFRAMES = {
     "15m": "15Min",
     "30m": "30Min",
@@ -354,6 +358,94 @@ def normalize_stock_quote(
         "midpoint": midpoint,
         "spread_bps": spread_bps,
         "raw_payload": dict(row),
+    }
+
+
+async def iter_stock_trade_pages(
+    symbol: str,
+    *,
+    start: datetime,
+    end: datetime,
+    feed: str = ALPACA_FEED,
+    max_pages: int = MAX_STOCK_TRADE_PAGES,
+) -> AsyncIterator[tuple[list[dict[str, Any]], dict[str, Any]]]:
+    """Yield pages of historical trades without accumulating the whole range.
+
+    A single liquid symbol can print well over a million trades in one session,
+    so this is an iterator rather than a list-returning fetch: the caller folds
+    each page into its aggregate and drops it.  Materialising the range would
+    reproduce the out-of-memory failures the candle work already hit.
+    """
+    if not settings.alpaca_api_key or not settings.alpaca_api_secret:
+        raise RuntimeError("Set ALPACA_API_KEY and ALPACA_API_SECRET to fetch Alpaca trades.")
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("Trade start/end must be timezone-aware.")
+    if end <= start:
+        raise ValueError("Trade end must be after start.")
+
+    params: dict[str, Any] = {
+        "start": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "end": end.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "limit": MAX_PAGE_LIMIT,
+        "feed": feed,
+        "sort": "asc",
+    }
+    headers = {
+        "APCA-API-KEY-ID": settings.alpaca_api_key,
+        "APCA-API-SECRET-KEY": settings.alpaca_api_secret,
+    }
+    endpoint = ALPACA_STOCK_TRADES_ENDPOINT.format(symbol=symbol.upper())
+
+    async with httpx.AsyncClient(
+        base_url=settings.alpaca_data_base_url, timeout=60, headers=headers
+    ) as client:
+        for page in range(max_pages):
+            response = await client.get(endpoint, params=params)
+            response.raise_for_status()
+            payload = response.json()
+            trades = payload.get("trades") or []
+            token = payload.get("next_page_token")
+            yield trades, {
+                "page": page,
+                "feed": feed,
+                "received": len(trades),
+                "status": response.status_code,
+                "request_id": response.headers.get("X-Request-ID"),
+                "next_page_token_present": bool(token),
+                # A truthful record of whether the window was fully drained.
+                "exhausted": not token or not trades,
+            }
+            if not token or not trades:
+                return
+            params["page_token"] = token
+
+
+def normalize_stock_trade(
+    symbol: str,
+    row: dict[str, Any],
+    *,
+    feed: str = ALPACA_FEED,
+) -> dict[str, Any] | None:
+    """Normalize one Alpaca trade, rejecting rows that cannot be priced."""
+    try:
+        price = Decimal(str(row["p"]))
+        size = Decimal(str(row["s"]))
+        timestamp = datetime.fromisoformat(str(row["t"]).replace("Z", "+00:00")).astimezone(UTC)
+    except (InvalidOperation, KeyError, TypeError, ValueError):
+        return None
+    if price <= 0 or size <= 0:
+        return None
+    conditions = row.get("c")
+    return {
+        "symbol": symbol.upper(),
+        "provider": "alpaca",
+        "feed": feed,
+        "timestamp": timestamp,
+        "price": price,
+        "size": size,
+        "exchange": row.get("x"),
+        "tape": row.get("z"),
+        "conditions": [str(item) for item in conditions] if conditions else [],
     }
 
 

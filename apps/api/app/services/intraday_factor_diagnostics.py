@@ -99,6 +99,12 @@ class FactorSpec:
     factor_type: str = "continuous"
     requires_quotes: bool = False
     requires_auction_data: bool = False
+    # Order-flow families rest on data the candles do not contain, so each
+    # declares its dependency and is blocked rather than silently measured
+    # against an empty side-channel.
+    requires_premarket: bool = False
+    requires_trade_flow: bool = False
+    requires_sector_context: bool = False
 
     def __post_init__(self) -> None:
         if self.factor_type not in FACTOR_TYPES:
@@ -115,6 +121,9 @@ class FactorSpec:
             "supported_timeframes": list(self.supported_timeframes),
             "requires_quotes": self.requires_quotes,
             "requires_auction_data": self.requires_auction_data,
+            "requires_premarket": self.requires_premarket,
+            "requires_trade_flow": self.requires_trade_flow,
+            "requires_sector_context": self.requires_sector_context,
             "references": list(self.references),
         }
 
@@ -178,6 +187,39 @@ def _jsonable_factor_payload(value: Any) -> Any:
     if isinstance(value, date):
         return value.isoformat()
     return jsonable(value)
+
+
+# Order-flow side channels, and the data a blocked factor is waiting on. A
+# factor that declares a dependency is refused when the channel is empty
+# rather than measured against nothing and reported as a null.
+SIDE_CHANNELS = (
+    (
+        "requires_premarket",
+        "premarket",
+        ("04:00-09:30 extended-hours bars", "premarket relative-volume baseline"),
+    ),
+    (
+        "requires_trade_flow",
+        "trade_flow",
+        ("signed trade prints", "bar-level buy/sell volume imbalance"),
+    ),
+    (
+        "requires_sector_context",
+        "sector_context",
+        ("sector membership per symbol", "at least five peers in the sector"),
+    ),
+)
+
+
+def missing_side_channel(spec: FactorSpec, channels: dict[str, Any]) -> dict[str, Any] | None:
+    """Report the first declared dependency this run cannot satisfy."""
+    for flag, name, required in SIDE_CHANNELS:
+        if getattr(spec, flag) and not channels.get(name):
+            return {
+                "status": f"blocked_missing_{name}_data",
+                "required_data": list(required),
+            }
+    return None
 
 
 def factor_research_readiness(
@@ -949,6 +991,99 @@ for _base_key, (_direction, _state) in GAP_VARIANTS.items():
 del _base_key, _direction, _state, _horizon, _key, _base_spec
 
 
+# ---------------------------------------------------------------------------
+# Order-flow families: the first factors whose score is not a rearrangement of
+# OHLCV.  Each declares the side channel it depends on and is blocked without
+# it, so an empty channel can never be reported as a null result.
+# ---------------------------------------------------------------------------
+
+ORDER_FLOW_HORIZON_BARS = (1, 2)
+
+_ORDER_FLOW_FAMILIES: dict[str, dict[str, Any]] = {
+    "premarket_undiscovered_gap_reversal": {
+        "title": "Premarket-undiscovered opening gap reversal",
+        "hypothesis": (
+            "An opening gap that four and a half hours of premarket trading "
+            "barely priced, on premarket volume below its own baseline, was "
+            "set by whoever was present in the opening auction rather than "
+            "negotiated. The unpriced portion partly reverts."
+        ),
+        "requires": {"requires_premarket": True},
+        "references": (
+            "Barclay & Hendershott (2003), Price discovery and trading after hours",
+            "Biais, Hillion & Spatt (1999), Price discovery in the pre-opening period",
+        ),
+    },
+    "signed_trade_imbalance_continuation": {
+        "title": "Signed trade-imbalance continuation",
+        "hypothesis": (
+            "An institution working a parent order to a same-day completion "
+            "target crosses the spread in one direction while the parent is "
+            "unfilled. The resulting signed imbalance is invisible in a candle "
+            "and predicts continuation over the next bars."
+        ),
+        "requires": {"requires_trade_flow": True},
+        "references": (
+            "Lee & Ready (1991), Inferring trade direction from intraday data",
+            "Cont, Kukanov & Stoikov (2014), The price impact of order book events",
+            "Chordia & Subrahmanyam (2004), Order imbalance and individual stock returns",
+        ),
+    },
+    "sector_relative_forced_flow_reversal": {
+        "title": "Sector-relative forced-flow reversal",
+        "hypothesis": (
+            "A large idiosyncratic move on participation well above the "
+            "symbol's sector peers, while the sector itself is unmoved, is one "
+            "participant liquidating for reasons unrelated to value. The "
+            "liquidity concession they pay reverts; a sector-wide repricing "
+            "does not, which is why the peer group is the control."
+        ),
+        "requires": {"requires_sector_context": True},
+        "references": (
+            "Coval & Stafford (2007), Asset fire sales in equity markets",
+            "Nagel (2012), Evaporating liquidity",
+        ),
+    },
+}
+
+
+def _register_order_flow_specs() -> None:
+    from app.services.intraday_order_flow_factors import (
+        horizon_builder,
+        premarket_undiscovered_gap_observations,
+        sector_relative_forced_flow_observations,
+        signed_trade_imbalance_observations,
+    )
+
+    bases = {
+        "premarket_undiscovered_gap_reversal": premarket_undiscovered_gap_observations,
+        "signed_trade_imbalance_continuation": signed_trade_imbalance_observations,
+        "sector_relative_forced_flow_reversal": sector_relative_forced_flow_observations,
+    }
+    for base_key, definition in _ORDER_FLOW_FAMILIES.items():
+        for horizon in ORDER_FLOW_HORIZON_BARS:
+            key = f"{base_key}_{horizon}bar"
+            FACTOR_SPECS[key] = FactorSpec(
+                key=key,
+                title=f"{definition['title']} ({horizon}-bar hold)",
+                hypothesis=(
+                    f"{definition['hypothesis']} Measured over a {horizon}-bar hold, "
+                    "entered at the open of the bar after the decision, exited at "
+                    "that bar's close, never carried past the session close."
+                ),
+                supported_timeframes=("30m",),
+                builder=horizon_builder(
+                    bases[base_key], factor_key=key, horizon_bars=horizon
+                ),
+                factor_type="directional_event",
+                references=definition["references"],
+                **definition["requires"],
+            )
+
+
+_register_order_flow_specs()
+
+
 def chronological_boundaries(
     session_dates: Sequence[date],
     *,
@@ -1352,6 +1487,8 @@ def evaluate_factor_discovery(
     cost_model: dict[str, Any],
     microstructure_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
     auction_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    premarket_by_symbol: dict[str, dict[Any, dict[str, Any]]] | None = None,
+    trade_flow_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
     institutional_data_readiness: dict[str, Any] | None = None,
     effective_trials: int | None = None,
     trial_ledger: dict[str, Any] | None = None,
@@ -1404,11 +1541,14 @@ def evaluate_factor_discovery(
     validation_p: dict[str, float | None] = {}
     for key in factor_keys:
         spec = FACTOR_SPECS[key]
-        if streamed and spec.factor_type == "cross_sectional":
+        if streamed and (
+            spec.factor_type == "cross_sectional" or spec.requires_sector_context
+        ):
             raise ValueError(
-                f"{key} is cross-sectional: its score compares symbols at the same "
-                "instant, so it cannot be built one symbol at a time. Run it with "
-                "the full candle set."
+                f"{key} scores against a same-instant cross-section of other "
+                "symbols, so it cannot be built one symbol at a time -- a batch "
+                "would silently redefine its peer group. Run it with the full "
+                "candle set."
             )
         if timeframe not in spec.supported_timeframes:
             factor_results[key] = {"status": "unsupported_timeframe"}
@@ -1434,6 +1574,17 @@ def evaluate_factor_discovery(
                 ],
             }
             continue
+        blocked = missing_side_channel(
+            spec,
+            {
+                "premarket": premarket_by_symbol,
+                "trade_flow": trade_flow_by_symbol,
+                "sector_context": sector_by_symbol,
+            },
+        )
+        if blocked is not None:
+            factor_results[key] = blocked
+            continue
         readiness = factor_research_readiness(
             spec,
             data_readiness=data_readiness,
@@ -1447,6 +1598,9 @@ def evaluate_factor_discovery(
                 timeframe=timeframe,
                 microstructure_by_symbol=microstructure_by_symbol,
                 auction_by_symbol=auction_by_symbol,
+                premarket_by_symbol=premarket_by_symbol,
+                trade_flow_by_symbol=trade_flow_by_symbol,
+                sector_by_symbol=sector_by_symbol,
             )
         )
         discovery = [
@@ -1584,6 +1738,8 @@ def evaluate_forward_confirmation(
     cost_model: dict[str, Any],
     microstructure_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
     auction_by_symbol: dict[str, list[dict[str, Any]]] | None = None,
+    premarket_by_symbol: dict[str, dict[Any, dict[str, Any]]] | None = None,
+    trade_flow_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
     institutional_data_readiness: dict[str, Any] | None = None,
     effective_trials: int | None = None,
     trial_ledger: dict[str, Any] | None = None,
@@ -1613,6 +1769,17 @@ def evaluate_forward_confirmation(
         if spec.requires_auction_data and not auction_by_symbol:
             factors[key] = {"status": "blocked_missing_auction_data"}
             continue
+        blocked = missing_side_channel(
+            spec,
+            {
+                "premarket": premarket_by_symbol,
+                "trade_flow": trade_flow_by_symbol,
+                "sector_context": sector_by_symbol,
+            },
+        )
+        if blocked is not None:
+            factors[key] = blocked
+            continue
         readiness = factor_research_readiness(
             spec,
             data_readiness=data_readiness,
@@ -1623,6 +1790,9 @@ def evaluate_forward_confirmation(
             timeframe=timeframe,
             microstructure_by_symbol=microstructure_by_symbol,
             auction_by_symbol=auction_by_symbol,
+            premarket_by_symbol=premarket_by_symbol,
+            trade_flow_by_symbol=trade_flow_by_symbol,
+            sector_by_symbol=sector_by_symbol,
         )
         metrics = factor_metrics(
             observations,

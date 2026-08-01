@@ -25,8 +25,11 @@ from app.services.intraday_factor_diagnostics import (
 )
 from app.services.intraday_hypotheses import (
     GAP_EXPERIMENT_KEY,
+    ORDER_FLOW_EXPERIMENT_KEY,
     assert_not_retired,
     gap_experiment_hypotheses,
+    order_flow_experiment_hypotheses,
+    order_flow_required_event_count,
     persist_hypotheses,
     retire_factor_version,
     retired_factor_versions,
@@ -187,6 +190,68 @@ def _declared_event_counts(
     return {str(row["factor_key"]): int(row["required"]) for row in rows}
 
 
+def _dataset_source(conn: Any, *, dataset_id: int) -> str:
+    """The single feed this snapshot was pinned to.
+
+    Side-channel features are keyed by source, and a snapshot that blended
+    feeds would silently mix them, so an unpinned dataset is refused here
+    rather than joined against the wrong rows.
+    """
+    row = conn.execute(
+        "SELECT integrity FROM research_dataset_manifests WHERE id = %s",
+        (dataset_id,),
+    ).fetchone()
+    integrity = (row or {}).get("integrity") or {}
+    source = integrity.get("pinned_source")
+    if not source or not integrity.get("single_source", True):
+        raise ValueError(
+            f"Dataset {dataset_id} is not pinned to a single feed, so its "
+            "premarket and trade-flow features cannot be matched to it."
+        )
+    return str(source)
+
+
+TRADE_FLOW_FEEDS = {"alpaca_sip": "sip", "alpaca_iex": "iex"}
+
+
+def _load_premarket(conn: Any, symbols: list[str], *, timeframe: str, source: str) -> dict:
+    """Premarket features keyed by symbol and session date."""
+    rows = conn.execute(
+        """
+        SELECT symbol, session_date, premarket_relative_volume, premarket_return,
+               premarket_range, premarket_gap, opening_gap,
+               gap_discovered_premarket, prior_regular_close, last_premarket_price
+        FROM intraday_premarket_features
+        WHERE symbol = ANY(%s) AND timeframe = %s AND source = %s
+        """,
+        ([item.upper() for item in symbols], timeframe, source),
+    ).fetchall()
+    output: dict[str, dict[Any, dict[str, Any]]] = {}
+    for row in rows:
+        record = dict(row)
+        output.setdefault(str(record["symbol"]).upper(), {})[record["session_date"]] = record
+    return output
+
+
+def _load_trade_flow(conn: Any, symbols: list[str], *, timeframe: str, feed: str) -> dict:
+    """Signed trade-flow features keyed by symbol and bar timestamp."""
+    rows = conn.execute(
+        """
+        SELECT symbol, timestamp, trade_count, signed_trade_imbalance,
+               signed_trade_count_imbalance, large_trade_share,
+               unclassified_share, effective_spread_bps
+        FROM intraday_trade_flow_features
+        WHERE symbol = ANY(%s) AND timeframe = %s AND feed = %s
+        """,
+        ([item.upper() for item in symbols], timeframe, feed),
+    ).fetchall()
+    output: dict[str, dict[Any, dict[str, Any]]] = {}
+    for row in rows:
+        record = dict(row)
+        output.setdefault(str(record["symbol"]).upper(), {})[record["timestamp"]] = record
+    return output
+
+
 def _stream_observations(
     conn: Any,
     *,
@@ -197,6 +262,8 @@ def _stream_observations(
     batch_size: int,
     microstructure_by_symbol: Any = None,
     auction_by_symbol: Any = None,
+    premarket_by_symbol: Any = None,
+    trade_flow_by_symbol: Any = None,
 ) -> dict[str, Any]:
     """Build every factor's observations without holding the universe in memory.
 
@@ -255,6 +322,8 @@ def _stream_observations(
                     timeframe=timeframe,
                     microstructure_by_symbol=microstructure_by_symbol,
                     auction_by_symbol=auction_by_symbol,
+                    premarket_by_symbol=premarket_by_symbol,
+                    trade_flow_by_symbol=trade_flow_by_symbol,
                 )
             )
         del candles
@@ -518,6 +587,21 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             factor_keys=keys,
             spec_hash=spec_hash,
         )
+        dataset_source = _dataset_source(conn, dataset_id=dataset_id)
+        premarket = _load_premarket(
+            conn, universe, timeframe=args.timeframe, source=dataset_source
+        )
+        trade_flow = _load_trade_flow(
+            conn,
+            universe,
+            timeframe=args.timeframe,
+            feed=TRADE_FLOW_FEEDS[dataset_source],
+        )
+        print(
+            f"  side channels: premarket {len(premarket)} symbols, "
+            f"trade flow {len(trade_flow)} symbols",
+            flush=True,
+        )
         streamed = _stream_observations(
             conn,
             dataset_id=dataset_id,
@@ -527,6 +611,8 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             batch_size=args.symbol_batch,
             microstructure_by_symbol=microstructure or None,
             auction_by_symbol=auctions or None,
+            premarket_by_symbol=premarket or None,
+            trade_flow_by_symbol=trade_flow or None,
         )
         result = evaluate_factor_discovery(
             {},
@@ -541,6 +627,8 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             cost_model=cost_model,
             microstructure_by_symbol=microstructure or None,
             auction_by_symbol=auctions or None,
+            premarket_by_symbol=premarket or None,
+            trade_flow_by_symbol=trade_flow or None,
             institutional_data_readiness=institutional_readiness,
             required_event_counts=_declared_event_counts(
                 conn, timeframe=args.timeframe, factor_keys=keys
@@ -615,6 +703,48 @@ def declare_experiment(args: argparse.Namespace) -> dict[str, Any]:
             "hypotheses": stored,
             "factor_keys": [item.factor_key for item in hypotheses],
             "fixed_parameters": dict(hypotheses[0].parameters),
+        }
+
+
+def declare_order_flow_experiment(args: argparse.Namespace) -> dict[str, Any]:
+    """Predeclare the bounded order-flow experiment: six hypotheses, six trials.
+
+    The required event count is derived from a minimum tradeable effect and a
+    declared dispersion, both fixed here before any observation is measured, so
+    a null result stays distinguishable from an underpowered one.
+    """
+    required = args.required_event_count or order_flow_required_event_count()
+    hypotheses = order_flow_experiment_hypotheses(required_event_count=required)
+    with connect() as conn:
+        stored = persist_hypotheses(
+            conn,
+            hypotheses,
+            experiment_key=ORDER_FLOW_EXPERIMENT_KEY,
+            timeframe=args.timeframe,
+            dataset_id=args.dataset_id,
+        )
+        declaration = declare_trials(
+            conn,
+            purpose=f"{ORDER_FLOW_EXPERIMENT_KEY}: bounded six-test order-flow experiment",
+            timeframe=args.timeframe,
+            factor_keys=[item.factor_key for item in hypotheses],
+            dataset_id=args.dataset_id,
+            hypothesis=(
+                "Gaps the premarket never priced revert, sustained signed trade "
+                "imbalance continues, and single-name flow against a calm sector "
+                "reverts; three families at 1 and 2 bar holds, at fixed "
+                "predeclared thresholds, on data the candles do not contain."
+            ),
+            protocol_version=FACTOR_DIAGNOSTICS_VERSION,
+        )
+        return {
+            "experiment_key": ORDER_FLOW_EXPERIMENT_KEY,
+            "declaration_id": int(declaration["id"]),
+            "already_declared": declaration["already_declared"],
+            "tests": len(hypotheses),
+            "required_event_count": required,
+            "hypotheses": stored,
+            "factor_keys": [item.factor_key for item in hypotheses],
         }
 
 
@@ -759,6 +889,7 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
             factor_keys=keys,
             spec_hash=str(source["frozen_spec_hash"]),
         )
+        confirmation_source = _dataset_source(conn, dataset_id=dataset_id)
         result = evaluate_forward_confirmation(
             forward,
             timeframe=str(source["timeframe"]),
@@ -766,6 +897,20 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
             cost_model=cost_model,
             microstructure_by_symbol=microstructure or None,
             auction_by_symbol=auctions or None,
+            premarket_by_symbol=_load_premarket(
+                conn,
+                list(forward),
+                timeframe=args.timeframe,
+                source=confirmation_source,
+            )
+            or None,
+            trade_flow_by_symbol=_load_trade_flow(
+                conn,
+                list(forward),
+                timeframe=args.timeframe,
+                feed=TRADE_FLOW_FEEDS[confirmation_source],
+            )
+            or None,
             institutional_data_readiness=institutional_readiness,
             effective_trials=trial_ledger["effective_trials"],
             trial_ledger=trial_ledger,
@@ -917,6 +1062,21 @@ def parser() -> argparse.ArgumentParser:
     experiment.add_argument("--dataset-id", type=int)
     experiment.add_argument("--required-event-count", type=int, default=850)
 
+    order_flow_experiment = commands.add_parser(
+        "declare-order-flow",
+        help=(
+            "Predeclare the bounded six-test order-flow experiment: premarket "
+            "discovery, signed trade imbalance and sector-relative flow."
+        ),
+    )
+    order_flow_experiment.add_argument("--timeframe", choices=("15m", "30m"), default="30m")
+    order_flow_experiment.add_argument("--dataset-id", type=int)
+    order_flow_experiment.add_argument(
+        "--required-event-count",
+        type=int,
+        help="Override the derived count. Omit to use the predeclared derivation.",
+    )
+
     retirement = commands.add_parser(
         "retire", help="Permanently retire a factor version, or list retirements."
     )
@@ -944,6 +1104,7 @@ COMMANDS = {
     "certify": certify,
     "declare": declare,
     "declare-experiment": declare_experiment,
+    "declare-order-flow": declare_order_flow_experiment,
     "retire": retire,
     "ledger": ledger,
     "discover": discover,

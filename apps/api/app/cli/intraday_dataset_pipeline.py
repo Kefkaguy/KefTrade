@@ -27,6 +27,7 @@ from app.services.intraday_dataset_quality import (
     dataset_quality_report,
     persist_quality_report,
 )
+from app.services.intraday_trade_flow_ingest import MAX_SESSIONS_PER_RUN
 from app.services.intraday_universe import UniverseRule, build_point_in_time_universe
 
 
@@ -193,6 +194,75 @@ def quality(args: argparse.Namespace) -> dict[str, Any]:
     return report
 
 
+def premarket(args: argparse.Namespace) -> dict[str, Any]:
+    """Premarket price discovery from bars already ingested."""
+    from app.services.intraday_premarket import build_premarket_dataset
+
+    with connect() as conn:
+        symbols = _universe_members(conn, args) if args.from_universe else _symbols(args.symbols)
+        print(f"premarket: {len(symbols)} symbols", flush=True)
+        return build_premarket_dataset(
+            conn,
+            symbols=symbols,
+            timeframe=args.timeframe,
+            source=feed_source(args.feed),
+        )
+
+
+def trade_flow(args: argparse.Namespace) -> dict[str, Any]:
+    """Bounded, checkpointed signed-trade-flow ingestion."""
+    from app.services.intraday_trade_flow_ingest import ingest_trade_flow
+
+    with connect() as conn:
+        symbols = _universe_members(conn, args) if args.from_universe else _symbols(args.symbols)
+        print(
+            f"trade flow: {len(symbols)} symbols, {args.start} to {args.end}",
+            flush=True,
+        )
+        return asyncio.run(
+            ingest_trade_flow(
+                conn,
+                symbols=symbols,
+                start=args.start,
+                end=args.end,
+                timeframe=args.timeframe,
+                feed=args.feed,
+                max_sessions=args.max_sessions,
+            )
+        )
+
+
+def flow_agreement(args: argparse.Namespace) -> dict[str, Any]:
+    """Measure the cheap classifier against Lee-Ready before trusting it."""
+    from app.services.intraday_trade_flow_ingest import measure_classifier_agreement
+
+    return asyncio.run(
+        measure_classifier_agreement(
+            symbol=args.symbol,
+            session=args.session,
+            feed=args.feed,
+            window_minutes=args.window_minutes,
+        )
+    )
+
+
+def sector_flow(args: argparse.Namespace) -> dict[str, Any]:
+    """Report how much of the universe has a usable sector peer group."""
+    from app.services.intraday_factor_diagnostics import (
+        load_dataset_candles,
+        sector_map,
+    )
+    from app.services.intraday_sector_flow import sector_flow_coverage
+
+    with connect() as conn:
+        candles = load_dataset_candles(
+            conn, dataset_id=args.dataset_id, timeframe=args.timeframe
+        )
+        return sector_flow_coverage(
+            candles, sector_by_symbol=sector_map(conn, list(candles))
+        )
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         description=(
@@ -265,6 +335,48 @@ def parser() -> argparse.ArgumentParser:
     features_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
     features_command.add_argument("--candle-limit", type=int, default=200_000)
 
+    premarket_command = commands.add_parser(
+        "premarket",
+        help="Premarket price discovery from the extended-hours bars already held.",
+    )
+    premarket_command.add_argument("--symbols")
+    premarket_command.add_argument("--from-universe", action="store_true")
+    premarket_command.add_argument("--universe-key")
+    premarket_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    premarket_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
+
+    trade_flow_command = commands.add_parser(
+        "trade-flow", help="Bounded, checkpointed signed-trade-flow ingestion."
+    )
+    trade_flow_command.add_argument("--symbols")
+    trade_flow_command.add_argument("--from-universe", action="store_true")
+    trade_flow_command.add_argument("--universe-key")
+    trade_flow_command.add_argument("--start", type=_date, required=True)
+    trade_flow_command.add_argument("--end", type=_date, required=True)
+    trade_flow_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    trade_flow_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
+    trade_flow_command.add_argument(
+        "--max-sessions",
+        type=int,
+        default=MAX_SESSIONS_PER_RUN,
+        help="Refuse to start beyond this many pending symbol-sessions.",
+    )
+
+    agreement_command = commands.add_parser(
+        "flow-agreement",
+        help="Measure the tick rule against Lee-Ready on one bounded window.",
+    )
+    agreement_command.add_argument("--symbol", required=True)
+    agreement_command.add_argument("--session", type=_date, required=True)
+    agreement_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
+    agreement_command.add_argument("--window-minutes", type=int, default=30)
+
+    sector_flow_command = commands.add_parser(
+        "sector-flow", help="Sector peer-group coverage for a snapshotted dataset."
+    )
+    sector_flow_command.add_argument("--dataset-id", type=int, required=True)
+    sector_flow_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+
     return root
 
 
@@ -274,6 +386,10 @@ COMMANDS = {
     "universe": universe,
     "snapshot": snapshot,
     "quality": quality,
+    "premarket": premarket,
+    "trade-flow": trade_flow,
+    "flow-agreement": flow_agreement,
+    "sector-flow": sector_flow,
 }
 
 

@@ -216,6 +216,221 @@ def gap_experiment_hypotheses(*, required_event_count: int = 850) -> list[Hypoth
 
 
 # ---------------------------------------------------------------------------
+# The second bounded experiment: order flow, again exactly six tests
+# ---------------------------------------------------------------------------
+
+ORDER_FLOW_EXPERIMENT_KEY = "bounded_order_flow_experiment_v1"
+
+# The required event count is derived from a minimum effect declared in
+# advance, not from an effect that was observed.  The first experiment's
+# power gate was briefly circular -- it asked how many events would be needed
+# to detect the effect the data happened to show, so a null effect demanded an
+# impossible sample and every genuine null read as "underpowered".  These
+# three constants are the fix: they are the smallest effect worth trading,
+# the dispersion it must be detected against, and the hurdle it must clear.
+MINIMUM_TRADEABLE_NET_BPS = 5.0
+DECLARED_OBSERVATION_DISPERSION_BPS = 60.0
+REQUIRED_T_STATISTIC = 3.0
+
+
+def order_flow_required_event_count(
+    *,
+    minimum_net_bps: float = MINIMUM_TRADEABLE_NET_BPS,
+    dispersion_bps: float = DECLARED_OBSERVATION_DISPERSION_BPS,
+    hurdle_t: float = REQUIRED_T_STATISTIC,
+    power_z: float = 0.841621,
+) -> int:
+    """Events needed to reach the t-hurdle on the smallest effect worth trading.
+
+    Both inputs are declared, so the answer is fixed before a single
+    observation is measured and a null result stays interpretable.
+    """
+    return int(round(((hurdle_t + power_z) * dispersion_bps / minimum_net_bps) ** 2 + 0.5))
+
+
+_ORDER_FLOW_INVALIDATION = (
+    "net stressed edge is not positive",
+    "day-clustered t-statistic below 3.0",
+    "block-bootstrap lower bound on net return is not positive",
+    "effect is confined to one quarter, one symbol or one volatility regime",
+    "qualifying event count below the predeclared requirement",
+    "the side channel the factor depends on is absent or incomplete",
+)
+_ORDER_FLOW_SUCCESS = (
+    "positive event-conditioned net return after stressed costs",
+    "day-clustered t-statistic of at least 3.0",
+    "false-discovery q-value at most 0.10 against the cumulative trial ledger",
+    "positive block-bootstrap lower confidence bound",
+    "stable direction across quarters and volatility regimes",
+)
+
+_ORDER_FLOW_PARAMETERS: dict[str, tuple[tuple[str, Any], ...]] = {
+    "premarket_undiscovered_gap_reversal": (
+        ("minimum_opening_gap", 0.003),
+        ("maximum_premarket_discovery_share", 0.35),
+        ("maximum_premarket_relative_volume", 1.0),
+        ("decision_bar_slot", "10:00"),
+        ("entry_bar_slot", "10:30"),
+    ),
+    "signed_trade_imbalance_continuation": (
+        ("minimum_signed_imbalance", 0.30),
+        ("minimum_trade_count", 200),
+        ("maximum_unclassified_share", 0.25),
+        ("classifier", "tick_rule_with_lee_ready_agreement_evidence"),
+    ),
+    "sector_relative_forced_flow_reversal": (
+        ("minimum_standardized_residual", 2.0),
+        ("minimum_excess_participation", 2.0),
+        ("minimum_sector_peers", 4),
+        ("peer_aggregate_excludes_the_symbol", True),
+    ),
+}
+
+_ORDER_FLOW_COMMON: tuple[tuple[str, Any], ...] = (
+    ("entry_price", "entry_bar_open"),
+    ("exit_price", "horizon_bar_close"),
+    ("forced_session_close_exit", True),
+    ("cost_scenario", "stressed_p90"),
+)
+
+_ORDER_FLOW_CLAIMS: dict[str, dict[str, str]] = {
+    "premarket_undiscovered_gap_reversal": {
+        "title": "Premarket-undiscovered gap reversal",
+        "forced_participant": (
+            "Opening-auction participants who must clear an overnight order "
+            "imbalance against whatever liquidity is present at 09:30, and the "
+            "index, ETF and stop-driven flow that is scheduled into that "
+            "auction regardless of price."
+        ),
+        "why_they_cannot_wait": (
+            "Auction orders are executed at the single clearing price the "
+            "auction produces. A participant mandated into the open has no "
+            "ability to wait for a better price, so when the premarket left the "
+            "gap unnegotiated the clearing price is set by who was present "
+            "rather than by what was learned."
+        ),
+        "how_the_flow_appears_in_data": (
+            "An opening gap of at least 30 bps where the premarket session "
+            "discovered at most 35 percent of it, on premarket volume at or "
+            "below the symbol's own trailing premarket baseline."
+        ),
+        "signal_timestamp": "09:30 ET open, with premarket features complete at 09:30",
+        "decision_timestamp": "10:00 ET, when the opening bar is complete",
+        "executable_entry_timestamp": "open of the 10:00 ET bar",
+        "expected_direction": "both",
+    },
+    "signed_trade_imbalance_continuation": {
+        "title": "Signed trade-imbalance continuation",
+        "forced_participant": (
+            "An institution working a large parent order to a same-day "
+            "completion target through a VWAP or percentage-of-volume "
+            "schedule."
+        ),
+        "why_they_cannot_wait": (
+            "The schedule is set by the mandate and the completion deadline, "
+            "not by the trader's read of price. While the parent is unfilled "
+            "its child orders keep crossing the spread in one direction, and "
+            "that demand for immediacy has to be paid for by the price."
+        ),
+        "how_the_flow_appears_in_data": (
+            "Signed trade imbalance of at least 0.30 in a 30-minute bar with "
+            "at least 200 prints and at most a quarter of volume unsignable. "
+            "The imbalance is signed by which side crossed the spread, which "
+            "no candle records at any resolution."
+        ),
+        "signal_timestamp": "close of the signal bar",
+        "decision_timestamp": "close of the signal bar, when its prints are complete",
+        "executable_entry_timestamp": "open of the following bar",
+        "expected_direction": "both",
+    },
+    "sector_relative_forced_flow_reversal": {
+        "title": "Sector-relative forced-flow reversal",
+        "forced_participant": (
+            "A single holder liquidating one position under a mandate -- fund "
+            "redemption, index deletion, or a risk limit breached on that name "
+            "alone -- while nothing has changed for the sector."
+        ),
+        "why_they_cannot_wait": (
+            "The liquidation is scheduled by the redemption or the limit, not "
+            "by price. Because the seller must complete regardless, they pay a "
+            "concession to whoever will take the other side, and that "
+            "concession is not information about value."
+        ),
+        "how_the_flow_appears_in_data": (
+            "A move at least two peer-dispersion units away from the sector "
+            "median at the same instant, with participation at least twice the "
+            "sector's, measured against a peer group of at least five names "
+            "that excludes the symbol itself."
+        ),
+        "signal_timestamp": "close of the signal bar",
+        "decision_timestamp": "close of the signal bar, when the peer cross-section is complete",
+        "executable_entry_timestamp": "open of the following bar",
+        "expected_direction": "both",
+    },
+}
+
+
+def _order_flow_hypothesis(
+    *,
+    family: str,
+    horizon_bars: int,
+    required_event_count: int,
+) -> Hypothesis:
+    claim = _ORDER_FLOW_CLAIMS[family]
+    return Hypothesis(
+        key=f"{ORDER_FLOW_EXPERIMENT_KEY}:{family}:{horizon_bars}bar",
+        factor_key=f"{family}_{horizon_bars}bar",
+        title=f"{claim['title']}, {horizon_bars}-bar hold",
+        forced_participant=claim["forced_participant"],
+        why_they_cannot_wait=claim["why_they_cannot_wait"],
+        how_the_flow_appears_in_data=claim["how_the_flow_appears_in_data"],
+        signal_timestamp=claim["signal_timestamp"],
+        decision_timestamp=claim["decision_timestamp"],
+        executable_entry_timestamp=claim["executable_entry_timestamp"],
+        exit_horizon=(
+            f"{horizon_bars} bar(s), exited at that bar's close; never carried "
+            "past the regular session close"
+        ),
+        # Both families are signed by the event, not by a fixed side: the score
+        # already carries the direction, so a declared "long" would be a claim
+        # about which events happen to occur rather than about the mechanism.
+        expected_direction=claim["expected_direction"],
+        universe="point-in-time liquid US equity membership at the observation timestamp",
+        cost_model="stressed p90 round-trip spread from the SIP execution-cost calibration",
+        required_event_count=required_event_count,
+        invalidation_conditions=_ORDER_FLOW_INVALIDATION,
+        success_criteria=_ORDER_FLOW_SUCCESS,
+        horizon_bars=horizon_bars,
+        parameters=_ORDER_FLOW_PARAMETERS[family] + _ORDER_FLOW_COMMON,
+    )
+
+
+def order_flow_experiment_hypotheses(
+    *, required_event_count: int | None = None
+) -> list[Hypothesis]:
+    """The six order-flow tests, and only these six.
+
+    Three families at two horizons.  Every one counts toward the cumulative
+    multiple-testing ledger whether or not it is reported, and the families
+    are declared together so a disappointing one cannot be dropped afterwards.
+    """
+    count = required_event_count or order_flow_required_event_count()
+    return [
+        _order_flow_hypothesis(
+            family=family,
+            horizon_bars=horizon_bars,
+            required_event_count=count,
+        )
+        for family in (
+            "premarket_undiscovered_gap_reversal",
+            "signed_trade_imbalance_continuation",
+            "sector_relative_forced_flow_reversal",
+        )
+        for horizon_bars in (1, 2)
+    ]
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 
