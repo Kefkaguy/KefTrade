@@ -12,7 +12,8 @@ The module contains no campaign, broker, order-submission, or UI code.
 from __future__ import annotations
 
 from datetime import UTC, date, datetime, time, timedelta
-from typing import Any, Sequence
+from collections import defaultdict
+from typing import Any, Callable, Sequence
 from zoneinfo import ZoneInfo
 
 import psycopg
@@ -226,6 +227,145 @@ async def ingest_trade_flow(
         "trades_fetched": sum(row.get("trades_fetched", 0) for row in results),
         "bars_written": sum(row.get("bars_written", 0) for row in completed),
         "failures": [row for row in results if row["status"] == "failed"][:20],
+    }
+
+
+def trade_flow_progress(
+    conn: psycopg.Connection,
+    *,
+    feed: str,
+    start: date,
+    end: date,
+) -> dict[str, Any]:
+    """Checkpoint progress for one declared ingestion window."""
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) FILTER (WHERE status = 'completed') AS completed_symbol_sessions,
+            COUNT(DISTINCT session_date) FILTER (WHERE status = 'completed') AS completed_sessions,
+            COUNT(DISTINCT symbol) FILTER (WHERE status = 'completed') AS completed_symbols,
+            COUNT(*) FILTER (WHERE status = 'failed') AS failed,
+            COUNT(*) FILTER (WHERE status = 'running') AS running,
+            MAX(updated_at) AS last_progress,
+            NOW() - MAX(updated_at) AS idle_for
+        FROM intraday_trade_ingest_checkpoints
+        WHERE feed = %s
+          AND ingest_version = %s
+          AND session_date BETWEEN %s AND %s
+        """,
+        (feed, TRADE_FLOW_VERSION, start, end),
+    ).fetchone()
+    return dict(row or {})
+
+
+def trade_flow_batches(
+    candidates: Sequence[tuple[str, date]],
+    already_completed: set[tuple[str, Any]],
+    *,
+    max_sessions: int = MAX_SESSIONS_PER_RUN,
+) -> list[tuple[date, list[str]]]:
+    """Plan safe single-date batches under the symbol-session ceiling."""
+    if max_sessions <= 0:
+        raise ValueError("max_sessions must be positive")
+
+    by_session: dict[date, list[str]] = defaultdict(list)
+    for symbol, session in candidates:
+        key = (str(symbol).upper(), session)
+        if key not in already_completed:
+            by_session[session].append(str(symbol).upper())
+
+    batches: list[tuple[date, list[str]]] = []
+    for session in sorted(by_session):
+        symbols = sorted(dict.fromkeys(by_session[session]))
+        for index in range(0, len(symbols), max_sessions):
+            batches.append((session, symbols[index:index + max_sessions]))
+    return batches
+
+
+async def ingest_trade_flow_auto(
+    conn: psycopg.Connection,
+    *,
+    symbols: Sequence[str],
+    start: date,
+    end: date,
+    timeframe: str = "30m",
+    feed: str = "sip",
+    target_completed: int | None = None,
+    max_batches: int | None = None,
+    max_sessions: int = MAX_SESSIONS_PER_RUN,
+    rate_limit_retries: int = 12,
+    rate_limit_base_sleep: float = 30.0,
+    request_pause_seconds: float = 1.0,
+    progress: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Run many bounded trade-flow batches until the declared target is reached."""
+    source = FEED_SOURCES[feed]
+    candidates = sessions_with_candles(
+        conn, symbols=symbols, start=start, end=end, timeframe=timeframe, source=source
+    )
+    completed = completed_sessions(conn, feed=feed)
+    batches = trade_flow_batches(candidates, completed, max_sessions=max_sessions)
+
+    initial_progress = trade_flow_progress(conn, feed=feed, start=start, end=end)
+    completed_count = int(initial_progress.get("completed_symbol_sessions") or 0)
+    target = target_completed if target_completed is not None else len(candidates)
+    target = min(target, len(candidates))
+
+    attempted_batches: list[dict[str, Any]] = []
+    for batch_number, (session, batch_symbols) in enumerate(batches, start=1):
+        if completed_count >= target:
+            break
+        if max_batches is not None and len(attempted_batches) >= max_batches:
+            break
+        if progress:
+            progress(
+                {
+                    "batch": batch_number,
+                    "planned_batches": len(batches),
+                    "session": session.isoformat(),
+                    "symbols": batch_symbols,
+                    "completed_symbol_sessions": completed_count,
+                    "target_completed": target,
+                }
+            )
+        report = await ingest_trade_flow(
+            conn,
+            symbols=batch_symbols,
+            start=session,
+            end=session,
+            timeframe=timeframe,
+            feed=feed,
+            max_sessions=max_sessions,
+            rate_limit_retries=rate_limit_retries,
+            rate_limit_base_sleep=rate_limit_base_sleep,
+            request_pause_seconds=request_pause_seconds,
+        )
+        attempted_batches.append(report)
+        completed_count = int(
+            trade_flow_progress(conn, feed=feed, start=start, end=end).get(
+                "completed_symbol_sessions"
+            )
+            or 0
+        )
+
+    final_progress = trade_flow_progress(conn, feed=feed, start=start, end=end)
+    return {
+        "trade_flow_version": TRADE_FLOW_VERSION,
+        "feed": feed,
+        "source": source,
+        "timeframe": timeframe,
+        "window": {"start": start.isoformat(), "end": end.isoformat()},
+        "symbol_sessions_available": len(candidates),
+        "target_completed": target,
+        "planned_batches": len(batches),
+        "batches_attempted": len(attempted_batches),
+        "final_progress": final_progress,
+        "target_reached": int(final_progress.get("completed_symbol_sessions") or 0) >= target,
+        "batch_failures": [
+            failure
+            for report in attempted_batches
+            for failure in report.get("failures", [])
+        ][:20],
     }
 
 

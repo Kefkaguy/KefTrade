@@ -235,6 +235,45 @@ def trade_flow(args: argparse.Namespace) -> dict[str, Any]:
         )
 
 
+def auto_trade_flow(args: argparse.Namespace) -> dict[str, Any]:
+    """Run checkpointed trade-flow ingestion in bounded batches."""
+    from app.services.intraday_trade_flow_ingest import ingest_trade_flow_auto
+
+    def report(batch: dict[str, Any]) -> None:
+        print(
+            "auto trade flow: "
+            f"{batch['completed_symbol_sessions']}/{batch['target_completed']} "
+            f"batch {batch['batch']}/{batch['planned_batches']} "
+            f"{batch['session']} symbols={len(batch['symbols'])}",
+            flush=True,
+        )
+
+    with connect() as conn:
+        symbols = _universe_members(conn, args) if args.from_universe else _symbols(args.symbols)
+        print(
+            f"auto trade flow: {len(symbols)} symbols, {args.start} to {args.end}, "
+            f"target={args.target_completed or 'all'}",
+            flush=True,
+        )
+        return asyncio.run(
+            ingest_trade_flow_auto(
+                conn,
+                symbols=symbols,
+                start=args.start,
+                end=args.end,
+                timeframe=args.timeframe,
+                feed=args.feed,
+                target_completed=args.target_completed,
+                max_batches=args.max_batches,
+                max_sessions=args.max_sessions,
+                rate_limit_retries=args.rate_limit_retries,
+                rate_limit_base_sleep=args.rate_limit_base_sleep,
+                request_pause_seconds=args.request_pause_seconds,
+                progress=report,
+            )
+        )
+
+
 def flow_agreement(args: argparse.Namespace) -> dict[str, Any]:
     """Measure the cheap classifier against Lee-Ready before trusting it."""
     from app.services.intraday_trade_flow_ingest import measure_classifier_agreement
@@ -366,6 +405,37 @@ def parser() -> argparse.ArgumentParser:
     trade_flow_command.add_argument("--rate-limit-base-sleep", type=float, default=60.0)
     trade_flow_command.add_argument("--request-pause-seconds", type=float, default=2.0)
 
+    auto_trade_flow_command = commands.add_parser(
+        "auto-trade-flow",
+        help="Automatically run bounded trade-flow batches until a target is reached.",
+    )
+    auto_trade_flow_command.add_argument("--symbols")
+    auto_trade_flow_command.add_argument("--from-universe", action="store_true")
+    auto_trade_flow_command.add_argument("--universe-key")
+    auto_trade_flow_command.add_argument("--start", type=_date, required=True)
+    auto_trade_flow_command.add_argument("--end", type=_date, required=True)
+    auto_trade_flow_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    auto_trade_flow_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
+    auto_trade_flow_command.add_argument(
+        "--target-completed",
+        type=int,
+        help="Stop once this many completed symbol-sessions exist in the window.",
+    )
+    auto_trade_flow_command.add_argument(
+        "--max-batches",
+        type=int,
+        help="Optional safety stop after this many bounded batches.",
+    )
+    auto_trade_flow_command.add_argument(
+        "--max-sessions",
+        type=int,
+        default=MAX_SESSIONS_PER_RUN,
+        help="Maximum pending symbol-sessions per inner ingestion batch.",
+    )
+    auto_trade_flow_command.add_argument("--rate-limit-retries", type=int, default=20)
+    auto_trade_flow_command.add_argument("--rate-limit-base-sleep", type=float, default=60.0)
+    auto_trade_flow_command.add_argument("--request-pause-seconds", type=float, default=2.0)
+
     agreement_command = commands.add_parser(
         "flow-agreement",
         help="Measure the tick rule against Lee-Ready on one bounded window.",
@@ -392,6 +462,7 @@ COMMANDS = {
     "quality": quality,
     "premarket": premarket,
     "trade-flow": trade_flow,
+    "auto-trade-flow": auto_trade_flow,
     "flow-agreement": flow_agreement,
     "sector-flow": sector_flow,
 }
