@@ -424,8 +424,8 @@ def _stream_observations(
     calendar: dict[str, Any] = {"session_shapes": {}}
 
     step = max(1, batch_size)
-    for start in range(0, len(universe), step):
-        batch = universe[start : start + step]
+    for batch_start in range(0, len(universe), step):
+        batch = universe[batch_start : batch_start + step]
         candles, _ = load_dataset_candles(
             conn,
             dataset_id=dataset_id,
@@ -438,7 +438,10 @@ def _stream_observations(
         )
         if not candles:
             continue
-        print(f"  observations: {min(start + step, len(universe))}/{len(universe)} symbols", flush=True)
+        print(
+            f"  observations: {min(batch_start + step, len(universe))}/{len(universe)} symbols",
+            flush=True,
+        )
         for symbol, rows in candles.items():
             symbols_with_rows.add(symbol)
             candle_rows += len(rows)
