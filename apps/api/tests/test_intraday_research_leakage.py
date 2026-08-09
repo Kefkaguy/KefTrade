@@ -124,6 +124,22 @@ def test_every_shipped_factor_survives_the_leakage_audit():
         assert audit["factors"][key]["status"] == "audited", key
 
 
+def test_audit_can_use_explicit_side_channel_cut_points():
+    candles = market(sessions=80)
+    explicit_cut = sorted({row["timestamp"] for row in candles["SPY"]})[120]
+
+    audit = audit_factor_leakage(
+        FACTOR_SPECS,
+        candles,
+        timeframe="30m",
+        factor_keys=["first_to_last_half_hour_market_momentum"],
+        cut_points=[explicit_cut],
+    )
+
+    assert audit["cut_points"] == [str(explicit_cut)]
+    assert audit["passed"] is True
+
+
 def test_the_audit_catches_a_builder_that_reads_its_own_future():
     report = future_perturbation_report(
         leaky_observations,

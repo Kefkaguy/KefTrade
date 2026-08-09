@@ -291,6 +291,24 @@ def _load_trade_flow(
     return output
 
 
+def _side_channel_cut_points(
+    rows_by_symbol: dict[str, dict[Any, dict[str, Any]]] | None,
+    *,
+    fractions: tuple[float, ...] = (0.25, 0.5, 0.75),
+) -> list[datetime]:
+    """Choose leakage cuts from the same side-channel window being audited."""
+    timestamps = sorted(
+        {
+            timestamp
+            for rows_by_timestamp in (rows_by_symbol or {}).values()
+            for timestamp in rows_by_timestamp
+        }
+    )
+    if len(timestamps) < 10:
+        return []
+    return [timestamps[int(len(timestamps) * fraction)] for fraction in fractions]
+
+
 def needs_peer_cross_section(spec: Any) -> bool:
     """Does this factor's score depend on other symbols at the same instant?"""
     return spec.factor_type == "cross_sectional" or spec.requires_sector_context
@@ -643,6 +661,7 @@ def certify(args: argparse.Namespace) -> dict[str, Any]:
             candles,
             timeframe=args.timeframe,
             factor_keys=auditable,
+            cut_points=_side_channel_cut_points(trade_flow) if requested_v2 else None,
             trade_imbalance_calibration=calibration,
             trade_flow_by_symbol=trade_flow or None,
         )

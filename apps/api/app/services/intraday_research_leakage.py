@@ -223,11 +223,14 @@ def audit_factor_leakage(
     timeframe: str,
     factor_keys: Sequence[str],
     cut_fractions: Sequence[float] = (0.25, 0.5, 0.75),
+    cut_points: Sequence[datetime] | None = None,
     seed: int = 20260730,
     **builder_kwargs: Any,
 ) -> dict[str, Any]:
     """Run the timing contract and perturbation experiment for every factor."""
-    cuts = _cut_points(candles_by_symbol, fractions=cut_fractions)
+    cuts = list(cut_points) if cut_points is not None else _cut_points(
+        candles_by_symbol, fractions=cut_fractions
+    )
     factors: dict[str, Any] = {}
     for key in factor_keys:
         spec = specs[key]
