@@ -214,6 +214,10 @@ def _dataset_source(conn: Any, *, dataset_id: int) -> str:
 
 
 TRADE_FLOW_FEEDS = {"alpaca_sip": "sip", "alpaca_iex": "iex"}
+SIGNED_TRADE_IMBALANCE_V2_KEYS = {
+    "signed_trade_imbalance_continuation_v2_1bar",
+    "signed_trade_imbalance_continuation_v2_2bar",
+}
 
 
 def _load_premarket(conn: Any, symbols: list[str], *, timeframe: str, source: str) -> dict:
@@ -530,6 +534,48 @@ def certify(args: argparse.Namespace) -> dict[str, Any]:
     keys = _factor_keys(args.factors)
     with connect() as conn:
         dataset_id = _dataset_id(conn, args.dataset_id)
+        manifest = dict(
+            conn.execute(
+                "SELECT * FROM research_dataset_manifests WHERE id = %s", (dataset_id,)
+            ).fetchone()
+            or {}
+        )
+        requested_v2 = bool(set(keys) & SIGNED_TRADE_IMBALANCE_V2_KEYS)
+        calibration = None
+        calibration_spec = None
+        if requested_v2:
+            if set(keys) - SIGNED_TRADE_IMBALANCE_V2_KEYS:
+                raise ValueError(
+                    "The signed-trade v2 protocol is a bounded signed-flow-only "
+                    "certification. Do not mix other families into this run."
+                )
+            if not args.trade_imbalance_calibration_id:
+                raise ValueError(
+                    "Signed-trade v2 requires --trade-imbalance-calibration-id."
+                )
+            calibration = load_calibration(
+                conn, args.trade_imbalance_calibration_id, require_ready=True
+            )
+            if calibration["feed"] != TRADE_FLOW_FEEDS[
+                _dataset_source(conn, dataset_id=dataset_id)
+            ]:
+                raise ValueError("Calibration and certification dataset use different feeds.")
+            if manifest.get("window_end") <= calibration["window_end"]:
+                raise ValueError(
+                    "Certification has no data strictly after the calibration window. "
+                    "Use the immutable snapshot built from later trade flow."
+                )
+            calibration_spec = {
+                "calibration_id": int(calibration["id"]),
+                "dataset_hash": calibration["dataset_hash"],
+                "specification_hash": calibration["specification_hash"],
+                "window_end": calibration["window_end"],
+                "threshold": dict(calibration["report"]).get("threshold"),
+            }
+        elif args.trade_imbalance_calibration_id:
+            raise ValueError(
+                "--trade-imbalance-calibration-id is only valid for signed-trade v2 factors."
+            )
         # Calendar integrity is a property of every row, so it is measured over
         # the whole dataset in SQL.  The leakage experiment is a mechanical
         # invariance check on the builders, so it runs on a bounded, recorded
@@ -581,6 +627,7 @@ def certify(args: argparse.Namespace) -> dict[str, Any]:
             candles,
             timeframe=args.timeframe,
             factor_keys=auditable,
+            trade_imbalance_calibration=calibration,
         )
         stored = persist_certification(
             conn,
@@ -608,6 +655,7 @@ def certify(args: argparse.Namespace) -> dict[str, Any]:
             "session_calendar_audit": calendar,
             "controls": controls,
             "leakage": leakage,
+            "trade_imbalance_calibration": calibration_spec,
             "factors_excluded_from_leakage_audit": sorted(set(keys) - set(auditable)),
         }
 
@@ -685,16 +733,12 @@ def discover(args: argparse.Namespace) -> dict[str, Any]:
             ).fetchone()
             or {}
         )
-        v2_keys = {
-            "signed_trade_imbalance_continuation_v2_1bar",
-            "signed_trade_imbalance_continuation_v2_2bar",
-        }
-        requested_v2 = bool(set(keys) & v2_keys)
+        requested_v2 = bool(set(keys) & SIGNED_TRADE_IMBALANCE_V2_KEYS)
         calibration = None
         calibration_spec = None
         discovery_start = None
         if requested_v2:
-            if set(keys) - v2_keys:
+            if set(keys) - SIGNED_TRADE_IMBALANCE_V2_KEYS:
                 raise ValueError(
                     "The signed-trade v2 protocol is a bounded signed-flow-only "
                     "discovery. Do not mix other families into this run."
@@ -1196,6 +1240,14 @@ def parser() -> argparse.ArgumentParser:
     certification.add_argument("--symbols")
     certification.add_argument("--max-symbols", type=int, default=200)
     certification.add_argument("--factors")
+    certification.add_argument(
+        "--trade-imbalance-calibration-id",
+        type=int,
+        help=(
+            "Frozen return-blind calibration required for signed-trade "
+            "imbalance v2 certification."
+        ),
+    )
     certification.add_argument("--control-sessions", type=int, default=260)
     certification.add_argument(
         "--audit-symbols",
