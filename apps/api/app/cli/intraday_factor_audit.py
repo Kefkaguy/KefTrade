@@ -543,6 +543,7 @@ def certify(args: argparse.Namespace) -> dict[str, Any]:
         requested_v2 = bool(set(keys) & SIGNED_TRADE_IMBALANCE_V2_KEYS)
         calibration = None
         calibration_spec = None
+        certification_start = None
         if requested_v2:
             if set(keys) - SIGNED_TRADE_IMBALANCE_V2_KEYS:
                 raise ValueError(
@@ -565,6 +566,7 @@ def certify(args: argparse.Namespace) -> dict[str, Any]:
                     "Certification has no data strictly after the calibration window. "
                     "Use the immutable snapshot built from later trade flow."
                 )
+            certification_start = calibration["window_end"] + timedelta(microseconds=1)
             calibration_spec = {
                 "calibration_id": int(calibration["id"]),
                 "dataset_hash": calibration["dataset_hash"],
@@ -608,6 +610,20 @@ def certify(args: argparse.Namespace) -> dict[str, Any]:
         )
         if not candles:
             raise ValueError("The selected frozen dataset contains no candles.")
+        dataset_source = _dataset_source(conn, dataset_id=dataset_id)
+        trade_flow = (
+            _load_trade_flow(
+                conn,
+                list(candles),
+                timeframe=args.timeframe,
+                feed=TRADE_FLOW_FEEDS[dataset_source],
+                start=certification_start,
+                end=manifest.get("window_end"),
+                dataset_id=dataset_id,
+            )
+            if requested_v2
+            else None
+        )
         controls = certify_measurement_instrument(
             FACTOR_SPECS,
             timeframe=args.timeframe,
@@ -628,6 +644,7 @@ def certify(args: argparse.Namespace) -> dict[str, Any]:
             timeframe=args.timeframe,
             factor_keys=auditable,
             trade_imbalance_calibration=calibration,
+            trade_flow_by_symbol=trade_flow or None,
         )
         stored = persist_certification(
             conn,
