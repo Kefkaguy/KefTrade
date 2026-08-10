@@ -301,17 +301,27 @@ def normalize_order(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def normalize_fill(payload: dict[str, Any]) -> dict[str, Any]:
+    raw_side = str(payload.get("side") or "").lower()
     return {
         "broker_order_id": str(payload.get("order_id") or ""),
         "broker_activity_id": str(payload.get("id") or ""),
         "symbol": str(payload.get("symbol") or "").upper(),
-        "side": str(payload.get("side") or "").lower(),
+        "side": normalize_fill_side(raw_side),
+        "raw_side": raw_side,
         "quantity": decimal(payload.get("qty")),
         "price": decimal(payload.get("price")),
         "cumulative_quantity": decimal(payload.get("cum_qty")) if payload.get("cum_qty") is not None else None,
         "leaves_quantity": decimal(payload.get("leaves_qty")) if payload.get("leaves_qty") is not None else None,
         "transaction_at": timestamp(payload.get("transaction_time")),
     }
+
+
+def normalize_fill_side(raw_side: str) -> str:
+    if raw_side in {"buy", "buy_to_cover"}:
+        return "buy"
+    if raw_side in {"sell", "sell_short"}:
+        return "sell"
+    return raw_side
 
 
 def normalize_position(payload: dict[str, Any]) -> dict[str, Any]:
