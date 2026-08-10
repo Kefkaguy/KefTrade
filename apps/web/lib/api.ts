@@ -3272,6 +3272,8 @@ export type IntradayPaperLabMonitor = {
     awaiting_broker_sync_items: number;
   };
   broker_sync: Record<string, any>;
+  market_data_feed?: string;
+  market_data_note?: string;
 };
 
 export function getIntradayPaperLabMonitor(experimentId = 1) {

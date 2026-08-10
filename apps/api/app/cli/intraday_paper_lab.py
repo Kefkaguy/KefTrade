@@ -59,6 +59,7 @@ def cycle(args: argparse.Namespace) -> dict:
                 submit=args.submit,
                 confirm_paper=args.confirm_paper,
                 bar_start=args.bar_start,
+                feed=args.feed,
             )
         )
 
@@ -72,6 +73,7 @@ def loop(args: argparse.Namespace) -> dict:
                 submit=args.submit,
                 confirm_paper=args.confirm_paper,
                 poll_seconds=args.poll_seconds,
+                feed=args.feed,
             )
         )
 
@@ -121,12 +123,14 @@ def parser() -> argparse.ArgumentParser:
     cycle_command = commands.add_parser("run-cycle")
     cycle_command.add_argument("--experiment-id", type=int, required=True)
     cycle_command.add_argument("--bar-start", type=_timestamp)
+    cycle_command.add_argument("--feed", choices=("iex", "sip"), default=None)
     cycle_command.add_argument("--submit", action="store_true")
     cycle_command.add_argument("--confirm-paper", action="store_true")
 
     loop_command = commands.add_parser("run-loop")
     loop_command.add_argument("--experiment-id", type=int, required=True)
     loop_command.add_argument("--poll-seconds", type=int, default=300)
+    loop_command.add_argument("--feed", choices=("iex", "sip"), default=None)
     loop_command.add_argument("--submit", action="store_true")
     loop_command.add_argument("--confirm-paper", action="store_true")
 

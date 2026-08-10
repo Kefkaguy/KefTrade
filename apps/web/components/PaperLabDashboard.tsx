@@ -119,11 +119,13 @@ export function PaperLabDashboard({ initial, experimentId = 1, initialError = nu
       <div className="paperStatusStrip">
         <span>Trading date <strong>{String(experiment.trading_date ?? "—")}</strong></span>
         <span>Timeframe <strong>{String(experiment.timeframe ?? "30m")}</strong></span>
+        <span>Data feed <strong>{String(snapshot?.market_data_feed ?? experiment.config?.market_data_feed ?? "iex")}</strong></span>
         <span>Symbols <strong>{Array.isArray(experiment.symbols) ? experiment.symbols.length : "—"}</strong></span>
         <span>Broker sync <strong>{snapshot?.broker_sync?.status ? String(snapshot.broker_sync.status) : "not synced"}</strong></span>
         <span>Awaiting sync <strong>{snapshot?.pnl?.awaiting_broker_sync_items ?? 0}</strong></span>
         <span>Page refresh <strong>{lastRefresh ? dateTime(lastRefresh.toISOString()) : "—"}</strong></span>
       </div>
+      {snapshot?.market_data_note ? <div className="paperAlert">{snapshot.market_data_note}</div> : null}
 
       <div className="paperGridTwo">
         <section className="paperPanel">

@@ -30,6 +30,8 @@ REGULAR_OPEN = time(9, 30)
 REGULAR_CLOSE = time(16, 0)
 LAST_ENTRY_TIME = time(15, 30)
 TIMEFRAME_MINUTES = {"30m": 30}
+PAPER_LAB_DEFAULT_FEED = "iex"
+PAPER_LAB_ALLOWED_FEEDS = {"iex", "sip"}
 
 
 def _json_safe(value: Any) -> Any:
@@ -110,6 +112,8 @@ def create_experiment(
         "market_hours_only": True,
         "calibration_id": calibration_id,
         "threshold": threshold,
+        "market_data_feed": PAPER_LAB_DEFAULT_FEED,
+        "feed_limitation": "IEX fallback is for fake-money observation only; it is not equivalent to SIP-calibrated research evidence.",
     }
     row = conn.execute(
         """
@@ -294,10 +298,13 @@ async def run_cycle(
     confirm_paper: bool,
     now: datetime | None = None,
     bar_start: datetime | None = None,
-    feed: str = "sip",
+    feed: str | None = None,
 ) -> dict[str, Any]:
     experiment = load_lab_experiment(conn, experiment_id)
     config = dict(experiment["config"] or {})
+    selected_feed = (feed or config.get("market_data_feed") or PAPER_LAB_DEFAULT_FEED).lower()
+    if selected_feed not in PAPER_LAB_ALLOWED_FEEDS:
+        raise ValueError(f"Unsupported paper lab feed: {selected_feed}.")
     if submit and not confirm_paper:
         raise ValueError("Submitting requires --confirm-paper.")
     if submit and settings.alpaca_paper_base_url.rstrip("/") != "https://paper-api.alpaca.markets":
@@ -355,7 +362,7 @@ async def run_cycle(
             continue
         try:
             flow = await _bar_trade_flow(
-                symbol, bar_start=signal_start, bar_end=signal_end, feed=feed
+                symbol, bar_start=signal_start, bar_end=signal_end, feed=selected_feed
             )
         except Exception as error:  # noqa: BLE001 - lab keeps processing other symbols
             decisions.append(
@@ -423,6 +430,7 @@ async def run_cycle(
         "entries_or_skips": len(decisions),
         "submitted_entries": sum(1 for row in decisions if row.get("client_order_id")),
         "exits": exits,
+        "market_data_feed": selected_feed,
     }
 
 
@@ -732,6 +740,7 @@ async def run_loop(
     submit: bool,
     confirm_paper: bool,
     poll_seconds: int = 300,
+    feed: str | None = None,
 ) -> dict[str, Any]:
     experiment = load_lab_experiment(conn, experiment_id)
     session_close = _utc(experiment["trading_date"], REGULAR_CLOSE) + timedelta(minutes=10)
@@ -747,6 +756,7 @@ async def run_loop(
                     submit=submit,
                     confirm_paper=confirm_paper,
                     bar_start=selected[0],
+                    feed=feed,
                 )
             )
             seen_bars.add(selected[0])
@@ -777,6 +787,8 @@ async def run_loop(
 
 def monitor(conn: psycopg.Connection, *, experiment_id: int) -> dict[str, Any]:
     experiment = load_lab_experiment(conn, experiment_id)
+    config = dict(experiment.get("config") or {})
+    market_data_feed = str(config.get("market_data_feed") or PAPER_LAB_DEFAULT_FEED).lower()
     summary = conn.execute(
         """
         SELECT
@@ -914,4 +926,6 @@ def monitor(conn: psycopg.Connection, *, experiment_id: int) -> dict[str, Any]:
             "awaiting_broker_sync_items": awaiting_sync,
         },
         "broker_sync": dict(latest_sync or {}),
+        "market_data_feed": market_data_feed,
+        "market_data_note": "IEX paper-lab feed avoids SIP entitlement errors but is not equivalent to SIP-calibrated research evidence." if market_data_feed == "iex" else "SIP feed requires current/recent SIP market-data entitlement.",
     }
