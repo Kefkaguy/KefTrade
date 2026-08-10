@@ -11,6 +11,7 @@ The module contains no campaign, broker, order-submission, or UI code.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, date, datetime, time, timedelta
 from collections import defaultdict
 from typing import Any, Callable, Sequence
@@ -293,6 +294,7 @@ async def ingest_trade_flow_auto(
     target_completed: int | None = None,
     max_batches: int | None = None,
     max_sessions: int = MAX_SESSIONS_PER_RUN,
+    parallel_workers: int = 1,
     rate_limit_retries: int = 12,
     rate_limit_base_sleep: float = 30.0,
     request_pause_seconds: float = 1.0,
@@ -310,6 +312,28 @@ async def ingest_trade_flow_auto(
     completed_count = int(initial_progress.get("completed_symbol_sessions") or 0)
     target = target_completed if target_completed is not None else len(candidates)
     target = min(target, len(candidates))
+
+    if parallel_workers <= 0:
+        raise ValueError("parallel_workers must be positive")
+    if parallel_workers > 1:
+        return await _ingest_trade_flow_auto_parallel(
+            symbols=symbols,
+            start=start,
+            end=end,
+            timeframe=timeframe,
+            feed=feed,
+            source=source,
+            batches=batches,
+            candidates_count=len(candidates),
+            target=target,
+            max_batches=max_batches,
+            max_sessions=max_sessions,
+            parallel_workers=parallel_workers,
+            rate_limit_retries=rate_limit_retries,
+            rate_limit_base_sleep=rate_limit_base_sleep,
+            request_pause_seconds=request_pause_seconds,
+            progress=progress,
+        )
 
     attempted_batches: list[dict[str, Any]] = []
     for batch_number, (session, batch_symbols) in enumerate(batches, start=1):
@@ -359,6 +383,162 @@ async def ingest_trade_flow_auto(
         "target_completed": target,
         "planned_batches": len(batches),
         "batches_attempted": len(attempted_batches),
+        "final_progress": final_progress,
+        "target_reached": int(final_progress.get("completed_symbol_sessions") or 0) >= target,
+        "batch_failures": [
+            failure
+            for report in attempted_batches
+            for failure in report.get("failures", [])
+        ][:20],
+    }
+
+
+async def _ingest_trade_flow_auto_parallel(
+    *,
+    symbols: Sequence[str],
+    start: date,
+    end: date,
+    timeframe: str,
+    feed: str,
+    source: str,
+    batches: Sequence[tuple[date, list[str]]],
+    candidates_count: int,
+    target: int,
+    max_batches: int | None,
+    max_sessions: int,
+    parallel_workers: int,
+    rate_limit_retries: int,
+    rate_limit_base_sleep: float,
+    request_pause_seconds: float,
+    progress: Callable[[dict[str, Any]], None] | None,
+) -> dict[str, Any]:
+    """Run bounded batches concurrently, with one DB connection per worker.
+
+    This uses the higher Alpaca API allowance without sharing a psycopg
+    connection across tasks.  The bound is deliberately at the batch level:
+    each worker still folds one symbol-session at a time, so memory remains
+    capped by the largest active symbol-session, not the whole window.
+    """
+    from app.db import connect
+
+    selected_batches = list(enumerate(batches, start=1))
+    if max_batches is not None:
+        selected_batches = selected_batches[:max_batches]
+
+    queue: asyncio.Queue[tuple[int, date, list[str]]] = asyncio.Queue()
+    for batch_number, (session, batch_symbols) in selected_batches:
+        queue.put_nowait((batch_number, session, batch_symbols))
+
+    attempted_batches: list[dict[str, Any]] = []
+    stop = asyncio.Event()
+
+    def current_completed() -> int:
+        with connect() as progress_conn:
+            row = trade_flow_progress(progress_conn, feed=feed, start=start, end=end)
+        return int(row.get("completed_symbol_sessions") or 0)
+
+    async def worker(worker_id: int) -> None:
+        while not stop.is_set():
+            try:
+                batch_number, session, batch_symbols = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            try:
+                completed_count = current_completed()
+                if completed_count >= target:
+                    stop.set()
+                    return
+                if progress:
+                    progress(
+                        {
+                            "status": "starting",
+                            "worker": worker_id,
+                            "batch": batch_number,
+                            "planned_batches": len(batches),
+                            "session": session.isoformat(),
+                            "symbols": batch_symbols,
+                            "completed_symbol_sessions": completed_count,
+                            "target_completed": target,
+                        }
+                    )
+                with connect() as batch_conn:
+                    report = await ingest_trade_flow(
+                        batch_conn,
+                        symbols=batch_symbols,
+                        start=session,
+                        end=session,
+                        timeframe=timeframe,
+                        feed=feed,
+                        max_sessions=max_sessions,
+                        rate_limit_retries=rate_limit_retries,
+                        rate_limit_base_sleep=rate_limit_base_sleep,
+                        request_pause_seconds=request_pause_seconds,
+                    )
+                attempted_batches.append(report)
+                completed_count = current_completed()
+                if progress:
+                    progress(
+                        {
+                            "status": "completed",
+                            "worker": worker_id,
+                            "batch": batch_number,
+                            "planned_batches": len(batches),
+                            "session": session.isoformat(),
+                            "symbols": batch_symbols,
+                            "completed_symbol_sessions": completed_count,
+                            "target_completed": target,
+                        }
+                    )
+                if completed_count >= target:
+                    stop.set()
+            except Exception as error:  # noqa: BLE001 - batch failure is reported
+                attempted_batches.append(
+                    {
+                        "symbol_sessions_attempted": len(batch_symbols),
+                        "symbol_sessions_completed": 0,
+                        "failures": [
+                            {
+                                "session_date": session,
+                                "symbols": batch_symbols,
+                                "status": "failed",
+                                "error": str(error)[:500],
+                            }
+                        ],
+                    }
+                )
+                if progress:
+                    progress(
+                        {
+                            "status": "failed",
+                            "worker": worker_id,
+                            "batch": batch_number,
+                            "planned_batches": len(batches),
+                            "session": session.isoformat(),
+                            "symbols": batch_symbols,
+                            "completed_symbol_sessions": current_completed(),
+                            "target_completed": target,
+                            "error": str(error)[:160],
+                        }
+                    )
+            finally:
+                queue.task_done()
+
+    worker_count = min(parallel_workers, max(1, len(selected_batches)))
+    await asyncio.gather(*(worker(worker_id) for worker_id in range(1, worker_count + 1)))
+
+    with connect() as final_conn:
+        final_progress = trade_flow_progress(final_conn, feed=feed, start=start, end=end)
+    return {
+        "trade_flow_version": TRADE_FLOW_VERSION,
+        "feed": feed,
+        "source": source,
+        "timeframe": timeframe,
+        "window": {"start": start.isoformat(), "end": end.isoformat()},
+        "symbol_sessions_available": candidates_count,
+        "target_completed": target,
+        "planned_batches": len(batches),
+        "batches_attempted": len(attempted_batches),
+        "parallel_workers": worker_count,
         "final_progress": final_progress,
         "target_reached": int(final_progress.get("completed_symbol_sessions") or 0) >= target,
         "batch_failures": [

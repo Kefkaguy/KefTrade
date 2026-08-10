@@ -240,11 +240,17 @@ def auto_trade_flow(args: argparse.Namespace) -> dict[str, Any]:
     from app.services.intraday_trade_flow_ingest import ingest_trade_flow_auto
 
     def report(batch: dict[str, Any]) -> None:
+        status = batch.get("status")
+        status_text = f" {status}" if status else ""
+        worker = batch.get("worker")
+        worker_text = f" worker={worker}" if worker else ""
+        error = batch.get("error")
+        error_text = f" error={error}" if error else ""
         print(
             "auto trade flow: "
             f"{batch['completed_symbol_sessions']}/{batch['target_completed']} "
-            f"batch {batch['batch']}/{batch['planned_batches']} "
-            f"{batch['session']} symbols={len(batch['symbols'])}",
+            f"batch {batch['batch']}/{batch['planned_batches']}{status_text}{worker_text} "
+            f"{batch['session']} symbols={len(batch['symbols'])}{error_text}",
             flush=True,
         )
 
@@ -252,7 +258,7 @@ def auto_trade_flow(args: argparse.Namespace) -> dict[str, Any]:
         symbols = _universe_members(conn, args) if args.from_universe else _symbols(args.symbols)
         print(
             f"auto trade flow: {len(symbols)} symbols, {args.start} to {args.end}, "
-            f"target={args.target_completed or 'all'}",
+            f"target={args.target_completed or 'all'}, workers={args.parallel_workers}",
             flush=True,
         )
         return asyncio.run(
@@ -266,6 +272,7 @@ def auto_trade_flow(args: argparse.Namespace) -> dict[str, Any]:
                 target_completed=args.target_completed,
                 max_batches=args.max_batches,
                 max_sessions=args.max_sessions,
+                parallel_workers=args.parallel_workers,
                 rate_limit_retries=args.rate_limit_retries,
                 rate_limit_base_sleep=args.rate_limit_base_sleep,
                 request_pause_seconds=args.request_pause_seconds,
@@ -431,6 +438,15 @@ def parser() -> argparse.ArgumentParser:
         type=int,
         default=MAX_SESSIONS_PER_RUN,
         help="Maximum pending symbol-sessions per inner ingestion batch.",
+    )
+    auto_trade_flow_command.add_argument(
+        "--parallel-workers",
+        type=int,
+        default=1,
+        help=(
+            "Run this many bounded ingestion batches at the same time. "
+            "Use cautiously because each worker can process a high-volume symbol-session."
+        ),
     )
     auto_trade_flow_command.add_argument("--rate-limit-retries", type=int, default=20)
     auto_trade_flow_command.add_argument("--rate-limit-base-sleep", type=float, default=60.0)
