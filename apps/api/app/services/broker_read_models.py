@@ -207,7 +207,7 @@ def broker_orders(conn: psycopg.Connection, limit: int = 100) -> list[dict[str, 
 
 
 def broker_positions(conn: psycopg.Connection) -> list[dict[str, Any]]:
-    return rows(conn, "SELECT * FROM broker_positions WHERE quantity > 0 ORDER BY symbol")
+    return rows(conn, "SELECT * FROM broker_positions WHERE quantity <> 0 ORDER BY symbol")
 
 
 def broker_reconciliation(conn: psycopg.Connection) -> dict[str, Any]:

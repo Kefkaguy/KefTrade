@@ -1,4 +1,4 @@
-from app.services.broker_sync import normalize_fill
+from app.services.broker_sync import normalize_fill, normalize_position
 
 
 def test_normalize_fill_maps_alpaca_short_activity_side() -> None:
@@ -35,3 +35,19 @@ def test_normalize_fill_maps_alpaca_cover_activity_side() -> None:
 
     assert row["side"] == "buy"
     assert row["raw_side"] == "buy_to_cover"
+
+
+def test_normalize_position_preserves_signed_short_quantity() -> None:
+    row = normalize_position(
+        {
+            "symbol": "C",
+            "qty": "-1",
+            "avg_entry_price": "134.97",
+            "market_value": "-134.97",
+            "unrealized_pl": "0",
+        }
+    )
+
+    assert row["symbol"] == "C"
+    assert row["quantity"] < 0
+    assert row["market_value"] > 0
