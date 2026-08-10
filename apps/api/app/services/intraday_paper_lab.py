@@ -95,9 +95,18 @@ def create_experiment(
     max_open_positions: int = 25,
     quantity: int = 1,
     allow_shorts: bool = True,
+    feed: str = PAPER_LAB_DEFAULT_FEED,
 ) -> dict[str, Any]:
     calibration = load_calibration(conn, calibration_id, require_ready=True)
+    selected_feed = feed.lower()
+    if selected_feed not in PAPER_LAB_ALLOWED_FEEDS:
+        raise ValueError(f"Unsupported paper lab feed: {selected_feed}.")
     threshold = float(dict(calibration["report"]).get("threshold", {})["global_rounded_up"])
+    feed_limitation = (
+        "IEX fallback is for fake-money observation only; it is not equivalent to SIP-calibrated research evidence."
+        if selected_feed == "iex"
+        else "SIP feed is aligned with the signed-imbalance research calibration and requires current SIP market-data entitlement."
+    )
     config = {
         "environment": "alpaca_paper",
         "factor_key": "signed_trade_imbalance_continuation_v2_1bar",
@@ -112,8 +121,8 @@ def create_experiment(
         "market_hours_only": True,
         "calibration_id": calibration_id,
         "threshold": threshold,
-        "market_data_feed": PAPER_LAB_DEFAULT_FEED,
-        "feed_limitation": "IEX fallback is for fake-money observation only; it is not equivalent to SIP-calibrated research evidence.",
+        "market_data_feed": selected_feed,
+        "feed_limitation": feed_limitation,
     }
     row = conn.execute(
         """

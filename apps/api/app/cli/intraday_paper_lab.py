@@ -47,6 +47,7 @@ def create(args: argparse.Namespace) -> dict:
             max_open_positions=args.max_open_positions,
             quantity=args.quantity,
             allow_shorts=not args.long_only,
+            feed=args.feed,
         )
 
 
@@ -118,6 +119,7 @@ def parser() -> argparse.ArgumentParser:
     create_command.add_argument("--max-orders-per-day", type=int, default=200)
     create_command.add_argument("--max-open-positions", type=int, default=25)
     create_command.add_argument("--quantity", type=int, default=1)
+    create_command.add_argument("--feed", choices=("iex", "sip"), default="iex")
     create_command.add_argument("--long-only", action="store_true")
 
     cycle_command = commands.add_parser("run-cycle")
