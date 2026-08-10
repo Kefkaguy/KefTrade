@@ -3198,3 +3198,85 @@ export function generateDailyResearchReport(reportDate?: string) {
 export function getDailyReportAnalytics() {
   return request<DailyReportAnalytics>("/paper/daily-reports/analytics", { timeoutMs: 60000 });
 }
+
+export type IntradayPaperLabDecision = {
+  id: number;
+  created_at: string;
+  symbol: string;
+  action: "enter" | "skip" | "exit" | "flatten" | "error";
+  side?: "buy" | "sell" | null;
+  signed_trade_imbalance?: string | number | null;
+  trade_count?: number | null;
+  reason?: string | null;
+  broker_status?: string | null;
+  client_order_id?: string | null;
+};
+
+export type IntradayPaperLabTrade = {
+  id: number;
+  symbol: string;
+  side: "long" | "short";
+  quantity: string | number;
+  status: "open" | "closing" | "closed" | "rejected";
+  signal_bar_start: string;
+  exit_due_at: string;
+  opened_at: string;
+  closed_at?: string | null;
+  entry_client_order_id?: string | null;
+  exit_client_order_id?: string | null;
+  entry_status?: string | null;
+  entry_price?: string | number | null;
+  entry_filled_quantity?: string | number | null;
+  entry_filled_at?: string | null;
+  exit_status?: string | null;
+  exit_price?: string | number | null;
+  exit_filled_quantity?: string | number | null;
+  exit_filled_at?: string | null;
+  realized_pnl?: string | number | null;
+};
+
+export type IntradayPaperLabOrder = {
+  symbol: string;
+  side: "buy" | "sell";
+  order_type: string;
+  requested_quantity: string | number;
+  filled_quantity: string | number;
+  filled_average_price?: string | number | null;
+  status: string;
+  submitted_at?: string | null;
+  filled_at?: string | null;
+  canceled_at?: string | null;
+  expired_at?: string | null;
+  client_order_id: string;
+  updated_at: string;
+};
+
+export type IntradayPaperLabMonitor = {
+  experiment: Record<string, any>;
+  summary: {
+    decisions: number;
+    entries_submitted: number;
+    exits_submitted: number;
+    skips: number;
+    errors: number;
+    last_decision_at?: string | null;
+  };
+  positions: Array<Record<string, any>>;
+  recent_decisions: IntradayPaperLabDecision[];
+  trades: IntradayPaperLabTrade[];
+  orders: IntradayPaperLabOrder[];
+  pnl: {
+    realized_pnl: string | number;
+    realized_trades: number;
+    open_trades: number;
+    awaiting_broker_sync_items: number;
+  };
+  broker_sync: Record<string, any>;
+};
+
+export function getIntradayPaperLabMonitor(experimentId = 1) {
+  return request<IntradayPaperLabMonitor>(`/intraday-paper-lab/experiments/${experimentId}`, {
+    cache: "no-store",
+    timeoutMs: 15000
+  });
+}

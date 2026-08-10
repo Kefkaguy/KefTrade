@@ -812,9 +812,106 @@ def monitor(conn: psycopg.Connection, *, experiment_id: int) -> dict[str, Any]:
         """,
         (experiment_id,),
     ).fetchall()
+    trade_rows = conn.execute(
+        """
+        WITH lab_positions AS (
+            SELECT
+                position.id,
+                position.symbol,
+                position.side,
+                position.quantity,
+                position.status,
+                position.signal_bar_start,
+                position.exit_due_at,
+                position.opened_at,
+                position.closed_at,
+                position.entry_client_order_id,
+                position.exit_client_order_id
+            FROM intraday_paper_lab_positions position
+            WHERE position.experiment_id = %s
+        )
+        SELECT
+            lab_positions.*,
+            entry_order.status AS entry_status,
+            entry_order.side AS entry_order_side,
+            entry_order.filled_quantity AS entry_filled_quantity,
+            entry_order.filled_average_price AS entry_price,
+            entry_order.submitted_at AS entry_submitted_at,
+            entry_order.filled_at AS entry_filled_at,
+            exit_order.status AS exit_status,
+            exit_order.side AS exit_order_side,
+            exit_order.filled_quantity AS exit_filled_quantity,
+            exit_order.filled_average_price AS exit_price,
+            exit_order.submitted_at AS exit_submitted_at,
+            exit_order.filled_at AS exit_filled_at
+        FROM lab_positions
+        LEFT JOIN broker_orders entry_order
+          ON entry_order.client_order_id = lab_positions.entry_client_order_id
+        LEFT JOIN broker_orders exit_order
+          ON exit_order.client_order_id = lab_positions.exit_client_order_id
+        ORDER BY lab_positions.opened_at DESC, lab_positions.id DESC
+        """,
+        (experiment_id,),
+    ).fetchall()
+    trades: list[dict[str, Any]] = []
+    realized_pnl = Decimal("0")
+    realized_count = 0
+    open_count = 0
+    awaiting_sync = 0
+    for row in trade_rows:
+        trade = dict(row)
+        quantity = Decimal(str(trade.get("quantity") or "0"))
+        entry_price = trade.get("entry_price")
+        exit_price = trade.get("exit_price")
+        pnl: Decimal | None = None
+        if entry_price is not None and exit_price is not None:
+            entry = Decimal(str(entry_price))
+            exit_ = Decimal(str(exit_price))
+            pnl = (exit_ - entry) * quantity if trade.get("side") == "long" else (entry - exit_) * quantity
+            realized_pnl += pnl
+            realized_count += 1
+        elif trade.get("status") in {"open", "closing"}:
+            open_count += 1
+        if trade.get("entry_client_order_id") and trade.get("entry_status") is None:
+            awaiting_sync += 1
+        if trade.get("exit_client_order_id") and trade.get("exit_status") is None:
+            awaiting_sync += 1
+        trade["realized_pnl"] = pnl
+        trades.append(trade)
+    broker_orders = conn.execute(
+        """
+        SELECT symbol, side, order_type, requested_quantity, filled_quantity,
+               filled_average_price, status, submitted_at, filled_at,
+               canceled_at, expired_at, client_order_id, updated_at
+        FROM broker_orders
+        WHERE client_order_id LIKE %s
+           OR client_order_id LIKE %s
+        ORDER BY submitted_at DESC NULLS LAST, updated_at DESC
+        LIMIT 100
+        """,
+        (f"kef-lab-{experiment_id}-%", f"kef-lab-exit-{experiment_id}-%"),
+    ).fetchall()
+    latest_sync = conn.execute(
+        """
+        SELECT id, status, started_at, completed_at, required_components,
+               completed_components, completeness, error
+        FROM broker_sync_runs
+        ORDER BY started_at DESC
+        LIMIT 1
+        """,
+    ).fetchone()
     return {
         "experiment": experiment,
         "summary": dict(summary or {}),
         "positions": [dict(row) for row in positions],
         "recent_decisions": [dict(row) for row in recent],
+        "trades": trades,
+        "orders": [dict(row) for row in broker_orders],
+        "pnl": {
+            "realized_pnl": realized_pnl,
+            "realized_trades": realized_count,
+            "open_trades": open_count,
+            "awaiting_broker_sync_items": awaiting_sync,
+        },
+        "broker_sync": dict(latest_sync or {}),
     }
