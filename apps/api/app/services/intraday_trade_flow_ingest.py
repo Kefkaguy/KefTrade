@@ -106,7 +106,12 @@ async def ingest_symbol_session(
     pages = 0
     exhausted = False
     record_checkpoint(
-        conn, symbol=symbol, session_date=session, feed=feed, status="running"
+        conn,
+        symbol=symbol,
+        session_date=session,
+        feed=feed,
+        timeframe=timeframe,
+        status="running",
     )
     try:
         async for page, meta in iter_stock_trade_pages(
@@ -135,6 +140,7 @@ async def ingest_symbol_session(
             symbol=symbol,
             session_date=session,
             feed=feed,
+            timeframe=timeframe,
             status="failed",
             trades_fetched=fetched,
             pages=pages,
@@ -157,6 +163,7 @@ async def ingest_symbol_session(
         symbol=symbol,
         session_date=session,
         feed=feed,
+        timeframe=timeframe,
         status=status,
         trades_fetched=fetched,
         bars_written=written,
@@ -192,7 +199,7 @@ async def ingest_trade_flow(
     candidates = sessions_with_candles(
         conn, symbols=symbols, start=start, end=end, timeframe=timeframe, source=source
     )
-    already = completed_sessions(conn, feed=feed)
+    already = completed_sessions(conn, feed=feed, timeframe=timeframe)
     pending = [item for item in candidates if item not in already]
     if len(pending) > max_sessions:
         raise ValueError(
@@ -235,6 +242,7 @@ def trade_flow_progress(
     conn: psycopg.Connection,
     *,
     feed: str,
+    timeframe: str,
     start: date,
     end: date,
 ) -> dict[str, Any]:
@@ -251,10 +259,11 @@ def trade_flow_progress(
             NOW() - MAX(updated_at) AS idle_for
         FROM intraday_trade_ingest_checkpoints
         WHERE feed = %s
+          AND timeframe = %s
           AND ingest_version = %s
           AND session_date BETWEEN %s AND %s
         """,
-        (feed, TRADE_FLOW_VERSION, start, end),
+        (feed, timeframe, TRADE_FLOW_VERSION, start, end),
     ).fetchone()
     return dict(row or {})
 
@@ -305,10 +314,12 @@ async def ingest_trade_flow_auto(
     candidates = sessions_with_candles(
         conn, symbols=symbols, start=start, end=end, timeframe=timeframe, source=source
     )
-    completed = completed_sessions(conn, feed=feed)
+    completed = completed_sessions(conn, feed=feed, timeframe=timeframe)
     batches = trade_flow_batches(candidates, completed, max_sessions=max_sessions)
 
-    initial_progress = trade_flow_progress(conn, feed=feed, start=start, end=end)
+    initial_progress = trade_flow_progress(
+        conn, feed=feed, timeframe=timeframe, start=start, end=end
+    )
     completed_count = int(initial_progress.get("completed_symbol_sessions") or 0)
     target = target_completed if target_completed is not None else len(candidates)
     target = min(target, len(candidates))
@@ -366,13 +377,17 @@ async def ingest_trade_flow_auto(
         )
         attempted_batches.append(report)
         completed_count = int(
-            trade_flow_progress(conn, feed=feed, start=start, end=end).get(
+            trade_flow_progress(
+                conn, feed=feed, timeframe=timeframe, start=start, end=end
+            ).get(
                 "completed_symbol_sessions"
             )
             or 0
         )
 
-    final_progress = trade_flow_progress(conn, feed=feed, start=start, end=end)
+    final_progress = trade_flow_progress(
+        conn, feed=feed, timeframe=timeframe, start=start, end=end
+    )
     return {
         "trade_flow_version": TRADE_FLOW_VERSION,
         "feed": feed,
@@ -434,7 +449,9 @@ async def _ingest_trade_flow_auto_parallel(
 
     def current_completed() -> int:
         with connect() as progress_conn:
-            row = trade_flow_progress(progress_conn, feed=feed, start=start, end=end)
+            row = trade_flow_progress(
+                progress_conn, feed=feed, timeframe=timeframe, start=start, end=end
+            )
         return int(row.get("completed_symbol_sessions") or 0)
 
     async def worker(worker_id: int) -> None:
@@ -527,7 +544,9 @@ async def _ingest_trade_flow_auto_parallel(
     await asyncio.gather(*(worker(worker_id) for worker_id in range(1, worker_count + 1)))
 
     with connect() as final_conn:
-        final_progress = trade_flow_progress(final_conn, feed=feed, start=start, end=end)
+        final_progress = trade_flow_progress(
+            final_conn, feed=feed, timeframe=timeframe, start=start, end=end
+        )
     return {
         "trade_flow_version": TRADE_FLOW_VERSION,
         "feed": feed,

@@ -443,6 +443,7 @@ def record_checkpoint(
     symbol: str,
     session_date: Any,
     feed: str,
+    timeframe: str,
     status: str,
     trades_fetched: int = 0,
     bars_written: int = 0,
@@ -452,11 +453,11 @@ def record_checkpoint(
     conn.execute(
         """
         INSERT INTO intraday_trade_ingest_checkpoints(
-            symbol, session_date, feed, status, trades_fetched, bars_written,
+            symbol, session_date, feed, timeframe, status, trades_fetched, bars_written,
             pages, error, ingest_version, updated_at
         )
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
-        ON CONFLICT (symbol, session_date, feed) DO UPDATE SET
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
+        ON CONFLICT (symbol, session_date, feed, timeframe) DO UPDATE SET
             status = EXCLUDED.status,
             trades_fetched = EXCLUDED.trades_fetched,
             bars_written = EXCLUDED.bars_written,
@@ -466,7 +467,7 @@ def record_checkpoint(
             updated_at = NOW()
         """,
         (
-            symbol.upper(), session_date, feed, status, trades_fetched,
+            symbol.upper(), session_date, feed, timeframe, status, trades_fetched,
             bars_written, pages, error, TRADE_FLOW_VERSION,
         ),
     )
@@ -474,15 +475,15 @@ def record_checkpoint(
 
 
 def completed_sessions(
-    conn: psycopg.Connection, *, feed: str
+    conn: psycopg.Connection, *, feed: str, timeframe: str
 ) -> set[tuple[str, Any]]:
     """Symbol-sessions already ingested, so a restart resumes rather than refetches."""
     rows = conn.execute(
         """
         SELECT symbol, session_date
         FROM intraday_trade_ingest_checkpoints
-        WHERE feed = %s AND status = 'completed' AND ingest_version = %s
+        WHERE feed = %s AND timeframe = %s AND status = 'completed' AND ingest_version = %s
         """,
-        (feed, TRADE_FLOW_VERSION),
+        (feed, timeframe, TRADE_FLOW_VERSION),
     ).fetchall()
     return {(str(row["symbol"]), row["session_date"]) for row in rows}
