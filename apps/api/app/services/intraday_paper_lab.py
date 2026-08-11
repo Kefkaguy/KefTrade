@@ -21,6 +21,8 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from app.providers.alpaca import iter_stock_trade_pages, normalize_stock_trade
+from app.providers.alpaca import normalize_stock_bars
+from app.services.intraday_candle_ingest import RateLimiter, fetch_bars_range
 from app.services.intraday_trade_flow import TradeFlowAccumulator
 from app.services.intraday_trade_imbalance_calibration import load_calibration
 from app.settings import settings
@@ -32,6 +34,44 @@ LAST_ENTRY_TIME = time(15, 30)
 TIMEFRAME_MINUTES = {"30m": 30}
 PAPER_LAB_DEFAULT_FEED = "iex"
 PAPER_LAB_ALLOWED_FEEDS = {"iex", "sip"}
+GAP_PAPER_LAB_FACTORS = {
+    "gap_down_absorption_reversal": {
+        "gap_direction": "down",
+        "flow_state": "absorption",
+        "position_side": "long",
+        "horizon_bars": 1,
+    },
+    "gap_down_absorption_reversal_2bar": {
+        "gap_direction": "down",
+        "flow_state": "absorption",
+        "position_side": "long",
+        "horizon_bars": 2,
+    },
+    "gap_up_absorption_reversal": {
+        "gap_direction": "up",
+        "flow_state": "absorption",
+        "position_side": "short",
+        "horizon_bars": 1,
+    },
+    "gap_up_absorption_reversal_2bar": {
+        "gap_direction": "up",
+        "flow_state": "absorption",
+        "position_side": "short",
+        "horizon_bars": 2,
+    },
+    "gap_up_acceptance_continuation": {
+        "gap_direction": "up",
+        "flow_state": "acceptance",
+        "position_side": "long",
+        "horizon_bars": 1,
+    },
+    "gap_up_acceptance_continuation_2bar": {
+        "gap_direction": "up",
+        "flow_state": "acceptance",
+        "position_side": "long",
+        "horizon_bars": 2,
+    },
+}
 
 
 def _json_safe(value: Any) -> Any:
@@ -139,6 +179,71 @@ def create_experiment(
             config["factor_key"],
             calibration_id,
             threshold,
+            Jsonb(sorted({symbol.upper() for symbol in symbols})),
+            Jsonb(config),
+        ),
+    ).fetchone()
+    conn.commit()
+    return dict(row)
+
+
+def create_gap_factor_experiment(
+    conn: psycopg.Connection,
+    *,
+    name: str,
+    trading_date: date,
+    symbols: Sequence[str],
+    factor_key: str,
+    max_orders_per_day: int = 200,
+    max_open_positions: int = 25,
+    quantity: int = 1,
+    allow_shorts: bool = True,
+    feed: str = "sip",
+) -> dict[str, Any]:
+    selected_feed = feed.lower()
+    if selected_feed not in PAPER_LAB_ALLOWED_FEEDS:
+        raise ValueError(f"Unsupported paper lab feed: {selected_feed}.")
+    if factor_key not in GAP_PAPER_LAB_FACTORS:
+        supported = ", ".join(sorted(GAP_PAPER_LAB_FACTORS))
+        raise ValueError(f"Unsupported gap paper factor {factor_key!r}. Use one of: {supported}")
+    spec = GAP_PAPER_LAB_FACTORS[factor_key]
+    config = {
+        "environment": "alpaca_paper",
+        "paper_lab_type": "gap_factor",
+        "factor_key": factor_key,
+        "timeframe": "30m",
+        "quantity": quantity,
+        "max_orders_per_day": max_orders_per_day,
+        "max_open_positions": max_open_positions,
+        "allow_shorts": allow_shorts,
+        "short_only_if_alpaca_shortable": True,
+        "no_pyramiding": "max one open position per symbol per direction",
+        "flatten_before_close": True,
+        "market_hours_only": True,
+        "market_data_feed": selected_feed,
+        "gap_threshold": 0.003,
+        "minimum_relative_volume": 1.5,
+        "acceptance_max_fill": 0.25,
+        "absorption_min_fill": 0.50,
+        "gap_direction": spec["gap_direction"],
+        "flow_state": spec["flow_state"],
+        "horizon_bars": spec["horizon_bars"],
+        "research_status": "exploratory_interim_not_validated",
+    }
+    row = conn.execute(
+        """
+        INSERT INTO intraday_paper_lab_experiments(
+            name, trading_date, factor_key, timeframe, calibration_id,
+            threshold, symbols, config
+        )
+        VALUES (%s,%s,%s,'30m',NULL,%s,%s,%s)
+        RETURNING *
+        """,
+        (
+            name,
+            trading_date,
+            factor_key,
+            Decimal("0.003"),
             Jsonb(sorted({symbol.upper() for symbol in symbols})),
             Jsonb(config),
         ),
@@ -663,6 +768,463 @@ async def _maybe_enter(
     return decision
 
 
+async def _submit_gap_entry(
+    conn: psycopg.Connection,
+    *,
+    experiment: dict[str, Any],
+    config: dict[str, Any],
+    client: AlpacaPaperLabClient | None,
+    submit: bool,
+    symbol: str,
+    position_side: str,
+    quantity: int,
+    max_open: int,
+    allow_shorts: bool,
+    signal_start: datetime,
+    signal_end: datetime,
+    horizon_bars: int,
+    reason: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    order_side = "buy" if position_side == "long" else "sell"
+    if position_side == "short" and not allow_shorts:
+        return _record_decision(
+            conn,
+            experiment_id=int(experiment["id"]),
+            symbol=symbol,
+            signal_start=signal_start,
+            signal_end=signal_end,
+            action="skip",
+            reason="shorts_disabled",
+            side=order_side,
+        )
+    if _open_position_exists(
+        conn, experiment_id=int(experiment["id"]), symbol=symbol, side=position_side
+    ):
+        return _record_decision(
+            conn,
+            experiment_id=int(experiment["id"]),
+            symbol=symbol,
+            signal_start=signal_start,
+            signal_end=signal_end,
+            action="skip",
+            reason="no_pyramiding_existing_position",
+            side=order_side,
+        )
+    if _open_positions(conn, int(experiment["id"])) >= max_open:
+        return _record_decision(
+            conn,
+            experiment_id=int(experiment["id"]),
+            symbol=symbol,
+            signal_start=signal_start,
+            signal_end=signal_end,
+            action="skip",
+            reason="max_open_positions_reached",
+            side=order_side,
+        )
+    if position_side == "short" and client is not None:
+        asset = await client.get_asset(symbol)
+        if not bool(asset.get("shortable")):
+            return _record_decision(
+                conn,
+                experiment_id=int(experiment["id"]),
+                symbol=symbol,
+                signal_start=signal_start,
+                signal_end=signal_end,
+                action="skip",
+                reason="alpaca_asset_not_shortable",
+                side=order_side,
+            )
+
+    client_order_id = f"kef-gap-{experiment['id']}-{symbol}-{int(signal_start.timestamp())}-{uuid4().hex[:8]}"
+    payload = {
+        "symbol": symbol.upper(),
+        "side": order_side,
+        "type": "market",
+        "qty": str(quantity),
+        "time_in_force": "day",
+        "client_order_id": client_order_id,
+        "factor_key": config.get("factor_key"),
+        "details": _json_safe(details or {}),
+    }
+    response = (
+        await client.submit_market_order(
+            symbol=symbol, side=order_side, quantity=quantity, client_order_id=client_order_id
+        )
+        if submit and client is not None
+        else {}
+    )
+    decision = _record_decision(
+        conn,
+        experiment_id=int(experiment["id"]),
+        symbol=symbol,
+        signal_start=signal_start,
+        signal_end=signal_end,
+        action="enter",
+        reason=reason if reason else (None if submit else "dry_run"),
+        side=order_side,
+        client_order_id=client_order_id if submit else None,
+        request_payload=payload,
+        response=response,
+    )
+    if submit and decision:
+        broker_order_id = ((response or {}).get("payload") or {}).get("id")
+        conn.execute(
+            """
+            INSERT INTO intraday_paper_lab_positions(
+                experiment_id, symbol, side, quantity, entry_decision_id,
+                entry_client_order_id, entry_broker_order_id,
+                signal_bar_start, exit_due_at
+            )
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """,
+            (
+                int(experiment["id"]),
+                symbol.upper(),
+                position_side,
+                quantity,
+                decision["id"],
+                client_order_id,
+                broker_order_id,
+                signal_start,
+                signal_end + timedelta(minutes=30 * max(1, horizon_bars)),
+            ),
+        )
+        conn.commit()
+    return decision
+
+
+def _historical_relative_volume(
+    conn: psycopg.Connection,
+    *,
+    symbol: str,
+    timeframe: str,
+    feed: str,
+    signal_start: datetime,
+    volume: float,
+    lookback_sessions: int = 60,
+) -> float | None:
+    source = f"alpaca_{feed}"
+    local_time = _et(signal_start).time()
+    rows = conn.execute(
+        """
+        SELECT volume
+        FROM candles
+        WHERE symbol = %s
+          AND timeframe = %s
+          AND source = %s
+          AND (timestamp AT TIME ZONE 'America/New_York')::time = %s
+          AND timestamp < %s
+        ORDER BY timestamp DESC
+        LIMIT %s
+        """,
+        (symbol.upper(), timeframe, source, local_time, signal_start, lookback_sessions),
+    ).fetchall()
+    values = [float(row["volume"]) for row in rows if row.get("volume") is not None]
+    baseline = sum(values) / len(values) if values else None
+    if baseline is None or baseline <= 0:
+        return None
+    return volume / baseline
+
+
+async def _live_gap_signal(
+    conn: psycopg.Connection,
+    *,
+    symbol: str,
+    session_date: date,
+    signal_start: datetime,
+    signal_end: datetime,
+    feed: str,
+    factor_key: str,
+) -> tuple[str, str | None, dict[str, Any]]:
+    """Evaluate the live gap factor using the same core event definition as research."""
+    spec = GAP_PAPER_LAB_FACTORS[factor_key]
+    headers = {
+        "APCA-API-KEY-ID": settings.alpaca_api_key,
+        "APCA-API-SECRET-KEY": settings.alpaca_api_secret,
+    }
+    if not headers["APCA-API-KEY-ID"] or not headers["APCA-API-SECRET-KEY"]:
+        raise RuntimeError("ALPACA_API_KEY and ALPACA_API_SECRET are required for SIP candles.")
+    fetch_start = datetime.combine(
+        session_date - timedelta(days=10), REGULAR_OPEN, tzinfo=EXCHANGE
+    ).astimezone(UTC)
+    fetch_end = signal_end + timedelta(minutes=1)
+    async with httpx.AsyncClient(
+        base_url=settings.alpaca_data_base_url, timeout=60, headers=headers
+    ) as client:
+        raw, _pages, _attempts = await fetch_bars_range(
+            client,
+            symbol=symbol,
+            timeframe="30m",
+            start=fetch_start,
+            end=fetch_end,
+            feed=feed,
+            limiter=RateLimiter(min_interval=0.0),
+        )
+    bars, _invalid = normalize_stock_bars(symbol.upper(), "30m", raw)
+    regular = [
+        row
+        for row in bars
+        if REGULAR_OPEN <= _et(row["timestamp"]).time() < REGULAR_CLOSE
+    ]
+    previous = [
+        row for row in regular if _et(row["timestamp"]).date() < session_date
+    ]
+    today = [
+        row for row in regular if _et(row["timestamp"]).date() == session_date
+    ]
+    first = next((row for row in today if _et(row["timestamp"]).time() == REGULAR_OPEN), None)
+    decision = next((row for row in today if row["timestamp"] == signal_start), None)
+    if first is None:
+        return "skip", "missing_opening_bar", {}
+    if decision is None:
+        return "skip", "missing_decision_bar", {}
+    if not previous:
+        return "skip", "missing_previous_session_close", {}
+    previous_close = float(previous[-1]["close"])
+    session_open = float(first["open"])
+    decision_close = float(decision["close"])
+    if previous_close <= 0 or session_open <= 0:
+        return "skip", "invalid_gap_prices", {}
+    gap = (session_open - previous_close) / previous_close
+    relative_volume = _historical_relative_volume(
+        conn,
+        symbol=symbol,
+        timeframe="30m",
+        feed=feed,
+        signal_start=signal_start,
+        volume=float(decision["volume"]),
+    )
+    if relative_volume is None:
+        return "skip", "missing_relative_volume_baseline", {"gap_return": gap}
+    gap_fill = (
+        (session_open - decision_close) / (session_open - previous_close)
+        if session_open != previous_close
+        else 0.0
+    )
+    details = {
+        "factor_key": factor_key,
+        "previous_close": previous_close,
+        "session_open": session_open,
+        "decision_close": decision_close,
+        "gap_return": gap,
+        "gap_fill_fraction": gap_fill,
+        "session_relative_volume": relative_volume,
+        "decision_volume": float(decision["volume"]),
+        "gap_threshold": 0.003,
+        "minimum_relative_volume": 1.5,
+        "acceptance_max_fill": 0.25,
+        "absorption_min_fill": 0.50,
+    }
+    gap_threshold = 0.003
+    if abs(gap) < gap_threshold:
+        return "skip", "gap_below_threshold", details
+    if spec["gap_direction"] == "down" and gap >= -gap_threshold:
+        return "skip", "not_gap_down", details
+    if spec["gap_direction"] == "up" and gap <= gap_threshold:
+        return "skip", "not_gap_up", details
+    if relative_volume < 1.5:
+        return "skip", "relative_volume_below_1_5", details
+    if spec["flow_state"] == "absorption" and gap_fill < 0.50:
+        return "skip", "gap_not_absorbed", details
+    if spec["flow_state"] == "acceptance" and gap_fill > 0.25:
+        return "skip", "gap_not_accepted", details
+    return str(spec["position_side"]), None, details
+
+
+async def run_gap_factor_cycle(
+    conn: psycopg.Connection,
+    *,
+    experiment_id: int,
+    submit: bool,
+    confirm_paper: bool,
+    now: datetime | None = None,
+    bar_start: datetime | None = None,
+    feed: str | None = None,
+) -> dict[str, Any]:
+    experiment = load_lab_experiment(conn, experiment_id)
+    config = dict(experiment["config"] or {})
+    factor_key = str(config.get("factor_key") or experiment["factor_key"])
+    if factor_key not in GAP_PAPER_LAB_FACTORS:
+        raise ValueError(f"Experiment {experiment_id} is not a supported gap-factor lab.")
+    selected_feed = (feed or config.get("market_data_feed") or "sip").lower()
+    if selected_feed not in PAPER_LAB_ALLOWED_FEEDS:
+        raise ValueError(f"Unsupported paper lab feed: {selected_feed}.")
+    if submit and not confirm_paper:
+        raise ValueError("Submitting requires --confirm-paper.")
+    if submit and settings.alpaca_paper_base_url.rstrip("/") != "https://paper-api.alpaca.markets":
+        raise ValueError("Refusing to submit: Alpaca base URL is not paper.")
+
+    now = (now or datetime.now(tz=UTC)).astimezone(UTC)
+    selected = (
+        (bar_start, bar_start + timedelta(minutes=30))
+        if bar_start is not None
+        else completed_signal_bar(now)
+    )
+    client = AlpacaPaperLabClient() if submit else None
+    exits = await flatten_due_positions(
+        conn, experiment=experiment, client=client, submit=submit, now=now
+    )
+    if selected is None:
+        return {"experiment_id": experiment_id, "status": "outside_market_hours", "exits": exits}
+    signal_start, signal_end = selected
+    if _et(signal_end).date() != experiment["trading_date"]:
+        return {
+            "experiment_id": experiment_id,
+            "status": "wrong_trading_date",
+            "bar": {"start": signal_start, "end": signal_end},
+            "exits": exits,
+        }
+    # Research defines gap acceptance/absorption on the second 30m bar
+    # (10:00-10:30 ET), entered at the next bar's open.
+    if _et(signal_start).time() != time(10, 0):
+        return {
+            "experiment_id": experiment_id,
+            "status": "waiting_for_gap_decision_bar",
+            "bar": {"start": signal_start, "end": signal_end},
+            "exits": exits,
+        }
+
+    quantity = int(config.get("quantity") or 1)
+    max_orders = int(config.get("max_orders_per_day") or 200)
+    max_open = int(config.get("max_open_positions") or 25)
+    allow_shorts = bool(config.get("allow_shorts", True))
+    horizon_bars = int(config.get("horizon_bars") or GAP_PAPER_LAB_FACTORS[factor_key]["horizon_bars"])
+    decisions: list[dict[str, Any]] = []
+    for symbol in list(experiment["symbols"]):
+        if _orders_today(conn, experiment_id) >= max_orders:
+            break
+        existing = _existing_bar_decision(
+            conn,
+            experiment_id=experiment_id,
+            symbol=symbol,
+            signal_start=signal_start,
+        )
+        if existing:
+            decisions.append(existing)
+            continue
+        try:
+            position_side, reason, details = await _live_gap_signal(
+                conn,
+                symbol=symbol,
+                session_date=experiment["trading_date"],
+                signal_start=signal_start,
+                signal_end=signal_end,
+                feed=selected_feed,
+                factor_key=factor_key,
+            )
+            if position_side == "skip":
+                decision = _record_decision(
+                    conn,
+                    experiment_id=experiment_id,
+                    symbol=symbol,
+                    signal_start=signal_start,
+                    signal_end=signal_end,
+                    action="skip",
+                    reason=reason,
+                    request_payload={"factor_key": factor_key, "details": _json_safe(details)},
+                )
+            else:
+                decision = await _submit_gap_entry(
+                    conn,
+                    experiment=experiment,
+                    config=config,
+                    client=client,
+                    submit=submit,
+                    symbol=symbol,
+                    position_side=position_side,
+                    quantity=quantity,
+                    max_open=max_open,
+                    allow_shorts=allow_shorts,
+                    signal_start=signal_start,
+                    signal_end=signal_end,
+                    horizon_bars=horizon_bars,
+                    details=details,
+                )
+        except Exception as error:  # noqa: BLE001 - lab keeps processing other symbols
+            decision = _record_decision(
+                conn,
+                experiment_id=experiment_id,
+                symbol=symbol,
+                signal_start=signal_start,
+                signal_end=signal_end,
+                action="error",
+                reason=f"{error.__class__.__name__}: {str(error)[:300]}",
+                request_payload={"factor_key": factor_key},
+            )
+        decisions.append(decision)
+    conn.execute(
+        "UPDATE intraday_paper_lab_experiments SET status='running', updated_at=NOW() WHERE id=%s",
+        (experiment_id,),
+    )
+    conn.commit()
+    return {
+        "experiment_id": experiment_id,
+        "factor_key": factor_key,
+        "bar": {"start": signal_start, "end": signal_end},
+        "submit": submit,
+        "entries_or_skips": len(decisions),
+        "submitted_entries": sum(1 for row in decisions if row.get("client_order_id")),
+        "exits": exits,
+        "market_data_feed": selected_feed,
+    }
+
+
+async def run_gap_factor_loop(
+    conn: psycopg.Connection,
+    *,
+    experiment_id: int,
+    submit: bool,
+    confirm_paper: bool,
+    poll_seconds: int = 300,
+    feed: str | None = None,
+) -> dict[str, Any]:
+    experiment = load_lab_experiment(conn, experiment_id)
+    factor_key = str((experiment.get("config") or {}).get("factor_key") or experiment["factor_key"])
+    if factor_key not in GAP_PAPER_LAB_FACTORS:
+        raise ValueError(f"Experiment {experiment_id} is not a supported gap-factor lab.")
+    session_close = _utc(experiment["trading_date"], REGULAR_CLOSE) + timedelta(minutes=10)
+    cycles = []
+    seen_bars: set[datetime] = set()
+    while datetime.now(tz=UTC) < session_close:
+        selected = completed_signal_bar()
+        if selected and selected[0] not in seen_bars:
+            cycles.append(
+                await run_gap_factor_cycle(
+                    conn,
+                    experiment_id=experiment_id,
+                    submit=submit,
+                    confirm_paper=confirm_paper,
+                    bar_start=selected[0],
+                    feed=feed,
+                )
+            )
+            seen_bars.add(selected[0])
+        else:
+            await flatten_due_positions(
+                conn,
+                experiment=experiment,
+                client=AlpacaPaperLabClient() if submit else None,
+                submit=submit,
+                now=datetime.now(tz=UTC),
+            )
+        await asyncio.sleep(max(30, poll_seconds))
+    await flatten_due_positions(
+        conn,
+        experiment=experiment,
+        client=AlpacaPaperLabClient() if submit else None,
+        submit=submit,
+        now=datetime.now(tz=UTC),
+        force=True,
+    )
+    conn.execute(
+        "UPDATE intraday_paper_lab_experiments SET status='completed', updated_at=NOW() WHERE id=%s",
+        (experiment_id,),
+    )
+    conn.commit()
+    return {"experiment_id": experiment_id, "cycles": len(cycles), "status": "completed"}
+
+
 async def flatten_due_positions(
     conn: psycopg.Connection,
     *,
@@ -907,10 +1469,15 @@ def monitor(conn: psycopg.Connection, *, experiment_id: int) -> dict[str, Any]:
         FROM broker_orders
         WHERE client_order_id LIKE %s
            OR client_order_id LIKE %s
+           OR client_order_id LIKE %s
         ORDER BY submitted_at DESC NULLS LAST, updated_at DESC
         LIMIT 100
         """,
-        (f"kef-lab-{experiment_id}-%", f"kef-lab-exit-{experiment_id}-%"),
+        (
+            f"kef-lab-{experiment_id}-%",
+            f"kef-lab-exit-{experiment_id}-%",
+            f"kef-gap-{experiment_id}-%",
+        ),
     ).fetchall()
     latest_sync = conn.execute(
         """
@@ -937,4 +1504,161 @@ def monitor(conn: psycopg.Connection, *, experiment_id: int) -> dict[str, Any]:
         "broker_sync": dict(latest_sync or {}),
         "market_data_feed": market_data_feed,
         "market_data_note": "IEX paper-lab feed avoids SIP entitlement errors but is not equivalent to SIP-calibrated research evidence." if market_data_feed == "iex" else "SIP feed requires current/recent SIP market-data entitlement.",
+    }
+
+
+def monitor_all(conn: psycopg.Connection, *, trading_date: date | None = None) -> dict[str, Any]:
+    if trading_date is None:
+        latest = conn.execute(
+            "SELECT MAX(trading_date) AS trading_date FROM intraday_paper_lab_experiments",
+        ).fetchone()
+        trading_date = latest["trading_date"] if latest else None
+    if trading_date is None:
+        return {
+            "experiment": {
+                "id": "all",
+                "name": "All Alpaca Paper Labs",
+                "trading_date": None,
+                "status": "empty",
+                "factor_key": "multiple",
+                "timeframe": "30m",
+                "symbols": [],
+                "config": {"market_data_feed": "unknown"},
+            },
+            "experiments": [],
+            "summary": {
+                "decisions": 0,
+                "entries_submitted": 0,
+                "exits_submitted": 0,
+                "skips": 0,
+                "errors": 0,
+                "last_decision_at": None,
+            },
+            "positions": [],
+            "recent_decisions": [],
+            "trades": [],
+            "orders": [],
+            "pnl": {
+                "realized_pnl": Decimal("0"),
+                "realized_trades": 0,
+                "open_trades": 0,
+                "awaiting_broker_sync_items": 0,
+            },
+            "broker_sync": {},
+            "market_data_feed": "unknown",
+            "market_data_note": "No Alpaca Paper lab experiments exist yet.",
+        }
+    experiments = conn.execute(
+        """
+        SELECT id
+        FROM intraday_paper_lab_experiments
+        WHERE trading_date = %s
+        ORDER BY id
+        """,
+        (trading_date,),
+    ).fetchall()
+    snapshots = [monitor(conn, experiment_id=int(row["id"])) for row in experiments]
+
+    summary = {
+        "decisions": 0,
+        "entries_submitted": 0,
+        "exits_submitted": 0,
+        "skips": 0,
+        "errors": 0,
+        "last_decision_at": None,
+    }
+    positions: list[dict[str, Any]] = []
+    recent_decisions: list[dict[str, Any]] = []
+    trades: list[dict[str, Any]] = []
+    orders: list[dict[str, Any]] = []
+    realized_pnl = Decimal("0")
+    realized_trades = 0
+    open_trades = 0
+    awaiting_sync = 0
+    feeds: set[str] = set()
+    symbols: set[str] = set()
+    experiment_rows: list[dict[str, Any]] = []
+
+    for snapshot in snapshots:
+        experiment = dict(snapshot["experiment"])
+        experiment_id = int(experiment["id"])
+        experiment_name = str(experiment.get("name") or f"Experiment {experiment_id}")
+        factor_key = str(experiment.get("factor_key") or "")
+        feed = str(snapshot.get("market_data_feed") or "unknown").lower()
+        feeds.add(feed)
+        symbols.update(str(symbol) for symbol in experiment.get("symbols") or [])
+        experiment_rows.append(experiment)
+        for key in ("decisions", "entries_submitted", "exits_submitted", "skips", "errors"):
+            summary[key] += int((snapshot.get("summary") or {}).get(key) or 0)
+        last_decision_at = (snapshot.get("summary") or {}).get("last_decision_at")
+        if last_decision_at and (
+            summary["last_decision_at"] is None or str(last_decision_at) > str(summary["last_decision_at"])
+        ):
+            summary["last_decision_at"] = last_decision_at
+        for row in snapshot.get("positions") or []:
+            item = dict(row)
+            item.update({"experiment_id": experiment_id, "experiment_name": experiment_name, "factor_key": factor_key})
+            positions.append(item)
+        for row in snapshot.get("recent_decisions") or []:
+            item = dict(row)
+            item.update({"experiment_id": experiment_id, "experiment_name": experiment_name, "factor_key": factor_key})
+            recent_decisions.append(item)
+        for row in snapshot.get("trades") or []:
+            item = dict(row)
+            item.update({"experiment_id": experiment_id, "experiment_name": experiment_name, "factor_key": factor_key})
+            trades.append(item)
+        for row in snapshot.get("orders") or []:
+            item = dict(row)
+            item.update({"experiment_id": experiment_id, "experiment_name": experiment_name, "factor_key": factor_key})
+            orders.append(item)
+        pnl = snapshot.get("pnl") or {}
+        realized_pnl += Decimal(str(pnl.get("realized_pnl") or "0"))
+        realized_trades += int(pnl.get("realized_trades") or 0)
+        open_trades += int(pnl.get("open_trades") or 0)
+        awaiting_sync += int(pnl.get("awaiting_broker_sync_items") or 0)
+
+    recent_decisions.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    trades.sort(key=lambda row: str(row.get("opened_at") or ""), reverse=True)
+    orders.sort(key=lambda row: str(row.get("submitted_at") or row.get("updated_at") or ""), reverse=True)
+    latest_sync = conn.execute(
+        """
+        SELECT id, status, started_at, completed_at, required_components,
+               completed_components, completeness, error
+        FROM broker_sync_runs
+        ORDER BY started_at DESC
+        LIMIT 1
+        """,
+    ).fetchone()
+    feed_label = feeds.pop() if len(feeds) == 1 else "mixed"
+    return {
+        "experiment": {
+            "id": "all",
+            "name": f"All Alpaca Paper Labs — {trading_date}",
+            "trading_date": trading_date,
+            "status": "running" if any(row.get("status") == "running" for row in experiment_rows) else "created",
+            "factor_key": "multiple",
+            "timeframe": "30m",
+            "threshold": None,
+            "symbols": sorted(symbols),
+            "config": {"market_data_feed": feed_label},
+        },
+        "experiments": experiment_rows,
+        "summary": summary,
+        "positions": positions,
+        "recent_decisions": recent_decisions[:50],
+        "trades": trades,
+        "orders": orders[:250],
+        "pnl": {
+            "realized_pnl": realized_pnl,
+            "realized_trades": realized_trades,
+            "open_trades": open_trades,
+            "awaiting_broker_sync_items": awaiting_sync,
+        },
+        "broker_sync": dict(latest_sync or {}),
+        "market_data_feed": feed_label,
+        "market_data_note": (
+            "All displayed labs use SIP market data."
+            if feed_label == "sip"
+            else "Displayed labs use mixed market-data feeds; check each experiment row."
+        ),
     }

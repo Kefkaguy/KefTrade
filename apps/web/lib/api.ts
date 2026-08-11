@@ -3201,6 +3201,9 @@ export function getDailyReportAnalytics() {
 
 export type IntradayPaperLabDecision = {
   id: number;
+  experiment_id?: number;
+  experiment_name?: string;
+  factor_key?: string;
   created_at: string;
   symbol: string;
   action: "enter" | "skip" | "exit" | "flatten" | "error";
@@ -3214,6 +3217,9 @@ export type IntradayPaperLabDecision = {
 
 export type IntradayPaperLabTrade = {
   id: number;
+  experiment_id?: number;
+  experiment_name?: string;
+  factor_key?: string;
   symbol: string;
   side: "long" | "short";
   quantity: string | number;
@@ -3236,6 +3242,9 @@ export type IntradayPaperLabTrade = {
 };
 
 export type IntradayPaperLabOrder = {
+  experiment_id?: number;
+  experiment_name?: string;
+  factor_key?: string;
   symbol: string;
   side: "buy" | "sell";
   order_type: string;
@@ -3253,6 +3262,7 @@ export type IntradayPaperLabOrder = {
 
 export type IntradayPaperLabMonitor = {
   experiment: Record<string, any>;
+  experiments?: Array<Record<string, any>>;
   summary: {
     decisions: number;
     entries_submitted: number;
@@ -3278,6 +3288,13 @@ export type IntradayPaperLabMonitor = {
 
 export function getIntradayPaperLabMonitor(experimentId = 1) {
   return request<IntradayPaperLabMonitor>(`/intraday-paper-lab/experiments/${experimentId}`, {
+    cache: "no-store",
+    timeoutMs: 15000
+  });
+}
+
+export function getIntradayPaperLabOverview() {
+  return request<IntradayPaperLabMonitor>("/intraday-paper-lab/experiments", {
     cache: "no-store",
     timeoutMs: 15000
   });

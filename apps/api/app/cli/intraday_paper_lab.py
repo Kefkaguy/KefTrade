@@ -8,11 +8,15 @@ from app.cli._refusal import run_command
 from app.db import connect
 from app.services.intraday_paper_lab import (
     AlpacaPaperLabClient,
+    GAP_PAPER_LAB_FACTORS,
     create_experiment,
+    create_gap_factor_experiment,
     flatten_due_positions,
     load_lab_experiment,
     monitor,
     run_cycle,
+    run_gap_factor_cycle,
+    run_gap_factor_loop,
     run_loop,
 )
 
@@ -51,6 +55,22 @@ def create(args: argparse.Namespace) -> dict:
         )
 
 
+def create_gap(args: argparse.Namespace) -> dict:
+    with connect() as conn:
+        return create_gap_factor_experiment(
+            conn,
+            name=args.name,
+            trading_date=args.trading_date,
+            symbols=_symbols(args.symbols),
+            factor_key=args.factor_key,
+            max_orders_per_day=args.max_orders_per_day,
+            max_open_positions=args.max_open_positions,
+            quantity=args.quantity,
+            allow_shorts=not args.long_only,
+            feed=args.feed,
+        )
+
+
 def cycle(args: argparse.Namespace) -> dict:
     with connect() as conn:
         return asyncio.run(
@@ -65,10 +85,38 @@ def cycle(args: argparse.Namespace) -> dict:
         )
 
 
+def gap_cycle(args: argparse.Namespace) -> dict:
+    with connect() as conn:
+        return asyncio.run(
+            run_gap_factor_cycle(
+                conn,
+                experiment_id=args.experiment_id,
+                submit=args.submit,
+                confirm_paper=args.confirm_paper,
+                bar_start=args.bar_start,
+                feed=args.feed,
+            )
+        )
+
+
 def loop(args: argparse.Namespace) -> dict:
     with connect() as conn:
         return asyncio.run(
             run_loop(
+                conn,
+                experiment_id=args.experiment_id,
+                submit=args.submit,
+                confirm_paper=args.confirm_paper,
+                poll_seconds=args.poll_seconds,
+                feed=args.feed,
+            )
+        )
+
+
+def gap_loop(args: argparse.Namespace) -> dict:
+    with connect() as conn:
+        return asyncio.run(
+            run_gap_factor_loop(
                 conn,
                 experiment_id=args.experiment_id,
                 submit=args.submit,
@@ -122,6 +170,17 @@ def parser() -> argparse.ArgumentParser:
     create_command.add_argument("--feed", choices=("iex", "sip"), default="iex")
     create_command.add_argument("--long-only", action="store_true")
 
+    create_gap_command = commands.add_parser("create-gap")
+    create_gap_command.add_argument("--name", required=True)
+    create_gap_command.add_argument("--trading-date", type=_date, required=True)
+    create_gap_command.add_argument("--symbols", required=True)
+    create_gap_command.add_argument("--factor-key", choices=sorted(GAP_PAPER_LAB_FACTORS), required=True)
+    create_gap_command.add_argument("--max-orders-per-day", type=int, default=200)
+    create_gap_command.add_argument("--max-open-positions", type=int, default=25)
+    create_gap_command.add_argument("--quantity", type=int, default=1)
+    create_gap_command.add_argument("--feed", choices=("iex", "sip"), default="sip")
+    create_gap_command.add_argument("--long-only", action="store_true")
+
     cycle_command = commands.add_parser("run-cycle")
     cycle_command.add_argument("--experiment-id", type=int, required=True)
     cycle_command.add_argument("--bar-start", type=_timestamp)
@@ -136,6 +195,20 @@ def parser() -> argparse.ArgumentParser:
     loop_command.add_argument("--submit", action="store_true")
     loop_command.add_argument("--confirm-paper", action="store_true")
 
+    gap_cycle_command = commands.add_parser("run-gap-cycle")
+    gap_cycle_command.add_argument("--experiment-id", type=int, required=True)
+    gap_cycle_command.add_argument("--bar-start", type=_timestamp)
+    gap_cycle_command.add_argument("--feed", choices=("iex", "sip"), default=None)
+    gap_cycle_command.add_argument("--submit", action="store_true")
+    gap_cycle_command.add_argument("--confirm-paper", action="store_true")
+
+    gap_loop_command = commands.add_parser("run-gap-loop")
+    gap_loop_command.add_argument("--experiment-id", type=int, required=True)
+    gap_loop_command.add_argument("--poll-seconds", type=int, default=300)
+    gap_loop_command.add_argument("--feed", choices=("iex", "sip"), default=None)
+    gap_loop_command.add_argument("--submit", action="store_true")
+    gap_loop_command.add_argument("--confirm-paper", action="store_true")
+
     flatten_command = commands.add_parser("flatten")
     flatten_command.add_argument("--experiment-id", type=int, required=True)
     flatten_command.add_argument("--submit", action="store_true")
@@ -149,8 +222,11 @@ def parser() -> argparse.ArgumentParser:
 
 COMMANDS = {
     "create": create,
+    "create-gap": create_gap,
     "run-cycle": cycle,
+    "run-gap-cycle": gap_cycle,
     "run-loop": loop,
+    "run-gap-loop": gap_loop,
     "flatten": flatten,
     "monitor": status,
 }
@@ -158,7 +234,7 @@ COMMANDS = {
 
 def main() -> None:
     args = parser().parse_args()
-    if args.command in {"flatten"} and args.submit and not args.confirm_paper:
+    if args.command in {"flatten", "run-gap-cycle", "run-gap-loop"} and args.submit and not args.confirm_paper:
         raise ValueError("Submitting requires --confirm-paper.")
     run_command(
         COMMANDS[args.command],

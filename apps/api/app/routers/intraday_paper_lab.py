@@ -4,9 +4,16 @@ from fastapi import APIRouter, Depends, HTTPException
 import psycopg
 
 from app.db import get_connection
-from app.services.intraday_paper_lab import monitor
+from app.services.intraday_paper_lab import monitor, monitor_all
 
 router = APIRouter(prefix="/intraday-paper-lab", tags=["intraday-paper-lab"])
+
+
+@router.get("/experiments")
+def get_intraday_paper_lab_experiments(
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return monitor_all(conn)
 
 
 @router.get("/experiments/{experiment_id}")

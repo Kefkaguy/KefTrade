@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   getIntradayPaperLabMonitor,
+  getIntradayPaperLabOverview,
   type IntradayPaperLabMonitor,
   type IntradayPaperLabTrade
 } from "@/lib/api";
@@ -48,7 +49,7 @@ function tradePnlClass(trade: IntradayPaperLabTrade) {
   return pnl >= 0 ? "positive" : "negative";
 }
 
-export function PaperLabDashboard({ initial, experimentId = 1, initialError = null }: Props) {
+export function PaperLabDashboard({ initial, experimentId, initialError = null }: Props) {
   const [snapshot, setSnapshot] = useState<IntradayPaperLabMonitor | null>(initial);
   const [error, setError] = useState<string | null>(initialError);
   const [loading, setLoading] = useState(false);
@@ -57,7 +58,9 @@ export function PaperLabDashboard({ initial, experimentId = 1, initialError = nu
   async function refresh() {
     setLoading(true);
     try {
-      const next = await getIntradayPaperLabMonitor(experimentId);
+      const next = experimentId
+        ? await getIntradayPaperLabMonitor(experimentId)
+        : await getIntradayPaperLabOverview();
       setSnapshot(next);
       setError(null);
       setLastRefresh(new Date());
@@ -78,6 +81,7 @@ export function PaperLabDashboard({ initial, experimentId = 1, initialError = nu
   const recentDecisions = snapshot?.recent_decisions ?? [];
   const orders = snapshot?.orders ?? [];
   const experiment = snapshot?.experiment ?? {};
+  const experiments = snapshot?.experiments ?? [];
   const summary = snapshot?.summary ?? {
     decisions: 0,
     entries_submitted: 0,
@@ -90,11 +94,13 @@ export function PaperLabDashboard({ initial, experimentId = 1, initialError = nu
     <section className="paperDashboard">
       <div className="paperHero">
         <div>
-          <span className="paperOnlyEyebrow">Experiment #{experimentId}</span>
-          <h1>{String(experiment.name ?? "Signed imbalance paper lab")}</h1>
+          <span className="paperOnlyEyebrow">
+            {experimentId ? `Experiment #${experimentId}` : `${experiments.length || 1} experiment(s)`}
+          </span>
+          <h1>{String(experiment.name ?? "Alpaca Paper Labs")}</h1>
           <p>
-            Backend-only Alpaca Paper monitor for the signed trade-imbalance experiment.
-            This page shows decisions, submitted orders, filled entry/exit prices, and realized P/L when broker sync data is available.
+            Backend-only Alpaca Paper monitor. This page aggregates submitted orders,
+            filled entry/exit prices, open trades, and total realized P/L for the current lab trading date.
           </p>
         </div>
         <div className="paperHeroActions">
@@ -108,18 +114,29 @@ export function PaperLabDashboard({ initial, experimentId = 1, initialError = nu
       {error ? <div className="paperAlert">API status unavailable: {error}</div> : null}
 
       <div className="paperMetricGrid">
-        <Metric label="Realized P/L" value={money(pnl)} tone={pnl >= 0 ? "positive" : "negative"} detail={`${snapshot?.pnl?.realized_trades ?? 0} closed trade(s)`} />
+        <Metric label="Total realized P/L" value={money(pnl)} tone={pnl >= 0 ? "positive" : "negative"} detail={`${snapshot?.pnl?.realized_trades ?? 0} closed trade(s)`} />
         <Metric label="Open trades" value={String(snapshot?.pnl?.open_trades ?? 0)} detail={`${snapshot?.positions?.length ?? 0} position bucket(s)`} />
         <Metric label="Entries submitted" value={String(summary.entries_submitted ?? 0)} detail={`${summary.exits_submitted ?? 0} exits submitted`} />
         <Metric label="Decisions" value={String(summary.decisions ?? 0)} detail={`${summary.skips ?? 0} skips · ${summary.errors ?? 0} errors`} />
-        <Metric label="Threshold" value={fixed(experiment.threshold, 2)} detail={String(experiment.factor_key ?? "signed imbalance")} />
+        <Metric label="Experiments" value={String(experiments.length || 1)} detail={String(experiment.factor_key ?? "multiple factors")} />
         <Metric label="Status" value={String(experiment.status ?? "unknown")} detail={`Last decision ${dateTime(summary.last_decision_at)}`} />
       </div>
+
+      {experiments.length ? (
+        <div className="paperStatusStrip">
+          {experiments.map((item) => (
+            <span key={String(item.id)}>
+              #{String(item.id)} <strong>{String(item.factor_key ?? item.name ?? "lab")}</strong>
+              {" · "}{String(item.config?.market_data_feed ?? "unknown").toUpperCase()}
+            </span>
+          ))}
+        </div>
+      ) : null}
 
       <div className="paperStatusStrip">
         <span>Trading date <strong>{String(experiment.trading_date ?? "—")}</strong></span>
         <span>Timeframe <strong>{String(experiment.timeframe ?? "30m")}</strong></span>
-        <span>Data feed <strong>{String(snapshot?.market_data_feed ?? experiment.config?.market_data_feed ?? "iex")}</strong></span>
+        <span>Data feed <strong>{String(snapshot?.market_data_feed ?? experiment.config?.market_data_feed ?? "iex").toUpperCase()}</strong></span>
         <span>Symbols <strong>{Array.isArray(experiment.symbols) ? experiment.symbols.length : "—"}</strong></span>
         <span>Broker sync <strong>{snapshot?.broker_sync?.status ? String(snapshot.broker_sync.status) : "not synced"}</strong></span>
         <span>Awaiting sync <strong>{snapshot?.pnl?.awaiting_broker_sync_items ?? 0}</strong></span>
@@ -148,10 +165,13 @@ export function PaperLabDashboard({ initial, experimentId = 1, initialError = nu
                 </thead>
                 <tbody>
                   {trades.map((trade) => (
-                    <tr key={trade.id}>
+                    <tr key={`${trade.experiment_id ?? "one"}-${trade.id}`}>
                       <td>{trade.symbol}</td>
                       <td>{trade.side}</td>
-                      <td>{trade.status}</td>
+                      <td>
+                        {trade.status}
+                        {trade.factor_key ? <small>{trade.factor_key}</small> : null}
+                      </td>
                       <td>
                         <strong>{trade.entry_price ? money(trade.entry_price) : "—"}</strong>
                         <small>{trade.entry_status ?? "awaiting sync"}</small>
@@ -172,15 +192,18 @@ export function PaperLabDashboard({ initial, experimentId = 1, initialError = nu
         <section className="paperPanel">
           <header>
             <span className="paperOnlyEyebrow">Orders</span>
-            <h2>Synced Alpaca orders</h2>
+            <h2>All synced Alpaca orders</h2>
           </header>
           {orders.length ? (
             <div className="paperOrderList">
-              {orders.slice(0, 12).map((order) => (
+              {orders.map((order) => (
                 <div key={order.client_order_id} className="paperOrderRow">
                   <div>
                     <strong>{order.symbol} · {order.side}</strong>
-                    <span>{order.status} · qty {String(order.filled_quantity)}/{String(order.requested_quantity)}</span>
+                    <span>
+                      {order.status} · qty {String(order.filled_quantity)}/{String(order.requested_quantity)}
+                      {order.factor_key ? ` · ${order.factor_key}` : ""}
+                    </span>
                   </div>
                   <div>
                     <strong>{order.filled_average_price ? money(order.filled_average_price) : "—"}</strong>
@@ -201,7 +224,7 @@ export function PaperLabDashboard({ initial, experimentId = 1, initialError = nu
         {recentDecisions.length ? (
           <div className="paperDecisionGrid">
             {recentDecisions.map((decision) => (
-              <div key={decision.id} className={`paperDecision ${decision.action}`}>
+              <div key={`${decision.experiment_id ?? "one"}-${decision.id}`} className={`paperDecision ${decision.action}`}>
                 <div>
                   <strong>{decision.symbol}</strong>
                   <span>{decision.action}{decision.side ? ` · ${decision.side}` : ""}</span>
