@@ -172,6 +172,90 @@ def _load_intrabar_trade_flow(
     return output
 
 
+def _intrabar_available_window(
+    conn: psycopg.Connection,
+    *,
+    symbols: Sequence[str],
+    timeframe: str,
+    source: str,
+    feed: str,
+    requested_start: datetime | None = None,
+    requested_end: datetime | None = None,
+) -> tuple[datetime, datetime]:
+    """Return the overlapping 1m candle/trade-flow window available to diagnose.
+
+    Dataset 82 contains many years of 30m candles, while the 1m microscope data
+    is intentionally much narrower.  Without this bound, diagnostics spend a
+    long time recomputing higher-timeframe events that cannot possibly receive
+    1m annotations.
+    """
+    symbol_list = [item.upper() for item in symbols]
+    candle = conn.execute(
+        """
+        SELECT MIN(timestamp) AS first_bar, MAX(timestamp) AS last_bar
+        FROM candles
+        WHERE symbol = ANY(%s)
+          AND timeframe = %s
+          AND source = %s
+          AND (%s::timestamptz IS NULL OR timestamp >= %s)
+          AND (%s::timestamptz IS NULL OR timestamp < %s)
+        """,
+        (
+            symbol_list,
+            timeframe,
+            source,
+            requested_start,
+            requested_start,
+            requested_end,
+            requested_end,
+        ),
+    ).fetchone()
+    flow = conn.execute(
+        """
+        SELECT MIN(timestamp) AS first_bar, MAX(timestamp) AS last_bar
+        FROM intraday_trade_flow_features
+        WHERE symbol = ANY(%s)
+          AND timeframe = %s
+          AND feed = %s
+          AND calculation_version LIKE 'intraday_trade_flow_v2%%'
+          AND (%s::timestamptz IS NULL OR timestamp >= %s)
+          AND (%s::timestamptz IS NULL OR timestamp < %s)
+        """,
+        (
+            symbol_list,
+            timeframe,
+            feed,
+            requested_start,
+            requested_start,
+            requested_end,
+            requested_end,
+        ),
+    ).fetchone()
+    candle_first = candle["first_bar"] if candle else None
+    candle_last = candle["last_bar"] if candle else None
+    flow_first = flow["first_bar"] if flow else None
+    flow_last = flow["last_bar"] if flow else None
+    if not candle_first or not candle_last:
+        raise ValueError("no 1m candles found for the requested diagnostic window")
+    if not flow_first or not flow_last:
+        raise ValueError("no 1m trade-flow found for the requested diagnostic window")
+
+    bar_delta = timedelta(seconds=INTRABAR_SECONDS[timeframe])
+    start = max(value for value in (candle_first, flow_first, requested_start) if value)
+    end = min(
+        value
+        for value in (
+            candle_last + bar_delta,
+            flow_last + bar_delta,
+            requested_end,
+        )
+        if value
+    )
+    if end <= start:
+        raise ValueError("1m candle/trade-flow windows do not overlap")
+    return start, end
+
+
 def intrabar_data_coverage(
     conn: psycopg.Connection,
     *,
@@ -498,6 +582,9 @@ def run_intrabar_diagnostics(
     intrabar_timeframe: str = "1m",
     source: str = "alpaca_sip",
     feed: str = "sip",
+    start: datetime | None = None,
+    end: datetime | None = None,
+    parent_lookback_days: int = 10,
     max_events_per_factor: int | None = 500,
     persist: bool = True,
 ) -> dict[str, Any]:
@@ -520,16 +607,36 @@ def run_intrabar_diagnostics(
 
     manifest = _load_manifest(conn, dataset_id)
     symbols = _dataset_symbols(manifest)
+    intrabar_start, intrabar_end = _intrabar_available_window(
+        conn,
+        symbols=symbols,
+        timeframe=intrabar_timeframe,
+        source=source,
+        feed=feed,
+        requested_start=start,
+        requested_end=end,
+    )
+    parent_start = intrabar_start - timedelta(days=max(parent_lookback_days, 1))
+    parent_end = intrabar_end
     candles = _load_parent_candles(
         conn,
         dataset_id=dataset_id,
         symbols=symbols,
         timeframe=parent_timeframe,
+        start=parent_start,
+        end=parent_end,
     )
     event_rows: dict[str, list[dict[str, Any]]] = {}
     all_events: list[dict[str, Any]] = []
     for key in factor_keys:
-        rows = FACTOR_SPECS[key].builder(candles, timeframe=parent_timeframe)
+        rows = []
+        for row in FACTOR_SPECS[key].builder(candles, timeframe=parent_timeframe):
+            event_start, event_end = _event_window(
+                row,
+                parent_timeframe=parent_timeframe,
+            )
+            if event_start >= intrabar_start and event_end <= intrabar_end:
+                rows.append(row)
         rows = sorted(
             rows,
             key=lambda row: (
@@ -544,27 +651,33 @@ def run_intrabar_diagnostics(
         all_events.extend(rows)
 
     if all_events:
-        start = min(row["signal_bar_timestamp"] for row in all_events)
-        end = max(row["decision_timestamp"] for row in all_events)
+        diagnostic_start = min(
+            _event_window(row, parent_timeframe=parent_timeframe)[0]
+            for row in all_events
+        )
+        diagnostic_end = max(
+            _event_window(row, parent_timeframe=parent_timeframe)[1]
+            for row in all_events
+        )
     else:
-        start = manifest["window_start"]
-        end = manifest["window_end"]
+        diagnostic_start = intrabar_start
+        diagnostic_end = intrabar_end
 
     intrabar_candles = _load_intrabar_candles(
         conn,
         symbols=symbols,
         timeframe=intrabar_timeframe,
         source=source,
-        start=start,
-        end=end,
+        start=diagnostic_start,
+        end=diagnostic_end,
     )
     intrabar_flow = _load_intrabar_trade_flow(
         conn,
         symbols=symbols,
         timeframe=intrabar_timeframe,
         feed=feed,
-        start=start,
-        end=end,
+        start=diagnostic_start,
+        end=diagnostic_end,
     )
 
     factors: dict[str, Any] = {}
@@ -603,8 +716,8 @@ def run_intrabar_diagnostics(
     coverage = intrabar_data_coverage(
         conn,
         symbols=symbols,
-        start=start,
-        end=end,
+        start=diagnostic_start,
+        end=diagnostic_end,
         timeframe=intrabar_timeframe,
         source=source,
         feed=feed,
@@ -617,7 +730,15 @@ def run_intrabar_diagnostics(
         "source": source,
         "feed": feed,
         "factor_keys": list(factor_keys),
-        "window": {"start": start, "end": end},
+        "window": {
+            "start": diagnostic_start,
+            "end": diagnostic_end,
+            "available_intrabar_start": intrabar_start,
+            "available_intrabar_end": intrabar_end,
+            "parent_scan_start": parent_start,
+            "parent_scan_end": parent_end,
+            "parent_lookback_days": parent_lookback_days,
+        },
         "symbols": symbols,
         "coverage": coverage,
         "factors": factors,

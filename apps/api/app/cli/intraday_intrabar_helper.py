@@ -68,6 +68,9 @@ def diagnose(args: argparse.Namespace) -> dict[str, Any]:
             intrabar_timeframe=args.intrabar_timeframe,
             source=feed_source(args.feed),
             feed=args.feed,
+            start=args.start,
+            end=args.end,
+            parent_lookback_days=args.parent_lookback_days,
             max_events_per_factor=args.max_events_per_factor,
             persist=not args.no_persist,
         )
@@ -105,6 +108,31 @@ def parser() -> argparse.ArgumentParser:
     )
     diagnose_command.add_argument("--intrabar-timeframe", default="1m", choices=("1m",))
     diagnose_command.add_argument("--feed", default="sip", choices=("sip", "iex"))
+    diagnose_command.add_argument(
+        "--start",
+        type=_timestamp,
+        help=(
+            "Optional 1m diagnostic window start. If omitted, the command uses "
+            "the overlapping available 1m candle/trade-flow window."
+        ),
+    )
+    diagnose_command.add_argument(
+        "--end",
+        type=_timestamp,
+        help=(
+            "Optional 1m diagnostic window end. If omitted, the command uses "
+            "the overlapping available 1m candle/trade-flow window."
+        ),
+    )
+    diagnose_command.add_argument(
+        "--parent-lookback-days",
+        type=int,
+        default=10,
+        help=(
+            "Extra higher-timeframe candle history to scan before the 1m window "
+            "so gap/session-dependent factors have prior context."
+        ),
+    )
     diagnose_command.add_argument(
         "--factors",
         type=_factors,
