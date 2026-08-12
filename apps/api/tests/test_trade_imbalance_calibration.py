@@ -98,10 +98,20 @@ def test_v2_hypotheses_freeze_the_calibration_identity_and_keep_both_horizons():
     assert {item.factor_key for item in hypotheses} == {
         "signed_trade_imbalance_continuation_v2_1bar",
         "signed_trade_imbalance_continuation_v2_2bar",
+        "signed_trade_imbalance_exhaustion_reversal_v3_1bar",
+        "signed_trade_imbalance_exhaustion_reversal_v3_2bar",
     }
     assert {item.horizon_bars for item in hypotheses} == {1, 2}
-    assert all(item.version == 2 for item in hypotheses)
+    assert {item.version for item in hypotheses} == {2, 3}
     assert all(dict(item.parameters)["calibration_id"] == 7 for item in hypotheses)
+    assert {
+        item.factor_key
+        for item in hypotheses
+        if dict(item.parameters).get("signal_polarity") == "reversal"
+    } == {
+        "signed_trade_imbalance_exhaustion_reversal_v3_1bar",
+        "signed_trade_imbalance_exhaustion_reversal_v3_2bar",
+    }
 
 
 def test_v2_hypothesis_refuses_an_uncertified_calibration():

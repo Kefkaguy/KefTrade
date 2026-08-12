@@ -279,6 +279,13 @@ _ORDER_FLOW_PARAMETERS: dict[str, tuple[tuple[str, Any], ...]] = {
         ("maximum_unclassified_share", 0.25),
         ("classifier", "tick_rule_with_lee_ready_agreement_evidence"),
     ),
+    "signed_trade_imbalance_exhaustion_reversal": (
+        ("minimum_signed_imbalance", 0.30),
+        ("minimum_trade_count", 200),
+        ("maximum_unclassified_share", 0.25),
+        ("classifier", "tick_rule_with_lee_ready_agreement_evidence"),
+        ("signal_polarity", "reversal"),
+    ),
     "sector_relative_forced_flow_reversal": (
         ("minimum_standardized_residual", 2.0),
         ("minimum_excess_participation", 2.0),
@@ -338,6 +345,31 @@ _ORDER_FLOW_CLAIMS: dict[str, dict[str, str]] = {
             "at least 200 prints and at most a quarter of volume unsignable. "
             "The imbalance is signed by which side crossed the spread, which "
             "no candle records at any resolution."
+        ),
+        "signal_timestamp": "close of the signal bar",
+        "decision_timestamp": "close of the signal bar, when its prints are complete",
+        "executable_entry_timestamp": "open of the following bar",
+        "expected_direction": "both",
+    },
+    "signed_trade_imbalance_exhaustion_reversal": {
+        "title": "Signed trade-imbalance exhaustion reversal",
+        "forced_participant": (
+            "Short-horizon liquidity demanders who have to complete a burst of "
+            "buying or selling immediately, exhausting the visible one-sided "
+            "flow inside the signal bar."
+        ),
+        "why_they_cannot_wait": (
+            "The immediacy demand is concentrated in the current bar: stop "
+            "activity, risk reduction, or urgent execution crosses the spread "
+            "now rather than patiently posting liquidity. Once that burst is "
+            "complete, the next bars no longer receive the same forced flow."
+        ),
+        "how_the_flow_appears_in_data": (
+            "The same return-blind extreme signed trade imbalance threshold as "
+            "the continuation test, but the event is scored in the opposite "
+            "direction: aggressive buying is tested as temporary upward "
+            "pressure that can revert, and aggressive selling as temporary "
+            "downward pressure that can revert."
         ),
         "signal_timestamp": "close of the signal bar",
         "decision_timestamp": "close of the signal bar, when its prints are complete",
@@ -454,7 +486,6 @@ def trade_imbalance_v2_hypotheses(
         else "time-slot and liquidity-bucket 95th-percentile thresholds"
     )
     required = required_event_count or order_flow_required_event_count()
-    claim = _ORDER_FLOW_CLAIMS["signed_trade_imbalance_continuation"]
     common_parameters = (
         ("calibration_id", calibration_id),
         ("calibration_dataset_hash", str(calibration["dataset_hash"])),
@@ -468,36 +499,50 @@ def trade_imbalance_v2_hypotheses(
         ("minimum_effective_trade_count", 50.0),
         ("classifier", "tick_rule_with_lee_ready_agreement_evidence"),
     ) + _ORDER_FLOW_COMMON
-    return [
-        Hypothesis(
-            key=f"{ORDER_FLOW_EXPERIMENT_KEY}:signed_trade_imbalance_continuation:{horizon}bar",
-            factor_key=f"signed_trade_imbalance_continuation_v2_{horizon}bar",
-            title=f"{claim['title']} v2, {horizon}-bar hold",
-            forced_participant=claim["forced_participant"],
-            why_they_cannot_wait=claim["why_they_cannot_wait"],
-            how_the_flow_appears_in_data=(
-                f"Extreme signed trade imbalance defined as {rule}; the numerical "
-                f"rule was frozen by return-blind calibration {calibration_id}."
-            ),
-            signal_timestamp=claim["signal_timestamp"],
-            decision_timestamp=claim["decision_timestamp"],
-            executable_entry_timestamp=claim["executable_entry_timestamp"],
-            exit_horizon=(
-                f"{horizon} bar(s), exited at that bar's close; never carried "
-                "past the regular session close"
-            ),
-            expected_direction="both",
-            universe="point-in-time liquid US equity membership at the observation timestamp",
-            cost_model="stressed p90 round-trip spread from the SIP execution-cost calibration",
-            required_event_count=required,
-            invalidation_conditions=_ORDER_FLOW_INVALIDATION,
-            success_criteria=_ORDER_FLOW_SUCCESS,
-            horizon_bars=horizon,
-            parameters=common_parameters,
-            version=2,
+    hypotheses: list[Hypothesis] = []
+    for family, version in (
+        ("signed_trade_imbalance_continuation", 2),
+        ("signed_trade_imbalance_exhaustion_reversal", 3),
+    ):
+        claim = _ORDER_FLOW_CLAIMS[family]
+        parameters = common_parameters + (
+            (("signal_polarity", "reversal"),)
+            if family == "signed_trade_imbalance_exhaustion_reversal"
+            else ()
         )
-        for horizon in (1, 2)
-    ]
+        hypotheses.extend(
+            [
+                Hypothesis(
+                    key=f"{ORDER_FLOW_EXPERIMENT_KEY}:{family}:{horizon}bar:v{version}",
+                    factor_key=f"{family}_v{version}_{horizon}bar",
+                    title=f"{claim['title']} v{version}, {horizon}-bar hold",
+                    forced_participant=claim["forced_participant"],
+                    why_they_cannot_wait=claim["why_they_cannot_wait"],
+                    how_the_flow_appears_in_data=(
+                        f"Extreme signed trade imbalance defined as {rule}; the numerical "
+                        f"rule was frozen by return-blind calibration {calibration_id}."
+                    ),
+                    signal_timestamp=claim["signal_timestamp"],
+                    decision_timestamp=claim["decision_timestamp"],
+                    executable_entry_timestamp=claim["executable_entry_timestamp"],
+                    exit_horizon=(
+                        f"{horizon} bar(s), exited at that bar's close; never carried "
+                        "past the regular session close"
+                    ),
+                    expected_direction="both",
+                    universe="point-in-time liquid US equity membership at the observation timestamp",
+                    cost_model="stressed p90 round-trip spread from the SIP execution-cost calibration",
+                    required_event_count=required,
+                    invalidation_conditions=_ORDER_FLOW_INVALIDATION,
+                    success_criteria=_ORDER_FLOW_SUCCESS,
+                    horizon_bars=horizon,
+                    parameters=parameters,
+                    version=version,
+                )
+                for horizon in (1, 2)
+            ]
+        )
+    return hypotheses
 
 
 # ---------------------------------------------------------------------------

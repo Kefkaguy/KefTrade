@@ -217,6 +217,8 @@ TRADE_FLOW_FEEDS = {"alpaca_sip": "sip", "alpaca_iex": "iex"}
 SIGNED_TRADE_IMBALANCE_V2_KEYS = {
     "signed_trade_imbalance_continuation_v2_1bar",
     "signed_trade_imbalance_continuation_v2_2bar",
+    "signed_trade_imbalance_exhaustion_reversal_v3_1bar",
+    "signed_trade_imbalance_exhaustion_reversal_v3_2bar",
 }
 
 

@@ -184,6 +184,7 @@ def signed_trade_imbalance_observations(
     horizon_bars: int = 1,
     trade_flow_by_symbol: dict[str, dict[datetime, dict[str, Any]]] | None = None,
     trade_imbalance_calibration: dict[str, Any] | None = None,
+    signal_polarity: str = "continuation",
     **_: Any,
 ) -> list[dict[str, Any]]:
     """Persistent one-sided aggression should keep pushing price.
@@ -198,6 +199,8 @@ def signed_trade_imbalance_observations(
         return []
     if horizon_bars < 1:
         raise ValueError("horizon_bars must be at least 1")
+    if signal_polarity not in {"continuation", "reversal"}:
+        raise ValueError("signal_polarity must be 'continuation' or 'reversal'")
 
     output: list[dict[str, Any]] = []
     for symbol, rows in candles_by_symbol.items():
@@ -277,14 +280,18 @@ def signed_trade_imbalance_observations(
                         factor_key="signed_trade_imbalance_continuation",
                         symbol=symbol,
                         session_date=session_date,
-                        score=float(imbalance),
+                        score=(
+                            float(imbalance)
+                            if signal_polarity == "continuation"
+                            else -float(imbalance)
+                        ),
                         target_return=horizon_return,
                         signal_bar=signal_bar,
                         entry_bar=entry_bar,
                         exit_bar=exit_bar,
                         timeframe=timeframe,
                         horizon_bars=horizon_bars,
-                        signal_polarity="continuation",
+                        signal_polarity=signal_polarity,
                         signed_trade_imbalance=float(imbalance),
                         trade_count=int(trade_count),
                         unclassified_share=(
@@ -405,7 +412,9 @@ def horizon_builder(base: Any, *, factor_key: str, horizon_bars: int) -> Any:
     return builder
 
 
-def calibrated_horizon_builder(base: Any, *, factor_key: str, horizon_bars: int) -> Any:
+def calibrated_horizon_builder(
+    base: Any, *, factor_key: str, horizon_bars: int, **bound_kwargs: Any
+) -> Any:
     """A v2 factor that refuses to run without its immutable calibration."""
 
     bound = horizon_builder(base, factor_key=factor_key, horizon_bars=horizon_bars)
@@ -423,6 +432,7 @@ def calibrated_horizon_builder(base: Any, *, factor_key: str, horizon_bars: int)
             candles_by_symbol,
             timeframe=timeframe,
             trade_imbalance_calibration=trade_imbalance_calibration,
+            **bound_kwargs,
             **kwargs,
         )
 

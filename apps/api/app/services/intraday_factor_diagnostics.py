@@ -1029,6 +1029,22 @@ _ORDER_FLOW_FAMILIES: dict[str, dict[str, Any]] = {
             "Chordia & Subrahmanyam (2004), Order imbalance and individual stock returns",
         ),
     },
+    "signed_trade_imbalance_exhaustion_reversal": {
+        "title": "Signed trade-imbalance exhaustion reversal",
+        "hypothesis": (
+            "An extreme burst of one-sided aggressive trading can exhaust the "
+            "immediate participant flow rather than reveal persistent demand. "
+            "After the forced buyers or sellers have paid for immediacy, the "
+            "temporary pressure partly reverses over the next bars."
+        ),
+        "requires": {"requires_trade_flow": True},
+        "v2_only": True,
+        "references": (
+            "Lee & Ready (1991), Inferring trade direction from intraday data",
+            "Hendershott & Menkveld (2014), Price pressures",
+            "Nagel (2012), Evaporating liquidity",
+        ),
+    },
     "sector_relative_forced_flow_reversal": {
         "title": "Sector-relative forced-flow reversal",
         "hypothesis": (
@@ -1059,9 +1075,12 @@ def _register_order_flow_specs() -> None:
     bases = {
         "premarket_undiscovered_gap_reversal": premarket_undiscovered_gap_observations,
         "signed_trade_imbalance_continuation": signed_trade_imbalance_observations,
+        "signed_trade_imbalance_exhaustion_reversal": signed_trade_imbalance_observations,
         "sector_relative_forced_flow_reversal": sector_relative_forced_flow_observations,
     }
     for base_key, definition in _ORDER_FLOW_FAMILIES.items():
+        if definition.get("v2_only"):
+            continue
         for horizon in ORDER_FLOW_HORIZON_BARS:
             key = f"{base_key}_{horizon}bar"
             FACTOR_SPECS[key] = FactorSpec(
@@ -1084,27 +1103,32 @@ def _register_order_flow_specs() -> None:
     # The v1 0.30 cutoff remains an immutable historical trial.  V2 is a new
     # factor specification whose numerical cutoff must come from a frozen,
     # return-blind calibration and therefore hashes as a separate trial.
-    definition = _ORDER_FLOW_FAMILIES["signed_trade_imbalance_continuation"]
-    for horizon in ORDER_FLOW_HORIZON_BARS:
-        key = f"signed_trade_imbalance_continuation_v2_{horizon}bar"
-        FACTOR_SPECS[key] = FactorSpec(
-            key=key,
-            title=f"Signed trade-imbalance continuation v2 ({horizon}-bar hold)",
-            hypothesis=(
-                f"{definition['hypothesis']} Extreme imbalance is defined by an "
-                "immutable return-blind calibration. Measured over a "
-                f"{horizon}-bar hold, entered at the following bar's open."
-            ),
-            supported_timeframes=("30m",),
-            builder=calibrated_horizon_builder(
-                signed_trade_imbalance_observations,
-                factor_key=key,
-                horizon_bars=horizon,
-            ),
-            factor_type="directional_event",
-            references=definition["references"],
-            requires_trade_flow=True,
-        )
+    for family, polarity, version in (
+        ("signed_trade_imbalance_continuation", "continuation", 2),
+        ("signed_trade_imbalance_exhaustion_reversal", "reversal", 3),
+    ):
+        definition = _ORDER_FLOW_FAMILIES[family]
+        for horizon in ORDER_FLOW_HORIZON_BARS:
+            key = f"{family}_v{version}_{horizon}bar"
+            FACTOR_SPECS[key] = FactorSpec(
+                key=key,
+                title=f"{definition['title']} v{version} ({horizon}-bar hold)",
+                hypothesis=(
+                    f"{definition['hypothesis']} Extreme imbalance is defined by an "
+                    "immutable return-blind calibration. Measured over a "
+                    f"{horizon}-bar hold, entered at the following bar's open."
+                ),
+                supported_timeframes=("30m",),
+                builder=calibrated_horizon_builder(
+                    signed_trade_imbalance_observations,
+                    factor_key=key,
+                    horizon_bars=horizon,
+                    signal_polarity=polarity,
+                ),
+                factor_type="directional_event",
+                references=definition["references"],
+                requires_trade_flow=True,
+            )
 
 
 _register_order_flow_specs()

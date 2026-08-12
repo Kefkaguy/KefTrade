@@ -218,6 +218,37 @@ def test_v2_uses_the_calibrated_threshold_instead_of_the_legacy_point_30():
     assert all(row["minimum_signed_imbalance"] == 0.5 for row in accepted)
 
 
+def test_v2_exhaustion_reversal_uses_same_threshold_but_flips_direction():
+    continuation = FACTOR_SPECS["signed_trade_imbalance_continuation_v2_1bar"]
+    reversal = FACTOR_SPECS["signed_trade_imbalance_exhaustion_reversal_v3_1bar"]
+    calibration = {
+        "id": 9,
+        "report": {
+            "threshold": {"mode": "global", "global_rounded_up": 0.5}
+        },
+    }
+
+    continuation_rows = continuation.builder(
+        {"AAPL": session()},
+        timeframe="30m",
+        trade_flow_by_symbol=flow(signed_trade_imbalance=0.6),
+        trade_imbalance_calibration=calibration,
+    )
+    reversal_rows = reversal.builder(
+        {"AAPL": session()},
+        timeframe="30m",
+        trade_flow_by_symbol=flow(signed_trade_imbalance=0.6),
+        trade_imbalance_calibration=calibration,
+    )
+
+    assert continuation_rows
+    assert reversal_rows
+    assert continuation_rows[0]["score"] == 0.6
+    assert reversal_rows[0]["score"] == -0.6
+    assert reversal_rows[0]["signal_polarity"] == "reversal"
+    assert reversal_rows[0]["minimum_signed_imbalance"] == 0.5
+
+
 def test_no_position_is_opened_that_cannot_be_closed_in_session():
     rows = imbalance(horizon_bars=2)
     last = max(row["exit_bar_timestamp"] for row in rows)
