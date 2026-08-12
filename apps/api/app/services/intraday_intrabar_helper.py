@@ -11,7 +11,7 @@ hypothesis.  It is not a promotion, confirmation, broker action, or UI action.
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from statistics import fmean
 from typing import Any, Sequence
 
@@ -489,10 +489,15 @@ def _event_diagnostics(
         key for key, value in flags.items()
         if value is True and key != "spread_acceptable"
     ]
+    session_date = observation["session_date"]
     return {
         "factor_key": observation["factor_key"],
         "symbol": observation["symbol"],
-        "session_date": observation["session_date"],
+        "session_date": (
+            session_date.isoformat()
+            if isinstance(session_date, date)
+            else str(session_date)
+        ),
         "direction": direction,
         "signal_bar_timestamp": observation["signal_bar_timestamp"],
         "decision_timestamp": observation["decision_timestamp"],
