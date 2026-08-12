@@ -28,12 +28,13 @@ SUPPORTED_INTRADAY_TIMEFRAMES = ("15m", "30m")
 # itself calendar-derived -- see `app.services.labs.intraday.session`).
 INTRADAY_BAR_DURATION_MINUTES: dict[str, int] = {"15m": 15, "30m": 30}
 
-# A join that drops more than half the candle rows signals a real problem
-# (e.g. intraday_features was never backfilled for most of this range) --
-# not the normal, expected premarket-orphan exclusion rate (~10-15% in
-# production data). Deliberately conservative so it only fires on a genuine
-# coverage gap.
-MINIMUM_CANDLE_FEATURE_JOIN_RATIO = 0.5
+# A join that drops too many candle rows signals a real problem (e.g.
+# intraday_features was never backfilled for most of this range).  Snapshots
+# may contain extended-hours candles, while intraday_features are intentionally
+# regular-session features.  A full 04:00-20:00 ET 15m/30m candle set therefore
+# joins at roughly 390/960 ~= 41%, so the threshold must be below that expected
+# regular-session share while still refusing genuinely empty/partial joins.
+MINIMUM_CANDLE_FEATURE_JOIN_RATIO_BY_TIMEFRAME = {"15m": 0.35, "30m": 0.35}
 
 # Opening-range fields should be non-null for essentially every joined row --
 # the very first in-window bar of a session already has a real (self-)
@@ -135,11 +136,12 @@ def build_intraday_backtest_dataset(
         )
 
     join_ratio = len(rows) / len(candles)
-    if join_ratio < MINIMUM_CANDLE_FEATURE_JOIN_RATIO:
+    minimum_join_ratio = MINIMUM_CANDLE_FEATURE_JOIN_RATIO_BY_TIMEFRAME[timeframe]
+    if join_ratio < minimum_join_ratio:
         raise IntradayDatasetError(
             f"Only {len(rows)}/{len(candles)} ({join_ratio:.0%}) candles for {symbol} {timeframe} "
             f"joined to an intraday_features row -- below the minimum expected coverage "
-            f"({MINIMUM_CANDLE_FEATURE_JOIN_RATIO:.0%}). Refusing to silently backtest a "
+            f"({minimum_join_ratio:.0%}). Refusing to silently backtest a "
             "partially joined dataset; check whether the intraday features backfill covers "
             "this candle range."
         )
