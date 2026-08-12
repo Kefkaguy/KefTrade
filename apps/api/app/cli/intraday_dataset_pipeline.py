@@ -30,6 +30,9 @@ from app.services.intraday_dataset_quality import (
 from app.services.intraday_trade_flow_ingest import MAX_SESSIONS_PER_RUN
 from app.services.intraday_universe import UniverseRule, build_point_in_time_universe
 
+INGEST_TIMEFRAMES = ("1m", "15m", "30m")
+RESEARCH_TIMEFRAMES = ("15m", "30m")
+
 
 def _symbols(value: str) -> list[str]:
     items = [item.strip().upper() for item in value.split(",") if item.strip()]
@@ -323,7 +326,7 @@ def parser() -> argparse.ArgumentParser:
         "ingest", help="Resumable date-range candle ingestion."
     )
     ingest_command.add_argument("--symbols", required=True)
-    ingest_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    ingest_command.add_argument("--timeframe", default="30m", choices=INGEST_TIMEFRAMES)
     ingest_command.add_argument("--start", type=_date, required=True)
     ingest_command.add_argument("--end", type=_date, required=True)
     ingest_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
@@ -341,7 +344,7 @@ def parser() -> argparse.ArgumentParser:
     universe_command.add_argument("--rebalance-months", type=int, default=3)
     universe_command.add_argument("--rank-lookback-sessions", type=int, default=60)
     universe_command.add_argument("--minimum-dollar-volume", type=float, default=20_000_000.0)
-    universe_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    universe_command.add_argument("--timeframe", default="30m", choices=RESEARCH_TIMEFRAMES)
     universe_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
 
     snapshot_command = commands.add_parser(
@@ -353,7 +356,7 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Take the asset list from the universe's members instead of --symbols.",
     )
-    snapshot_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    snapshot_command.add_argument("--timeframe", default="30m", choices=RESEARCH_TIMEFRAMES)
     snapshot_command.add_argument("--universe-key")
     snapshot_command.add_argument("--as-of")
     snapshot_command.add_argument("--name")
@@ -369,7 +372,7 @@ def parser() -> argparse.ArgumentParser:
         "quality", help="Data-quality checks and the gap-experiment power gate."
     )
     quality_command.add_argument("--dataset-id", type=int, required=True)
-    quality_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    quality_command.add_argument("--timeframe", default="30m", choices=RESEARCH_TIMEFRAMES)
     quality_command.add_argument("--universe-key")
 
     features_command = commands.add_parser(
@@ -378,7 +381,7 @@ def parser() -> argparse.ArgumentParser:
     features_command.add_argument("--symbols")
     features_command.add_argument("--from-universe", action="store_true")
     features_command.add_argument("--universe-key")
-    features_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    features_command.add_argument("--timeframe", default="30m", choices=RESEARCH_TIMEFRAMES)
     features_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
     features_command.add_argument("--candle-limit", type=int, default=200_000)
 
@@ -389,7 +392,7 @@ def parser() -> argparse.ArgumentParser:
     premarket_command.add_argument("--symbols")
     premarket_command.add_argument("--from-universe", action="store_true")
     premarket_command.add_argument("--universe-key")
-    premarket_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    premarket_command.add_argument("--timeframe", default="30m", choices=RESEARCH_TIMEFRAMES)
     premarket_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
 
     trade_flow_command = commands.add_parser(
@@ -400,7 +403,7 @@ def parser() -> argparse.ArgumentParser:
     trade_flow_command.add_argument("--universe-key")
     trade_flow_command.add_argument("--start", type=_date, required=True)
     trade_flow_command.add_argument("--end", type=_date, required=True)
-    trade_flow_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    trade_flow_command.add_argument("--timeframe", default="30m", choices=INGEST_TIMEFRAMES)
     trade_flow_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
     trade_flow_command.add_argument(
         "--max-sessions",
@@ -421,7 +424,7 @@ def parser() -> argparse.ArgumentParser:
     auto_trade_flow_command.add_argument("--universe-key")
     auto_trade_flow_command.add_argument("--start", type=_date, required=True)
     auto_trade_flow_command.add_argument("--end", type=_date, required=True)
-    auto_trade_flow_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    auto_trade_flow_command.add_argument("--timeframe", default="30m", choices=INGEST_TIMEFRAMES)
     auto_trade_flow_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)
     auto_trade_flow_command.add_argument(
         "--target-completed",
@@ -465,7 +468,7 @@ def parser() -> argparse.ArgumentParser:
         "sector-flow", help="Sector peer-group coverage for a snapshotted dataset."
     )
     sector_flow_command.add_argument("--dataset-id", type=int, required=True)
-    sector_flow_command.add_argument("--timeframe", default="30m", choices=("15m", "30m"))
+    sector_flow_command.add_argument("--timeframe", default="30m", choices=RESEARCH_TIMEFRAMES)
 
     return root
 

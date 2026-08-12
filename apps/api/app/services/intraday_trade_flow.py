@@ -77,7 +77,7 @@ QUOTE_LAG = timedelta(0)
 # large-trade share; below it is where retail and algorithmic slicing live.
 LARGE_TRADE_SIZE = 10_000
 
-BAR_SECONDS = {"15m": 900, "30m": 1800}
+BAR_SECONDS = {"1m": 60, "15m": 900, "30m": 1800}
 
 
 def _decimal(value: Any) -> Decimal:

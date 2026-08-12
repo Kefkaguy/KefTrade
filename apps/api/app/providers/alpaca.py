@@ -29,6 +29,7 @@ MAX_STOCK_QUOTE_PAGES = 100
 # high; the caller folds each page away rather than holding the range.
 MAX_STOCK_TRADE_PAGES = 400
 SUPPORTED_TIMEFRAMES = {
+    "1m": "1Min",
     "15m": "15Min",
     "30m": "30Min",
     "1h": "1Hour",
@@ -36,6 +37,7 @@ SUPPORTED_TIMEFRAMES = {
     "1d": "1Day",
 }
 TIMEFRAME_SECONDS = {
+    "1m": 60,
     "15m": 15 * 60,
     "30m": 30 * 60,
     "1h": 60 * 60,
