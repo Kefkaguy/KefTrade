@@ -3286,8 +3286,11 @@ export type IntradayPaperLabMonitor = {
   market_data_note?: string;
 };
 
-export function getIntradayPaperLabMonitor(experimentId = 1) {
-  return request<IntradayPaperLabMonitor>(`/intraday-paper-lab/experiments/${experimentId}`, {
+export function getIntradayPaperLabMonitor(experimentId?: number) {
+  const path = experimentId
+    ? `/intraday-paper-lab/experiments/${experimentId}`
+    : "/intraday-paper-lab/experiments";
+  return request<IntradayPaperLabMonitor>(path, {
     cache: "no-store",
     timeoutMs: 15000
   });

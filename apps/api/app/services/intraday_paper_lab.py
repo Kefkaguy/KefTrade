@@ -1508,17 +1508,23 @@ def monitor(conn: psycopg.Connection, *, experiment_id: int) -> dict[str, Any]:
 
 
 def monitor_all(conn: psycopg.Connection, *, trading_date: date | None = None) -> dict[str, Any]:
-    if trading_date is None:
-        latest = conn.execute(
-            "SELECT MAX(trading_date) AS trading_date FROM intraday_paper_lab_experiments",
-        ).fetchone()
-        trading_date = latest["trading_date"] if latest else None
-    if trading_date is None:
+    where_clause = "WHERE trading_date = %s" if trading_date is not None else ""
+    params: tuple[Any, ...] = (trading_date,) if trading_date is not None else ()
+    experiments = conn.execute(
+        f"""
+        SELECT id
+        FROM intraday_paper_lab_experiments
+        {where_clause}
+        ORDER BY trading_date DESC, id DESC
+        """,
+        params,
+    ).fetchall()
+    if not experiments:
         return {
             "experiment": {
                 "id": "all",
                 "name": "All Alpaca Paper Labs",
-                "trading_date": None,
+                "trading_date": trading_date,
                 "status": "empty",
                 "factor_key": "multiple",
                 "timeframe": "30m",
@@ -1548,15 +1554,6 @@ def monitor_all(conn: psycopg.Connection, *, trading_date: date | None = None) -
             "market_data_feed": "unknown",
             "market_data_note": "No Alpaca Paper lab experiments exist yet.",
         }
-    experiments = conn.execute(
-        """
-        SELECT id
-        FROM intraday_paper_lab_experiments
-        WHERE trading_date = %s
-        ORDER BY id
-        """,
-        (trading_date,),
-    ).fetchall()
     snapshots = [monitor(conn, experiment_id=int(row["id"])) for row in experiments]
 
     summary = {
@@ -1577,6 +1574,7 @@ def monitor_all(conn: psycopg.Connection, *, trading_date: date | None = None) -
     awaiting_sync = 0
     feeds: set[str] = set()
     symbols: set[str] = set()
+    trading_dates: set[date] = set()
     experiment_rows: list[dict[str, Any]] = []
 
     for snapshot in snapshots:
@@ -1587,6 +1585,11 @@ def monitor_all(conn: psycopg.Connection, *, trading_date: date | None = None) -
         feed = str(snapshot.get("market_data_feed") or "unknown").lower()
         feeds.add(feed)
         symbols.update(str(symbol) for symbol in experiment.get("symbols") or [])
+        if experiment.get("trading_date"):
+            trading_dates.add(experiment["trading_date"])
+        experiment["summary"] = dict(snapshot.get("summary") or {})
+        experiment["pnl"] = dict(snapshot.get("pnl") or {})
+        experiment["market_data_feed"] = feed
         experiment_rows.append(experiment)
         for key in ("decisions", "entries_submitted", "exits_submitted", "skips", "errors"):
             summary[key] += int((snapshot.get("summary") or {}).get(key) or 0)
@@ -1630,17 +1633,35 @@ def monitor_all(conn: psycopg.Connection, *, trading_date: date | None = None) -
         """,
     ).fetchone()
     feed_label = feeds.pop() if len(feeds) == 1 else "mixed"
+    active_statuses = {str(row.get("status") or "") for row in experiment_rows}
+    aggregate_status = (
+        "running"
+        if "running" in active_statuses
+        else "created"
+        if "created" in active_statuses
+        else "complete"
+    )
+    aggregate_name = (
+        f"All Alpaca Paper Labs — {trading_date}"
+        if trading_date is not None
+        else "All Alpaca Paper Labs — live all-day status"
+    )
     return {
         "experiment": {
             "id": "all",
-            "name": f"All Alpaca Paper Labs — {trading_date}",
+            "name": aggregate_name,
             "trading_date": trading_date,
-            "status": "running" if any(row.get("status") == "running" for row in experiment_rows) else "created",
+            "trading_dates": sorted(trading_dates),
+            "status": aggregate_status,
             "factor_key": "multiple",
             "timeframe": "30m",
             "threshold": None,
             "symbols": sorted(symbols),
-            "config": {"market_data_feed": feed_label},
+            "config": {
+                "market_data_feed": feed_label,
+                "scope": "all_trading_dates" if trading_date is None else "single_trading_date",
+                "experiment_count": len(experiment_rows),
+            },
         },
         "experiments": experiment_rows,
         "summary": summary,

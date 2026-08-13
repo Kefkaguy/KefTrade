@@ -99,8 +99,8 @@ export function PaperLabDashboard({ initial, experimentId, initialError = null }
           </span>
           <h1>{String(experiment.name ?? "Alpaca Paper Labs")}</h1>
           <p>
-            Backend-only Alpaca Paper monitor. This page aggregates submitted orders,
-            filled entry/exit prices, open trades, and total realized P/L for the current lab trading date.
+            Backend-only Alpaca Paper monitor. This page aggregates every paper-lab experiment across all
+            trading dates: submitted orders, filled entry/exit prices, open trades, and total realized P/L.
           </p>
         </div>
         <div className="paperHeroActions">
@@ -118,7 +118,7 @@ export function PaperLabDashboard({ initial, experimentId, initialError = null }
         <Metric label="Open trades" value={String(snapshot?.pnl?.open_trades ?? 0)} detail={`${snapshot?.positions?.length ?? 0} position bucket(s)`} />
         <Metric label="Entries submitted" value={String(summary.entries_submitted ?? 0)} detail={`${summary.exits_submitted ?? 0} exits submitted`} />
         <Metric label="Decisions" value={String(summary.decisions ?? 0)} detail={`${summary.skips ?? 0} skips · ${summary.errors ?? 0} errors`} />
-        <Metric label="Experiments" value={String(experiments.length || 1)} detail={String(experiment.factor_key ?? "multiple factors")} />
+        <Metric label="Experiments" value={String(experiments.length || 1)} detail={String(experiment.config?.scope ?? "all trading dates")} />
         <Metric label="Status" value={String(experiment.status ?? "unknown")} detail={`Last decision ${dateTime(summary.last_decision_at)}`} />
       </div>
 
@@ -134,7 +134,7 @@ export function PaperLabDashboard({ initial, experimentId, initialError = null }
       ) : null}
 
       <div className="paperStatusStrip">
-        <span>Trading date <strong>{String(experiment.trading_date ?? "—")}</strong></span>
+        <span>Trading scope <strong>{experiment.trading_date ? String(experiment.trading_date) : "All dates"}</strong></span>
         <span>Timeframe <strong>{String(experiment.timeframe ?? "30m")}</strong></span>
         <span>Data feed <strong>{String(snapshot?.market_data_feed ?? experiment.config?.market_data_feed ?? "iex").toUpperCase()}</strong></span>
         <span>Symbols <strong>{Array.isArray(experiment.symbols) ? experiment.symbols.length : "—"}</strong></span>
@@ -143,6 +143,55 @@ export function PaperLabDashboard({ initial, experimentId, initialError = null }
         <span>Page refresh <strong>{lastRefresh ? dateTime(lastRefresh.toISOString()) : "—"}</strong></span>
       </div>
       {snapshot?.market_data_note ? <div className="paperAlert">{snapshot.market_data_note}</div> : null}
+
+      {experiments.length ? (
+        <section className="paperPanel">
+          <header>
+            <span className="paperOnlyEyebrow">Experiments</span>
+            <h2>All paper-lab bots</h2>
+          </header>
+          <div className="paperTableWrap">
+            <table className="paperTable">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>Name</th>
+                  <th>Date</th>
+                  <th>Status</th>
+                  <th>Feed</th>
+                  <th>Decisions</th>
+                  <th>Orders</th>
+                  <th>Open</th>
+                  <th>P/L</th>
+                </tr>
+              </thead>
+              <tbody>
+                {experiments.map((item) => {
+                  const itemSummary = item.summary ?? {};
+                  const itemPnl = item.pnl ?? {};
+                  const itemRealizedPnl = numberValue(itemPnl.realized_pnl);
+                  return (
+                    <tr key={String(item.id)}>
+                      <td>#{String(item.id)}</td>
+                      <td>
+                        <strong>{String(item.factor_key ?? item.name ?? "lab")}</strong>
+                        <small>{String(item.name ?? "")}</small>
+                      </td>
+                      <td>{String(item.trading_date ?? "—")}</td>
+                      <td>{String(item.status ?? "unknown")}</td>
+                      <td>{String(item.market_data_feed ?? item.config?.market_data_feed ?? "unknown").toUpperCase()}</td>
+                      <td>{String(itemSummary.decisions ?? 0)}</td>
+                      <td>{String(itemSummary.entries_submitted ?? 0)} / {String(itemSummary.exits_submitted ?? 0)}</td>
+                      <td>{String(itemPnl.open_trades ?? 0)}</td>
+                      <td className={itemRealizedPnl >= 0 ? "positive" : "negative"}>{money(itemRealizedPnl)}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
 
       <div className="paperGridTwo">
         <section className="paperPanel">
