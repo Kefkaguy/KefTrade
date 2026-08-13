@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 
 from app.cli._refusal import run_command
 from app.db import connect
 from app.services.intraday_paper_lab import (
     AlpacaPaperLabClient,
+    EXCHANGE,
     GAP_PAPER_LAB_FACTORS,
+    REGULAR_CLOSE,
+    REGULAR_OPEN,
+    _utc,
     create_experiment,
     create_gap_factor_experiment,
     flatten_due_positions,
@@ -37,6 +41,17 @@ def _timestamp(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise argparse.ArgumentTypeError("timestamp must include timezone")
     return parsed.astimezone(UTC)
+
+
+def _ids(value: str | None) -> list[int]:
+    if not value:
+        return []
+    ids: list[int] = []
+    for item in value.split(","):
+        item = item.strip()
+        if item:
+            ids.append(int(item))
+    return list(dict.fromkeys(ids))
 
 
 def create(args: argparse.Namespace) -> dict:
@@ -150,6 +165,136 @@ def status(args: argparse.Namespace) -> dict:
         return monitor(conn, experiment_id=args.experiment_id)
 
 
+async def _run_scheduled_experiment(
+    experiment_id: int,
+    *,
+    submit: bool,
+    confirm_paper: bool,
+    poll_seconds: int,
+    feed: str | None,
+) -> dict:
+    with connect() as conn:
+        experiment = load_lab_experiment(conn, experiment_id)
+        conn.execute(
+            "UPDATE intraday_paper_lab_experiments SET status='running', updated_at=NOW() WHERE id=%s",
+            (experiment_id,),
+        )
+        conn.commit()
+        config = dict(experiment.get("config") or {})
+        factor_key = str(config.get("factor_key") or experiment.get("factor_key") or "")
+        if factor_key in GAP_PAPER_LAB_FACTORS:
+            return await run_gap_factor_loop(
+                conn,
+                experiment_id=experiment_id,
+                submit=submit,
+                confirm_paper=confirm_paper,
+                poll_seconds=poll_seconds,
+                feed=feed,
+            )
+        return await run_loop(
+            conn,
+            experiment_id=experiment_id,
+            submit=submit,
+            confirm_paper=confirm_paper,
+            poll_seconds=poll_seconds,
+            feed=feed,
+        )
+
+
+async def _schedule_async(args: argparse.Namespace) -> dict:
+    trading_date: date = args.trading_date or datetime.now(tz=EXCHANGE).date()
+    start_at = _utc(trading_date, REGULAR_OPEN) - timedelta(minutes=args.start_minutes_before_open)
+    session_close = _utc(trading_date, REGULAR_CLOSE) + timedelta(minutes=10)
+    now = datetime.now(tz=UTC)
+    if now > session_close:
+        return {
+            "status": "refused",
+            "reason": "trading_date session is already closed",
+            "trading_date": trading_date,
+            "session_close": session_close,
+        }
+    if now < start_at and not args.dry_run:
+        while datetime.now(tz=UTC) < start_at:
+            await asyncio.sleep(min(60, max(1, int((start_at - datetime.now(tz=UTC)).total_seconds()))))
+
+    requested_ids = _ids(args.experiment_ids)
+    with connect() as conn:
+        if requested_ids:
+            rows = conn.execute(
+                """
+                SELECT id, name, status, factor_key, trading_date, config
+                FROM intraday_paper_lab_experiments
+                WHERE trading_date = %s
+                  AND id = ANY(%s)
+                ORDER BY id
+                """,
+                (trading_date, requested_ids),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT id, name, status, factor_key, trading_date, config
+                FROM intraday_paper_lab_experiments
+                WHERE trading_date = %s
+                  AND status IN ('created', 'running')
+                ORDER BY id
+                """,
+                (trading_date,),
+            ).fetchall()
+    experiments = [dict(row) for row in rows]
+    if args.dry_run:
+        return {
+            "status": "dry_run",
+            "trading_date": trading_date,
+            "start_at": start_at,
+            "session_close": session_close,
+            "experiments": experiments,
+        }
+    if not experiments:
+        return {
+            "status": "no_experiments",
+            "trading_date": trading_date,
+            "start_at": start_at,
+            "session_close": session_close,
+        }
+    results = await asyncio.gather(
+        *[
+            _run_scheduled_experiment(
+                int(experiment["id"]),
+                submit=args.submit,
+                confirm_paper=args.confirm_paper,
+                poll_seconds=args.poll_seconds,
+                feed=args.feed,
+            )
+            for experiment in experiments
+        ],
+        return_exceptions=True,
+    )
+    normalized_results: list[dict] = []
+    for experiment, result in zip(experiments, results, strict=False):
+        if isinstance(result, Exception):
+            normalized_results.append(
+                {
+                    "experiment_id": experiment["id"],
+                    "status": "error",
+                    "error": str(result),
+                    "error_type": type(result).__name__,
+                }
+            )
+        else:
+            normalized_results.append(dict(result))
+    return {
+        "status": "completed",
+        "trading_date": trading_date,
+        "experiments_started": len(experiments),
+        "results": normalized_results,
+    }
+
+
+def schedule(args: argparse.Namespace) -> dict:
+    return asyncio.run(_schedule_async(args))
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         description=(
@@ -217,6 +362,16 @@ def parser() -> argparse.ArgumentParser:
     monitor_command = commands.add_parser("monitor")
     monitor_command.add_argument("--experiment-id", type=int, required=True)
 
+    schedule_command = commands.add_parser("schedule")
+    schedule_command.add_argument("--trading-date", type=_date)
+    schedule_command.add_argument("--experiment-ids", default=None)
+    schedule_command.add_argument("--poll-seconds", type=int, default=60)
+    schedule_command.add_argument("--feed", choices=("iex", "sip"), default=None)
+    schedule_command.add_argument("--start-minutes-before-open", type=int, default=10)
+    schedule_command.add_argument("--submit", action="store_true")
+    schedule_command.add_argument("--confirm-paper", action="store_true")
+    schedule_command.add_argument("--dry-run", action="store_true")
+
     return root
 
 
@@ -229,12 +384,13 @@ COMMANDS = {
     "run-gap-loop": gap_loop,
     "flatten": flatten,
     "monitor": status,
+    "schedule": schedule,
 }
 
 
 def main() -> None:
     args = parser().parse_args()
-    if args.command in {"flatten", "run-gap-cycle", "run-gap-loop"} and args.submit and not args.confirm_paper:
+    if args.command in {"flatten", "run-cycle", "run-loop", "run-gap-cycle", "run-gap-loop", "schedule"} and args.submit and not args.confirm_paper:
         raise ValueError("Submitting requires --confirm-paper.")
     run_command(
         COMMANDS[args.command],
