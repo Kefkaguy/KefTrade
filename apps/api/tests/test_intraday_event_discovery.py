@@ -16,6 +16,7 @@ from app.services.intraday_event_discovery import (
     _apply_explicit_ev_model,
     _build_models,
     _confirmation_gates,
+    _detect_alpha_ceiling_panel,
     _detect_failed_auctions,
     _normalization_model,
     _outcomes,
@@ -166,6 +167,61 @@ def test_failed_auction_detector_keeps_probe_and_separate_range_reentry_event():
         decision_end=before_session,
     )
     assert withheld == []
+
+
+def test_alpha_ceiling_detector_uses_base_features_without_missing_helper():
+    ny = ZoneInfo("America/New_York")
+    rows = []
+    for index in range(8):
+        timestamp = (
+            datetime(2026, 1, 5, 9, 30, tzinfo=ny) + timedelta(minutes=15 * index)
+        ).astimezone(UTC)
+        rows.append(
+            {
+                "symbol": "TEST",
+                "timeframe": "15m",
+                "timestamp": timestamp,
+                "session_date": date(2026, 1, 5),
+                "open": 100.0 + index * 0.1,
+                "high": 100.3 + index * 0.1,
+                "low": 99.8 + index * 0.1,
+                "close": 100.1 + index * 0.1,
+                "volume": 1000 + index * 10,
+                "session_relative_volume": 1.0 + index / 10,
+                "minutes_from_open": 15 * index,
+                "distance_from_session_vwap": 0.001 * index,
+                "opening_range_position": 0.5,
+                "gap_percent": 0.002,
+                "flow_signed_trade_imbalance": 0.05 * index,
+                "flow_large_trade_share": 0.2,
+                "flow_effective_spread_bps": 1.5,
+            }
+        )
+    contexts = {
+        "returns": {},
+        "sector": {},
+        "market": {},
+        "overnight": {},
+        "overnight_sector": {},
+        "overnight_market": {},
+    }
+
+    events = _detect_alpha_ceiling_panel(
+        {"TEST": rows},
+        timeframe="15m",
+        contexts=contexts,
+        sectors={},
+        cost_model={"stressed_round_trip_bps": 2.0, "conservative_round_trip_bps": 30.0},
+        horizons=(15, 30, 60, 120),
+    )
+
+    assert events
+    event = events[0]
+    assert event["event_key"] == "15m_alpha_ceiling_panel"
+    assert event["labels"]["dynamic_direction"] is True
+    assert event["features"]["idiosyncratic_return"] is not None
+    assert event["features"]["market_return"] == 0.0
+    assert event["outcomes"]["15m"]["available"] is True
 
 
 def test_normalization_is_fit_only_on_the_rows_passed_to_it():

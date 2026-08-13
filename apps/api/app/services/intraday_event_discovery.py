@@ -1019,7 +1019,7 @@ def _detect_alpha_ceiling_panel(
                 ]
                 imbalance = _finite(current.get("flow_signed_trade_imbalance"))
                 prior_imbalance = _finite(session[index - 1].get("flow_signed_trade_imbalance"))
-                common = _common_features(
+                common = _base_features(
                     symbol=symbol,
                     row=current,
                     previous_row=session[index - 1],
