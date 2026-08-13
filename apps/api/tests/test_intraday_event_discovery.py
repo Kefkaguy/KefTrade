@@ -7,16 +7,19 @@ import pytest
 
 from app.cli.intraday_event_discovery import parser
 from app.services.intraday_event_discovery import (
+    BRANCH_ALPHA_CEILING,
     BRANCH_FAILED_AUCTION,
     BRANCH_GAP,
     BRANCH_ONE_MINUTE_VETO,
     FEATURE_CATALOG,
     _apply_frozen_models,
+    _apply_explicit_ev_model,
     _build_models,
     _confirmation_gates,
     _detect_failed_auctions,
     _normalization_model,
     _outcomes,
+    _mid_tier,
     _validate_branches,
 )
 
@@ -195,7 +198,14 @@ def test_model_freezes_score_and_uses_same_threshold_on_later_rows():
     confirmation = [_event(200 + index, "confirmation", 10, index / 10, 2) for index in range(10)]
     _apply_frozen_models(confirmation, models)
 
-    assert any(row["features"]["_selected"] for row in confirmation)
+    assert all("_predicted_ev_bps" in row["features"] for row in confirmation)
+    assert all(isinstance(row["features"]["_selected"], bool) for row in confirmation)
+    assert models["15m_failed_auction_confirmed"]["score_rule"] == (
+        "explicit_conditional_ev_ridge_logit_fitted_on_discovery_only"
+    )
+    assert models["15m_failed_auction_confirmed"]["conditional_ev_model"]["objective"] == (
+        "P(W|X)*E[G|W,X]-P(L|X)*E[|L||L,X]-C(X)"
+    )
 
 
 def test_confirmation_requires_real_independent_post_cost_evidence():
@@ -219,6 +229,8 @@ def test_branch_timeframes_keep_1m_as_veto_only():
         BRANCH_ONE_MINUTE_VETO,
     ]
     assert _validate_branches("15m", [BRANCH_FAILED_AUCTION]) == [BRANCH_FAILED_AUCTION]
+    assert _validate_branches("15m", [BRANCH_ALPHA_CEILING]) == [BRANCH_ALPHA_CEILING]
+    assert _validate_branches("30m", [BRANCH_ALPHA_CEILING]) == [BRANCH_ALPHA_CEILING]
     assert all(spec.role == "veto" for spec in FEATURE_CATALOG[BRANCH_ONE_MINUTE_VETO])
 
 
@@ -260,3 +272,77 @@ def test_cli_exposes_governed_phases_without_a_trade_command():
 
     assert set(choices) == {"catalog", "declare", "discover", "report", "confirm"}
     assert "trade" not in choices
+
+
+def test_explicit_ev_model_can_choose_short_and_subtract_conditional_cost():
+    row = _event(0, "validation", -10, 0.5, 2)
+    row["event_key"] = "15m_alpha_ceiling_panel"
+    row["branch"] = BRANCH_ALPHA_CEILING
+    model = {
+        "horizon": "30m",
+        "dynamic_long_short_direction": True,
+        "magnitude_cap_bps": 100.0,
+        "win_probability": {"coefficients": [-2.197224577]},
+        "conditional_gain_bps": {"coefficients": [10.0]},
+        "conditional_loss_bps": {"coefficients": [10.0]},
+    }
+
+    _apply_explicit_ev_model([row], [], model)
+
+    assert row["features"]["_predicted_direction"] == "short"
+    assert row["features"]["_p_win"] == pytest.approx(0.9)
+    assert row["features"]["_predicted_ev_bps"] == pytest.approx(6.0)
+
+
+def test_mid_tier_is_positive_but_does_not_relax_elite_confirmation_gates():
+    summary = {
+        "signals": 150,
+        "distinct_sessions": 50,
+        "distinct_symbols": 12,
+        "mean_net_bps": 2.0,
+        "day_clustered_t_statistic": 1.2,
+    }
+    diagnostics = {"direction_accuracy": 0.52}
+
+    assert _mid_tier(summary, diagnostics) == "mid_portfolio_candidate"
+    assert _confirmation_gates(summary)["day_clustered_t_at_least_3"] is False
+
+
+def test_alpha_ceiling_scores_all_horizons_with_frozen_explicit_ev():
+    rows = []
+    specs = FEATURE_CATALOG[BRANCH_ALPHA_CEILING]
+    for index in range(120):
+        phase = "discovery" if index < 80 else "validation"
+        signal = (index % 20 - 10) / 10
+        gross_bps = signal * 8
+        row = _event(index, phase, gross_bps - 2, signal, 2)
+        row["event_key"] = "15m_alpha_ceiling_panel"
+        row["branch"] = BRANCH_ALPHA_CEILING
+        row["stage"] = "hourly_information_set"
+        row["direction"] = "long"
+        row["labels"] = {"dynamic_direction": True}
+        row["features"] = {spec.name: signal + position / 100 for position, spec in enumerate(specs)}
+        row["features"]["bar_return_1"] = signal / 100
+        row["outcomes"] = {}
+        for horizon in ("15m", "30m", "60m", "120m", "eod"):
+            row["outcomes"][horizon] = {
+                "available": True,
+                "gross_return": gross_bps / 10_000,
+                "gross_return_bps": gross_bps,
+                "net_return": (gross_bps - 2) / 10_000,
+                "net_return_bps": gross_bps - 2,
+                "mfe_bps": max(0, gross_bps) + 5,
+                "mae_bps": max(0, -gross_bps) + 5,
+                "future_realized_volatility_bps": abs(gross_bps) / 2,
+                "liquidity_deterioration_bps": signal,
+            }
+        rows.append(row)
+
+    models, reports, _ = _build_models(rows, branches=[BRANCH_ALPHA_CEILING])
+    model = models["15m_alpha_ceiling_panel"]
+    report = reports["15m_alpha_ceiling_panel"]
+
+    assert set(model["horizon_models"]) == {"15m", "30m", "60m", "120m", "eod"}
+    assert model["dynamic_long_short_direction"] is True
+    assert report["alpha_ceiling"]["confirmation_untouched"] is True
+    assert "large_move_probability" in report["alpha_ceiling"]["horizons"]["30m"]["predictability_targets"]

@@ -69,7 +69,8 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         description=(
             "Pre-strategy event-conditioned alpha discovery. Measures fixed-horizon "
-            "returns, MFE/MAE, normalized context, scores, and vetoes without any "
+            "returns, MFE/MAE, explicit conditional EV, information-set predictability, "
+            "and vetoes without any "
             "campaign or broker action."
         )
     )

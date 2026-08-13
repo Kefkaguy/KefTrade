@@ -14,6 +14,7 @@ The protocol is intentionally staged:
 
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -24,6 +25,7 @@ from math import erfc, isfinite, sqrt
 from statistics import fmean, pstdev
 from typing import Any, Iterable, Sequence
 
+import numpy as np
 import psycopg
 from psycopg.types.json import Jsonb
 
@@ -48,14 +50,22 @@ from app.services.research_splits import (
     record_split_access,
 )
 
-EVENT_DISCOVERY_VERSION = "intraday_event_conditioned_alpha_v1"
+EVENT_DISCOVERY_VERSION = "intraday_event_conditioned_alpha_v2_explicit_ev"
 BRANCH_GAP = "gap_absorption"
 BRANCH_FAILED_AUCTION = "failed_auction"
 BRANCH_ONE_MINUTE_VETO = "one_minute_veto"
-BRANCHES = (BRANCH_GAP, BRANCH_FAILED_AUCTION, BRANCH_ONE_MINUTE_VETO)
+BRANCH_ALPHA_CEILING = "alpha_ceiling"
+BRANCHES = (
+    BRANCH_GAP,
+    BRANCH_FAILED_AUCTION,
+    BRANCH_ONE_MINUTE_VETO,
+    BRANCH_ALPHA_CEILING,
+)
 HORIZONS_MINUTES = (15, 30, 60, 120)
 MIN_SCORE_EVENTS = 30
 MIN_CONFIRMATION_EVENTS = 50
+ALPHA_CEILING_DECISION_GRID_MINUTES = 60
+EV_RIDGE_PENALTY = 8.0
 
 
 @dataclass(frozen=True)
@@ -108,6 +118,25 @@ FEATURE_CATALOG: dict[str, tuple[FeatureSpec, ...]] = {
         FeatureSpec("intrabar_imbalance_improvement", "veto", 1, "Reject deteriorating 1m signed flow."),
         FeatureSpec("intrabar_spread_bps", "veto", -1, "Reject an abnormally expensive 1m liquidity state."),
     ),
+    BRANCH_ALPHA_CEILING: (
+        FeatureSpec("bar_return_1", "alpha", 1, "Current completed-bar return."),
+        FeatureSpec("bar_return_2", "alpha", 1, "Two-bar return ending at the decision bar."),
+        FeatureSpec("bar_return_4", "alpha", 1, "Four-bar return ending at the decision bar."),
+        FeatureSpec("realized_volatility_4", "regime", 1, "Four-bar realized volatility."),
+        FeatureSpec("bar_range_bps", "regime", 1, "Completed-bar high-low range."),
+        FeatureSpec("close_location", "alpha", 1, "Close location inside the completed bar."),
+        FeatureSpec("distance_from_session_vwap", "alpha", 1, "Distance from knowable session VWAP."),
+        FeatureSpec("opening_range_position", "alpha", 1, "Position inside or beyond the opening range."),
+        FeatureSpec("gap_percent", "regime", 1, "Overnight gap known at the open."),
+        FeatureSpec("relative_volume_surprise", "alpha", 1, "Same-slot relative volume."),
+        FeatureSpec("signed_trade_imbalance", "alpha", 1, "Signed aggressive trade flow in the completed bar."),
+        FeatureSpec("directional_flow_shift", "alpha", 1, "Change in signed imbalance from the prior bar."),
+        FeatureSpec("large_trade_share", "alpha", 1, "Share of volume in larger prints."),
+        FeatureSpec("idiosyncratic_return", "alpha", 1, "Return residual to contemporaneous market and sector movement."),
+        FeatureSpec("market_return", "regime", 1, "Contemporaneous broad-market direction."),
+        FeatureSpec("minutes_from_open", "regime", 1, "Intraday time slot."),
+        FeatureSpec("effective_spread_bps", "execution", -1, "Conditional round-trip execution state."),
+    ),
 }
 
 
@@ -152,9 +181,9 @@ def _percentile(values: Sequence[float], quantile: float) -> float | None:
 def _rank_percentile(value: float | None, baseline: Sequence[float]) -> float | None:
     if value is None or not baseline:
         return None
-    ordered = sorted(baseline)
-    below = sum(item < value for item in ordered)
-    equal = sum(item == value for item in ordered)
+    ordered = baseline
+    below = bisect_left(ordered, value)
+    equal = bisect_right(ordered, value) - below
     return (below + 0.5 * equal) / len(ordered)
 
 
@@ -450,6 +479,17 @@ def _outcomes(
             result[f"{horizon}m"] = {"available": False, "reason": "missing_ohlc"}
             continue
         gross = sign * (exit_price / entry - 1)
+        path_returns = [
+            value
+            for row in path
+            if (value := _bar_return(row)) is not None
+        ]
+        future_spreads = [
+            value
+            for row in path
+            if (value := _finite(row.get("flow_effective_spread_bps"))) is not None
+        ]
+        decision_spread = _finite(session[decision_index].get("flow_effective_spread_bps"))
         if direction == "long":
             mfe = max(float(value) for value in highs) / entry - 1
             mae = max(0.0, 1 - min(float(value) for value in lows) / entry)
@@ -466,8 +506,62 @@ def _outcomes(
             "net_return_bps": gross * 10_000 - cost_bps,
             "mfe_bps": max(0.0, mfe) * 10_000,
             "mae_bps": mae * 10_000,
+            "future_realized_volatility_bps": (
+                pstdev(path_returns) * 10_000 if len(path_returns) > 1 else 0.0
+            ),
+            "future_mean_spread_bps": _mean(future_spreads),
+            "liquidity_deterioration_bps": (
+                (_mean(future_spreads) or 0.0) - decision_spread
+                if future_spreads and decision_spread is not None
+                else None
+            ),
             "bars": bars,
         }
+    eod_path = session[entry_index:]
+    if eod_path:
+        eod_exit = _finite(eod_path[-1].get("close"))
+        eod_highs = [_finite(row.get("high")) for row in eod_path]
+        eod_lows = [_finite(row.get("low")) for row in eod_path]
+        if eod_exit is not None and not any(value is None for value in eod_highs + eod_lows):
+            gross = sign * (eod_exit / entry - 1)
+            if direction == "long":
+                mfe = max(float(value) for value in eod_highs) / entry - 1
+                mae = max(0.0, 1 - min(float(value) for value in eod_lows) / entry)
+            else:
+                mfe = 1 - min(float(value) for value in eod_lows) / entry
+                mae = max(0.0, max(float(value) for value in eod_highs) / entry - 1)
+            path_returns = [
+                value for row in eod_path if (value := _bar_return(row)) is not None
+            ]
+            future_spreads = [
+                value
+                for row in eod_path
+                if (value := _finite(row.get("flow_effective_spread_bps"))) is not None
+            ]
+            decision_spread = _finite(session[decision_index].get("flow_effective_spread_bps"))
+            result["eod"] = {
+                "available": True,
+                "entry_price": entry,
+                "exit_price": eod_exit,
+                "gross_return": gross,
+                "gross_return_bps": gross * 10_000,
+                "net_return": gross - cost_bps / 10_000,
+                "net_return_bps": gross * 10_000 - cost_bps,
+                "mfe_bps": max(0.0, mfe) * 10_000,
+                "mae_bps": mae * 10_000,
+                "future_realized_volatility_bps": (
+                    pstdev(path_returns) * 10_000 if len(path_returns) > 1 else 0.0
+                ),
+                "future_mean_spread_bps": _mean(future_spreads),
+                "liquidity_deterioration_bps": (
+                    (_mean(future_spreads) or 0.0) - decision_spread
+                    if future_spreads and decision_spread is not None
+                    else None
+                ),
+                "bars": len(eod_path),
+            }
+        else:
+            result["eod"] = {"available": False, "reason": "missing_ohlc"}
     return result
 
 
@@ -870,6 +964,116 @@ def _intrabar_rows(
     return result
 
 
+def _window_return(rows: Sequence[dict[str, Any]], start: int, end: int) -> float | None:
+    if start < 0 or end >= len(rows) or start > end:
+        return None
+    opening = _finite(rows[start].get("open"))
+    closing = _finite(rows[end].get("close"))
+    if opening is None or closing is None or opening <= 0:
+        return None
+    return closing / opening - 1
+
+
+def _detect_alpha_ceiling_panel(
+    candles: dict[str, list[dict[str, Any]]],
+    *,
+    timeframe: str,
+    contexts: dict[str, Any],
+    sectors: dict[str, str],
+    cost_model: dict[str, Any],
+    horizons: Sequence[int],
+    decision_start: datetime | None = None,
+    decision_end: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """Build a broad, non-overlapping-enough information-set panel.
+
+    Decisions are sampled on a frozen hourly grid.  Every predictor comes
+    from the completed decision bar or earlier.  Direction is deliberately
+    left as ``long`` in the raw outcome; the frozen EV model compares the
+    long and short decompositions and chooses a direction later.
+    """
+    events: list[dict[str, Any]] = []
+    for symbol, rows in candles.items():
+        for session_date, session in ordered_regular_sessions(rows, timeframe=timeframe):
+            for index, current in enumerate(session):
+                if index < 3 or index + 1 >= len(session):
+                    continue
+                minutes_from_open = int(_finite(current.get("minutes_from_open")) or 0)
+                if minutes_from_open % ALPHA_CEILING_DECISION_GRID_MINUTES:
+                    continue
+                knowable_at = bar_close_timestamp(current["timestamp"], timeframe=timeframe)
+                if decision_start is not None and knowable_at < decision_start:
+                    continue
+                if decision_end is not None and knowable_at >= decision_end:
+                    continue
+                open_price = _finite(current.get("open"))
+                high = _finite(current.get("high"))
+                low = _finite(current.get("low"))
+                close = _finite(current.get("close"))
+                if not open_price or high is None or low is None or close is None:
+                    continue
+                bar_returns = [
+                    value
+                    for row in session[index - 3 : index + 1]
+                    if (value := _bar_return(row)) is not None
+                ]
+                imbalance = _finite(current.get("flow_signed_trade_imbalance"))
+                prior_imbalance = _finite(session[index - 1].get("flow_signed_trade_imbalance"))
+                common = _common_features(
+                    symbol=symbol,
+                    row=current,
+                    previous_row=session[index - 1],
+                    direction="long",
+                    contexts=contexts,
+                    sectors=sectors,
+                )
+                features = {
+                    "bar_return_1": _bar_return(current),
+                    "bar_return_2": _window_return(session, index - 1, index),
+                    "bar_return_4": _window_return(session, index - 3, index),
+                    "realized_volatility_4": pstdev(bar_returns) if len(bar_returns) > 1 else 0.0,
+                    "bar_range_bps": (high - low) / open_price * 10_000,
+                    "close_location": (close - low) / (high - low) if high > low else 0.5,
+                    "distance_from_session_vwap": _finite(current.get("distance_from_session_vwap")),
+                    "opening_range_position": _finite(current.get("opening_range_position")),
+                    "gap_percent": _finite(current.get("gap_percent")),
+                    "relative_volume_surprise": _finite(current.get("session_relative_volume")),
+                    "signed_trade_imbalance": imbalance,
+                    "directional_flow_shift": (
+                        imbalance - prior_imbalance
+                        if imbalance is not None and prior_imbalance is not None
+                        else None
+                    ),
+                    "large_trade_share": _finite(current.get("flow_large_trade_share")),
+                    "idiosyncratic_return": common["idiosyncratic_return"],
+                    "market_return": common["market_return"],
+                    "minutes_from_open": minutes_from_open,
+                    "effective_spread_bps": _finite(current.get("flow_effective_spread_bps")),
+                }
+                events.append(
+                    _event(
+                        event_key=f"{timeframe}_alpha_ceiling_panel",
+                        branch=BRANCH_ALPHA_CEILING,
+                        stage="hourly_information_set",
+                        symbol=symbol,
+                        session_date=session_date,
+                        decision_row=current,
+                        decision_index=index,
+                        session=session,
+                        direction="long",
+                        timeframe=timeframe,
+                        features=features,
+                        labels={
+                            "dynamic_direction": True,
+                            "decision_grid_minutes": ALPHA_CEILING_DECISION_GRID_MINUTES,
+                        },
+                        cost_model=cost_model,
+                        horizons=horizons,
+                    )
+                )
+    return events
+
+
 def detect_events(
     conn: psycopg.Connection,
     *,
@@ -954,6 +1158,19 @@ def detect_events(
                 decision_end=decision_end,
             )
         )
+    if BRANCH_ALPHA_CEILING in branches:
+        events.extend(
+            _detect_alpha_ceiling_panel(
+                candles,
+                timeframe=timeframe,
+                contexts=contexts,
+                sectors=sectors,
+                cost_model=cost_model,
+                horizons=horizons,
+                decision_start=decision_start,
+                decision_end=decision_end,
+            )
+        )
     return sorted(events, key=lambda row: (row["decision_timestamp"], row["event_key"], row["symbol"]))
 
 
@@ -975,10 +1192,25 @@ def _normalization_model(
                 continue
             slot = event["decision_timestamp"].strftime("%H:%M")
             by_symbol_slot[f"{event['symbol']}|{slot}"].append(value)
+        global_values.sort()
+        conditional = {
+            key: sorted(values) for key, values in by_symbol_slot.items() if len(values) >= 10
+        }
         model[name] = {
             "global": global_values,
             "conditional": {
-                key: values for key, values in by_symbol_slot.items() if len(values) >= 10
+                key: values for key, values in conditional.items()
+            },
+            "global_stats": {
+                "mean": _mean(global_values),
+                "deviation": pstdev(global_values) if len(global_values) > 1 else 0.0,
+            },
+            "conditional_stats": {
+                key: {
+                    "mean": _mean(values),
+                    "deviation": pstdev(values) if len(values) > 1 else 0.0,
+                }
+                for key, values in conditional.items()
             },
         }
     return model
@@ -993,10 +1225,19 @@ def _apply_normalization(
         key = f"{event['symbol']}|{slot}"
         for name, spec in model.items():
             value = _finite(event["features"].get(name))
-            baseline = (spec.get("conditional") or {}).get(key) or spec.get("global") or []
+            conditional = (spec.get("conditional") or {}).get(key)
+            baseline = conditional or spec.get("global") or []
             percentile = _rank_percentile(value, baseline)
-            mean = _mean(baseline)
-            deviation = pstdev(baseline) if len(baseline) > 1 else 0.0
+            stats = (
+                (spec.get("conditional_stats") or {}).get(key)
+                if conditional
+                else spec.get("global_stats")
+            ) or {}
+            mean = _finite(stats.get("mean"))
+            deviation = _finite(stats.get("deviation")) or 0.0
+            if not stats:
+                mean = _mean(baseline)
+                deviation = pstdev(baseline) if len(baseline) > 1 else 0.0
             event["features"][f"{name}_percentile"] = percentile
             event["features"][f"{name}_z"] = (
                 (value - mean) / deviation
@@ -1009,9 +1250,18 @@ def _primary_horizon(event_key: str) -> str:
     return "30m" if event_key.startswith("15m_") else "60m"
 
 
-def _outcome_value(event: dict[str, Any], horizon: str, field: str = "net_return") -> float | None:
+def _outcome_value(event: dict[str, Any], horizon: str, field: str = "model_net_return") -> float | None:
     row = (event.get("outcomes") or {}).get(horizon) or {}
-    return _finite(row.get(field)) if row.get("available") else None
+    if not row.get("available"):
+        return None
+    value = _finite(row.get(field))
+    if value is None and field == "model_net_return":
+        value = _finite(row.get("net_return"))
+    if value is None and field == "gross_return":
+        net = _finite(row.get("net_return"))
+        if net is not None:
+            value = net + float(event.get("cost_bps") or 0.0) / 10_000
+    return value
 
 
 def _phase_summary(
@@ -1335,6 +1585,436 @@ def _probability_backtest_overfit(
     }
 
 
+def _design_matrix(
+    events: Sequence[dict[str, Any]],
+    features: Sequence[FeatureSpec] | Sequence[dict[str, Any]],
+) -> np.ndarray:
+    names = [spec.name if isinstance(spec, FeatureSpec) else str(spec["name"]) for spec in features]
+    matrix = np.zeros((len(events), len(names) + 1), dtype=np.float64)
+    matrix[:, 0] = 1.0
+    for column, name in enumerate(names, 1):
+        matrix[:, column] = [
+            2.0 * value - 1.0
+            if (value := _finite(row["features"].get(f"{name}_percentile"))) is not None
+            else 0.0
+            for row in events
+        ]
+    return matrix
+
+
+def _ridge_coefficients(matrix: np.ndarray, target: np.ndarray, penalty: float) -> list[float]:
+    if not len(target):
+        return []
+    regularizer = np.eye(matrix.shape[1], dtype=np.float64) * penalty
+    regularizer[0, 0] = 0.0
+    coefficients = np.linalg.pinv(matrix.T @ matrix + regularizer) @ matrix.T @ target
+    return [float(value) for value in coefficients]
+
+
+def _logistic_coefficients(
+    matrix: np.ndarray,
+    target: np.ndarray,
+    penalty: float,
+    iterations: int = 30,
+) -> list[float]:
+    if not len(target):
+        return []
+    coefficients = np.zeros(matrix.shape[1], dtype=np.float64)
+    base_rate = min(0.999, max(0.001, float(target.mean())))
+    coefficients[0] = np.log(base_rate / (1.0 - base_rate))
+    penalty_vector = np.full(matrix.shape[1], penalty, dtype=np.float64)
+    penalty_vector[0] = 0.0
+    for _ in range(iterations):
+        linear = np.clip(matrix @ coefficients, -30.0, 30.0)
+        probability = 1.0 / (1.0 + np.exp(-linear))
+        weights = np.maximum(probability * (1.0 - probability), 1e-6)
+        gradient = matrix.T @ (target - probability) - penalty_vector * coefficients
+        hessian = matrix.T @ (matrix * weights[:, None]) + np.diag(penalty_vector)
+        step = np.linalg.pinv(hessian) @ gradient
+        coefficients += step
+        if float(np.max(np.abs(step))) < 1e-7:
+            break
+    return [float(value) for value in coefficients]
+
+
+def _linear_prediction(matrix: np.ndarray, coefficients: Sequence[float]) -> np.ndarray:
+    return matrix @ np.asarray(coefficients, dtype=np.float64)
+
+
+def _logistic_prediction(matrix: np.ndarray, coefficients: Sequence[float]) -> np.ndarray:
+    linear = np.clip(_linear_prediction(matrix, coefficients), -30.0, 30.0)
+    return 1.0 / (1.0 + np.exp(-linear))
+
+
+def _fit_explicit_ev_model(
+    discovery: Sequence[dict[str, Any]],
+    features: Sequence[FeatureSpec],
+    horizon: str,
+    *,
+    dynamic_direction: bool,
+) -> dict[str, Any] | None:
+    usable = [row for row in discovery if _outcome_value(row, horizon, "gross_return") is not None]
+    if len(usable) < max(30, len(features) * 3):
+        return None
+    matrix = _design_matrix(usable, features)
+    gross_bps = np.asarray(
+        [_outcome_value(row, horizon, "gross_return") * 10_000 for row in usable],
+        dtype=np.float64,
+    )
+    won = (gross_bps > 0).astype(np.float64)
+    gains = gross_bps[gross_bps > 0]
+    losses = -gross_bps[gross_bps <= 0]
+    win_coefficients = _logistic_coefficients(matrix, won, EV_RIDGE_PENALTY)
+    gain_coefficients = _ridge_coefficients(
+        matrix[gross_bps > 0], gains, EV_RIDGE_PENALTY
+    ) if len(gains) else [0.0] * matrix.shape[1]
+    loss_coefficients = _ridge_coefficients(
+        matrix[gross_bps <= 0], losses, EV_RIDGE_PENALTY
+    ) if len(losses) else [0.0] * matrix.shape[1]
+    magnitude_cap = max(1.0, float(np.quantile(np.abs(gross_bps), 0.99)))
+    return {
+        "model_version": "explicit_conditional_ev_ridge_logit_v1",
+        "horizon": horizon,
+        "feature_names": [spec.name for spec in features],
+        "ridge_penalty": EV_RIDGE_PENALTY,
+        "training_events": len(usable),
+        "dynamic_long_short_direction": dynamic_direction,
+        "win_definition": "direction_adjusted_gross_return_gt_zero_before_cost",
+        "win_probability": {"link": "logit", "coefficients": win_coefficients},
+        "conditional_gain_bps": {"link": "ridge_identity", "coefficients": gain_coefficients},
+        "conditional_loss_bps": {"link": "ridge_identity", "coefficients": loss_coefficients},
+        "magnitude_cap_bps": magnitude_cap,
+        "cost_rule": "per_symbol_decision_timestamp_frozen_stressed_round_trip_cost_bps",
+        "objective": "P(W|X)*E[G|W,X]-P(L|X)*E[|L||L,X]-C(X)",
+    }
+
+
+def _apply_explicit_ev_model(
+    events: Sequence[dict[str, Any]],
+    features: Sequence[FeatureSpec] | Sequence[dict[str, Any]],
+    model: dict[str, Any],
+) -> None:
+    if not events:
+        return
+    matrix = _design_matrix(events, features)
+    probability = _logistic_prediction(matrix, model["win_probability"]["coefficients"])
+    cap = float(model["magnitude_cap_bps"])
+    gain = np.clip(
+        _linear_prediction(matrix, model["conditional_gain_bps"]["coefficients"]),
+        0.0,
+        cap,
+    )
+    loss = np.clip(
+        _linear_prediction(matrix, model["conditional_loss_bps"]["coefficients"]),
+        0.0,
+        cap,
+    )
+    dynamic = bool(model.get("dynamic_long_short_direction"))
+    horizon = str(model["horizon"])
+    for index, row in enumerate(events):
+        cost = float(row.get("cost_bps") or 0.0)
+        long_gross_ev = float(probability[index] * gain[index] - (1.0 - probability[index]) * loss[index])
+        short_gross_ev = -long_gross_ev
+        direction = "short" if dynamic and short_gross_ev > long_gross_ev else row["direction"]
+        predicted_gross = short_gross_ev if direction == "short" else long_gross_ev
+        flipped = dynamic and direction == "short"
+        selected_probability = 1.0 - float(probability[index]) if flipped else float(probability[index])
+        selected_gain = float(loss[index]) if flipped else float(gain[index])
+        selected_loss = float(gain[index]) if flipped else float(loss[index])
+        predicted_ev = predicted_gross - cost
+        row["features"].update(
+            {
+                "_p_win": selected_probability,
+                "_expected_gain_bps": selected_gain,
+                "_expected_loss_bps": selected_loss,
+                "_predicted_cost_bps": cost,
+                "_predicted_gross_bps": predicted_gross,
+                "_predicted_ev_bps": predicted_ev,
+                "_predicted_direction": direction,
+                "_alpha_score": predicted_ev,
+            }
+        )
+        outcome = (row.get("outcomes") or {}).get(horizon) or {}
+        raw_gross = _finite(outcome.get("gross_return_bps"))
+        if raw_gross is None:
+            raw_gross_return = _outcome_value(row, horizon, "gross_return")
+            raw_gross = raw_gross_return * 10_000 if raw_gross_return is not None else None
+        if outcome.get("available") and raw_gross is not None:
+            direction_sign = -1.0 if dynamic and direction == "short" else 1.0
+            outcome["model_gross_return_bps"] = direction_sign * raw_gross
+            outcome["model_net_return_bps"] = direction_sign * raw_gross - cost
+            outcome["model_net_return"] = outcome["model_net_return_bps"] / 10_000
+
+
+def _pearson(left: Sequence[float], right: Sequence[float]) -> float | None:
+    if len(left) < 3 or len(left) != len(right):
+        return None
+    left_array = np.asarray(left, dtype=np.float64)
+    right_array = np.asarray(right, dtype=np.float64)
+    if float(left_array.std()) == 0.0 or float(right_array.std()) == 0.0:
+        return None
+    return float(np.corrcoef(left_array, right_array)[0, 1])
+
+
+def _ev_diagnostics(events: Sequence[dict[str, Any]], horizon: str) -> dict[str, Any]:
+    usable = [
+        row for row in events
+        if _finite(row["features"].get("_predicted_ev_bps")) is not None
+        and _outcome_value(row, horizon, "gross_return") is not None
+    ]
+    if not usable:
+        return {"events": 0}
+    predicted_ev = [float(row["features"]["_predicted_ev_bps"]) for row in usable]
+    predicted_probability = [float(row["features"]["_p_win"]) for row in usable]
+    actual_gross = [
+        float(((row.get("outcomes") or {}).get(horizon) or {}).get("model_gross_return_bps"))
+        for row in usable
+    ]
+    actual_win = [1.0 if value > 0 else 0.0 for value in actual_gross]
+    actual_net = [
+        float(((row.get("outcomes") or {}).get(horizon) or {}).get("model_net_return_bps"))
+        for row in usable
+    ]
+    winners = [value for value in actual_gross if value > 0]
+    losers = [-value for value in actual_gross if value <= 0]
+    p_win = _mean(actual_win) or 0.0
+    gain = _mean(winners) or 0.0
+    loss = _mean(losers) or 0.0
+    cost = _mean(float(row.get("cost_bps") or 0.0) for row in usable) or 0.0
+    return {
+        "events": len(usable),
+        "brier_score": _mean((p - y) ** 2 for p, y in zip(predicted_probability, actual_win)),
+        "direction_accuracy": _mean(
+            1.0 if (p >= 0.5) == bool(y) else 0.0
+            for p, y in zip(predicted_probability, actual_win)
+        ),
+        "predicted_ev_to_realized_net_correlation": _pearson(predicted_ev, actual_net),
+        "mean_predicted_ev_bps": _mean(predicted_ev),
+        "mean_realized_net_bps": _mean(actual_net),
+        "empirical_decomposition": {
+            "p_win": p_win,
+            "mean_gain_bps_given_win": gain,
+            "p_loss": 1.0 - p_win,
+            "mean_absolute_loss_bps_given_loss": loss,
+            "mean_cost_bps": cost,
+            "reconstructed_ev_bps": p_win * gain - (1.0 - p_win) * loss - cost,
+        },
+    }
+
+
+def _cross_sectional_values(
+    events: Sequence[dict[str, Any]],
+    horizon: str,
+) -> tuple[dict[int, float], dict[int, float]]:
+    by_timestamp: dict[datetime, list[tuple[int, float]]] = defaultdict(list)
+    for row in events:
+        gross = _outcome_value(row, horizon, "gross_return")
+        if gross is not None:
+            by_timestamp[row["decision_timestamp"]].append((id(row), gross * 10_000))
+    residuals: dict[int, float] = {}
+    ranks: dict[int, float] = {}
+    for values in by_timestamp.values():
+        center = _mean(value for _, value in values) or 0.0
+        ordered = sorted(value for _, value in values)
+        for row_id, value in values:
+            residuals[row_id] = value - center
+            ranks[row_id] = _rank_percentile(value, ordered) or 0.5
+    return residuals, ranks
+
+
+def _fit_auxiliary_target_models(
+    discovery: Sequence[dict[str, Any]],
+    validation: Sequence[dict[str, Any]],
+    features: Sequence[FeatureSpec],
+    horizon: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Measure predictability beyond the trading-return objective.
+
+    These models never select trades.  They answer whether the frozen X set
+    predicts residual return/rank, tail movement, path risk, volatility, or
+    liquidity.  This is the actual information-ceiling diagnostic.
+    """
+    discovery_residual, discovery_rank = _cross_sectional_values(discovery, horizon)
+    validation_residual, validation_rank = _cross_sectional_values(validation, horizon)
+
+    def bounded(rows: list[dict[str, Any]], limit: int = 50_000) -> list[dict[str, Any]]:
+        if len(rows) <= limit:
+            return rows
+        stride = max(1, len(rows) // limit)
+        return rows[::stride][:limit]
+
+    def target(row: dict[str, Any], name: str, *, residual: dict[int, float], rank: dict[int, float]) -> float | None:
+        outcome = (row.get("outcomes") or {}).get(horizon) or {}
+        if not outcome.get("available"):
+            return None
+        if name == "future_residual_return_bps":
+            return residual.get(id(row))
+        if name == "cross_sectional_return_rank":
+            return rank.get(id(row))
+        if name == "continuation_signed_return_bps":
+            current = _finite(row["features"].get("bar_return_1"))
+            gross = _finite(outcome.get("gross_return_bps"))
+            if current is None or gross is None or current == 0:
+                return None
+            return (1.0 if current > 0 else -1.0) * gross
+        return _finite(outcome.get(name))
+
+    target_names = (
+        "future_residual_return_bps",
+        "cross_sectional_return_rank",
+        "continuation_signed_return_bps",
+        "mfe_bps",
+        "mae_bps",
+        "future_realized_volatility_bps",
+        "liquidity_deterioration_bps",
+    )
+    models: dict[str, Any] = {}
+    reports: dict[str, Any] = {}
+    for name in target_names:
+        train = bounded([
+            row for row in discovery
+            if target(row, name, residual=discovery_residual, rank=discovery_rank) is not None
+        ])
+        test = bounded([
+            row for row in validation
+            if target(row, name, residual=validation_residual, rank=validation_rank) is not None
+        ])
+        if len(train) < max(30, len(features) * 3):
+            reports[name] = {"estimated": False, "reason": "insufficient_discovery_rows"}
+            continue
+        coefficients = _ridge_coefficients(
+            _design_matrix(train, features),
+            np.asarray(
+                [target(row, name, residual=discovery_residual, rank=discovery_rank) for row in train],
+                dtype=np.float64,
+            ),
+            EV_RIDGE_PENALTY,
+        )
+        models[name] = {"link": "ridge_identity", "coefficients": coefficients}
+        predicted = (
+            [float(value) for value in _linear_prediction(_design_matrix(test, features), coefficients)]
+            if test else []
+        )
+        actual = [
+            float(target(row, name, residual=validation_residual, rank=validation_rank))
+            for row in test
+        ]
+        threshold = _percentile(predicted, 0.80)
+        top = [value for prediction, value in zip(predicted, actual) if threshold is not None and prediction >= threshold]
+        reports[name] = {
+            "estimated": True,
+            "discovery_events": len(train),
+            "validation_events": len(test),
+            "validation_prediction_correlation": _pearson(predicted, actual),
+            "validation_base_mean": _mean(actual),
+            "validation_top_predicted_quintile_mean": _mean(top),
+        }
+
+    gross_discovery = [
+        abs(value * 10_000)
+        for row in discovery
+        if (value := _outcome_value(row, horizon, "gross_return")) is not None
+    ]
+    large_move_threshold = _percentile(gross_discovery, 0.80)
+    if large_move_threshold is not None:
+        train = bounded([
+            row for row in discovery if _outcome_value(row, horizon, "gross_return") is not None
+        ])
+        test = bounded([
+            row for row in validation if _outcome_value(row, horizon, "gross_return") is not None
+        ])
+        labels = np.asarray(
+            [
+                1.0 if abs(_outcome_value(row, horizon, "gross_return") * 10_000) >= large_move_threshold else 0.0
+                for row in train
+            ],
+            dtype=np.float64,
+        )
+        coefficients = _logistic_coefficients(_design_matrix(train, features), labels, EV_RIDGE_PENALTY)
+        models["large_move_probability"] = {
+            "link": "logit",
+            "threshold_bps": large_move_threshold,
+            "coefficients": coefficients,
+        }
+        probability = (
+            [float(value) for value in _logistic_prediction(_design_matrix(test, features), coefficients)]
+            if test else []
+        )
+        actual = [
+            1.0 if abs(_outcome_value(row, horizon, "gross_return") * 10_000) >= large_move_threshold else 0.0
+            for row in test
+        ]
+        cutoff = _percentile(probability, 0.80)
+        top = [value for prediction, value in zip(probability, actual) if cutoff is not None and prediction >= cutoff]
+        reports["large_move_probability"] = {
+            "estimated": True,
+            "large_move_threshold_bps": large_move_threshold,
+            "validation_events": len(test),
+            "validation_brier_score": _mean((p - y) ** 2 for p, y in zip(probability, actual)),
+            "validation_base_rate": _mean(actual),
+            "validation_top_predicted_quintile_rate": _mean(top),
+        }
+    return models, reports
+
+
+def _mid_tier(summary: dict[str, Any], diagnostics: dict[str, Any]) -> str:
+    mean_net = float(summary.get("mean_net_bps") or 0.0)
+    signals = int(summary.get("signals") or 0)
+    sessions = int(summary.get("distinct_sessions") or 0)
+    symbols = int(summary.get("distinct_symbols") or 0)
+    clustered_t = float(summary.get("day_clustered_t_statistic") or 0.0)
+    if mean_net <= 0:
+        return "failed_or_negative"
+    if (
+        signals >= 100
+        and sessions >= 40
+        and symbols >= 8
+        and clustered_t >= 1.0
+        and float(diagnostics.get("direction_accuracy") or 0.0) >= 0.50
+    ):
+        return "mid_portfolio_candidate"
+    return "weak_positive_watchlist"
+
+
+def _concise_alpha_ceiling(report: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not report:
+        return None
+    horizons: dict[str, Any] = {}
+    for horizon, row in (report.get("horizons") or {}).items():
+        validation = row.get("validation_selected") or {}
+        diagnostics = row.get("validation_ev_diagnostics") or {}
+        predictable_targets = {}
+        for name, target in (row.get("predictability_targets") or {}).items():
+            correlation = target.get("validation_prediction_correlation")
+            base_rate = target.get("validation_base_rate")
+            top_rate = target.get("validation_top_predicted_quintile_rate")
+            if correlation is not None or (base_rate is not None and top_rate is not None):
+                predictable_targets[name] = {
+                    "correlation": correlation,
+                    "base_rate": base_rate,
+                    "top_quintile_rate": top_rate,
+                }
+        horizons[horizon] = {
+            "portfolio_tier": row.get("portfolio_tier"),
+            "signals": validation.get("signals"),
+            "sessions": validation.get("distinct_sessions"),
+            "symbols": validation.get("distinct_symbols"),
+            "mean_net_bps": validation.get("mean_net_bps"),
+            "day_clustered_t": validation.get("day_clustered_t_statistic"),
+            "direction_accuracy": diagnostics.get("direction_accuracy"),
+            "predicted_vs_realized_net_correlation": diagnostics.get(
+                "predicted_ev_to_realized_net_correlation"
+            ),
+            "predictability_targets": predictable_targets,
+        }
+    return {
+        "objective": report.get("objective"),
+        "discovery_selected_horizon": report.get("discovery_selected_horizon"),
+        "confirmation_untouched": report.get("confirmation_untouched"),
+        "horizons": horizons,
+    }
+
+
 def _build_models(
     events: Sequence[dict[str, Any]],
     *,
@@ -1358,27 +2038,114 @@ def _build_models(
         ]
         normalization = _normalization_model(discovery, [spec.name for spec in eligible])
         _apply_normalization(rows, normalization)
-        alpha = [spec for spec in eligible if spec.role in {"setup", "alpha", "regime"}]
+        alpha = [
+            spec for spec in eligible
+            if spec.role in {"setup", "alpha", "regime", "execution"}
+        ]
         pass_through = branch == BRANCH_ONE_MINUTE_VETO
-        for row in rows:
-            components = [
-                spec.sign * (2 * percentile - 1)
-                for spec in alpha
-                if (percentile := _finite(row["features"].get(f"{spec.name}_percentile"))) is not None
-            ]
-            row["features"]["_alpha_score"] = 1.0 if pass_through else _mean(components)
-        threshold = (
-            1.0
-            if pass_through
-            else _percentile(
-                [
-                    value for row in discovery
-                    if (value := _finite(row["features"].get("_alpha_score"))) is not None
-                ],
-                0.80,
-            )
+        dynamic_direction = branch == BRANCH_ALPHA_CEILING
+        horizon_models: dict[str, Any] = {}
+        horizon_reports: dict[str, Any] = {}
+        candidate_horizons = sorted(
+            {
+                horizon
+                for row in discovery
+                for horizon, outcome in (row.get("outcomes") or {}).items()
+                if outcome.get("available")
+            },
+            key=lambda value: 10_000 if value == "eod" else int(value.removesuffix("m")),
         )
-        horizon = _primary_horizon(event_key)
+        if pass_through:
+            horizon = _primary_horizon(event_key)
+            threshold = 1.0
+            for row in rows:
+                row["features"]["_alpha_score"] = 1.0
+                row["features"]["_predicted_ev_bps"] = None
+        else:
+            for candidate_horizon in candidate_horizons:
+                ev_model = _fit_explicit_ev_model(
+                    discovery,
+                    alpha,
+                    candidate_horizon,
+                    dynamic_direction=dynamic_direction,
+                )
+                if ev_model is None:
+                    continue
+                _apply_explicit_ev_model(rows, alpha, ev_model)
+                candidate_threshold = max(
+                    0.0,
+                    _percentile(
+                        [
+                            value for row in discovery
+                            if (value := _finite(row["features"].get("_predicted_ev_bps"))) is not None
+                        ],
+                        0.80,
+                    ) or 0.0,
+                )
+                for row in rows:
+                    score = _finite(row["features"].get("_predicted_ev_bps"))
+                    row["features"]["_selected"] = bool(
+                        score is not None and score >= candidate_threshold
+                    )
+                selected_discovery_for_horizon = [
+                    row for row in discovery if row["features"].get("_selected")
+                ]
+                selected_validation_for_horizon = [
+                    row for row in validation if row["features"].get("_selected")
+                ]
+                discovery_summary = _phase_summary(
+                    selected_discovery_for_horizon,
+                    horizon=candidate_horizon,
+                    effective_trials=max(1, len(alpha) * max(1, len(candidate_horizons))),
+                )
+                validation_summary = _phase_summary(
+                    selected_validation_for_horizon,
+                    horizon=candidate_horizon,
+                    effective_trials=max(1, len(alpha) * max(1, len(candidate_horizons))),
+                )
+                validation_diagnostics = _ev_diagnostics(validation, candidate_horizon)
+                auxiliary_models, auxiliary_report = _fit_auxiliary_target_models(
+                    discovery,
+                    validation,
+                    alpha,
+                    candidate_horizon,
+                )
+                ev_model["selection_percentile"] = 0.80
+                ev_model["selection_threshold_bps"] = candidate_threshold
+                ev_model["auxiliary_target_models"] = auxiliary_models
+                horizon_models[candidate_horizon] = ev_model
+                horizon_reports[candidate_horizon] = {
+                    "discovery_selected": discovery_summary,
+                    "validation_selected": validation_summary,
+                    "discovery_ev_diagnostics": _ev_diagnostics(discovery, candidate_horizon),
+                    "validation_ev_diagnostics": validation_diagnostics,
+                    "predictability_targets": auxiliary_report,
+                    "portfolio_tier": _mid_tier(validation_summary, validation_diagnostics),
+                }
+            if not horizon_models:
+                horizon = _primary_horizon(event_key)
+                threshold = None
+                for row in rows:
+                    row["features"]["_alpha_score"] = None
+                    row["features"]["_predicted_ev_bps"] = None
+            else:
+                preferred = _primary_horizon(event_key)
+                if branch == BRANCH_ALPHA_CEILING:
+                    horizon = max(
+                        horizon_models,
+                        key=lambda key: (
+                            float(
+                                horizon_reports[key]["discovery_selected"].get("mean_net_bps")
+                                or float("-inf")
+                            ),
+                            int(horizon_reports[key]["discovery_selected"].get("signals") or 0),
+                        ),
+                    )
+                else:
+                    horizon = preferred if preferred in horizon_models else next(iter(horizon_models))
+                chosen_ev_model = horizon_models[horizon]
+                threshold = float(chosen_ev_model["selection_threshold_bps"])
+                _apply_explicit_ev_model(rows, alpha, chosen_ev_model)
         veto_reports, vetoes = _veto_report(discovery, validation, eligible, horizon)
         for row in rows:
             row["features"]["_vetoed"] = _is_vetoed(row, vetoes)
@@ -1391,7 +2158,7 @@ def _build_models(
             )
         selected_discovery = [row for row in discovery if row["features"]["_selected"]]
         selected_validation = [row for row in validation if row["features"]["_selected"]]
-        trials = max(1, len(eligible) + len(veto_reports) + 1)
+        trials = max(1, len(eligible) * max(1, len(horizon_models)) + len(veto_reports) + 1)
         effective_trials += trials
         feature_report = _feature_diagnostics(discovery, eligible, horizon)
         reports[event_key] = {
@@ -1401,7 +2168,7 @@ def _build_models(
             "event_counts": {"discovery": len(discovery), "validation": len(validation)},
             "horizon_coverage": {
                 key: sum(bool((row.get("outcomes") or {}).get(key, {}).get("available")) for row in rows)
-                for key in ("15m", "30m", "60m", "120m")
+                for key in ("15m", "30m", "60m", "120m", "eod")
             },
             "unconditional": {
                 "discovery": _phase_summary(discovery, horizon=horizon, effective_trials=trials),
@@ -1421,11 +2188,26 @@ def _build_models(
                 "discovery": _stability_report(selected_discovery, horizon=horizon),
                 "validation": _stability_report(selected_validation, horizon=horizon),
             },
-            "pbo": _probability_backtest_overfit(discovery + validation, eligible, horizon),
-            "interpretation": (
-                "conditional_edge_candidate"
-                if selected_validation and (_mean(_outcome_value(row, horizon) for row in selected_validation) or 0) > 0
-                else "no_validated_conditional_edge"
+            "pbo": (
+                {
+                    "estimated": False,
+                    "reason": (
+                        "broad alpha-ceiling uses explicit effective-trial accounting and untouched validation; "
+                        "the legacy signed-feature CSCV ranking is not meaningful for an unconstrained EV model"
+                    ),
+                }
+                if branch == BRANCH_ALPHA_CEILING
+                else _probability_backtest_overfit(discovery + validation, eligible, horizon)
+            ),
+            "alpha_ceiling": {
+                "objective": "P(W|X)*E[G|W,X]-P(L|X)*E[|L||L,X]-C(X)",
+                "horizons": horizon_reports,
+                "discovery_selected_horizon": horizon,
+                "confirmation_untouched": True,
+            },
+            "interpretation": _mid_tier(
+                _phase_summary(selected_validation, horizon=horizon, effective_trials=trials),
+                _ev_diagnostics(validation, horizon),
             ),
         }
         models[event_key] = {
@@ -1435,10 +2217,17 @@ def _build_models(
             "primary_horizon": horizon,
             "normalization": normalization,
             "alpha_features": [spec.as_dict() for spec in alpha],
-            "score_rule": "equal_weight_mean_of_declared_signed_development_percentiles",
+            "score_rule": (
+                "base_event_pass_through_veto_only"
+                if pass_through
+                else "explicit_conditional_ev_ridge_logit_fitted_on_discovery_only"
+            ),
             "base_event_pass_through": pass_through,
             "selection_percentile": 0.80,
             "selection_threshold": threshold,
+            "conditional_ev_model": horizon_models.get(horizon),
+            "horizon_models": horizon_models,
+            "dynamic_long_short_direction": dynamic_direction,
             "vetoes": vetoes,
             "architecture": {
                 "setup": [spec.name for spec in eligible if spec.role == "setup"],
@@ -1461,13 +2250,15 @@ def _apply_frozen_models(events: Sequence[dict[str, Any]], models: dict[str, Any
         if not model:
             continue
         _apply_normalization(rows, model["normalization"])
+        conditional_ev_model = model.get("conditional_ev_model")
+        if conditional_ev_model:
+            _apply_explicit_ev_model(rows, model["alpha_features"], conditional_ev_model)
         for row in rows:
-            components = []
-            for spec in model["alpha_features"]:
-                percentile = _finite(row["features"].get(f"{spec['name']}_percentile"))
-                if percentile is not None:
-                    components.append(int(spec["sign"]) * (2 * percentile - 1))
-            score = 1.0 if model.get("base_event_pass_through") else _mean(components)
+            score = (
+                1.0
+                if model.get("base_event_pass_through")
+                else _finite(row["features"].get("_predicted_ev_bps"))
+            )
             row["features"]["_alpha_score"] = score
             row["features"]["_vetoed"] = _is_vetoed(row, model["vetoes"])
             row["features"]["_selected"] = bool(
@@ -1484,9 +2275,9 @@ def _validate_branches(timeframe: str, branches: Sequence[str]) -> list[str]:
     if unknown:
         raise ValueError(f"Unknown event branches: {unknown}")
     allowed = (
-        {BRANCH_GAP, BRANCH_ONE_MINUTE_VETO}
+        {BRANCH_GAP, BRANCH_ONE_MINUTE_VETO, BRANCH_ALPHA_CEILING}
         if timeframe == "30m"
-        else {BRANCH_FAILED_AUCTION}
+        else {BRANCH_FAILED_AUCTION, BRANCH_ALPHA_CEILING}
     )
     invalid = sorted(set(unique) - allowed)
     if invalid:
@@ -1536,11 +2327,38 @@ def declare_event_study(
             BRANCH_GAP: "30m opening gap >=30bps, elevated second-bar relative volume, and >=50% gap rejection",
             BRANCH_FAILED_AUCTION: "15m excursion beyond prior four-bar range followed by optional re-entry within two bars",
             BRANCH_ONE_MINUTE_VETO: "1m state inside the completed 30m signal bar; veto only, never standalone direction",
+            BRANCH_ALPHA_CEILING: (
+                "All-symbol hourly decision grid using only completed-bar predictors; "
+                "the development-fitted EV model compares long and short expectancy"
+            ),
         },
         "horizons_minutes": list(HORIZONS_MINUTES),
-        "outcomes": ["gross_return", "net_return_after_stressed_cost", "MFE", "MAE"],
+        "outcomes": [
+            "gross_return",
+            "net_return_after_stressed_cost",
+            "MFE",
+            "MAE",
+            "future_realized_volatility",
+            "future_liquidity_deterioration",
+            "EOD_return",
+        ],
         "split_policy": "50pct_discovery_30pct_validation_20pct_one_shot_confirmation",
-        "score_policy": "equal_weight_declared_signed_percentiles_top_20pct",
+        "score_policy": (
+            "explicit conditional EV: P(win|X)*E(gain|win,X)-"
+            "P(loss|X)*E(abs(loss)|loss,X)-conditional_cost; top development quintile"
+        ),
+        "alpha_ceiling_targets": [
+            "future_gross_and_net_return",
+            "future_direction_probability",
+            "conditional_gain_and_loss_magnitude",
+            "future_MFE_and_MAE",
+            "future_realized_volatility",
+            "future_liquidity_deterioration",
+        ],
+        "mid_tier_policy": (
+            "validation net positive, >=100 signals, >=40 sessions, >=8 symbols, "
+            "day-clustered t>=1, direction accuracy>=50%; elite gates unchanged"
+        ),
         "veto_policy": "development_mining_validation_check_max_30pct_removed",
         "multiple_testing": ["Benjamini-Hochberg", "Deflated Sharpe", "CSCV PBO diagnostic"],
         "broker_authorization": False,
@@ -1611,6 +2429,7 @@ def declare_event_study(
         "branches": branches,
         "symbols": len(selected),
         "horizons_minutes": list(HORIZONS_MINUTES),
+        "additional_horizons": ["eod"],
         "specification_hash": spec_hash,
         "next_allowed_phase": "development_discovery",
         "created_at": row["created_at"],
@@ -1691,7 +2510,7 @@ def run_event_discovery(
         branches=list(declaration["branches"]),
     )
     results = {
-        "research_object": "conditional_expectancy_not_strategy",
+        "research_object": "explicit_conditional_ev_and_alpha_ceiling_not_strategy",
         "dataset_id": int(declaration["dataset_id"]),
         "declaration_id": declaration_id,
         "timeframe": declaration["timeframe"],
@@ -1701,6 +2520,12 @@ def run_event_discovery(
         "events": len(development),
         "effective_trials": effective_trials,
         "event_studies": reports,
+        "mid_candidate_count": sum(
+            1
+            for report in reports.values()
+            for horizon in (report.get("alpha_ceiling") or {}).get("horizons", {}).values()
+            if horizon.get("portfolio_tier") == "mid_portfolio_candidate"
+        ),
         "promotion_authorized": False,
         "next_allowed_phase": "freeze_complete_then_one_shot_confirmation",
         "protocol_version": EVENT_DISCOVERY_VERSION,
@@ -1724,8 +2549,13 @@ def run_event_discovery(
         ),
     ).fetchone()
     run_id = int(row["id"])
-    for batch_start in range(0, len(development), 500):
-        batch = development[batch_start : batch_start + 500]
+    persisted_development = [
+        event
+        for event in development
+        if event["branch"] != BRANCH_ALPHA_CEILING or event["features"].get("_selected")
+    ]
+    for batch_start in range(0, len(persisted_development), 500):
+        batch = persisted_development[batch_start : batch_start + 500]
         with conn.cursor() as cursor:
             cursor.executemany(
                 """
@@ -1775,11 +2605,15 @@ def run_event_discovery(
                 "primary_horizon": report["primary_horizon"],
                 "interpretation": report["interpretation"],
                 "selected_validation": report["selected"]["validation"],
+                "alpha_ceiling": _concise_alpha_ceiling(report.get("alpha_ceiling")),
                 "selected_vetoes": [row["feature"] for row in report["veto_diagnostics"] if row["selected"]],
             }
             for key, report in reports.items()
         },
         "confirmation_accessed": False,
+        "raw_event_persistence": (
+            "all_named_events; alpha_ceiling_selected_events_only_to_bound_database_growth"
+        ),
         "next_command": f"confirm --run-id {run_id}",
         "created_at": row["created_at"],
     }
@@ -1952,6 +2786,7 @@ def event_study_report(
                 "events": value.get("event_counts"),
                 "validation_interpretation": value.get("interpretation"),
                 "validation_selected": (value.get("selected") or {}).get("validation"),
+                "alpha_ceiling": _concise_alpha_ceiling(value.get("alpha_ceiling")),
                 "selected_vetoes": [
                     item.get("feature") for item in value.get("veto_diagnostics", []) if item.get("selected")
                 ],
@@ -1980,6 +2815,8 @@ def feature_catalog() -> dict[str, Any]:
             for branch, specs in FEATURE_CATALOG.items()
         },
         "horizons_minutes": list(HORIZONS_MINUTES),
+        "ev_objective": "P(W|X)*E[G|W,X]-P(L|X)*E[|L||L,X]-C(X)",
+        "mid_tier_is_not_elite": True,
         "workflow": ["declare", "discover", "report", "confirm_once"],
         "broker_authorized": False,
     }

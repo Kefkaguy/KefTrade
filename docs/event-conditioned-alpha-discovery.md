@@ -17,6 +17,14 @@ or broker authorization.
 - Score-decile reports, loser/large-MAE veto mining, and stability by year, liquidity, and market regime.
 - Benjamini-Hochberg feature diagnostics, Deflated Sharpe inference, and a CSCV/PBO diagnostic.
 - Immutable 50% discovery / 30% validation / 20% one-shot confirmation governance.
+- An explicit conditional-EV model rather than an equal-weight feature score:
+  `P(win|X) * E(gain|win,X) - P(loss|X) * E(abs(loss)|loss,X) - cost(X)`.
+- A broad 15m/30m alpha-ceiling branch sampled on a frozen hourly decision
+  grid, with long/short direction chosen from predicted EV.
+- Auxiliary predictability tests for residual return, cross-sectional rank,
+  continuation/reversal, large moves, MFE, MAE, future volatility, and
+  liquidity deterioration.
+- A separate mid-tier label that never weakens or bypasses elite/confirmation gates.
 
 The 1m branch never predicts direction. It asks whether the frozen parent setup
 should be rejected because its completed signal bar shows adverse price, flow,
@@ -121,6 +129,64 @@ docker compose -f docker-compose.prod.yml run --rm --no-deps api \
   python -m app.cli.intraday_event_discovery discover \
   --declaration-id DECLARATION_ID
 ```
+
+## Alpha-ceiling study: the next experiment
+
+Use this after named 15m/30m hypotheses fail. It asks whether the available
+information set predicts any economically useful target, rather than inventing
+another strategy name. It sends no broker orders and does not create a paper lab.
+
+Run 15m first on dataset 83:
+
+```bash
+cd /opt/keftrade/deploy/production
+
+SYMBOLS="AAPL,ABBV,ABT,ADBE,AMAT,AMD,AMZN,AVGO,BA,BAC,BMY,C,CAT,CMCSA,COIN,COST,CRM,CSCO,CVX,DIS,F,GE,GM,GOOGL,GS,HD,IBM,INTC,JPM,KO,LLY,META,MRK,MSFT,MU,NFLX,NVDA,ORCL,PEP,PFE,QQQ,SPY,T,TSLA,UNH,VZ,WMT,XOM"
+
+docker compose -f docker-compose.prod.yml run --rm --no-deps api \
+  python -m app.cli.intraday_event_discovery declare \
+  --dataset-id 83 \
+  --timeframe 15m \
+  --branches alpha_ceiling \
+  --symbols "$SYMBOLS" \
+  --cost-calibration-id 4 \
+  --feed sip \
+  --purpose "15m broad information-set alpha ceiling with explicit conditional EV"
+```
+
+Then run the returned declaration id detached:
+
+```bash
+docker compose -f docker-compose.prod.yml run -d \
+  --name alpha-ceiling-15m \
+  api python -m app.cli.intraday_event_discovery discover \
+  --declaration-id DECLARATION_ID
+
+docker logs -f alpha-ceiling-15m
+```
+
+For the 30m dataset, repeat with dataset `82`, timeframe `30m`, and a distinct
+container name such as `alpha-ceiling-30m`.
+
+Print the concise persisted result:
+
+```bash
+docker compose -f docker-compose.prod.yml run --rm --no-deps api \
+  python -m app.cli.intraday_event_discovery report \
+  --run-id RUN_ID
+```
+
+Interpretation tiers are deliberately separate:
+
+- `mid_portfolio_candidate`: positive after costs with broad enough validation
+  coverage and modest evidence; still requires untouched confirmation before
+  strategy engineering.
+- `weak_positive_watchlist`: positive but too weak or concentrated.
+- `failed_or_negative`: no usable conditional edge.
+
+Do not call `confirm` merely because a mid candidate exists. Review horizon
+deciles, EV calibration, auxiliary targets, and stability first; confirmation
+remains a one-shot use of the last 20 percent.
 
 ## Monitor a long development run
 
