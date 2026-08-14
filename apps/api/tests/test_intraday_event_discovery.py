@@ -221,6 +221,8 @@ def test_alpha_ceiling_detector_uses_base_features_without_missing_helper():
     assert event["labels"]["dynamic_direction"] is True
     assert event["features"]["idiosyncratic_return"] is not None
     assert event["features"]["market_return"] == 0.0
+    assert event["features"]["news_last_60m"] == 0.0
+    assert event["features"]["minutes_since_last_news"] == 100_000.0
     assert event["outcomes"]["15m"]["available"] is True
 
 
@@ -367,8 +369,8 @@ def test_mid_tier_is_positive_but_does_not_relax_elite_confirmation_gates():
 def test_alpha_ceiling_scores_all_horizons_with_frozen_explicit_ev():
     rows = []
     specs = FEATURE_CATALOG[BRANCH_ALPHA_CEILING]
-    for index in range(120):
-        phase = "discovery" if index < 80 else "validation"
+    for index in range(180):
+        phase = "discovery" if index < 120 else "validation"
         signal = (index % 20 - 10) / 10
         gross_bps = signal * 8
         row = _event(index, phase, gross_bps - 2, signal, 2)

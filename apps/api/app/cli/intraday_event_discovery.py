@@ -39,6 +39,7 @@ def declare(args: argparse.Namespace) -> dict[str, Any]:
             cost_calibration_id=args.cost_calibration_id,
             feed=args.feed,
             purpose=args.purpose,
+            include_news_features=args.include_news_features,
         )
 
 
@@ -86,6 +87,11 @@ def parser() -> argparse.ArgumentParser:
     declare_command.add_argument("--symbols", type=_symbols)
     declare_command.add_argument("--cost-calibration-id", type=int, required=True)
     declare_command.add_argument("--feed", choices=("sip", "iex"), default="sip")
+    declare_command.add_argument(
+        "--include-news-features",
+        action="store_true",
+        help="Add point-in-time Alpaca news features to the alpha-ceiling information set.",
+    )
     declare_command.add_argument("--purpose", required=True)
     declare_command.set_defaults(handler=declare)
 

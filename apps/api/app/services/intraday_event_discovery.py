@@ -34,6 +34,11 @@ from app.services.intraday_factor_diagnostics import (
     load_dataset_candles,
     sector_map,
 )
+from app.services.intraday_news import (
+    NEWS_FEATURE_NAMES,
+    empty_news_features,
+    load_news_feature_index,
+)
 from app.services.intraday_research_integrity import (
     clustered_outcome_statistics,
     estimated_round_trip_cost_bps,
@@ -136,6 +141,22 @@ FEATURE_CATALOG: dict[str, tuple[FeatureSpec, ...]] = {
         FeatureSpec("market_return", "regime", 1, "Contemporaneous broad-market direction."),
         FeatureSpec("minutes_from_open", "regime", 1, "Intraday time slot."),
         FeatureSpec("effective_spread_bps", "execution", -1, "Conditional round-trip execution state."),
+        FeatureSpec("news_last_15m", "alpha", 1, "Point-in-time article count in the last 15 minutes."),
+        FeatureSpec("news_last_60m", "alpha", 1, "Point-in-time article count in the last 60 minutes."),
+        FeatureSpec("news_last_24h", "regime", 1, "Point-in-time article count in the last 24 hours."),
+        FeatureSpec("minutes_since_last_news", "regime", -1, "Minutes since the latest known article version."),
+        FeatureSpec("first_news_today", "alpha", 1, "Whether this is the first known article for the symbol today."),
+        FeatureSpec("news_frequency_surprise", "alpha", 1, "Recent article burst versus 24-hour baseline."),
+        FeatureSpec("positive_news_score", "alpha", 1, "Lightweight positive keyword count in known recent news."),
+        FeatureSpec("negative_news_score", "alpha", -1, "Lightweight negative keyword count in known recent news."),
+        FeatureSpec("earnings_event", "regime", 1, "Known recent article mentions earnings/results."),
+        FeatureSpec("guidance_event", "regime", 1, "Known recent article mentions guidance/outlook."),
+        FeatureSpec("analyst_event", "regime", 1, "Known recent article mentions analyst/rating action."),
+        FeatureSpec("ma_event", "regime", 1, "Known recent article mentions M&A."),
+        FeatureSpec("regulatory_event", "regime", 1, "Known recent article mentions regulatory activity."),
+        FeatureSpec("product_event", "regime", 1, "Known recent article mentions product/news launch."),
+        FeatureSpec("management_event", "regime", 1, "Known recent article mentions management change."),
+        FeatureSpec("legal_event", "regime", 1, "Known recent article mentions legal activity."),
     ),
 }
 
@@ -982,6 +1003,7 @@ def _detect_alpha_ceiling_panel(
     sectors: dict[str, str],
     cost_model: dict[str, Any],
     horizons: Sequence[int],
+    news_index: Any | None = None,
     decision_start: datetime | None = None,
     decision_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -1050,6 +1072,11 @@ def _detect_alpha_ceiling_panel(
                     "minutes_from_open": minutes_from_open,
                     "effective_spread_bps": _finite(current.get("flow_effective_spread_bps")),
                 }
+                features.update(
+                    news_index.features_at(symbol, knowable_at)
+                    if news_index is not None
+                    else empty_news_features()
+                )
                 events.append(
                     _event(
                         event_key=f"{timeframe}_alpha_ceiling_panel",
@@ -1085,6 +1112,7 @@ def detect_events(
     horizons: Sequence[int],
     source: str,
     feed: str,
+    include_news_features: bool = False,
     decision_start: datetime | None = None,
     decision_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -1109,6 +1137,21 @@ def detect_events(
     )
     sectors = sector_map(conn, selected)
     contexts = _context_maps(candles, sectors)
+    news_index = None
+    if include_news_features and selected:
+        all_timestamps = [
+            row["timestamp"]
+            for rows in candles.values()
+            for row in rows
+            if row.get("timestamp") is not None
+        ]
+        if all_timestamps:
+            news_index = load_news_feature_index(
+                conn,
+                symbols=selected,
+                start=min(all_timestamps),
+                end=max(all_timestamps) + timedelta(days=1),
+            )
     events: list[dict[str, Any]] = []
     if BRANCH_GAP in branches or BRANCH_ONE_MINUTE_VETO in branches:
         base = _detect_gap_absorption(
@@ -1167,6 +1210,7 @@ def detect_events(
                 sectors=sectors,
                 cost_model=cost_model,
                 horizons=horizons,
+                news_index=news_index,
                 decision_start=decision_start,
                 decision_end=decision_end,
             )
@@ -2295,6 +2339,7 @@ def declare_event_study(
     cost_calibration_id: int | None,
     feed: str,
     purpose: str,
+    include_news_features: bool = False,
 ) -> dict[str, Any]:
     branches = _validate_branches(timeframe, branches)
     splits = get_dataset_splits(conn, dataset_id)
@@ -2355,6 +2400,13 @@ def declare_event_study(
             "future_realized_volatility",
             "future_liquidity_deterioration",
         ],
+        "news_side_channel": {
+            "enabled": bool(include_news_features),
+            "provider": "alpaca_news",
+            "known_at_policy": "use article updated_at as the earliest usable version timestamp",
+            "research_question": "price_flow_baseline_vs_price_flow_plus_point_in_time_news",
+            "features": list(NEWS_FEATURE_NAMES) if include_news_features else [],
+        },
         "mid_tier_policy": (
             "validation net positive, >=100 signals, >=40 sessions, >=8 symbols, "
             "day-clustered t>=1, direction accuracy>=50%; elite gates unchanged"
@@ -2383,6 +2435,7 @@ def declare_event_study(
         "splits": splits.as_dict(),
         "cost_model": cost_model,
         "specification": specification,
+        "include_news_features": bool(include_news_features),
         "protocol_version": EVENT_DISCOVERY_VERSION,
     }
     spec_hash = sha256(dumps(hash_payload, sort_keys=True, default=str).encode()).hexdigest()
@@ -2396,6 +2449,7 @@ def declare_event_study(
             "already_declared": True,
             "specification_hash": spec_hash,
             "next_allowed_phase": "development_discovery",
+            "news_features": bool(include_news_features),
         }
     row = conn.execute(
         """
@@ -2433,6 +2487,7 @@ def declare_event_study(
         "specification_hash": spec_hash,
         "next_allowed_phase": "development_discovery",
         "created_at": row["created_at"],
+        "news_features": bool(include_news_features),
     }
 
 
@@ -2494,6 +2549,7 @@ def run_event_discovery(
         horizons=list(declaration["horizons_minutes"]),
         source=str(specification["source"]),
         feed=str(specification["feed"]),
+        include_news_features=bool((specification.get("news_side_channel") or {}).get("enabled")),
         decision_end=splits.confirmation_start,
     )
     development = []
@@ -2515,6 +2571,7 @@ def run_event_discovery(
         "declaration_id": declaration_id,
         "timeframe": declaration["timeframe"],
         "branches": declaration["branches"],
+        "news_features": bool((specification.get("news_side_channel") or {}).get("enabled")),
         "splits_accessed": ["discovery", "validation"],
         "confirmation_accessed": False,
         "events": len(development),
@@ -2670,6 +2727,7 @@ def run_event_confirmation(
         horizons=list(declaration["horizons_minutes"]),
         source=str(specification["source"]),
         feed=str(specification["feed"]),
+        include_news_features=bool((specification.get("news_side_channel") or {}).get("enabled")),
         decision_start=splits.confirmation_start,
         decision_end=splits.confirmation_end + timedelta(days=1),
     )
