@@ -638,10 +638,12 @@ def load_option_feature_index(
              AND snapshot.observed_at <= %s
             GROUP BY requested.symbol
         )
-        SELECT underlying_symbol, option_symbol, observed_at, expiration_date,
-               option_type, strike_price, bid_price, ask_price, bid_size, ask_size,
-               trade_price, trade_size, implied_volatility, delta, gamma, theta,
-               vega, rho, open_interest
+        SELECT snapshot.underlying_symbol, snapshot.option_symbol, snapshot.observed_at,
+               snapshot.expiration_date, snapshot.option_type, snapshot.strike_price,
+               snapshot.bid_price, snapshot.ask_price, snapshot.bid_size, snapshot.ask_size,
+               snapshot.trade_price, snapshot.trade_size, snapshot.implied_volatility,
+               snapshot.delta, snapshot.gamma, snapshot.theta, snapshot.vega, snapshot.rho,
+               snapshot.open_interest
         FROM intraday_option_chain_snapshots AS snapshot
         JOIN latest
           ON latest.underlying_symbol = snapshot.underlying_symbol
