@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 import gzip
 from hashlib import sha256
@@ -2565,6 +2565,12 @@ def jsonable(value: Any) -> Any:
     if isinstance(value, Decimal):
         return float(value) if value.is_finite() else None
     if isinstance(value, datetime):
+        return value.isoformat()
+    # `date` must be tested after `datetime`, which subclasses it. Without this
+    # branch a payload carrying an exchange session date reaches json.dumps and
+    # raises there, which surfaces as a persistence failure at the end of a run
+    # rather than as a serialization problem.
+    if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, float) and not math.isfinite(value):
         return None

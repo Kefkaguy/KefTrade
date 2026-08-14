@@ -125,6 +125,161 @@ def load_lab_experiment(conn: psycopg.Connection, experiment_id: int) -> dict[st
     return dict(row)
 
 
+def load_runnable_experiment(
+    conn: psycopg.Connection, experiment_id: int
+) -> dict[str, Any]:
+    """Load an experiment that is allowed to place orders.
+
+    Frozen experiments stay readable -- reading the evidence is the point of
+    keeping them -- but they cannot be run.  Re-running one under a new
+    threshold would overwrite a finding with a fitted result and leave no trace
+    that the original hypothesis had already been tested.
+    """
+    record = load_lab_experiment(conn, experiment_id)
+    if record.get("frozen_at") is not None:
+        raise ValueError(
+            f"Experiment {experiment_id} was frozen as evidence at "
+            f"{record['frozen_at']} and cannot be run again. Its result is a finding "
+            "about the hypothesis it tested. Declare a new experiment if a different "
+            "hypothesis is intended."
+        )
+    return record
+
+
+EVIDENCE_BASES = (
+    "alpha_map_cleared",
+    "operational_curiosity",
+)
+
+
+def _resolve_evidence_basis(
+    conn: psycopg.Connection,
+    *,
+    evidence_basis: str,
+    alpha_map_run_id: int | None,
+    alpha_map_cell_key: str | None,
+    factor_key: str,
+) -> dict[str, Any]:
+    """Decide whether this experiment is allowed to exist, and on what grounds.
+
+    Paper Lab is the last stage of research, not the microscope.  A dozen fake
+    trades over one afternoon cannot establish whether a feature predicts
+    anything -- that is a question about thousands of observations across
+    hundreds of sessions, and the alpha map answers it far more cheaply.  What
+    Paper Lab can establish is whether an already-measured effect survives real
+    scheduling, quotes, broker semantics and fills.
+
+    So an experiment must say which of those two things it is.  Curiosity runs
+    remain allowed, because shaking out broker semantics genuinely needs no
+    edge at all; they simply have to be labelled, so that a later reader cannot
+    mistake an unmeasured hypothesis for a validated one.
+    """
+    if evidence_basis not in EVIDENCE_BASES:
+        raise ValueError(
+            f"evidence_basis must be one of {list(EVIDENCE_BASES)}. "
+            "'alpha_map_cleared' requires a cleared alpha-map cell and means this "
+            "experiment is testing execution reality for a measured effect. "
+            "'operational_curiosity' means it is testing the plumbing and its P/L is "
+            "not evidence about the hypothesis."
+        )
+    if evidence_basis == "operational_curiosity":
+        return {
+            "evidence_basis": evidence_basis,
+            "alpha_map_run_id": None,
+            "alpha_map_cell_key": None,
+            "limitation": (
+                "Operational curiosity run. No alpha-map cell authorizes this factor, so "
+                "its profit or loss is evidence about scheduling, fills and broker "
+                "semantics only -- not about whether the factor predicts anything."
+            ),
+        }
+    if alpha_map_run_id is None or not alpha_map_cell_key:
+        raise ValueError(
+            "evidence_basis='alpha_map_cleared' requires alpha_map_run_id and "
+            "alpha_map_cell_key. Run the alpha map for this feature first: a cleared "
+            "cell is what states the horizon and the measured edge this experiment is "
+            "supposed to reproduce."
+        )
+    from app.services.intraday_alpha_map import cleared_cell
+
+    cell = cleared_cell(conn, run_id=alpha_map_run_id, cell_key=alpha_map_cell_key)
+    return {
+        "evidence_basis": evidence_basis,
+        "alpha_map_run_id": alpha_map_run_id,
+        "alpha_map_cell_key": alpha_map_cell_key,
+        "cleared_cell": {
+            "feature": cell["feature"],
+            "feature_transform": cell["feature_transform"],
+            "horizon_seconds": cell["horizon_seconds"],
+            "measured_gross_bps": cell["extreme_bucket_gross_bps"],
+            "required_gross_bps": cell["required_gross_bps"],
+            "rank_ic_t_statistic": cell["rank_ic_t_statistic"],
+            "phase": cell["phase"],
+        },
+        "limitation": (
+            f"Authorized by alpha-map cell {alpha_map_cell_key} at a "
+            f"{cell['horizon_seconds']}s horizon. A Paper Lab holding period that does "
+            f"not match that horizon is testing a different hypothesis than the one "
+            f"that was cleared, and the factor key in use here is {factor_key!r}."
+        ),
+    }
+
+
+def freeze_experiment(
+    conn: psycopg.Connection,
+    *,
+    experiment_id: int,
+    finding: str,
+    verdict: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Preserve an experiment as a finding rather than re-fitting it.
+
+    The failure this prevents is quiet and common: an experiment loses money,
+    the threshold is adjusted, it runs again under the same name, and the
+    record of what the original hypothesis actually predicted is gone.  A
+    frozen experiment keeps its verdict, can no longer be started, and stands
+    as evidence that its hypothesis was tested and failed.
+    """
+    row = conn.execute(
+        "SELECT * FROM intraday_paper_lab_experiments WHERE id = %s",
+        (experiment_id,),
+    ).fetchone()
+    if not row:
+        raise ValueError(f"No intraday paper lab experiment id={experiment_id}.")
+    record = dict(row)
+    if record.get("frozen_at") is not None:
+        return {**_json_safe(record), "already_frozen": True}
+    if not finding.strip():
+        raise ValueError(
+            "A freeze must state the finding. 'It lost money' is a result; the finding "
+            "is what the result says about the hypothesis."
+        )
+    payload = {
+        "finding": finding.strip(),
+        "factor_key": record.get("factor_key"),
+        "timeframe": record.get("timeframe"),
+        "threshold": float(record["threshold"]) if record.get("threshold") is not None else None,
+        "trading_date": record.get("trading_date"),
+        "config": record.get("config"),
+        **(verdict or {}),
+    }
+    frozen = conn.execute(
+        """
+        UPDATE intraday_paper_lab_experiments
+        SET status = CASE WHEN status IN ('running', 'created') THEN 'stopped' ELSE status END,
+            evidence_basis = 'frozen_failed_hypothesis',
+            frozen_at = NOW(),
+            frozen_verdict = %s,
+            updated_at = NOW()
+        WHERE id = %s
+        RETURNING *
+        """,
+        (Jsonb(_json_safe(payload)), experiment_id),
+    ).fetchone()
+    conn.commit()
+    return {**_json_safe(dict(frozen)), "already_frozen": False}
+
+
 def create_experiment(
     conn: psycopg.Connection,
     *,
@@ -137,7 +292,17 @@ def create_experiment(
     quantity: int = 1,
     allow_shorts: bool = True,
     feed: str = PAPER_LAB_DEFAULT_FEED,
+    evidence_basis: str,
+    alpha_map_run_id: int | None = None,
+    alpha_map_cell_key: str | None = None,
 ) -> dict[str, Any]:
+    clearance = _resolve_evidence_basis(
+        conn,
+        evidence_basis=evidence_basis,
+        alpha_map_run_id=alpha_map_run_id,
+        alpha_map_cell_key=alpha_map_cell_key,
+        factor_key="signed_trade_imbalance_continuation_v2_1bar",
+    )
     calibration = load_calibration(conn, calibration_id, require_ready=True)
     selected_feed = feed.lower()
     if selected_feed not in PAPER_LAB_ALLOWED_FEEDS:
@@ -164,14 +329,18 @@ def create_experiment(
         "threshold": threshold,
         "market_data_feed": selected_feed,
         "feed_limitation": feed_limitation,
+        "evidence_basis": clearance["evidence_basis"],
+        "evidence_limitation": clearance["limitation"],
+        "alpha_map_cell": clearance.get("cleared_cell"),
     }
     row = conn.execute(
         """
         INSERT INTO intraday_paper_lab_experiments(
             name, trading_date, factor_key, timeframe, calibration_id,
-            threshold, symbols, config
+            threshold, symbols, config, evidence_basis,
+            alpha_map_cell_run_id, alpha_map_cell_key
         )
-        VALUES (%s,%s,%s,'30m',%s,%s,%s,%s)
+        VALUES (%s,%s,%s,'30m',%s,%s,%s,%s,%s,%s,%s)
         RETURNING *
         """,
         (
@@ -182,6 +351,9 @@ def create_experiment(
             threshold,
             Jsonb(sorted({symbol.upper() for symbol in symbols})),
             Jsonb(config),
+            clearance["evidence_basis"],
+            clearance["alpha_map_run_id"],
+            clearance["alpha_map_cell_key"],
         ),
     ).fetchone()
     conn.commit()
@@ -200,6 +372,9 @@ def create_gap_factor_experiment(
     quantity: int = 1,
     allow_shorts: bool = True,
     feed: str = "sip",
+    evidence_basis: str,
+    alpha_map_run_id: int | None = None,
+    alpha_map_cell_key: str | None = None,
 ) -> dict[str, Any]:
     selected_feed = feed.lower()
     if selected_feed not in PAPER_LAB_ALLOWED_FEEDS:
@@ -207,6 +382,13 @@ def create_gap_factor_experiment(
     if factor_key not in GAP_PAPER_LAB_FACTORS:
         supported = ", ".join(sorted(GAP_PAPER_LAB_FACTORS))
         raise ValueError(f"Unsupported gap paper factor {factor_key!r}. Use one of: {supported}")
+    clearance = _resolve_evidence_basis(
+        conn,
+        evidence_basis=evidence_basis,
+        alpha_map_run_id=alpha_map_run_id,
+        alpha_map_cell_key=alpha_map_cell_key,
+        factor_key=factor_key,
+    )
     spec = GAP_PAPER_LAB_FACTORS[factor_key]
     config = {
         "environment": "alpaca_paper",
@@ -230,14 +412,18 @@ def create_gap_factor_experiment(
         "flow_state": spec["flow_state"],
         "horizon_bars": spec["horizon_bars"],
         "research_status": "exploratory_interim_not_validated",
+        "evidence_basis": clearance["evidence_basis"],
+        "evidence_limitation": clearance["limitation"],
+        "alpha_map_cell": clearance.get("cleared_cell"),
     }
     row = conn.execute(
         """
         INSERT INTO intraday_paper_lab_experiments(
             name, trading_date, factor_key, timeframe, calibration_id,
-            threshold, symbols, config
+            threshold, symbols, config, evidence_basis,
+            alpha_map_cell_run_id, alpha_map_cell_key
         )
-        VALUES (%s,%s,%s,'30m',NULL,%s,%s,%s)
+        VALUES (%s,%s,%s,'30m',NULL,%s,%s,%s,%s,%s,%s)
         RETURNING *
         """,
         (
@@ -247,6 +433,9 @@ def create_gap_factor_experiment(
             Decimal("0.003"),
             Jsonb(sorted({symbol.upper() for symbol in symbols})),
             Jsonb(config),
+            clearance["evidence_basis"],
+            clearance["alpha_map_run_id"],
+            clearance["alpha_map_cell_key"],
         ),
     ).fetchone()
     conn.commit()
@@ -486,7 +675,7 @@ async def run_cycle(
     bar_start: datetime | None = None,
     feed: str | None = None,
 ) -> dict[str, Any]:
-    experiment = load_lab_experiment(conn, experiment_id)
+    experiment = load_runnable_experiment(conn, experiment_id)
     config = dict(experiment["config"] or {})
     selected_feed = (feed or config.get("market_data_feed") or PAPER_LAB_DEFAULT_FEED).lower()
     if selected_feed not in PAPER_LAB_ALLOWED_FEEDS:
@@ -1160,7 +1349,7 @@ async def run_gap_factor_cycle(
     bar_start: datetime | None = None,
     feed: str | None = None,
 ) -> dict[str, Any]:
-    experiment = load_lab_experiment(conn, experiment_id)
+    experiment = load_runnable_experiment(conn, experiment_id)
     config = dict(experiment["config"] or {})
     factor_key = str(config.get("factor_key") or experiment["factor_key"])
     if factor_key not in GAP_PAPER_LAB_FACTORS:
@@ -1324,7 +1513,7 @@ async def run_gap_factor_loop(
     poll_seconds: int = 300,
     feed: str | None = None,
 ) -> dict[str, Any]:
-    experiment = load_lab_experiment(conn, experiment_id)
+    experiment = load_runnable_experiment(conn, experiment_id)
     factor_key = str((experiment.get("config") or {}).get("factor_key") or experiment["factor_key"])
     if factor_key not in GAP_PAPER_LAB_FACTORS:
         raise ValueError(f"Experiment {experiment_id} is not a supported gap-factor lab.")
@@ -1458,7 +1647,7 @@ async def run_loop(
     poll_seconds: int = 300,
     feed: str | None = None,
 ) -> dict[str, Any]:
-    experiment = load_lab_experiment(conn, experiment_id)
+    experiment = load_runnable_experiment(conn, experiment_id)
     session_close = _utc(experiment["trading_date"], REGULAR_CLOSE) + timedelta(minutes=10)
     cycles = []
     seen_bars: set[datetime] = set()

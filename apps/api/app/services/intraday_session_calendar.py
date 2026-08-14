@@ -23,7 +23,11 @@ NEW_YORK = ZoneInfo("America/New_York")
 REGULAR_OPEN = time(9, 30)
 REGULAR_CLOSE = time(16, 0)
 EARLY_CLOSE = time(13, 0)
-TIMEFRAME_MINUTES = {"15m": 15, "30m": 30}
+# 1m and 5m are measurement grids, not signal timeframes.  Forward-return
+# horizons cannot be resolved on the same grid that produced the signal -- a
+# 30m bar can only answer 30/60/90-minute questions -- so the alpha map reads
+# signals at 15m/30m and measures outcomes against a finer grid.
+TIMEFRAME_MINUTES = {"1m": 1, "5m": 5, "15m": 15, "30m": 30}
 
 
 def timeframe_minutes(timeframe: str) -> int:

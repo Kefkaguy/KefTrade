@@ -8,6 +8,7 @@ from app.cli._refusal import run_command
 from app.db import connect
 from app.services.intraday_paper_lab import (
     AlpacaPaperLabClient,
+    EVIDENCE_BASES,
     EXCHANGE,
     GAP_PAPER_LAB_FACTORS,
     REGULAR_CLOSE,
@@ -15,6 +16,7 @@ from app.services.intraday_paper_lab import (
     _utc,
     create_experiment,
     create_gap_factor_experiment,
+    freeze_experiment,
     flatten_due_positions,
     load_lab_experiment,
     monitor,
@@ -67,6 +69,9 @@ def create(args: argparse.Namespace) -> dict:
             quantity=args.quantity,
             allow_shorts=not args.long_only,
             feed=args.feed,
+            evidence_basis=args.evidence_basis,
+            alpha_map_run_id=args.alpha_map_run_id,
+            alpha_map_cell_key=args.alpha_map_cell_key,
         )
 
 
@@ -83,6 +88,18 @@ def create_gap(args: argparse.Namespace) -> dict:
             quantity=args.quantity,
             allow_shorts=not args.long_only,
             feed=args.feed,
+            evidence_basis=args.evidence_basis,
+            alpha_map_run_id=args.alpha_map_run_id,
+            alpha_map_cell_key=args.alpha_map_cell_key,
+        )
+
+
+def freeze(args: argparse.Namespace) -> dict:
+    with connect() as conn:
+        return freeze_experiment(
+            conn,
+            experiment_id=args.experiment_id,
+            finding=args.finding,
         )
 
 
@@ -295,6 +312,33 @@ def schedule(args: argparse.Namespace) -> dict:
     return asyncio.run(_schedule_async(args))
 
 
+def _add_evidence_arguments(command: argparse.ArgumentParser) -> None:
+    """Make every experiment state what it is evidence about.
+
+    Paper Lab cannot establish whether a feature predicts anything -- a dozen
+    fake trades in an afternoon is not a sample -- so an experiment has to
+    declare whether it is reproducing an already-measured effect under real
+    execution, or exercising the plumbing. Both are legitimate; conflating them
+    is what turned a curiosity run into an apparent verdict on a hypothesis.
+    """
+    command.add_argument(
+        "--evidence-basis",
+        choices=EVIDENCE_BASES,
+        required=True,
+        help=(
+            "alpha_map_cleared: an alpha-map cell measured this effect and this run "
+            "tests whether it survives execution reality. "
+            "operational_curiosity: this run tests scheduling, fills and broker "
+            "semantics, and its P/L says nothing about the hypothesis."
+        ),
+    )
+    command.add_argument("--alpha-map-run-id", type=int)
+    command.add_argument(
+        "--alpha-map-cell-key",
+        help="Required with --evidence-basis alpha_map_cleared.",
+    )
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         description=(
@@ -314,6 +358,7 @@ def parser() -> argparse.ArgumentParser:
     create_command.add_argument("--quantity", type=int, default=1)
     create_command.add_argument("--feed", choices=("iex", "sip"), default="iex")
     create_command.add_argument("--long-only", action="store_true")
+    _add_evidence_arguments(create_command)
 
     create_gap_command = commands.add_parser("create-gap")
     create_gap_command.add_argument("--name", required=True)
@@ -325,6 +370,21 @@ def parser() -> argparse.ArgumentParser:
     create_gap_command.add_argument("--quantity", type=int, default=1)
     create_gap_command.add_argument("--feed", choices=("iex", "sip"), default="sip")
     create_gap_command.add_argument("--long-only", action="store_true")
+    _add_evidence_arguments(create_gap_command)
+
+    freeze_command = commands.add_parser(
+        "freeze",
+        help=(
+            "Preserve an experiment as a finding. It becomes unrunnable, so its "
+            "hypothesis cannot be quietly re-fitted under the same name."
+        ),
+    )
+    freeze_command.add_argument("--experiment-id", type=int, required=True)
+    freeze_command.add_argument(
+        "--finding",
+        required=True,
+        help="What the result says about the hypothesis, not what the P/L was.",
+    )
 
     cycle_command = commands.add_parser("run-cycle")
     cycle_command.add_argument("--experiment-id", type=int, required=True)
@@ -378,6 +438,7 @@ def parser() -> argparse.ArgumentParser:
 COMMANDS = {
     "create": create,
     "create-gap": create_gap,
+    "freeze": freeze,
     "run-cycle": cycle,
     "run-gap-cycle": gap_cycle,
     "run-loop": loop,
