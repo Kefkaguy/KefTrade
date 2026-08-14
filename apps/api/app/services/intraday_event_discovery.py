@@ -39,6 +39,11 @@ from app.services.intraday_news import (
     empty_news_features,
     load_news_feature_index,
 )
+from app.services.intraday_options import (
+    OPTION_FEATURE_NAMES,
+    empty_option_features,
+    load_option_feature_index,
+)
 from app.services.intraday_research_integrity import (
     clustered_outcome_statistics,
     estimated_round_trip_cost_bps,
@@ -157,6 +162,17 @@ FEATURE_CATALOG: dict[str, tuple[FeatureSpec, ...]] = {
         FeatureSpec("product_event", "regime", 1, "Known recent article mentions product/news launch."),
         FeatureSpec("management_event", "regime", 1, "Known recent article mentions management change."),
         FeatureSpec("legal_event", "regime", 1, "Known recent article mentions legal activity."),
+        FeatureSpec("option_contracts", "regime", 1, "Available option-contract surface breadth known before decision."),
+        FeatureSpec("option_atm_iv", "alpha", 1, "Near-the-money implied volatility from the latest known option surface."),
+        FeatureSpec("option_put_call_iv_skew", "alpha", 1, "Near-the-money put IV minus call IV."),
+        FeatureSpec("option_iv_term_slope", "regime", 1, "Far-expiry IV minus near-expiry IV."),
+        FeatureSpec("option_call_volume", "alpha", 1, "Latest call option trade-size proxy in the known surface."),
+        FeatureSpec("option_put_volume", "alpha", 1, "Latest put option trade-size proxy in the known surface."),
+        FeatureSpec("option_put_call_volume_ratio", "alpha", 1, "Put option activity divided by call activity."),
+        FeatureSpec("option_gamma_proxy", "alpha", 1, "Surface gamma exposure proxy using displayed size and latest trade size."),
+        FeatureSpec("option_delta_abs_proxy", "regime", 1, "Absolute delta exposure proxy using displayed size and latest trade size."),
+        FeatureSpec("option_near_atm_spread_bps", "execution", -1, "Near-ATM option spread state as a liquidity/attention proxy."),
+        FeatureSpec("option_minutes_since_snapshot", "regime", -1, "Age of the option surface snapshot available at decision time."),
     ),
 }
 
@@ -1004,6 +1020,7 @@ def _detect_alpha_ceiling_panel(
     cost_model: dict[str, Any],
     horizons: Sequence[int],
     news_index: Any | None = None,
+    option_index: Any | None = None,
     decision_start: datetime | None = None,
     decision_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -1077,6 +1094,11 @@ def _detect_alpha_ceiling_panel(
                     if news_index is not None
                     else empty_news_features()
                 )
+                features.update(
+                    option_index.features_at(symbol, knowable_at, underlying_price=close)
+                    if option_index is not None
+                    else empty_option_features()
+                )
                 events.append(
                     _event(
                         event_key=f"{timeframe}_alpha_ceiling_panel",
@@ -1113,6 +1135,8 @@ def detect_events(
     source: str,
     feed: str,
     include_news_features: bool = False,
+    include_options_features: bool = False,
+    options_feed: str = "opra",
     decision_start: datetime | None = None,
     decision_end: datetime | None = None,
 ) -> list[dict[str, Any]]:
@@ -1138,13 +1162,14 @@ def detect_events(
     sectors = sector_map(conn, selected)
     contexts = _context_maps(candles, sectors)
     news_index = None
+    option_index = None
+    all_timestamps = [
+        row["timestamp"]
+        for rows in candles.values()
+        for row in rows
+        if row.get("timestamp") is not None
+    ]
     if include_news_features and selected:
-        all_timestamps = [
-            row["timestamp"]
-            for rows in candles.values()
-            for row in rows
-            if row.get("timestamp") is not None
-        ]
         if all_timestamps:
             news_index = load_news_feature_index(
                 conn,
@@ -1152,6 +1177,14 @@ def detect_events(
                 start=min(all_timestamps),
                 end=max(all_timestamps) + timedelta(days=1),
             )
+    if include_options_features and selected and all_timestamps:
+        option_index = load_option_feature_index(
+            conn,
+            symbols=selected,
+            start=min(all_timestamps),
+            end=max(all_timestamps) + timedelta(days=1),
+            feed=options_feed,
+        )
     events: list[dict[str, Any]] = []
     if BRANCH_GAP in branches or BRANCH_ONE_MINUTE_VETO in branches:
         base = _detect_gap_absorption(
@@ -1211,6 +1244,7 @@ def detect_events(
                 cost_model=cost_model,
                 horizons=horizons,
                 news_index=news_index,
+                option_index=option_index,
                 decision_start=decision_start,
                 decision_end=decision_end,
             )
@@ -2340,6 +2374,8 @@ def declare_event_study(
     feed: str,
     purpose: str,
     include_news_features: bool = False,
+    include_options_features: bool = False,
+    options_feed: str = "opra",
 ) -> dict[str, Any]:
     branches = _validate_branches(timeframe, branches)
     splits = get_dataset_splits(conn, dataset_id)
@@ -2407,6 +2443,18 @@ def declare_event_study(
             "research_question": "price_flow_baseline_vs_price_flow_plus_point_in_time_news",
             "features": list(NEWS_FEATURE_NAMES) if include_news_features else [],
         },
+        "options_side_channel": {
+            "enabled": bool(include_options_features),
+            "provider": "alpaca_options",
+            "feed": options_feed,
+            "known_at_policy": "use option-chain observed_at as the earliest usable surface timestamp",
+            "research_question": "price_flow_news_baseline_vs_price_flow_news_plus_point_in_time_options",
+            "limitation": (
+                "Option-chain snapshots are point-in-time from collection time; "
+                "they are not historical option-surface reconstruction for old decisions."
+            ),
+            "features": list(OPTION_FEATURE_NAMES) if include_options_features else [],
+        },
         "mid_tier_policy": (
             "validation net positive, >=100 signals, >=40 sessions, >=8 symbols, "
             "day-clustered t>=1, direction accuracy>=50%; elite gates unchanged"
@@ -2436,6 +2484,8 @@ def declare_event_study(
         "cost_model": cost_model,
         "specification": specification,
         "include_news_features": bool(include_news_features),
+        "include_options_features": bool(include_options_features),
+        "options_feed": options_feed,
         "protocol_version": EVENT_DISCOVERY_VERSION,
     }
     spec_hash = sha256(dumps(hash_payload, sort_keys=True, default=str).encode()).hexdigest()
@@ -2450,6 +2500,8 @@ def declare_event_study(
             "specification_hash": spec_hash,
             "next_allowed_phase": "development_discovery",
             "news_features": bool(include_news_features),
+            "options_features": bool(include_options_features),
+            "options_feed": options_feed if include_options_features else None,
         }
     row = conn.execute(
         """
@@ -2488,6 +2540,8 @@ def declare_event_study(
         "next_allowed_phase": "development_discovery",
         "created_at": row["created_at"],
         "news_features": bool(include_news_features),
+        "options_features": bool(include_options_features),
+        "options_feed": options_feed if include_options_features else None,
     }
 
 
@@ -2550,6 +2604,8 @@ def run_event_discovery(
         source=str(specification["source"]),
         feed=str(specification["feed"]),
         include_news_features=bool((specification.get("news_side_channel") or {}).get("enabled")),
+        include_options_features=bool((specification.get("options_side_channel") or {}).get("enabled")),
+        options_feed=str((specification.get("options_side_channel") or {}).get("feed") or "opra"),
         decision_end=splits.confirmation_start,
     )
     development = []
@@ -2572,6 +2628,10 @@ def run_event_discovery(
         "timeframe": declaration["timeframe"],
         "branches": declaration["branches"],
         "news_features": bool((specification.get("news_side_channel") or {}).get("enabled")),
+        "options_features": bool((specification.get("options_side_channel") or {}).get("enabled")),
+        "options_feed": str((specification.get("options_side_channel") or {}).get("feed") or "opra")
+        if bool((specification.get("options_side_channel") or {}).get("enabled"))
+        else None,
         "splits_accessed": ["discovery", "validation"],
         "confirmation_accessed": False,
         "events": len(development),
@@ -2728,6 +2788,8 @@ def run_event_confirmation(
         source=str(specification["source"]),
         feed=str(specification["feed"]),
         include_news_features=bool((specification.get("news_side_channel") or {}).get("enabled")),
+        include_options_features=bool((specification.get("options_side_channel") or {}).get("enabled")),
+        options_feed=str((specification.get("options_side_channel") or {}).get("feed") or "opra"),
         decision_start=splits.confirmation_start,
         decision_end=splits.confirmation_end + timedelta(days=1),
     )
@@ -2778,6 +2840,11 @@ def run_event_confirmation(
         "dataset_id": int(run["dataset_id"]),
         "phase": "confirmation",
         "one_shot": True,
+        "news_features": bool((specification.get("news_side_channel") or {}).get("enabled")),
+        "options_features": bool((specification.get("options_side_channel") or {}).get("enabled")),
+        "options_feed": str((specification.get("options_side_channel") or {}).get("feed") or "opra")
+        if bool((specification.get("options_side_channel") or {}).get("enabled"))
+        else None,
         "event_studies": results,
         "passed_locked_confirmation": all_passed,
         "strategy_created": False,

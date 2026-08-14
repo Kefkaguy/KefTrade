@@ -40,6 +40,8 @@ def declare(args: argparse.Namespace) -> dict[str, Any]:
             feed=args.feed,
             purpose=args.purpose,
             include_news_features=args.include_news_features,
+            include_options_features=args.include_options_features,
+            options_feed=args.options_feed,
         )
 
 
@@ -92,6 +94,12 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Add point-in-time Alpaca news features to the alpha-ceiling information set.",
     )
+    declare_command.add_argument(
+        "--include-options-features",
+        action="store_true",
+        help="Add point-in-time Alpaca option-chain surface features to the alpha-ceiling information set.",
+    )
+    declare_command.add_argument("--options-feed", choices=("opra", "indicative"), default="opra")
     declare_command.add_argument("--purpose", required=True)
     declare_command.set_defaults(handler=declare)
 
