@@ -622,19 +622,43 @@ def load_option_feature_index(
     selected = list(dict.fromkeys(symbol.upper() for symbol in symbols))
     rows = conn.execute(
         """
+        WITH requested(symbol) AS (
+            SELECT unnest(%s::text[])
+        ),
+        latest AS (
+            SELECT
+                requested.symbol AS underlying_symbol,
+                MAX(snapshot.observed_at) AS observed_at
+            FROM requested
+            LEFT JOIN intraday_option_chain_snapshots AS snapshot
+              ON snapshot.underlying_symbol = requested.symbol
+             AND snapshot.provider = %s
+             AND snapshot.feed = %s
+             AND snapshot.observed_at >= %s
+             AND snapshot.observed_at <= %s
+            GROUP BY requested.symbol
+        )
         SELECT underlying_symbol, option_symbol, observed_at, expiration_date,
                option_type, strike_price, bid_price, ask_price, bid_size, ask_size,
                trade_price, trade_size, implied_volatility, delta, gamma, theta,
                vega, rho, open_interest
-        FROM intraday_option_chain_snapshots
-        WHERE provider = %s
-          AND feed = %s
-          AND underlying_symbol = ANY(%s::text[])
-          AND observed_at >= %s
-          AND observed_at <= %s
-        ORDER BY underlying_symbol, observed_at, option_symbol
+        FROM intraday_option_chain_snapshots AS snapshot
+        JOIN latest
+          ON latest.underlying_symbol = snapshot.underlying_symbol
+         AND latest.observed_at = snapshot.observed_at
+        WHERE snapshot.provider = %s
+          AND snapshot.feed = %s
+        ORDER BY snapshot.underlying_symbol, snapshot.observed_at, snapshot.option_symbol
         """,
-        (provider, feed, selected, _utc(start) - timedelta(days=7), _utc(end)),
+        (
+            selected,
+            provider,
+            feed,
+            _utc(start) - timedelta(days=7),
+            _utc(end),
+            provider,
+            feed,
+        ),
     ).fetchall()
     by_symbol: dict[str, dict[datetime, list[dict[str, Any]]]] = {symbol: {} for symbol in selected}
     for row in rows:
