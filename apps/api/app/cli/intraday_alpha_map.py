@@ -59,6 +59,7 @@ def declare(args: argparse.Namespace) -> dict[str, Any]:
             slices=args.slices or ("all",),
             cost_calibration_id=args.cost_calibration_id,
             cost_safety_multiple=args.cost_safety_multiple,
+            phases=args.phases or ("discovery", "validation", "confirmation"),
         )
 
 
@@ -165,6 +166,16 @@ def parser() -> argparse.ArgumentParser:
         help=(
             "Required gross edge is round-trip cost times this. Break-even is not a "
             "hurdle: the cost model has more estimation error than that."
+        ),
+    )
+    declare_command.add_argument(
+        "--phases",
+        type=_csv,
+        help=(
+            "Phases this declaration may be measured against; defaults to all three. "
+            "Each is preflighted for frozen signal evidence and frozen outcome-grid "
+            "coverage inside its own window, so a grid that only covers discovery "
+            "fails here instead of producing an empty confirmation run."
         ),
     )
     # No --feed or --source: the dataset pinned both when it was frozen, and a

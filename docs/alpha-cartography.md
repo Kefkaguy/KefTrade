@@ -81,6 +81,41 @@ returns are measured on a **1m grid** against a horizon ladder expressed in
 - A horizon running past the session close is **dropped**, not shortened.
 - A gap in the grid is **detected**, not silently measured as a longer forecast.
 
+### The session close is a hard boundary
+
+A frozen 1m grid built from a SIP feed contains after-hours bars, and nothing
+about them looks wrong: same symbol, same exchange date, perfectly contiguous
+with the 15:59 bar. Neither the group-by-session-date nor the gap check excludes
+them, so a 15:30 ET decision could "hold" through 16:30 on prices this
+strategy's universe was never going to trade at. In the test fixture that bug
+turns a 60-minute rung into **38,263 bps**.
+
+Every rung is therefore required to close at or before the session close:
+
+| Situation | Result |
+|---|---|
+| Exit bar closes at or before the close | measured |
+| Exit bar closes after it | `session_end_before_horizon` |
+| Decision is at or after the close (the last signal bar of every session) | `decision_at_or_after_session_close` — no horizon is measurable |
+| Signal bar has no `minutes_to_close` | `session_close_unknown` — refused, not guessed |
+
+The boundary is **not** a 09:30–16:00 clock. It comes from `minutes_to_close` on
+the frozen signal feature, which the feature engine computes as
+`market_close - bar_timestamp` against the XNYS calendar via
+`pandas_market_calendars` ([session.py:109](../apps/api/app/services/labs/intraday/session.py:109)).
+That is the only source that is right on early-close days: on 2025-07-03 the
+exchange closes at 13:00 ET and there are three further hours of contiguous
+bars a hardcoded 16:00 would happily consume.
+
+A useful consequence: **the last signal bar of every session yields no forward
+return at all.** It decides exactly at the close, so there is no time left to
+hold anything. That is correct, and it is worth knowing before reading a
+coverage report — `attach_forward_returns` now returns
+`unavailable_by_reason` alongside the per-horizon counts, because a run whose
+rungs are mostly `session_end_before_horizon` is telling you the horizon is too
+long for where in the session the signal fires. That is a finding about the
+hypothesis, not a data problem.
+
 Sub-minute rungs (10s, 30s) are accepted by the declaration and reported as
 `below_measurement_grid` with the exact requirement, rather than omitted. They
 resolve automatically if a sub-minute bar grid is ever ingested. Rounding 10s up
@@ -207,11 +242,19 @@ Two consequences worth knowing:
 
 - **`--feed` and `--source` are gone from `declare`.** The snapshot pinned both
   when it was frozen, so a flag could only disagree with the data it reads.
-- **Coverage is checked at declaration, not at measurement.** A declaration is
-  single-use; discovering a missing outcome grid mid-run would spend it. The
-  declaration records the frozen row counts and time bounds it measured against,
-  so a later reader who gets different numbers from the same `dataset_id` has
-  found a dataset that was not actually immutable.
+- **Coverage is checked at declaration, not at measurement, and per phase.** A
+  declaration is single-use; discovering a missing outcome grid mid-run would
+  spend it. Each phase named in `--phases` (default: all three) must have frozen
+  signal evidence **and** frozen outcome-grid coverage *inside its own window*.
+  A dataset-wide "does the grid exist anywhere" check is the wrong question: a
+  grid frozen over only the discovery window passes it and then produces a
+  confirmation run in which every horizon is unavailable, which reads as a null
+  result rather than as missing data. `run_alpha_map` additionally refuses a
+  phase the declaration was never preflighted for.
+
+  The declaration records the frozen row counts and time bounds per phase, so a
+  later reader who gets different numbers from the same `dataset_id` has found a
+  dataset that was not actually immutable.
 
 ## Freezing a dataset for it
 

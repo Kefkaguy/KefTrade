@@ -17,6 +17,7 @@ first two would pass on a function that returns a constant.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,12 +25,16 @@ from app.services.intraday_alpha_map import (
     attach_forward_returns,
     dataset_coverage,
     load_alpha_map_panel,
+    phase_windows,
 )
 
 DATASET_ID = 91
 SIGNAL_BAR = datetime(2025, 6, 3, 14, 30, tzinfo=UTC)  # 10:30 ET, a 30m bar open
 DECISION = datetime(2025, 6, 3, 15, 0, tzinfo=UTC)  # its close, when features are knowable
 WINDOW = (datetime(2025, 6, 3, tzinfo=UTC), datetime(2025, 6, 4, tzinfo=UTC))
+# June is EDT, so 16:00 ET is 20:00 UTC: 330 minutes from the 14:30 bar open.
+MINUTES_TO_CLOSE = 330
+SESSION_CLOSE = datetime(2025, 6, 3, 20, 0, tzinfo=UTC)
 
 LIVE_TABLES = (
     "FROM candles",
@@ -49,7 +54,11 @@ def _grid_bar(index: int, *, open_price: float) -> dict:
         "high": open_price + 0.05,
         "low": open_price - 0.05,
         "close": open_price + 0.02,
+        # The 1m outcome grid carries no session features: `intraday_features`
+        # is CHECK-constrained to 15m/30m, so the LEFT JOIN yields NULLs here.
+        # The session boundary comes from the signal bar, not from these.
         "minutes_from_open": None,
+        "minutes_to_close": None,
         "session_relative_volume": None,
         "distance_from_session_vwap": None,
     }
@@ -84,6 +93,7 @@ def _frozen_store(*, grid_slope: float = 0.10, imbalance: float = -0.31) -> dict
                 "low": 99.4,
                 "close": 99.6,
                 "minutes_from_open": 60,
+                "minutes_to_close": MINUTES_TO_CLOSE,
                 "session_relative_volume": 1.35,
                 "distance_from_session_vwap": -0.0021,
             },
@@ -291,6 +301,63 @@ def test_a_dataset_without_frozen_trade_flow_is_refused_by_name():
         _panel(FrozenOnlyConn(store))
 
 
+def test_dataset_coverage_is_bounded_to_the_phase_window():
+    """A dataset-wide count answers the wrong question at declaration time.
+
+    An outcome grid frozen over only the discovery window satisfies "does the
+    grid exist" and then produces a confirmation run in which every horizon is
+    unavailable -- which reads as a null result rather than as missing data.
+    """
+    store = _frozen_store()
+    conn = _CoverageConn(store)
+
+    inside = dataset_coverage(
+        conn,
+        dataset_id=DATASET_ID,
+        symbols=["AAA"],
+        signal_timeframe="30m",
+        grid_timeframe="1m",
+        start=WINDOW[0],
+        end=WINDOW[1],
+    )
+    later = dataset_coverage(
+        conn,
+        dataset_id=DATASET_ID,
+        symbols=["AAA"],
+        signal_timeframe="30m",
+        grid_timeframe="1m",
+        start=datetime(2025, 9, 1, tzinfo=UTC),
+        end=datetime(2025, 9, 2, tzinfo=UTC),
+    )
+
+    assert inside["trade_flow_rows"] == 1
+    assert inside["grid_candles"] == 40
+    # The same dataset, a window it does not cover: exactly the case the
+    # per-phase preflight has to refuse.
+    assert later["trade_flow_rows"] == 0
+    assert later["grid_candles"] == 0
+
+
+def test_phase_windows_are_half_open_and_contiguous():
+    splits = SimpleNamespace(
+        discovery_start=datetime(2025, 1, 1, tzinfo=UTC),
+        discovery_end=datetime(2025, 6, 1, tzinfo=UTC),
+        validation_start=datetime(2025, 6, 1, tzinfo=UTC),
+        validation_end=datetime(2025, 9, 1, tzinfo=UTC),
+        confirmation_start=datetime(2025, 9, 1, tzinfo=UTC),
+        confirmation_end=datetime(2025, 12, 1, tzinfo=UTC),
+    )
+
+    windows = phase_windows(splits)
+
+    assert windows["discovery"] == (splits.discovery_start, splits.validation_start)
+    assert windows["validation"] == (splits.validation_start, splits.confirmation_start)
+    assert windows["confirmation"] == (splits.confirmation_start, splits.confirmation_end)
+    # Contiguous with no overlap, so no observation is counted in two phases.
+    assert windows["discovery"][1] == windows["validation"][0]
+    assert windows["validation"][1] == windows["confirmation"][0]
+
+
 def test_dataset_coverage_counts_only_frozen_rows():
     """What `declare` checks before it spends a single-use declaration.
 
@@ -325,7 +392,10 @@ class _CoverageConn(FrozenOnlyConn):
         for table in LIVE_TABLES:
             if table in collapsed:
                 raise AssertionError(f"coverage read a live table ({table})")
-        dataset_id, symbols, timeframe = (params or ())[:3]
+        # (dataset_id, symbols, timeframe, start, start, end, end) -- the
+        # nullable bounds are passed twice because each is used for both the
+        # IS NULL cast and the comparison.
+        dataset_id, symbols, timeframe, start, _, end, _ = params or ()
         source = (
             self.store["trade_flow"]
             if "research_dataset_trade_flow_features" in collapsed
@@ -337,6 +407,8 @@ class _CoverageConn(FrozenOnlyConn):
             if dataset_id == DATASET_ID
             and row["symbol"] in symbols
             and row["timeframe"] == timeframe
+            and (start is None or row["timestamp"] >= start)
+            and (end is None or row["timestamp"] < end)
         ]
         return _Result(
             [

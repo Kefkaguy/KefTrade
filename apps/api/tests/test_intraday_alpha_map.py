@@ -87,12 +87,17 @@ def _grid(bars: int = 40, *, start_minute: int = 0) -> list[dict]:
     ]
 
 
+# 2026-03-04 is before US DST begins, so 16:00 ET is 21:00 UTC.
+GRID_SESSION_CLOSE = datetime(2026, 3, 4, 21, 0, tzinfo=UTC)
+
+
 def test_forward_returns_enter_at_the_next_bar_open_not_the_signal_close():
     ladder = forward_return_ladder(
         _grid(),
         decision_timestamp=datetime(2026, 3, 4, 15, 5, tzinfo=UTC),
         horizons_seconds=(60, 300),
         grid_seconds=60,
+        session_close_timestamp=GRID_SESSION_CLOSE,
     )
     # The bar opening exactly at the decision instant is the first tradable
     # price; the signal bar's own close is not a price anyone could have hit.
@@ -107,6 +112,7 @@ def test_a_horizon_running_past_the_session_is_dropped_not_shortened():
         decision_timestamp=datetime(2026, 3, 4, 15, 5, tzinfo=UTC),
         horizons_seconds=(3_600,),
         grid_seconds=60,
+        session_close_timestamp=GRID_SESSION_CLOSE,
     )
     assert ladder[3_600] == {"available": False, "reason": "session_end_before_horizon"}
 
@@ -119,6 +125,7 @@ def test_a_gap_in_the_grid_is_detected_rather_than_measured_as_a_longer_forecast
         decision_timestamp=datetime(2026, 3, 4, 15, 5, tzinfo=UTC),
         horizons_seconds=(600,),
         grid_seconds=60,
+        session_close_timestamp=GRID_SESSION_CLOSE,
     )
     assert ladder[600] == {"available": False, "reason": "gap_in_measurement_grid"}
 
@@ -628,6 +635,11 @@ def test_run_alpha_map_persists_the_same_cells_as_the_python_measurement_on_post
             slices=("all",),
             cost_calibration_id=int(cost_id),
             cost_safety_multiple=2.0,
+            # The fixture's 60 sessions all land inside the discovery window,
+            # so discovery is the only phase with frozen coverage. Declaring
+            # all three would be refused by the per-phase preflight -- which is
+            # the preflight doing its job, not a fixture bug.
+            phases=("discovery",),
         )
         declaration_id = int(declaration["id"])
 
@@ -928,7 +940,9 @@ def _seed_alpha_map_postgres_fixture(conn, *, token: str, symbols: list[str]) ->
                     opening_range_low, opening_range_position, gap_percent,
                     session_relative_volume
                 )
-                VALUES (%s,%s,'30m',%s,%s,30,330,%s,%s,%s,%s,0.5,0.0,1.0)
+                -- 30 minutes from the open and 360 to the close: a 390-minute
+                -- regular session, matching what the feature engine writes.
+                VALUES (%s,%s,'30m',%s,%s,30,360,%s,%s,%s,%s,0.5,0.0,1.0)
                 ON CONFLICT (dataset_id, symbol, timeframe, timestamp) DO NOTHING
                 """,
                 (

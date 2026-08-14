@@ -269,6 +269,7 @@ def forward_return_ladder(
     decision_timestamp: datetime,
     horizons_seconds: Sequence[int],
     grid_seconds: int,
+    session_close_timestamp: datetime | None,
 ) -> dict[int, dict[str, Any]]:
     """Executable forward returns from one decision instant.
 
@@ -278,11 +279,40 @@ def forward_return_ladder(
     could have traded at.  Exit is the close of the last grid bar that ends at
     or before ``decision + horizon``.
 
-    ``grid_rows`` must be one symbol's bars for one session, in chronological
-    order.  Bounding to a session is not a convenience -- carrying the ladder
-    across an overnight gap would score an overnight move as a five-minute
-    forecast.
+    ``grid_rows`` must be one symbol's bars for one exchange session date, in
+    chronological order.  Grouping by session is not a convenience -- carrying
+    the ladder across an overnight gap would score an overnight move as a
+    five-minute forecast.
+
+    ``session_close_timestamp`` is the hard boundary, and grouping by date is
+    not a substitute for it.  A frozen 1m grid built from a SIP feed contains
+    after-hours bars, and they sit on the same exchange date and are perfectly
+    contiguous with the regular session, so neither the date grouping nor the
+    gap check excludes them: a 15:30 decision would happily "hold" to 16:30
+    through bars nobody in this strategy's universe was going to trade.  Every
+    rung is therefore required to close at or before the session close.
+
+    The boundary must be passed in rather than derived from a clock here.  It
+    comes from ``minutes_to_close`` on the frozen signal feature, which the
+    feature engine computes as ``market_close - bar_timestamp`` against the
+    XNYS calendar -- so it is already correct on early-close days, which a
+    hardcoded 16:00 would not be.
     """
+    if session_close_timestamp is None:
+        # Refusing rather than assuming a close: guessing 16:00 would be wrong
+        # on exactly the sessions where being wrong is hardest to notice.
+        return {
+            int(horizon): {"available": False, "reason": "session_close_unknown"}
+            for horizon in horizons_seconds
+        }
+    if decision_timestamp >= session_close_timestamp:
+        # The last signal bar of a session decides exactly at the close, so
+        # there is no time left to hold anything. This is a property of the
+        # observation, not of any particular horizon.
+        return {
+            int(horizon): {"available": False, "reason": "decision_at_or_after_session_close"}
+            for horizon in horizons_seconds
+        }
     timestamps = [row["timestamp"] for row in grid_rows]
     entry_index = bisect_left(timestamps, decision_timestamp)
     result: dict[int, dict[str, Any]] = {}
@@ -313,6 +343,13 @@ def forward_return_ladder(
         elapsed = (path[-1]["timestamp"] - path[0]["timestamp"]).total_seconds()
         if elapsed != (bars - 1) * grid_seconds:
             result[horizon] = {"available": False, "reason": "gap_in_measurement_grid"}
+            continue
+        # Measured from the exit bar's own close rather than from
+        # `decision + horizon`, so a grid whose first bar starts after the
+        # decision instant is still bounded by where the position actually
+        # ends up rather than by where it was supposed to.
+        if path[-1]["timestamp"] + timedelta(seconds=grid_seconds) > session_close_timestamp:
+            result[horizon] = {"available": False, "reason": "session_end_before_horizon"}
             continue
         exit_price = _finite(path[-1].get("close"))
         highs = [_finite(row.get("high")) for row in path]
@@ -1437,6 +1474,9 @@ def load_alpha_map_panel(
             continue
         decision = bar_close_timestamp(timestamp, timeframe=signal_timeframe)
         features = _panel_features(dict(row), candle=dict(candle))
+        session_close = session_close_timestamp(dict(candle))
+        if session_close is None:
+            skipped["signal_bar_without_minutes_to_close"] += 1
         observations.append(
             {
                 "symbol": symbol,
@@ -1445,12 +1485,14 @@ def load_alpha_map_panel(
                 "session_date": session,
                 "slot": bar_slot(timestamp),
                 "minutes_from_open": _finite(candle.get("minutes_from_open")),
+                "session_close": session_close,
                 "features": features,
                 "cost_bps": estimated_round_trip_cost_bps(
                     cost_model, symbol=symbol, timestamp=decision, stressed=True
                 ),
                 "_grid_rows": grid_rows,
                 "_decision": decision,
+                "_session_close": session_close,
             }
         )
     return {
@@ -1461,26 +1503,62 @@ def load_alpha_map_panel(
     }
 
 
+def session_close_timestamp(signal_row: dict[str, Any]) -> datetime | None:
+    """When the exchange session containing this signal bar actually ended.
+
+    ``minutes_to_close`` is written by the feature engine as
+    ``market_close - bar_timestamp`` in minutes, against the XNYS calendar via
+    ``pandas_market_calendars`` -- see
+    ``app/services/labs/intraday/session.py``.  It is measured from the bar's
+    *open*, which is what ``timestamp`` holds throughout this schema, so the
+    close is recovered by adding it back to that same timestamp.
+
+    Deriving the boundary this way rather than from a 16:00 clock is the whole
+    point: on an early-close session the calendar returns 13:00 and this
+    follows automatically, whereas a hardcoded close would silently admit three
+    hours of after-hours bars on exactly the days that are easiest to overlook.
+    """
+    minutes = _finite(signal_row.get("minutes_to_close"))
+    timestamp = signal_row.get("timestamp")
+    if minutes is None or not isinstance(timestamp, datetime):
+        return None
+    return timestamp + timedelta(minutes=minutes)
+
+
 def attach_forward_returns(
     observations: Sequence[dict[str, Any]],
     *,
     horizons_seconds: Sequence[int],
     grid_seconds: int,
 ) -> dict[str, Any]:
-    """Populate each observation's forward ladder and drop the scratch keys."""
+    """Populate each observation's forward ladder and drop the scratch keys.
+
+    ``unavailable_by_reason`` is returned alongside the coverage counts because
+    the reasons are diagnostic rather than incidental: a run whose rungs are
+    mostly ``session_end_before_horizon`` is telling you the horizon is too long
+    for where in the session the signal fires, which is a finding about the
+    hypothesis and not a data problem.
+    """
     coverage: dict[str, int] = defaultdict(int)
+    reasons: dict[str, int] = defaultdict(int)
     for observation in observations:
         ladder = forward_return_ladder(
             observation.pop("_grid_rows"),
             decision_timestamp=observation.pop("_decision"),
             horizons_seconds=horizons_seconds,
             grid_seconds=grid_seconds,
+            session_close_timestamp=observation.pop("_session_close"),
         )
         observation["forward"] = ladder
         for horizon, outcome in ladder.items():
             if outcome.get("available"):
                 coverage[f"{horizon}s"] += 1
-    return {"available_by_horizon": dict(coverage)}
+            else:
+                reasons[str(outcome.get("reason") or "unknown")] += 1
+    return {
+        "available_by_horizon": dict(coverage),
+        "unavailable_by_reason": dict(reasons),
+    }
 
 
 def _dataset_candles_by_symbol(
@@ -1503,12 +1581,19 @@ def _dataset_candles_by_symbol(
     includes ``source``, so a dataset frozen without a pinned source can hold
     two rows for one bar, and silently taking both would double-count that bar
     in every measurement.
+
+    ``minutes_to_close`` comes back with the signal rows because it is the only
+    record of where the exchange session actually ended. The candle table has
+    no such notion -- an after-hours bar looks exactly like a regular one -- so
+    without this column there is nothing to stop a forward return running past
+    the close.
     """
     rows = conn.execute(
         """
         SELECT DISTINCT ON (c.symbol, c.timestamp)
                c.symbol, c.timestamp, c.source, c.open, c.high, c.low, c.close, c.volume,
-               f.minutes_from_open, f.session_relative_volume, f.distance_from_session_vwap
+               f.minutes_from_open, f.minutes_to_close,
+               f.session_relative_volume, f.distance_from_session_vwap
         FROM research_dataset_candles c
         LEFT JOIN research_dataset_intraday_features f
           ON f.dataset_id = c.dataset_id AND f.symbol = c.symbol
@@ -1566,12 +1651,20 @@ def declare_alpha_map(
     slices: Sequence[str] = ("all",),
     cost_calibration_id: int | None = None,
     cost_safety_multiple: float = DEFAULT_COST_SAFETY_MULTIPLE,
+    phases: Sequence[str] = ("discovery", "validation", "confirmation"),
 ) -> dict[str, Any]:
     """Freeze the grid before any of it is measured.
 
     Declaring first is what makes the trial count honest.  A grid chosen after
     seeing which horizons looked promising is a grid of one test reported as a
     grid of one test, when it was really a search over all of them.
+
+    ``phases`` names the windows this declaration is allowed to be measured
+    against, and every one of them is preflighted for frozen signal *and*
+    outcome-grid coverage before the declaration is written.  Declaring all
+    three by default is the strict reading: a declaration is single-use, so a
+    phase that cannot be measured should stop the declaration rather than be
+    discovered later by the run that spent it.
     """
     if not symbols:
         raise ValueError("an alpha map declaration must name at least one symbol")
@@ -1594,6 +1687,14 @@ def declare_alpha_map(
             "without them cannot say which of its looks were free"
         )
     normalized_symbols = sorted({str(symbol).upper() for symbol in symbols})
+    requested_phases = sorted(set(phases))
+    unknown_phases = sorted(set(requested_phases) - {"discovery", "validation", "confirmation"})
+    if unknown_phases:
+        raise ValueError(f"unsupported phases: {unknown_phases}")
+    if not requested_phases:
+        raise ValueError("a declaration must name at least one measurable phase")
+
+    windows = phase_windows(splits)
     coverage = dataset_coverage(
         conn,
         dataset_id=dataset_id,
@@ -1601,20 +1702,43 @@ def declare_alpha_map(
         signal_timeframe=signal_timeframe,
         grid_timeframe=grid_timeframe,
     )
+    by_phase = {
+        phase: dataset_coverage(
+            conn,
+            dataset_id=dataset_id,
+            symbols=normalized_symbols,
+            signal_timeframe=signal_timeframe,
+            grid_timeframe=grid_timeframe,
+            start=windows[phase][0],
+            end=windows[phase][1],
+        )
+        for phase in requested_phases
+    }
     # Refusing at declaration rather than at measurement. A declaration is
     # single-use: if the missing outcome grid only surfaced during the run, the
     # declaration would already be spent and the fix would cost a new one.
-    if not coverage["grid_candles"]:
-        raise ValueError(
-            f"dataset {dataset_id} contains no frozen {grid_timeframe} candles, so no "
-            f"horizon shorter than one {signal_timeframe} bar can be measured against it. "
-            f"Re-freeze the dataset with --outcome-timeframes {grid_timeframe}."
-        )
-    if not coverage["trade_flow_rows"]:
-        raise ValueError(
-            f"dataset {dataset_id} contains no frozen {signal_timeframe} trade-flow "
-            "features for these symbols."
-        )
+    #
+    # Checked per phase, not dataset-wide. An outcome grid frozen over only the
+    # discovery window passes a dataset-wide "does it exist anywhere" test and
+    # then yields a confirmation run in which every horizon is unavailable --
+    # which reads as a null result rather than as missing data.
+    for phase in requested_phases:
+        window = windows[phase]
+        phase_coverage = by_phase[phase]
+        if not phase_coverage["trade_flow_rows"]:
+            raise ValueError(
+                f"dataset {dataset_id} has no frozen {signal_timeframe} trade-flow "
+                f"features inside the {phase} window ({window[0]} to {window[1]}) for "
+                "these symbols, so that phase cannot be measured."
+            )
+        if not phase_coverage["grid_candles"]:
+            raise ValueError(
+                f"dataset {dataset_id} has no frozen {grid_timeframe} candles inside the "
+                f"{phase} window ({window[0]} to {window[1]}). The outcome grid exists "
+                "elsewhere in the dataset but not where this phase would measure it; "
+                f"re-freeze with --outcome-timeframes {grid_timeframe} covering the whole "
+                "declared window."
+            )
     cell_keys = declared_cell_keys(
         features=features,
         transforms=transforms,
@@ -1639,6 +1763,8 @@ def declare_alpha_map(
         # accepted from the caller, so the declaration cannot claim a feed the
         # snapshot does not contain.
         "dataset_coverage": coverage,
+        "phases": requested_phases,
+        "phase_coverage": by_phase,
         "declared_cell_count": declared_cells,
     }
     specification_hash = sha256(
@@ -1704,12 +1830,19 @@ def dataset_coverage(
     symbols: Sequence[str],
     signal_timeframe: str,
     grid_timeframe: str,
+    start: datetime | None = None,
+    end: datetime | None = None,
 ) -> dict[str, Any]:
     """What the frozen dataset actually contains for this measurement.
 
     Recorded into the declaration so the run is reproducible against a stated
     row count: if a later reader gets different numbers from the same dataset
     id, the dataset was not immutable and this is where that shows up.
+
+    ``start``/``end`` bound the count to one phase window.  Counting over the
+    whole dataset is the wrong question for a declaration: an outcome grid that
+    covers only the discovery window would satisfy a dataset-wide check and
+    then produce a confirmation run with no measurable horizons at all.
     """
     upper = [str(symbol).upper() for symbol in symbols]
     flow = conn.execute(
@@ -1718,8 +1851,10 @@ def dataset_coverage(
                MIN(timestamp) AS first_bar, MAX(timestamp) AS last_bar
         FROM research_dataset_trade_flow_features
         WHERE dataset_id = %s AND symbol = ANY(%s) AND timeframe = %s
+          AND (%s::timestamptz IS NULL OR timestamp >= %s)
+          AND (%s::timestamptz IS NULL OR timestamp < %s)
         """,
-        (dataset_id, upper, signal_timeframe),
+        (dataset_id, upper, signal_timeframe, start, start, end, end),
     ).fetchone()
     grid = conn.execute(
         """
@@ -1727,14 +1862,18 @@ def dataset_coverage(
                MIN(timestamp) AS first_bar, MAX(timestamp) AS last_bar
         FROM research_dataset_candles
         WHERE dataset_id = %s AND symbol = ANY(%s) AND timeframe = %s
+          AND (%s::timestamptz IS NULL OR timestamp >= %s)
+          AND (%s::timestamptz IS NULL OR timestamp < %s)
         """,
-        (dataset_id, upper, grid_timeframe),
+        (dataset_id, upper, grid_timeframe, start, start, end, end),
     ).fetchone()
     return jsonable(
         {
             "dataset_id": dataset_id,
             "signal_timeframe": signal_timeframe,
             "grid_timeframe": grid_timeframe,
+            "window_start": start,
+            "window_end": end,
             "trade_flow_rows": int((flow or {}).get("rows") or 0),
             "trade_flow_symbols": int((flow or {}).get("symbols") or 0),
             "trade_flow_first_bar": (flow or {}).get("first_bar"),
@@ -1745,6 +1884,15 @@ def dataset_coverage(
             "grid_last_bar": (grid or {}).get("last_bar"),
         }
     )
+
+
+def phase_windows(splits: Any) -> dict[str, tuple[datetime, datetime]]:
+    """The half-open window each split phase covers."""
+    return {
+        "discovery": (splits.discovery_start, splits.validation_start),
+        "validation": (splits.validation_start, splits.confirmation_start),
+        "confirmation": (splits.confirmation_start, splits.confirmation_end),
+    }
 
 
 def declared_cell_keys(
@@ -1839,11 +1987,16 @@ def run_alpha_map(
     splits = get_dataset_splits(conn, dataset_id)
     if splits is None:
         raise ValueError(f"dataset {dataset_id} lost its research splits")
-    window = {
-        "discovery": (splits.discovery_start, splits.validation_start),
-        "validation": (splits.validation_start, splits.confirmation_start),
-        "confirmation": (splits.confirmation_start, splits.confirmation_end),
-    }[phase]
+    declared_phases = [
+        str(item) for item in (specification.get("phases") or ["discovery", "validation", "confirmation"])
+    ]
+    if phase not in declared_phases:
+        raise ValueError(
+            f"Declaration {declaration_id} was preflighted for {declared_phases}, not "
+            f"{phase!r}. Measuring a phase whose frozen coverage was never checked is "
+            "how a run comes back empty and gets read as a null result."
+        )
+    window = phase_windows(splits)[phase]
     record_split_access(
         conn,
         dataset_id=dataset_id,
@@ -1901,6 +2054,7 @@ def run_alpha_map(
         "signal_rows": panel["signal_rows"],
         "skipped": panel["skipped"],
         "forward_coverage": coverage["available_by_horizon"],
+        "forward_unavailable_by_reason": coverage["unavailable_by_reason"],
     }
     results["trial_ledger"] = ledger
     results["phase"] = phase
