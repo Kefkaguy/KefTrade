@@ -700,6 +700,111 @@ def option_coverage(
     }
 
 
+def option_live_status(
+    conn: psycopg.Connection,
+    *,
+    symbols: Sequence[str],
+    provider: str = ALPACA_OPTIONS_PROVIDER,
+    feed: str = "opra",
+    fresh_minutes: int = 10,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    selected = list(dict.fromkeys(symbol.upper() for symbol in symbols))
+    checked_at = _utc(now or datetime.now(tz=UTC))
+    day_start = checked_at.replace(hour=0, minute=0, second=0, microsecond=0)
+    latest = conn.execute(
+        """
+        WITH requested AS (
+            SELECT unnest(%s::text[]) AS symbol
+        ),
+        latest_by_symbol AS (
+            SELECT DISTINCT ON (underlying_symbol)
+                   underlying_symbol,
+                   observed_at
+            FROM intraday_option_chain_snapshots
+            WHERE provider = %s
+              AND feed = %s
+              AND underlying_symbol = ANY(%s::text[])
+            ORDER BY underlying_symbol, observed_at DESC
+        )
+        SELECT
+            COUNT(requested.symbol) AS requested_symbols,
+            COUNT(latest_by_symbol.underlying_symbol) AS symbols_with_snapshots,
+            COUNT(latest_by_symbol.underlying_symbol) FILTER (
+                WHERE latest_by_symbol.observed_at >= %s
+            ) AS fresh_symbols,
+            MIN(latest_by_symbol.observed_at) AS oldest_latest_observed_at,
+            MAX(latest_by_symbol.observed_at) AS newest_observed_at
+        FROM requested
+        LEFT JOIN latest_by_symbol
+          ON latest_by_symbol.underlying_symbol = requested.symbol
+        """,
+        (
+            selected,
+            provider,
+            feed,
+            selected,
+            checked_at - timedelta(minutes=fresh_minutes),
+        ),
+    ).fetchone()
+    today = conn.execute(
+        """
+        SELECT COUNT(DISTINCT observed_at) AS snapshot_times_today,
+               COUNT(*) AS contract_snapshots_today,
+               MIN(observed_at) AS first_observed_at_today,
+               MAX(observed_at) AS last_observed_at_today
+        FROM intraday_option_chain_snapshots
+        WHERE provider = %s
+          AND feed = %s
+          AND underlying_symbol = ANY(%s::text[])
+          AND observed_at >= %s
+          AND observed_at <= %s
+        """,
+        (provider, feed, selected, day_start, checked_at),
+    ).fetchone()
+    checkpoint = conn.execute(
+        """
+        SELECT status, COUNT(*) AS count
+        FROM intraday_option_ingest_checkpoints
+        WHERE provider = %s
+          AND feed = %s
+          AND underlying_symbol = ANY(%s::text[])
+          AND started_at >= %s
+          AND started_at <= %s
+        GROUP BY status
+        ORDER BY status
+        """,
+        (provider, feed, selected, day_start, checked_at),
+    ).fetchall()
+    newest = latest["newest_observed_at"]
+    age_minutes = (
+        (checked_at - _utc(newest)).total_seconds() / 60.0
+        if newest is not None
+        else None
+    )
+    fresh_symbols = int(latest["fresh_symbols"] or 0)
+    requested_symbols = int(latest["requested_symbols"] or len(selected))
+    return {
+        "provider": provider,
+        "feed": feed,
+        "checked_at": checked_at,
+        "freshness_threshold_minutes": fresh_minutes,
+        "live": bool(requested_symbols and fresh_symbols == requested_symbols),
+        "status": "live" if requested_symbols and fresh_symbols == requested_symbols else "stale_or_partial",
+        "requested_symbols": requested_symbols,
+        "symbols_with_snapshots": int(latest["symbols_with_snapshots"] or 0),
+        "fresh_symbols": fresh_symbols,
+        "oldest_latest_observed_at": latest["oldest_latest_observed_at"],
+        "newest_observed_at": newest,
+        "latest_snapshot_age_minutes": round(age_minutes, 2) if age_minutes is not None else None,
+        "snapshot_times_today": int(today["snapshot_times_today"] or 0),
+        "contract_snapshots_today": int(today["contract_snapshots_today"] or 0),
+        "first_observed_at_today": today["first_observed_at_today"],
+        "last_observed_at_today": today["last_observed_at_today"],
+        "checkpoint_status_today": {str(item["status"]): int(item["count"]) for item in checkpoint},
+    }
+
+
 def materialize_option_features_for_dataset(
     conn: psycopg.Connection,
     *,

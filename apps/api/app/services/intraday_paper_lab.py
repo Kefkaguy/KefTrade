@@ -23,6 +23,7 @@ from psycopg.types.json import Jsonb
 from app.providers.alpaca import iter_stock_trade_pages, normalize_stock_trade
 from app.providers.alpaca import normalize_stock_bars
 from app.services.intraday_candle_ingest import RateLimiter, fetch_bars_range
+from app.services.intraday_options import empty_option_features, load_option_feature_index
 from app.services.intraday_trade_flow import TradeFlowAccumulator
 from app.services.intraday_trade_imbalance_calibration import load_calibration
 from app.settings import settings
@@ -404,6 +405,77 @@ def _existing_bar_decision(
     return dict(row) if row else None
 
 
+def _build_options_helper(
+    option_index: Any | None,
+    *,
+    symbol: str,
+    decision_timestamp: datetime,
+    underlying_price: float | None = None,
+) -> dict[str, Any]:
+    features = (
+        option_index.features_at(
+            symbol,
+            decision_timestamp,
+            underlying_price=underlying_price,
+        )
+        if option_index is not None
+        else empty_option_features()
+    )
+    age = float(features.get("option_minutes_since_snapshot") or 100_000.0)
+    contracts = float(features.get("option_contracts") or 0.0)
+    spread = float(features.get("option_near_atm_spread_bps") or 0.0)
+    skew = float(features.get("option_put_call_iv_skew") or 0.0)
+    reasons: list[str] = []
+    if contracts <= 0:
+        status = "missing"
+        reasons.append("no_option_snapshot")
+    elif age > 45:
+        status = "stale"
+        reasons.append("option_snapshot_older_than_45m")
+    elif spread > 750:
+        status = "risky"
+        reasons.append("near_atm_option_spread_above_750bps")
+    elif spread > 300:
+        status = "caution"
+        reasons.append("near_atm_option_spread_above_300bps")
+    else:
+        status = "neutral"
+    if abs(skew) >= 0.08:
+        reasons.append("large_put_call_iv_skew")
+    return {
+        "enabled": True,
+        "mode": "record_only",
+        "status": status,
+        "reasons": reasons,
+        "decision_timestamp": decision_timestamp,
+        "features": {
+            key: round(float(value), 6)
+            for key, value in features.items()
+            if value is not None
+        },
+    }
+
+
+def _options_helper_index(
+    conn: psycopg.Connection,
+    *,
+    symbols: Sequence[str],
+    decision_timestamp: datetime,
+    feed: str = "opra",
+) -> Any | None:
+    try:
+        return load_option_feature_index(
+            conn,
+            symbols=symbols,
+            start=decision_timestamp - timedelta(days=1),
+            end=decision_timestamp + timedelta(minutes=1),
+            feed=feed,
+        )
+    except Exception:
+        conn.rollback()
+        return None
+
+
 async def run_cycle(
     conn: psycopg.Connection,
     *,
@@ -460,6 +532,13 @@ async def run_cycle(
     max_orders = int(config.get("max_orders_per_day") or 200)
     max_open = int(config.get("max_open_positions") or 25)
     allow_shorts = bool(config.get("allow_shorts", True))
+    options_feed = str(config.get("options_feed") or "opra").lower()
+    option_index = _options_helper_index(
+        conn,
+        symbols=list(experiment["symbols"]),
+        decision_timestamp=signal_end,
+        feed=options_feed,
+    )
     decisions: list[dict[str, Any]] = []
 
     for symbol in list(experiment["symbols"]):
@@ -474,6 +553,11 @@ async def run_cycle(
         if existing:
             decisions.append(existing)
             continue
+        options_helper = _build_options_helper(
+            option_index,
+            symbol=symbol,
+            decision_timestamp=signal_end,
+        )
         try:
             flow = await _bar_trade_flow(
                 symbol, bar_start=signal_start, bar_end=signal_end, feed=selected_feed
@@ -488,6 +572,7 @@ async def run_cycle(
                     signal_end=signal_end,
                     action="error",
                     reason=f"{error.__class__.__name__}: {str(error)[:300]}",
+                    request_payload={"options_helper": options_helper},
                 )
             )
             continue
@@ -501,6 +586,7 @@ async def run_cycle(
                     signal_end=signal_end,
                     action="skip",
                     reason="no_trade_flow",
+                    request_payload={"options_helper": options_helper},
                 )
             )
             continue
@@ -519,6 +605,7 @@ async def run_cycle(
                 allow_shorts=allow_shorts,
                 signal_start=signal_start,
                 signal_end=signal_end,
+                options_helper=options_helper,
             )
         except Exception as error:  # noqa: BLE001 - record order/provider errors
             decision = _record_decision(
@@ -530,6 +617,7 @@ async def run_cycle(
                 action="error",
                 reason=f"{error.__class__.__name__}: {str(error)[:300]}",
                 flow=flow,
+                request_payload={"options_helper": options_helper},
             )
         decisions.append(decision)
     conn.execute(
@@ -623,6 +711,7 @@ async def _maybe_enter(
     allow_shorts: bool,
     signal_start: datetime,
     signal_end: datetime,
+    options_helper: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     imbalance = flow.get("signed_trade_imbalance")
     if imbalance is None or abs(float(imbalance)) < threshold:
@@ -635,6 +724,7 @@ async def _maybe_enter(
             action="skip",
             reason="below_threshold",
             flow=flow,
+            request_payload={"options_helper": options_helper or {}},
         )
     if int(flow.get("trade_count") or 0) < 200:
         reason = "trade_count_below_200"
@@ -654,6 +744,7 @@ async def _maybe_enter(
             action="skip",
             reason=reason,
             flow=flow,
+            request_payload={"options_helper": options_helper or {}},
         )
 
     position_side = "long" if float(imbalance) > 0 else "short"
@@ -669,6 +760,7 @@ async def _maybe_enter(
             reason="shorts_disabled",
             side=order_side,
             flow=flow,
+            request_payload={"options_helper": options_helper or {}},
         )
     if _open_position_exists(
         conn, experiment_id=int(experiment["id"]), symbol=symbol, side=position_side
@@ -683,6 +775,7 @@ async def _maybe_enter(
             reason="no_pyramiding_existing_position",
             side=order_side,
             flow=flow,
+            request_payload={"options_helper": options_helper or {}},
         )
     if _open_positions(conn, int(experiment["id"])) >= max_open:
         return _record_decision(
@@ -695,6 +788,7 @@ async def _maybe_enter(
             reason="max_open_positions_reached",
             side=order_side,
             flow=flow,
+            request_payload={"options_helper": options_helper or {}},
         )
     if position_side == "short" and client is not None:
         asset = await client.get_asset(symbol)
@@ -709,6 +803,7 @@ async def _maybe_enter(
                 reason="alpaca_asset_not_shortable",
                 side=order_side,
                 flow=flow,
+                request_payload={"options_helper": options_helper or {}},
             )
 
     client_order_id = f"kef-lab-{experiment['id']}-{symbol}-{int(signal_start.timestamp())}-{uuid4().hex[:8]}"
@@ -719,6 +814,7 @@ async def _maybe_enter(
         "qty": str(quantity),
         "time_in_force": "day",
         "client_order_id": client_order_id,
+        "options_helper": options_helper or {},
     }
     response = (
         await client.submit_market_order(
@@ -785,6 +881,7 @@ async def _submit_gap_entry(
     horizon_bars: int,
     reason: str | None = None,
     details: dict[str, Any] | None = None,
+    options_helper: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     order_side = "buy" if position_side == "long" else "sell"
     if position_side == "short" and not allow_shorts:
@@ -797,6 +894,11 @@ async def _submit_gap_entry(
             action="skip",
             reason="shorts_disabled",
             side=order_side,
+            request_payload={
+                "factor_key": config.get("factor_key"),
+                "details": _json_safe(details or {}),
+                "options_helper": options_helper or {},
+            },
         )
     if _open_position_exists(
         conn, experiment_id=int(experiment["id"]), symbol=symbol, side=position_side
@@ -810,6 +912,11 @@ async def _submit_gap_entry(
             action="skip",
             reason="no_pyramiding_existing_position",
             side=order_side,
+            request_payload={
+                "factor_key": config.get("factor_key"),
+                "details": _json_safe(details or {}),
+                "options_helper": options_helper or {},
+            },
         )
     if _open_positions(conn, int(experiment["id"])) >= max_open:
         return _record_decision(
@@ -821,6 +928,11 @@ async def _submit_gap_entry(
             action="skip",
             reason="max_open_positions_reached",
             side=order_side,
+            request_payload={
+                "factor_key": config.get("factor_key"),
+                "details": _json_safe(details or {}),
+                "options_helper": options_helper or {},
+            },
         )
     if position_side == "short" and client is not None:
         asset = await client.get_asset(symbol)
@@ -834,6 +946,11 @@ async def _submit_gap_entry(
                 action="skip",
                 reason="alpaca_asset_not_shortable",
                 side=order_side,
+                request_payload={
+                    "factor_key": config.get("factor_key"),
+                    "details": _json_safe(details or {}),
+                    "options_helper": options_helper or {},
+                },
             )
 
     client_order_id = f"kef-gap-{experiment['id']}-{symbol}-{int(signal_start.timestamp())}-{uuid4().hex[:8]}"
@@ -846,6 +963,7 @@ async def _submit_gap_entry(
         "client_order_id": client_order_id,
         "factor_key": config.get("factor_key"),
         "details": _json_safe(details or {}),
+        "options_helper": options_helper or {},
     }
     response = (
         await client.submit_market_order(
@@ -1090,6 +1208,13 @@ async def run_gap_factor_cycle(
     max_open = int(config.get("max_open_positions") or 25)
     allow_shorts = bool(config.get("allow_shorts", True))
     horizon_bars = int(config.get("horizon_bars") or GAP_PAPER_LAB_FACTORS[factor_key]["horizon_bars"])
+    options_feed = str(config.get("options_feed") or "opra").lower()
+    option_index = _options_helper_index(
+        conn,
+        symbols=list(experiment["symbols"]),
+        decision_timestamp=signal_end,
+        feed=options_feed,
+    )
     decisions: list[dict[str, Any]] = []
     for symbol in list(experiment["symbols"]):
         if _orders_today(conn, experiment_id) >= max_orders:
@@ -1113,6 +1238,16 @@ async def run_gap_factor_cycle(
                 feed=selected_feed,
                 factor_key=factor_key,
             )
+            options_helper = _build_options_helper(
+                option_index,
+                symbol=symbol,
+                decision_timestamp=signal_end,
+                underlying_price=(
+                    float(details["decision_close"])
+                    if isinstance(details, dict) and details.get("decision_close") is not None
+                    else None
+                ),
+            )
             if position_side == "skip":
                 decision = _record_decision(
                     conn,
@@ -1122,7 +1257,11 @@ async def run_gap_factor_cycle(
                     signal_end=signal_end,
                     action="skip",
                     reason=reason,
-                    request_payload={"factor_key": factor_key, "details": _json_safe(details)},
+                    request_payload={
+                        "factor_key": factor_key,
+                        "details": _json_safe(details),
+                        "options_helper": options_helper,
+                    },
                 )
             else:
                 decision = await _submit_gap_entry(
@@ -1140,8 +1279,14 @@ async def run_gap_factor_cycle(
                     signal_end=signal_end,
                     horizon_bars=horizon_bars,
                     details=details,
+                    options_helper=options_helper,
                 )
         except Exception as error:  # noqa: BLE001 - lab keeps processing other symbols
+            options_helper = _build_options_helper(
+                option_index,
+                symbol=symbol,
+                decision_timestamp=signal_end,
+            )
             decision = _record_decision(
                 conn,
                 experiment_id=experiment_id,
@@ -1150,7 +1295,7 @@ async def run_gap_factor_cycle(
                 signal_end=signal_end,
                 action="error",
                 reason=f"{error.__class__.__name__}: {str(error)[:300]}",
-                request_payload={"factor_key": factor_key},
+                request_payload={"factor_key": factor_key, "options_helper": options_helper},
             )
         decisions.append(decision)
     conn.execute(
@@ -1387,7 +1532,8 @@ def monitor(conn: psycopg.Connection, *, experiment_id: int) -> dict[str, Any]:
     recent = conn.execute(
         """
         SELECT id, created_at, symbol, action, side, signed_trade_imbalance,
-               trade_count, reason, broker_status, client_order_id
+               trade_count, reason, broker_status, client_order_id,
+               request_payload->'options_helper' AS options_helper
         FROM intraday_paper_lab_decisions
         WHERE experiment_id = %s
         ORDER BY created_at DESC

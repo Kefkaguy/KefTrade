@@ -9,6 +9,7 @@ from app.services.intraday_options import (
     normalize_option_chain_snapshot,
     parse_occ_option_symbol,
 )
+from app.services.intraday_paper_lab import _build_options_helper
 
 
 def test_parse_occ_option_symbol_extracts_expiration_type_and_strike() -> None:
@@ -122,3 +123,30 @@ def test_option_feature_index_is_point_in_time_and_summarizes_surface() -> None:
     assert after["option_gamma_proxy"] > 0
     assert after["option_minutes_since_snapshot"] == 4.0
     assert OPTION_FEATURE_VERSION == "intraday_option_surface_features_v1_point_in_time"
+
+
+def test_paper_lab_options_helper_is_record_only_and_classifies_stale_snapshot() -> None:
+    class FakeIndex:
+        def features_at(self, *_args, **_kwargs):
+            return {
+                **empty_option_features(),
+                "option_contracts": 1200.0,
+                "option_atm_iv": 0.31,
+                "option_put_call_iv_skew": 0.09,
+                "option_near_atm_spread_bps": 120.0,
+                "option_minutes_since_snapshot": 60.0,
+            }
+
+    helper = _build_options_helper(
+        FakeIndex(),
+        symbol="AAPL",
+        decision_timestamp=datetime(2026, 8, 14, 14, 0, tzinfo=UTC),
+        underlying_price=230.0,
+    )
+
+    assert helper["enabled"] is True
+    assert helper["mode"] == "record_only"
+    assert helper["status"] == "stale"
+    assert "option_snapshot_older_than_45m" in helper["reasons"]
+    assert "large_put_call_iv_skew" in helper["reasons"]
+    assert helper["features"]["option_atm_iv"] == 0.31

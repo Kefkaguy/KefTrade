@@ -13,6 +13,7 @@ from app.services.intraday_options import (
     ingest_option_chains,
     materialize_option_features_for_dataset,
     option_coverage,
+    option_live_status,
 )
 
 
@@ -76,6 +77,16 @@ def coverage(args: argparse.Namespace) -> dict[str, Any]:
         )
 
 
+def live_status(args: argparse.Namespace) -> dict[str, Any]:
+    with connect() as conn:
+        return option_live_status(
+            conn,
+            symbols=args.symbols,
+            feed=args.feed,
+            fresh_minutes=args.fresh_minutes,
+        )
+
+
 def features(args: argparse.Namespace) -> dict[str, Any]:
     with connect() as conn:
         return materialize_option_features_for_dataset(
@@ -114,6 +125,15 @@ def parser() -> argparse.ArgumentParser:
     coverage_command.add_argument("--end", type=_timestamp, required=True)
     coverage_command.add_argument("--feed", choices=("opra", "indicative"), default="opra")
     coverage_command.set_defaults(handler=coverage)
+
+    live_command = commands.add_parser(
+        "live-status",
+        help="Check whether fresh option-chain snapshots are landing for all requested symbols.",
+    )
+    live_command.add_argument("--symbols", type=_symbols, required=True)
+    live_command.add_argument("--feed", choices=("opra", "indicative"), default="opra")
+    live_command.add_argument("--fresh-minutes", type=int, default=10)
+    live_command.set_defaults(handler=live_status)
 
     features_command = commands.add_parser(
         "features",
