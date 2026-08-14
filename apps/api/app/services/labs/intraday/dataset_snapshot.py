@@ -26,7 +26,7 @@ from app.services.research_architecture import jsonable, load_snapshot_candles, 
 from app.services.intraday_trade_flow import TRADE_FLOW_VERSION
 
 __all__ = ["record_intraday_dataset_snapshot", "load_snapshot_intraday_features", "load_snapshot_candles"]
-INTRADAY_DATASET_VERSION = "intraday_dataset_v3_frozen_trade_flow"
+INTRADAY_DATASET_VERSION = "intraday_dataset_v4_bounded_window_and_outcome_grid"
 
 
 def record_intraday_dataset_snapshot(
@@ -37,7 +37,9 @@ def record_intraday_dataset_snapshot(
     mode: str = "rolling",
     name: str | None = None,
     universe_key: str | None = None,
+    window_start: datetime | None = None,
     window_end: datetime | None = None,
+    outcome_timeframes: list[str] | None = None,
     source: str | None = None,
 ) -> dict[str, Any]:
     """Materialize an exact immutable candles + intraday_features snapshot.
@@ -46,16 +48,43 @@ def record_intraday_dataset_snapshot(
     `record_dataset_snapshot`: an identical (assets, timeframes, mode) combo
     over unchanged underlying data reuses the existing manifest row instead
     of creating a duplicate.
+
+    ``window_start`` bounds the snapshot from below.  Without it the only
+    control was ``window_end``, so a dataset always reached back to the
+    earliest candle a symbol had -- which is how a snapshot taken to study a
+    recent order-flow window ends up carrying years of history that has no
+    trade-flow evidence beside it, and then hands those sessions to the split
+    calculator as though they were usable.
+
+    ``outcome_timeframes`` freezes a finer candle grid alongside the signal
+    timeframes, candles only.  It exists because forward-return horizons cannot
+    be resolved on the grid that produced the signal: a 30m bar can only answer
+    30/60/90-minute questions.  These timeframes deliberately skip the
+    intraday-feature and trade-flow requirements -- `intraday_features` is
+    CHECK-constrained to 15m/30m, and an outcome grid needs prices, not
+    signals.
     """
 
     if mode not in {"rolling", "reproducibility"}:
         raise ValueError("dataset mode must be 'rolling' or 'reproducibility'")
-    if window_end is not None and window_end.tzinfo is None:
-        raise ValueError("dataset window_end must be timezone-aware")
+    for label, bound in (("window_start", window_start), ("window_end", window_end)):
+        if bound is not None and bound.tzinfo is None:
+            raise ValueError(f"dataset {label} must be timezone-aware")
+    if window_start is not None and window_end is not None and window_start >= window_end:
+        raise ValueError("dataset window_start must be earlier than window_end")
     normalized_assets = sorted({item.strip().upper() for item in assets if item.strip()})
     normalized_timeframes = sorted({item.strip() for item in timeframes if item.strip()})
+    normalized_outcomes = sorted(
+        {item.strip() for item in (outcome_timeframes or []) if item.strip()}
+    )
     if not normalized_assets or not normalized_timeframes:
         raise ValueError("dataset snapshot requires at least one asset and timeframe")
+    overlap = sorted(set(normalized_outcomes) & set(normalized_timeframes))
+    if overlap:
+        raise ValueError(
+            f"{overlap} cannot be both a signal timeframe and an outcome timeframe; "
+            "the outcome grid exists to measure horizons the signal grid cannot express"
+        )
 
     summaries: list[dict[str, Any]] = []
     for symbol in normalized_assets:
@@ -71,6 +100,7 @@ def record_intraday_dataset_snapshot(
                 FROM candles
                 WHERE symbol = %s AND timeframe = %s
                   AND (%s::text IS NULL OR source = %s::text)
+                  AND (%s::timestamptz IS NULL OR timestamp >= %s::timestamptz)
                   AND (%s::timestamptz IS NULL OR timestamp <= %s::timestamptz)
                   AND (
                       %s::text IS NULL
@@ -94,6 +124,8 @@ def record_intraday_dataset_snapshot(
                     timeframe,
                     source,
                     source,
+                    window_start,
+                    window_start,
                     window_end,
                     window_end,
                     universe_key,
@@ -141,6 +173,7 @@ def record_intraday_dataset_snapshot(
                 ) micro ON TRUE
                 WHERE intraday_features.symbol = %s
                   AND intraday_features.timeframe = %s
+                  AND (%s::timestamptz IS NULL OR intraday_features.timestamp >= %s::timestamptz)
                   AND (%s::timestamptz IS NULL OR intraday_features.timestamp <= %s::timestamptz)
                   AND (
                       %s::text IS NULL
@@ -160,6 +193,8 @@ def record_intraday_dataset_snapshot(
                 (
                     symbol,
                     timeframe,
+                    window_start,
+                    window_start,
                     window_end,
                     window_end,
                     universe_key,
@@ -219,13 +254,90 @@ def record_intraday_dataset_snapshot(
                 }
             )
 
+    outcome_summaries: list[dict[str, Any]] = []
+    for symbol in normalized_assets:
+        for timeframe in normalized_outcomes:
+            outcome_row = conn.execute(
+                """
+                SELECT COUNT(*) AS candle_count, MIN(timestamp) AS window_start,
+                       MAX(timestamp) AS window_end,
+                       MD5(COALESCE(STRING_AGG(
+                           CONCAT_WS('|', source, timestamp::text, open::text, high::text, low::text, close::text, volume::text),
+                           '||' ORDER BY timestamp, source
+                       ), '')) AS candle_hash,
+                       ARRAY_AGG(DISTINCT source ORDER BY source) AS sources
+                FROM candles
+                WHERE symbol = %s AND timeframe = %s
+                  AND (%s::text IS NULL OR source = %s::text)
+                  AND (%s::timestamptz IS NULL OR timestamp >= %s::timestamptz)
+                  AND (%s::timestamptz IS NULL OR timestamp <= %s::timestamptz)
+                  AND (
+                      %s::text IS NULL
+                      OR EXISTS (
+                          SELECT 1
+                          FROM research_point_in_time_universe_membership membership
+                          WHERE membership.universe_key = %s::text
+                            AND membership.symbol = candles.symbol
+                            AND membership.effective_from <=
+                                (candles.timestamp AT TIME ZONE 'America/New_York')::date
+                            AND (
+                                membership.effective_to IS NULL
+                                OR membership.effective_to >=
+                                    (candles.timestamp AT TIME ZONE 'America/New_York')::date
+                            )
+                      )
+                  )
+                """,
+                (
+                    symbol,
+                    timeframe,
+                    source,
+                    source,
+                    window_start,
+                    window_start,
+                    window_end,
+                    window_end,
+                    universe_key,
+                    universe_key,
+                ),
+            ).fetchone()
+            outcome_count = int((outcome_row or {}).get("candle_count") or 0)
+            if outcome_count == 0:
+                # Refusing here rather than freezing a partial grid: a dataset
+                # missing its outcome bars for one symbol would measure that
+                # symbol's horizons as unavailable and quietly drop it from
+                # every cell, which looks like a thin result rather than a
+                # missing ingest.
+                raise ValueError(
+                    f"cannot snapshot outcome grid {symbol} {timeframe}: no candles in the "
+                    "requested window. Ingest the finer grid before freezing the dataset."
+                )
+            outcome_summaries.append(
+                {
+                    "key": f"{symbol}|{timeframe}",
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "candle_count": outcome_count,
+                    "window_start": outcome_row.get("window_start"),
+                    "window_end": outcome_row.get("window_end"),
+                    "candle_hash": str(outcome_row.get("candle_hash") or ""),
+                    "sources": list(outcome_row.get("sources") or []),
+                }
+            )
+
     content_hash = stable_hash(
         {
             "kind": "intraday",
             "mode": mode,
             "assets": normalized_assets,
             "timeframes": normalized_timeframes,
+            "outcome_timeframes": normalized_outcomes,
             "universe_key": universe_key,
+            # Both bounds belong to the dataset's identity. The same symbols
+            # over a different window are a different dataset, and leaving the
+            # lower bound out of the hash would let a bounded snapshot collide
+            # with an unbounded one taken earlier.
+            "requested_window_start": window_start,
             "requested_window_end": window_end,
             # The feed is part of the dataset's identity: the same symbols over
             # the same window on a different feed are different prices.
@@ -234,13 +346,19 @@ def record_intraday_dataset_snapshot(
                 {key: jsonable(item[key]) for key in ("key", "candle_count", "feature_count", "trade_flow_count", "window_start", "window_end", "candle_hash", "feature_hash", "trade_flow_hash", "sources")}
                 for item in summaries
             ],
+            "outcome_datasets": [
+                {key: jsonable(item[key]) for key in ("key", "candle_count", "window_start", "window_end", "candle_hash", "sources")}
+                for item in outcome_summaries
+            ],
             "calculation_version": INTRADAY_DATASET_VERSION,
         }
     )
     dataset_key = f"intraday_dataset_{content_hash[:24]}"
-    counts = {item["key"]: item["candle_count"] for item in summaries}
-    hashes = {item["key"]: item["candle_hash"] for item in summaries}
-    sources = sorted({source for item in summaries for source in item["sources"]})
+    counts = {item["key"]: item["candle_count"] for item in [*summaries, *outcome_summaries]}
+    hashes = {item["key"]: item["candle_hash"] for item in [*summaries, *outcome_summaries]}
+    sources = sorted(
+        {source for item in [*summaries, *outcome_summaries] for source in item["sources"]}
+    )
     adjusted_prices = bool(sources) and all(
         str(source).lower().startswith("alpaca") for source in sources
     )
@@ -267,7 +385,9 @@ def record_intraday_dataset_snapshot(
             ),
             mode,
             Jsonb(normalized_assets),
-            Jsonb(normalized_timeframes),
+            # The manifest lists both layers, so a loader reading `timeframes`
+            # can see the outcome grid exists without opening the integrity blob.
+            Jsonb(sorted({*normalized_timeframes, *normalized_outcomes})),
             min(window_starts) if window_starts else None,
             max(window_ends) if window_ends else None,
             Jsonb(counts),
@@ -282,6 +402,10 @@ def record_intraday_dataset_snapshot(
                     "exact_intraday_features_materialized": True,
                     "point_in_time_universe": universe_key is not None,
                     "universe_key": universe_key,
+                    "signal_timeframes": normalized_timeframes,
+                    "outcome_timeframes": normalized_outcomes,
+                    "exact_outcome_grid_materialized": bool(normalized_outcomes),
+                    "requested_window_start": jsonable(window_start),
                     "requested_window_end": jsonable(window_end),
                     "pinned_source": source,
                     "single_source": len(sources) == 1,
@@ -435,12 +559,55 @@ def record_intraday_dataset_snapshot(
                 universe_key,
             ),
         )
-    _ensure_nested_splits(conn, dataset_id)
+    for item in outcome_summaries:
+        conn.execute(
+            """
+            INSERT INTO research_dataset_candles(dataset_id, symbol, source, timeframe, timestamp, open, high, low, close, volume)
+            SELECT %s, symbol, source, timeframe, timestamp, open, high, low, close, volume
+            FROM candles
+            WHERE symbol = %s AND timeframe = %s AND timestamp BETWEEN %s AND %s
+              AND (%s::text IS NULL OR source = %s::text)
+              AND (
+                  %s::text IS NULL
+                  OR EXISTS (
+                      SELECT 1
+                      FROM research_point_in_time_universe_membership membership
+                      WHERE membership.universe_key = %s::text
+                        AND membership.symbol = candles.symbol
+                        AND membership.effective_from <=
+                            (candles.timestamp AT TIME ZONE 'America/New_York')::date
+                        AND (
+                            membership.effective_to IS NULL
+                            OR membership.effective_to >=
+                                (candles.timestamp AT TIME ZONE 'America/New_York')::date
+                        )
+                  )
+              )
+            ON CONFLICT(dataset_id, symbol, timeframe, timestamp, source) DO NOTHING
+            """,
+            (
+                dataset_id,
+                item["symbol"],
+                item["timeframe"],
+                item["window_start"],
+                item["window_end"],
+                source,
+                source,
+                universe_key,
+                universe_key,
+            ),
+        )
+    _ensure_nested_splits(conn, dataset_id, signal_timeframes=normalized_timeframes)
     conn.commit()
     return jsonable(dict(row))
 
 
-def _ensure_nested_splits(conn: psycopg.Connection, dataset_id: int) -> None:
+def _ensure_nested_splits(
+    conn: psycopg.Connection,
+    dataset_id: int,
+    *,
+    signal_timeframes: list[str] | None = None,
+) -> None:
     """Fix the discovery/validation/confirmation boundaries at snapshot time.
 
     Deliberately at creation, before any research has run against the data:
@@ -449,6 +616,11 @@ def _ensure_nested_splits(conn: psycopg.Connection, dataset_id: int) -> None:
     `persist_dataset_splits`). Failure to split is not fatal to snapshotting;
     a dataset without splits simply cannot be used for confirmation, which the
     protocol reports rather than silently working around.
+
+    The boundaries come from the *signal* layer. A phase is a statement about
+    which decisions a researcher was allowed to look at, and decisions happen
+    on signal bars -- letting a 1m outcome grid into the calculation would put
+    the boundaries wherever the finer grid happened to be dense.
     """
     from app.services.research_splits import (
         compute_nested_splits,
@@ -461,9 +633,10 @@ def _ensure_nested_splits(conn: psycopg.Connection, dataset_id: int) -> None:
         SELECT DISTINCT timestamp, session_date
         FROM research_dataset_intraday_features
         WHERE dataset_id = %s
+          AND (%s::text[] IS NULL OR timeframe = ANY(%s::text[]))
         ORDER BY timestamp
         """,
-        (dataset_id,),
+        (dataset_id, signal_timeframes, signal_timeframes),
     ).fetchall()
     if rows:
         observations = [(row["timestamp"], row["session_date"]) for row in rows]
@@ -475,8 +648,14 @@ def _ensure_nested_splits(conn: psycopg.Connection, dataset_id: int) -> None:
             )
             return
     fallback = conn.execute(
-        "SELECT DISTINCT timestamp FROM research_dataset_candles WHERE dataset_id = %s ORDER BY timestamp",
-        (dataset_id,),
+        """
+        SELECT DISTINCT timestamp
+        FROM research_dataset_candles
+        WHERE dataset_id = %s
+          AND (%s::text[] IS NULL OR timeframe = ANY(%s::text[]))
+        ORDER BY timestamp
+        """,
+        (dataset_id, signal_timeframes, signal_timeframes),
     ).fetchall()
     timestamps = [row["timestamp"] for row in fallback]
     if len(timestamps) >= 3:

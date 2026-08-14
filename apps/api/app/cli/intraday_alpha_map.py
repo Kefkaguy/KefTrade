@@ -59,8 +59,6 @@ def declare(args: argparse.Namespace) -> dict[str, Any]:
             slices=args.slices or ("all",),
             cost_calibration_id=args.cost_calibration_id,
             cost_safety_multiple=args.cost_safety_multiple,
-            feed=args.feed,
-            source=args.source,
         )
 
 
@@ -115,7 +113,16 @@ def parser() -> argparse.ArgumentParser:
         "declare",
         help="Freeze the feature x transform x horizon x slice grid before measuring it.",
     )
-    declare_command.add_argument("--dataset-id", type=int, required=True)
+    declare_command.add_argument(
+        "--dataset-id",
+        type=int,
+        required=True,
+        help=(
+            "A frozen intraday dataset holding both the signal timeframe's trade-flow "
+            "evidence and the finer outcome candle grid. Every row the measurement "
+            "reads comes from this snapshot; no live table is consulted."
+        ),
+    )
     declare_command.add_argument("--signal-timeframe", choices=("15m", "30m"), default="30m")
     declare_command.add_argument(
         "--grid-timeframe",
@@ -160,8 +167,8 @@ def parser() -> argparse.ArgumentParser:
             "hurdle: the cost model has more estimation error than that."
         ),
     )
-    declare_command.add_argument("--feed", choices=("sip", "iex"), default="sip")
-    declare_command.add_argument("--source", default="alpaca")
+    # No --feed or --source: the dataset pinned both when it was frozen, and a
+    # flag here could only disagree with the snapshot it reads.
     declare_command.set_defaults(handler=declare)
 
     measure_command = commands.add_parser(

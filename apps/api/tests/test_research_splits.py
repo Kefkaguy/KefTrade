@@ -488,9 +488,12 @@ def test_splits_are_fixed_when_the_dataset_is_snapshotted():
     original_execute = conn.execute
 
     def execute(query, params=None):
-        if "SELECT DISTINCT timestamp, session_date" in query:
+        # Whitespace-collapsed so a reformatted query still routes here: the
+        # split source gained a timeframe filter and therefore a line break.
+        collapsed = " ".join(query.split())
+        if "SELECT DISTINCT timestamp, session_date" in collapsed:
             return FakeResult([])
-        if "SELECT DISTINCT timestamp FROM research_dataset_candles" in query:
+        if "SELECT DISTINCT timestamp FROM research_dataset_candles" in collapsed:
             return FakeResult([{"timestamp": timestamp} for timestamp in timestamps])
         return original_execute(query, params)
 
@@ -510,9 +513,12 @@ def test_a_dataset_too_small_to_split_is_left_unsplit_rather_than_faked():
     original_execute = conn.execute
 
     def execute(query, params=None):
-        if "SELECT DISTINCT timestamp, session_date" in query:
+        # Whitespace-collapsed so a reformatted query still routes here: the
+        # split source gained a timeframe filter and therefore a line break.
+        collapsed = " ".join(query.split())
+        if "SELECT DISTINCT timestamp, session_date" in collapsed:
             return FakeResult([])
-        if "SELECT DISTINCT timestamp FROM research_dataset_candles" in query:
+        if "SELECT DISTINCT timestamp FROM research_dataset_candles" in collapsed:
             return FakeResult([{"timestamp": START}])
         return original_execute(query, params)
 

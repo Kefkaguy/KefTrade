@@ -1,23 +1,4 @@
-"""Phase F: why a family lost, and what to change next.
 
-"Rejected" is not a research finding. A family that fails because it has no
-predictive signal and a family that fails because a real signal is eaten by
-costs need opposite responses -- retire the first, restructure the second --
-and the current pipeline reports both as the same rejection. This module
-decomposes a family's P&L into the components that distinguish them, names
-the failure, and proposes exactly one causal change to test next.
-
-The decomposition is possible because `research_campaign_trades` already
-stores gross P&L, fees, and slippage separately, plus excursions (MFE/MAE),
-exit reasons, entry timing, direction, and symbol. Nothing here re-simulates.
-
-The mutation rules deliberately propose ONE change at a time. Changing three
-things and observing an improvement tells you nothing about which one worked,
-and a broad random sweep around a failed family is how a search ends up with
-120 variants and no hypothesis. When the diagnosis is `NO_RAW_SIGNAL` no
-mutation is proposed at all: there is nothing to preserve, and mutating it
-would just be a slower way of testing noise.
-"""
 
 from __future__ import annotations
 

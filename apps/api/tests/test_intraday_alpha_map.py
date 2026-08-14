@@ -4,6 +4,7 @@ import os
 import random
 from datetime import UTC, date, datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -627,8 +628,6 @@ def test_run_alpha_map_persists_the_same_cells_as_the_python_measurement_on_post
             slices=("all",),
             cost_calibration_id=int(cost_id),
             cost_safety_multiple=2.0,
-            feed="sip",
-            source="alpaca",
         )
         declaration_id = int(declaration["id"])
 
@@ -637,13 +636,12 @@ def test_run_alpha_map_persists_the_same_cells_as_the_python_measurement_on_post
         cost_model = load_cost_model(conn, int(cost_id))
         panel = load_alpha_map_panel(
             conn,
+            dataset_id=int(dataset_id),
             symbols=symbols,
             signal_timeframe="30m",
             grid_timeframe="1m",
             start=splits.discovery_start,
             end=splits.validation_start,
-            feed="sip",
-            source="alpaca",
             cost_model=cost_model,
         )
         observations = panel["observations"]
@@ -736,6 +734,64 @@ def test_run_alpha_map_persists_the_same_cells_as_the_python_measurement_on_post
         with pytest.raises(ValueError, match="already measured"):
             run_alpha_map(conn, declaration_id=declaration_id, phase="discovery")
 
+        # Frozen means frozen, on real PostgreSQL. The fixture already seeded
+        # the live tables with values that contradict the frozen ones; churn
+        # them again and the panel must be bit-identical, because none of it
+        # was ever read from there.
+        _churn_live_tables(conn, symbols=symbols)
+        after_churn = load_alpha_map_panel(
+            conn,
+            dataset_id=int(dataset_id),
+            symbols=symbols,
+            signal_timeframe="30m",
+            grid_timeframe="1m",
+            start=splits.discovery_start,
+            end=splits.validation_start,
+            cost_model=cost_model,
+        )
+        attach_forward_returns(
+            after_churn["observations"],
+            horizons_seconds=horizons,
+            grid_seconds=after_churn["grid_seconds"],
+        )
+        assert _panel_signature(after_churn["observations"]) == _panel_signature(
+            observations
+        )
+
+
+def _panel_signature(observations):
+    return [
+        (
+            row["symbol"],
+            row["timestamp"],
+            row["cost_bps"],
+            tuple(sorted((key, value) for key, value in row["features"].items())),
+            tuple(
+                (horizon, outcome.get("available"), outcome.get("gross_return_bps"))
+                for horizon, outcome in sorted(row["forward"].items())
+            ),
+        )
+        for row in observations
+    ]
+
+
+def _churn_live_tables(conn, *, symbols: list[str]) -> None:
+    """Rewrite the live tables the way a nightly backfill would."""
+    conn.execute(
+        """
+        UPDATE intraday_trade_flow_features
+        SET signed_trade_imbalance = 0.99, signed_trade_count_imbalance = 0.99,
+            large_trade_share = 0.99, effective_spread_bps = 99.0
+        WHERE symbol = ANY(%s)
+        """,
+        (symbols,),
+    )
+    conn.execute(
+        "UPDATE candles SET open = 1.0, high = 1.0, low = 1.0, close = 1.0 WHERE symbol = ANY(%s)",
+        (symbols,),
+    )
+    conn.commit()
+
 
 def _maybe_float(value):
     return None if value is None else float(value)
@@ -747,7 +803,6 @@ def _seed_alpha_map_postgres_fixture(conn, *, token: str, symbols: list[str]) ->
     start = datetime(2026, 1, 5, 15, 0, tzinfo=UTC)
     sessions = 60
     signal_minutes = 30
-    grid_minutes = 1
     dataset_key = f"alpha-map-postgres-fixture-{token}"
 
     for index, symbol in enumerate(symbols):
@@ -830,22 +885,31 @@ def _seed_alpha_map_postgres_fixture(conn, *, token: str, symbols: list[str]) ->
         ),
     )
 
+    # The frozen tables carry the real fixture. The live tables are seeded with
+    # values that contradict them, so a loader that reaches for `candles` or
+    # `intraday_trade_flow_features` cannot produce a merely slightly different
+    # number -- it produces an obviously wrong one, and the equality assertions
+    # against the pure Python measurement fail loudly.
     values = [-0.90, -0.65, -0.35, -0.10, 0.10, 0.35, 0.65, 0.90]
     for day in range(sessions):
         signal_open = start + timedelta(days=day)
         decision = signal_open + timedelta(minutes=signal_minutes)
-        session = signal_open.astimezone().date()
+        session = signal_open.astimezone(ZoneInfo("America/New_York")).date()
         for symbol_index, symbol in enumerate(symbols):
             raw = values[(symbol_index + day) % len(values)]
             base_price = 100.0 + symbol_index * 3.0 + day * 0.01
 
             conn.execute(
                 """
-                INSERT INTO candles(symbol, source, timeframe, timestamp, open, high, low, close, volume)
-                VALUES (%s,'alpaca','30m',%s,%s,%s,%s,%s,%s)
-                ON CONFLICT (symbol, source, timeframe, timestamp) DO NOTHING
+                INSERT INTO research_dataset_candles(
+                    dataset_id, symbol, source, timeframe, timestamp,
+                    open, high, low, close, volume
+                )
+                VALUES (%s,%s,'alpaca','30m',%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (dataset_id, symbol, timeframe, timestamp, source) DO NOTHING
                 """,
                 (
+                    dataset_id,
                     symbol,
                     signal_open,
                     base_price,
@@ -857,17 +921,18 @@ def _seed_alpha_map_postgres_fixture(conn, *, token: str, symbols: list[str]) ->
             )
             conn.execute(
                 """
-                INSERT INTO intraday_features(
-                    symbol, timeframe, timestamp, session_date, minutes_from_open,
-                    minutes_to_close, session_vwap, distance_from_session_vwap,
-                    opening_range_high, opening_range_low, opening_range_position,
-                    gap_percent, session_relative_volume, opening_range_minutes,
-                    relative_volume_lookback_sessions
+                INSERT INTO research_dataset_intraday_features(
+                    dataset_id, symbol, timeframe, timestamp, session_date,
+                    minutes_from_open, minutes_to_close, session_vwap,
+                    distance_from_session_vwap, opening_range_high,
+                    opening_range_low, opening_range_position, gap_percent,
+                    session_relative_volume
                 )
-                VALUES (%s,'30m',%s,%s,30,330,%s,%s,%s,%s,0.5,0.0,1.0,30,20)
-                ON CONFLICT (symbol, timeframe, timestamp) DO NOTHING
+                VALUES (%s,%s,'30m',%s,%s,30,330,%s,%s,%s,%s,0.5,0.0,1.0)
+                ON CONFLICT (dataset_id, symbol, timeframe, timestamp) DO NOTHING
                 """,
                 (
+                    dataset_id,
                     symbol,
                     signal_open,
                     session,
@@ -879,6 +944,42 @@ def _seed_alpha_map_postgres_fixture(conn, *, token: str, symbols: list[str]) ->
             )
             conn.execute(
                 """
+                INSERT INTO research_dataset_trade_flow_features(
+                    dataset_id, symbol, timeframe, timestamp, feed, trade_count,
+                    total_volume, signed_trade_imbalance,
+                    signed_trade_count_imbalance, large_trade_share,
+                    unclassified_share, effective_spread_bps,
+                    classification_method, classified_volume,
+                    trade_size_squared_sum, effective_trade_count
+                )
+                VALUES (%s,%s,'30m',%s,'sip',1000,%s,%s,%s,0.10,0.0,0.20,
+                        'lee_ready',%s,%s,%s)
+                ON CONFLICT (dataset_id, symbol, timeframe, timestamp) DO NOTHING
+                """,
+                (
+                    dataset_id,
+                    symbol,
+                    signal_open,
+                    100_000,
+                    raw,
+                    raw,
+                    100_000,
+                    10_000_000,
+                    1_000,
+                ),
+            )
+
+            # Live decoys: same keys, contradictory values.
+            conn.execute(
+                """
+                INSERT INTO candles(symbol, source, timeframe, timestamp, open, high, low, close, volume)
+                VALUES (%s,'alpaca','30m',%s,1.0,1.0,1.0,1.0,1)
+                ON CONFLICT (symbol, source, timeframe, timestamp) DO NOTHING
+                """,
+                (symbol, signal_open),
+            )
+            conn.execute(
+                """
                 INSERT INTO intraday_trade_flow_features(
                     symbol, timeframe, timestamp, provider, feed, trade_count,
                     total_volume, buy_volume, sell_volume, signed_trade_imbalance,
@@ -886,20 +987,11 @@ def _seed_alpha_map_postgres_fixture(conn, *, token: str, symbols: list[str]) ->
                     unclassified_share, trade_vwap, effective_spread_bps,
                     calculation_version
                 )
-                VALUES (%s,'30m',%s,'alpaca','sip',1000,%s,%s,%s,%s,%s,0.10,0.0,%s,0.20,
-                        'intraday_trade_flow_v2_fixture')
+                VALUES (%s,'30m',%s,'alpaca','sip',1,1,1,0,0.99,0.99,0.99,0.0,1.0,99.0,
+                        'intraday_trade_flow_v2_decoy')
                 ON CONFLICT (symbol, timeframe, timestamp, provider, feed) DO NOTHING
                 """,
-                (
-                    symbol,
-                    signal_open,
-                    100_000,
-                    50_000 * (1.0 + raw),
-                    50_000 * (1.0 - raw),
-                    raw,
-                    raw,
-                    base_price,
-                ),
+                (symbol, signal_open),
             )
 
             for minute in range(70):
@@ -914,12 +1006,15 @@ def _seed_alpha_map_postgres_fixture(conn, *, token: str, symbols: list[str]) ->
                 low = min(open_price, close_price) * 0.9999
                 conn.execute(
                     """
-                    INSERT INTO candles(symbol, source, timeframe, timestamp,
-                                        open, high, low, close, volume)
-                    VALUES (%s,'alpaca','1m',%s,%s,%s,%s,%s,%s)
-                    ON CONFLICT (symbol, source, timeframe, timestamp) DO NOTHING
+                    INSERT INTO research_dataset_candles(
+                        dataset_id, symbol, source, timeframe, timestamp,
+                        open, high, low, close, volume
+                    )
+                    VALUES (%s,%s,'alpaca','1m',%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (dataset_id, symbol, timeframe, timestamp, source) DO NOTHING
                     """,
                     (
+                        dataset_id,
                         symbol,
                         ts,
                         open_price,
@@ -928,6 +1023,15 @@ def _seed_alpha_map_postgres_fixture(conn, *, token: str, symbols: list[str]) ->
                         close_price,
                         3_000 + minute * 10 + symbol_index,
                     ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO candles(symbol, source, timeframe, timestamp,
+                                        open, high, low, close, volume)
+                    VALUES (%s,'alpaca','1m',%s,1.0,1.0,1.0,1.0,1)
+                    ON CONFLICT (symbol, source, timeframe, timestamp) DO NOTHING
+                    """,
+                    (symbol, ts),
                 )
 
     conn.commit()

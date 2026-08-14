@@ -23,6 +23,7 @@ class FakeSnapshotConn:
         self.manifests: dict[str, dict] = {}
         self._next_id = 1
         self.candle_inserts = 0
+        self.candle_insert_timeframes: list[str] = []
         self.feature_inserts = 0
         self.trade_flow_inserts = 0
         self.split_timestamp_queries = 0
@@ -32,7 +33,11 @@ class FakeSnapshotConn:
     def execute(self, query, params=None):
         params = params or ()
         self.executed.append((query, params))
-        stripped = query.strip()
+        # Collapsed to single spaces so a reformatted query -- one that gained a
+        # WHERE clause and therefore a line break -- still routes to the same
+        # branch. Matching raw text meant an indentation change looked like an
+        # unknown query.
+        stripped = " ".join(query.split())
         if "FROM candles" in stripped and "COUNT(*)" in stripped:
             return FakeResult(
                 {
@@ -66,6 +71,10 @@ class FakeSnapshotConn:
             return FakeResult(self.manifests.get(params[0]))
         if stripped.startswith("INSERT INTO research_dataset_candles"):
             self.candle_inserts += 1
+            # params[2] is the timeframe: the outcome grid is materialized by
+            # the same statement as the signal layer, so the timeframe is the
+            # only thing that distinguishes the two passes.
+            self.candle_insert_timeframes.append(params[2])
             return FakeResult(None)
         if stripped.startswith("INSERT INTO research_dataset_intraday_features"):
             self.feature_inserts += 1
@@ -171,6 +180,123 @@ def test_predeclared_as_of_cutoff_changes_the_immutable_dataset_identity():
     )
 
     assert first["dataset_key"] != second["dataset_key"]
+
+
+def test_window_start_changes_the_immutable_dataset_identity():
+    # Without the lower bound in the hash, a snapshot deliberately bounded to a
+    # recent window would collide with an earlier unbounded one and silently
+    # reuse a manifest describing years of history it does not contain.
+    conn = FakeSnapshotConn()
+
+    unbounded = record_intraday_dataset_snapshot(conn, assets=["AMD"], timeframes=["30m"])
+    bounded = record_intraday_dataset_snapshot(
+        conn,
+        assets=["AMD"],
+        timeframes=["30m"],
+        window_start=datetime(2025, 1, 6, 14, 30, tzinfo=UTC),
+    )
+
+    assert unbounded["dataset_key"] != bounded["dataset_key"]
+    assert len(conn.manifests) == 2
+
+
+def test_window_start_bounds_the_snapshot_queries():
+    conn = FakeSnapshotConn()
+
+    record_intraday_dataset_snapshot(
+        conn,
+        assets=["AMD"],
+        timeframes=["30m"],
+        window_start=datetime(2025, 1, 6, 14, 30, tzinfo=UTC),
+    )
+    summaries = [
+        (" ".join(query.split()), params)
+        for query, params in conn.executed
+        if "COUNT(*)" in query
+    ]
+
+    assert summaries, "expected the summary queries to run"
+    for query, params in summaries[:2]:
+        assert "timestamp >= %s::timestamptz" in query
+        assert datetime(2025, 1, 6, 14, 30, tzinfo=UTC) in params
+
+
+def test_window_start_must_precede_window_end():
+    with pytest.raises(ValueError, match="earlier than window_end"):
+        record_intraday_dataset_snapshot(
+            FakeSnapshotConn(),
+            assets=["AMD"],
+            timeframes=["30m"],
+            window_start=datetime(2026, 3, 1, tzinfo=UTC),
+            window_end=datetime(2026, 1, 1, tzinfo=UTC),
+        )
+
+
+def test_window_start_must_be_timezone_aware():
+    with pytest.raises(ValueError, match="window_start must be timezone-aware"):
+        record_intraday_dataset_snapshot(
+            FakeSnapshotConn(),
+            assets=["AMD"],
+            timeframes=["30m"],
+            window_start=datetime(2025, 1, 6),
+        )
+
+
+def test_outcome_timeframes_freeze_a_finer_candle_only_grid():
+    conn = FakeSnapshotConn()
+
+    dataset = record_intraday_dataset_snapshot(
+        conn,
+        assets=["AMD"],
+        timeframes=["30m"],
+        outcome_timeframes=["1m"],
+    )
+
+    # The outcome grid is candles only: `intraday_features` is CHECK-constrained
+    # to 15m/30m, and a forward-return grid needs prices, not signals.
+    assert conn.candle_insert_timeframes == ["30m", "1m"]
+    assert conn.feature_inserts == 1
+    assert conn.trade_flow_inserts == 1
+    assert dataset["dataset_kind"] == "intraday"
+
+
+def test_outcome_timeframes_change_the_dataset_identity():
+    conn = FakeSnapshotConn()
+
+    without = record_intraday_dataset_snapshot(conn, assets=["AMD"], timeframes=["30m"])
+    with_grid = record_intraday_dataset_snapshot(
+        conn, assets=["AMD"], timeframes=["30m"], outcome_timeframes=["1m"]
+    )
+
+    assert without["dataset_key"] != with_grid["dataset_key"]
+
+
+def test_a_timeframe_cannot_be_both_signal_and_outcome():
+    with pytest.raises(ValueError, match="cannot be both a signal timeframe"):
+        record_intraday_dataset_snapshot(
+            FakeSnapshotConn(),
+            assets=["AMD"],
+            timeframes=["30m"],
+            outcome_timeframes=["30m"],
+        )
+
+
+def test_splits_are_computed_from_the_signal_layer_only():
+    # A phase says which decisions a researcher was allowed to see, and
+    # decisions happen on signal bars. Letting a 1m outcome grid into the
+    # calculation would put the boundaries wherever that grid is dense.
+    conn = FakeSnapshotConn()
+
+    record_intraday_dataset_snapshot(
+        conn, assets=["AMD"], timeframes=["30m"], outcome_timeframes=["1m"]
+    )
+    split_queries = [
+        params for query, params in conn.executed if "SELECT DISTINCT timestamp" in query
+    ]
+
+    assert split_queries
+    for params in split_queries:
+        assert ["30m"] in params
 
 
 def test_as_of_cutoff_must_be_timezone_aware():

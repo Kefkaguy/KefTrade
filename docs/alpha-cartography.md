@@ -187,10 +187,63 @@ again under the same name, and the record of what the original hypothesis
 predicted is gone. Frozen experiments stay fully readable through `monitor` —
 reading the evidence is the point of keeping them.
 
+## Every row comes from the frozen dataset
+
+The alpha map reads `research_dataset_trade_flow_features`,
+`research_dataset_candles` and `research_dataset_intraday_features`, all bounded
+by `dataset_id`. It never touches `candles`, `intraday_trade_flow_features` or
+`intraday_features`.
+
+This was a real defect in the first version: the declaration took its split
+boundaries from the frozen manifest and then loaded signals and outcomes from
+live tables. That is worse than having no protocol, because it wraps a content
+hash, a declaration id and an immutability trigger around a measurement that a
+nightly ingest could silently change. `test_intraday_alpha_map_frozen_evidence.py`
+pins the property from three sides — the loader must not name a live table, its
+output must be unmoved by live-table drift, and it must still change when the
+frozen rows differ, so the first two cannot pass on a constant.
+
+Two consequences worth knowing:
+
+- **`--feed` and `--source` are gone from `declare`.** The snapshot pinned both
+  when it was frozen, so a flag could only disagree with the data it reads.
+- **Coverage is checked at declaration, not at measurement.** A declaration is
+  single-use; discovering a missing outcome grid mid-run would spend it. The
+  declaration records the frozen row counts and time bounds it measured against,
+  so a later reader who gets different numbers from the same `dataset_id` has
+  found a dataset that was not actually immutable.
+
+## Freezing a dataset for it
+
+`window_start` bounds a snapshot from below. Without it the only control was
+`--as-of`, so a dataset always reached back to each symbol's earliest candle —
+which is how a snapshot taken to study a recent order-flow window ends up
+carrying years of history with no trade-flow evidence beside it and then hands
+those sessions to the split calculator as though they were usable.
+
+`--outcome-timeframes` freezes the finer candle-only grid the horizon ladder
+needs. It is candle-only by necessity: `intraday_features` is CHECK-constrained
+to 15m/30m, and an outcome grid needs prices, not signals. A timeframe cannot be
+both signal and outcome.
+
+Both go into the content hash, so a bounded snapshot cannot collide with an
+earlier unbounded one. `INTRADAY_DATASET_VERSION` moved to `v4`, which means any
+re-snapshot now mints a new manifest rather than reusing an old one — intended,
+since the old manifests describe a different freezing rule.
+
+Splits come from the **signal** layer only. A phase says which decisions a
+researcher was allowed to see, and decisions happen on signal bars; letting a 1m
+grid into the calculation would put the boundaries wherever that grid is dense.
+The existing 50/30/20 session splitter is untouched.
+
 ## Usage
 
 ```bash
-python -m app.cli.intraday_alpha_map declare --dataset-id 82 --symbols AAPL,NVDA,QQQ,LLY,CRM,UNH,VZ,KO --signal-timeframe 30m --grid-timeframe 1m --cost-calibration-id 3 --cost-safety-multiple 2.0
+python -m app.cli.intraday_dataset_pipeline snapshot --from-universe --universe-key <key> --timeframe 30m --outcome-timeframes 1m --window-start 2025-01-06T14:30:00+00:00 --as-of 2026-03-31T20:00:00+00:00 --feed sip
+```
+
+```bash
+python -m app.cli.intraday_alpha_map declare --dataset-id <new-id> --symbols AAPL,NVDA,QQQ,LLY,CRM,UNH,VZ,KO --signal-timeframe 30m --grid-timeframe 1m --cost-calibration-id 3 --cost-safety-multiple 2.0
 ```
 
 ```bash

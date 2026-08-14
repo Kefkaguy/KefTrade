@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from app.cli._refusal import run_command
@@ -43,6 +43,23 @@ def _symbols(value: str) -> list[str]:
 
 def _date(value: str) -> date:
     return datetime.strptime(value, "%Y-%m-%d").date()
+
+
+def _timeframes(value: str) -> list[str]:
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    unknown = sorted(set(items) - set(INGEST_TIMEFRAMES))
+    if unknown:
+        raise argparse.ArgumentTypeError(
+            f"unsupported timeframes {unknown}; expected from {list(INGEST_TIMEFRAMES)}"
+        )
+    return list(dict.fromkeys(items))
+
+
+def _instant(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise argparse.ArgumentTypeError("timestamp must include a timezone")
+    return parsed.astimezone(UTC)
 
 
 def ingest(args: argparse.Namespace) -> dict[str, Any]:
@@ -140,6 +157,8 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
     window_end = (
         datetime.fromisoformat(args.as_of.replace("Z", "+00:00")) if args.as_of else None
     )
+    window_start = args.window_start
+    outcome_timeframes = args.outcome_timeframes or []
     source = feed_source(args.feed)
     with connect() as conn:
         # The snapshot's assets are the universe's members, not the candidate
@@ -174,7 +193,9 @@ def snapshot(args: argparse.Namespace) -> dict[str, Any]:
             mode="reproducibility" if args.as_of else "rolling",
             name=args.name,
             universe_key=args.universe_key,
+            window_start=window_start,
             window_end=window_end,
+            outcome_timeframes=outcome_timeframes,
             source=source,
         )
     return {"features": features, "dataset": manifest}
@@ -359,6 +380,26 @@ def parser() -> argparse.ArgumentParser:
     snapshot_command.add_argument("--timeframe", default="30m", choices=RESEARCH_TIMEFRAMES)
     snapshot_command.add_argument("--universe-key")
     snapshot_command.add_argument("--as-of")
+    snapshot_command.add_argument(
+        "--window-start",
+        type=_instant,
+        help=(
+            "Timezone-aware lower bound, e.g. 2025-01-06T14:30:00+00:00. Without it the "
+            "snapshot reaches back to each symbol's earliest candle, which drags in "
+            "sessions that have no order-flow evidence beside them and then hands them "
+            "to the split calculator as usable."
+        ),
+    )
+    snapshot_command.add_argument(
+        "--outcome-timeframes",
+        type=_timeframes,
+        help=(
+            "Finer candle-only grid frozen alongside the signal timeframe, e.g. 1m. "
+            "Forward-return horizons cannot be resolved on the grid that produced the "
+            "signal, so an alpha map needs this layer to measure anything shorter than "
+            "one signal bar."
+        ),
+    )
     snapshot_command.add_argument("--name")
     snapshot_command.add_argument("--candle-limit", type=int, default=200_000)
     snapshot_command.add_argument("--feed", default="sip", choices=RESEARCH_FEEDS)

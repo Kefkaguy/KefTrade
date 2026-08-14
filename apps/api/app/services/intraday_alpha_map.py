@@ -1325,21 +1325,34 @@ PANEL_FEATURES = (
 def load_alpha_map_panel(
     conn: psycopg.Connection,
     *,
+    dataset_id: int,
     symbols: Sequence[str],
     signal_timeframe: str,
     grid_timeframe: str,
     start: datetime,
     end: datetime,
-    feed: str,
-    source: str,
     cost_model: dict[str, Any],
 ) -> dict[str, Any]:
-    """Build the observation panel from ingested evidence.
+    """Build the observation panel from *frozen* dataset evidence only.
+
+    Every table read here is a ``research_dataset_*`` snapshot bounded by
+    ``dataset_id``.  Reading the live tables instead -- which an earlier version
+    of this function did -- would have made the whole declaration protocol
+    decorative: the split boundaries would come from the frozen manifest while
+    the signals and outcomes came from tables that a nightly ingest rewrites,
+    so re-running a declaration after a backfill could produce a different
+    answer with the same declaration id and the same content hash.  A frozen
+    dataset that only freezes the boundaries is not a frozen dataset.
 
     The signal side is read at ``signal_timeframe`` (where the trade-flow
     features live) and the outcome side at ``grid_timeframe``, which must be
-    finer.  Decision time is the signal bar's *close*, because that is the
-    first instant its features are knowable.
+    finer and must have been frozen into the same dataset as an outcome grid.
+    Decision time is the signal bar's *close*, because that is the first
+    instant its features are knowable.
+
+    Feed and source are not parameters: the snapshot already pinned both when
+    it was frozen, and accepting them here would let a caller ask for a feed
+    the dataset does not contain and get silence instead of a refusal.
     """
     signal_minutes = timeframe_minutes(signal_timeframe)
     grid_minutes = timeframe_minutes(grid_timeframe)
@@ -1356,36 +1369,41 @@ def load_alpha_map_panel(
         SELECT symbol, timestamp, signed_trade_imbalance, signed_trade_count_imbalance,
                large_trade_share, effective_trade_count, effective_spread_bps,
                total_volume, trade_count, unclassified_share
-        FROM intraday_trade_flow_features
-        WHERE symbol = ANY(%s) AND timeframe = %s AND feed = %s
+        FROM research_dataset_trade_flow_features
+        WHERE dataset_id = %s AND symbol = ANY(%s) AND timeframe = %s
           AND timestamp >= %s AND timestamp < %s
-          AND calculation_version LIKE 'intraday_trade_flow_v2%%'
         ORDER BY symbol, timestamp
         """,
-        (upper, signal_timeframe, feed, start, end),
+        (dataset_id, upper, signal_timeframe, start, end),
     ).fetchall()
     if not flow_rows:
         raise ValueError(
-            f"no {signal_timeframe} trade-flow features for {len(upper)} symbols in the "
-            "requested window; ingest them before mapping alpha"
+            f"dataset {dataset_id} has no frozen {signal_timeframe} trade-flow features "
+            f"for these {len(upper)} symbols in this phase window. Freeze them into the "
+            "dataset before mapping alpha; the alpha map does not read live tables."
         )
 
-    signal_candles = _candles_by_symbol(
-        conn, symbols=upper, timeframe=signal_timeframe, source=source, start=start, end=end
+    signal_candles = _dataset_candles_by_symbol(
+        conn, dataset_id=dataset_id, symbols=upper, timeframe=signal_timeframe,
+        start=start, end=end,
     )
+    # The last decision in the window needs bars past the window to resolve its
+    # longest horizon. Those bars are still inside the frozen dataset, so this
+    # reaches forward in time without reaching outside the snapshot.
     horizon_slack = timedelta(minutes=signal_minutes + 90)
-    grid_candles = _candles_by_symbol(
+    grid_candles = _dataset_candles_by_symbol(
         conn,
+        dataset_id=dataset_id,
         symbols=upper,
         timeframe=grid_timeframe,
-        source=source,
         start=start,
         end=end + horizon_slack,
     )
     if not grid_candles:
         raise ValueError(
-            f"no {grid_timeframe} candles for the requested window; the alpha map cannot "
-            f"measure sub-{signal_timeframe} horizons without a finer grid"
+            f"dataset {dataset_id} contains no frozen {grid_timeframe} candles. Re-freeze "
+            f"it with --outcome-timeframes {grid_timeframe}; the alpha map cannot measure "
+            f"sub-{signal_timeframe} horizons without a finer frozen grid."
         )
 
     grid_by_session: dict[str, dict[date, list[dict[str, Any]]]] = {}
@@ -1465,27 +1483,41 @@ def attach_forward_returns(
     return {"available_by_horizon": dict(coverage)}
 
 
-def _candles_by_symbol(
+def _dataset_candles_by_symbol(
     conn: psycopg.Connection,
     *,
+    dataset_id: int,
     symbols: Sequence[str],
     timeframe: str,
-    source: str,
     start: datetime,
     end: datetime,
 ) -> dict[str, list[dict[str, Any]]]:
+    """Frozen candles joined to their frozen session context.
+
+    The join is to ``research_dataset_intraday_features`` rather than the live
+    ``intraday_features``: a session VWAP or relative-volume value recomputed by
+    a later backfill would change the feature panel without changing anything
+    the declaration recorded.
+
+    ``DISTINCT ON`` collapses the source dimension. The frozen candle key
+    includes ``source``, so a dataset frozen without a pinned source can hold
+    two rows for one bar, and silently taking both would double-count that bar
+    in every measurement.
+    """
     rows = conn.execute(
         """
-        SELECT c.symbol, c.timestamp, c.open, c.high, c.low, c.close, c.volume,
+        SELECT DISTINCT ON (c.symbol, c.timestamp)
+               c.symbol, c.timestamp, c.source, c.open, c.high, c.low, c.close, c.volume,
                f.minutes_from_open, f.session_relative_volume, f.distance_from_session_vwap
-        FROM candles c
-        LEFT JOIN intraday_features f
-          ON f.symbol = c.symbol AND f.timeframe = c.timeframe AND f.timestamp = c.timestamp
-        WHERE c.symbol = ANY(%s) AND c.timeframe = %s AND c.source = %s
+        FROM research_dataset_candles c
+        LEFT JOIN research_dataset_intraday_features f
+          ON f.dataset_id = c.dataset_id AND f.symbol = c.symbol
+         AND f.timeframe = c.timeframe AND f.timestamp = c.timestamp
+        WHERE c.dataset_id = %s AND c.symbol = ANY(%s) AND c.timeframe = %s
           AND c.timestamp >= %s AND c.timestamp < %s
-        ORDER BY c.symbol, c.timestamp
+        ORDER BY c.symbol, c.timestamp, c.source
         """,
-        ([str(symbol).upper() for symbol in symbols], timeframe, source, start, end),
+        (dataset_id, [str(symbol).upper() for symbol in symbols], timeframe, start, end),
     ).fetchall()
     output: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -1534,8 +1566,6 @@ def declare_alpha_map(
     slices: Sequence[str] = ("all",),
     cost_calibration_id: int | None = None,
     cost_safety_multiple: float = DEFAULT_COST_SAFETY_MULTIPLE,
-    feed: str = "sip",
-    source: str = "alpaca",
 ) -> dict[str, Any]:
     """Freeze the grid before any of it is measured.
 
@@ -1564,6 +1594,27 @@ def declare_alpha_map(
             "without them cannot say which of its looks were free"
         )
     normalized_symbols = sorted({str(symbol).upper() for symbol in symbols})
+    coverage = dataset_coverage(
+        conn,
+        dataset_id=dataset_id,
+        symbols=normalized_symbols,
+        signal_timeframe=signal_timeframe,
+        grid_timeframe=grid_timeframe,
+    )
+    # Refusing at declaration rather than at measurement. A declaration is
+    # single-use: if the missing outcome grid only surfaced during the run, the
+    # declaration would already be spent and the fix would cost a new one.
+    if not coverage["grid_candles"]:
+        raise ValueError(
+            f"dataset {dataset_id} contains no frozen {grid_timeframe} candles, so no "
+            f"horizon shorter than one {signal_timeframe} bar can be measured against it. "
+            f"Re-freeze the dataset with --outcome-timeframes {grid_timeframe}."
+        )
+    if not coverage["trade_flow_rows"]:
+        raise ValueError(
+            f"dataset {dataset_id} contains no frozen {signal_timeframe} trade-flow "
+            "features for these symbols."
+        )
     cell_keys = declared_cell_keys(
         features=features,
         transforms=transforms,
@@ -1584,8 +1635,10 @@ def declare_alpha_map(
         "slices": sorted(set(slices)),
         "cost_model": jsonable(cost_model),
         "cost_safety_multiple": float(cost_safety_multiple),
-        "feed": feed,
-        "source": source,
+        # Feed and source are recorded from the frozen dataset rather than
+        # accepted from the caller, so the declaration cannot claim a feed the
+        # snapshot does not contain.
+        "dataset_coverage": coverage,
         "declared_cell_count": declared_cells,
     }
     specification_hash = sha256(
@@ -1642,6 +1695,56 @@ def declare_alpha_map(
     ).fetchone()
     conn.commit()
     return {**jsonable(dict(row)), "already_declared": False}
+
+
+def dataset_coverage(
+    conn: psycopg.Connection,
+    *,
+    dataset_id: int,
+    symbols: Sequence[str],
+    signal_timeframe: str,
+    grid_timeframe: str,
+) -> dict[str, Any]:
+    """What the frozen dataset actually contains for this measurement.
+
+    Recorded into the declaration so the run is reproducible against a stated
+    row count: if a later reader gets different numbers from the same dataset
+    id, the dataset was not immutable and this is where that shows up.
+    """
+    upper = [str(symbol).upper() for symbol in symbols]
+    flow = conn.execute(
+        """
+        SELECT COUNT(*) AS rows, COUNT(DISTINCT symbol) AS symbols,
+               MIN(timestamp) AS first_bar, MAX(timestamp) AS last_bar
+        FROM research_dataset_trade_flow_features
+        WHERE dataset_id = %s AND symbol = ANY(%s) AND timeframe = %s
+        """,
+        (dataset_id, upper, signal_timeframe),
+    ).fetchone()
+    grid = conn.execute(
+        """
+        SELECT COUNT(*) AS rows, COUNT(DISTINCT symbol) AS symbols,
+               MIN(timestamp) AS first_bar, MAX(timestamp) AS last_bar
+        FROM research_dataset_candles
+        WHERE dataset_id = %s AND symbol = ANY(%s) AND timeframe = %s
+        """,
+        (dataset_id, upper, grid_timeframe),
+    ).fetchone()
+    return jsonable(
+        {
+            "dataset_id": dataset_id,
+            "signal_timeframe": signal_timeframe,
+            "grid_timeframe": grid_timeframe,
+            "trade_flow_rows": int((flow or {}).get("rows") or 0),
+            "trade_flow_symbols": int((flow or {}).get("symbols") or 0),
+            "trade_flow_first_bar": (flow or {}).get("first_bar"),
+            "trade_flow_last_bar": (flow or {}).get("last_bar"),
+            "grid_candles": int((grid or {}).get("rows") or 0),
+            "grid_symbols": int((grid or {}).get("symbols") or 0),
+            "grid_first_bar": (grid or {}).get("first_bar"),
+            "grid_last_bar": (grid or {}).get("last_bar"),
+        }
+    )
 
 
 def declared_cell_keys(
@@ -1753,13 +1856,12 @@ def run_alpha_map(
     symbols = [str(item).upper() for item in (declaration["symbols"] or [])]
     panel = load_alpha_map_panel(
         conn,
+        dataset_id=dataset_id,
         symbols=symbols,
         signal_timeframe=str(declaration["signal_timeframe"]),
         grid_timeframe=str(declaration["grid_timeframe"]),
         start=window[0],
         end=window[1],
-        feed=str(specification.get("feed") or "sip"),
-        source=str(specification.get("source") or "alpaca"),
         cost_model=cost_model,
     )
     observations = panel["observations"]
