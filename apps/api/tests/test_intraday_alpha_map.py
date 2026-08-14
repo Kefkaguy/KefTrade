@@ -909,7 +909,7 @@ def _seed_alpha_map_postgres_fixture(conn, *, token: str, symbols: list[str]) ->
                 # verdict is less important than exact equality with the Python
                 # measurement below.
                 open_price = base_price
-                close_price = base_price * (1.0 + raw * 0.000025 * (minute + 1))
+                close_price = base_price * (1.0 + raw * 0.00010 * (minute + 1))
                 high = max(open_price, close_price) * 1.0001
                 low = min(open_price, close_price) * 0.9999
                 conn.execute(
