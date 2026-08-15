@@ -1419,14 +1419,15 @@ def load_alpha_map_panel(
             f"for these {len(upper)} symbols in this phase window. Freeze them into the "
             "dataset before mapping alpha; the alpha map does not read live tables."
         )
-
     signal_candles = _dataset_candles_by_symbol(
-        conn, dataset_id=dataset_id, symbols=upper, timeframe=signal_timeframe,
-        start=start, end=end,
+        conn,
+        dataset_id=dataset_id,
+        symbols=upper,
+        timeframe=signal_timeframe,
+        start=start,
+        end=end,
+        include_session_context=True,
     )
-    # The last decision in the window needs bars past the window to resolve its
-    # longest horizon. Those bars are still inside the frozen dataset, so this
-    # reaches forward in time without reaching outside the snapshot.
     horizon_slack = timedelta(minutes=signal_minutes + 90)
     grid_candles = _dataset_candles_by_symbol(
         conn,
@@ -1435,6 +1436,7 @@ def load_alpha_map_panel(
         timeframe=grid_timeframe,
         start=start,
         end=end + horizon_slack,
+        include_session_context=False,
     )
     if not grid_candles:
         raise ValueError(
@@ -1560,7 +1562,6 @@ def attach_forward_returns(
         "unavailable_by_reason": dict(reasons),
     }
 
-
 def _dataset_candles_by_symbol(
     conn: psycopg.Connection,
     *,
@@ -1569,45 +1570,74 @@ def _dataset_candles_by_symbol(
     timeframe: str,
     start: datetime,
     end: datetime,
+    include_session_context: bool = True,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Frozen candles joined to their frozen session context.
+    """Load frozen candles, optionally joined to frozen session context.
 
-    The join is to ``research_dataset_intraday_features`` rather than the live
-    ``intraday_features``: a session VWAP or relative-volume value recomputed by
-    a later backfill would change the feature panel without changing anything
-    the declaration recorded.
+    Signal-timeframe candles need frozen intraday session context because
+    minutes_to_close, relative volume and distance from VWAP are signal
+    features.
 
-    ``DISTINCT ON`` collapses the source dimension. The frozen candle key
-    includes ``source``, so a dataset frozen without a pinned source can hold
-    two rows for one bar, and silently taking both would double-count that bar
-    in every measurement.
+    Outcome-grid candles need only timestamp/OHLCV. Joining millions of 1m
+    outcome rows to research_dataset_intraday_features is unnecessary and can
+    make panel construction extremely expensive.
 
-    ``minutes_to_close`` comes back with the signal rows because it is the only
-    record of where the exchange session actually ended. The candle table has
-    no such notion -- an after-hours bar looks exactly like a regular one -- so
-    without this column there is nothing to stop a forward return running past
-    the close.
+    DISTINCT ON still collapses the source dimension for snapshots that were
+    not pinned to a single source.
     """
-    rows = conn.execute(
-        """
-        SELECT DISTINCT ON (c.symbol, c.timestamp)
-               c.symbol, c.timestamp, c.source, c.open, c.high, c.low, c.close, c.volume,
-               f.minutes_from_open, f.minutes_to_close,
-               f.session_relative_volume, f.distance_from_session_vwap
-        FROM research_dataset_candles c
-        LEFT JOIN research_dataset_intraday_features f
-          ON f.dataset_id = c.dataset_id AND f.symbol = c.symbol
-         AND f.timeframe = c.timeframe AND f.timestamp = c.timestamp
-        WHERE c.dataset_id = %s AND c.symbol = ANY(%s) AND c.timeframe = %s
-          AND c.timestamp >= %s AND c.timestamp < %s
-        ORDER BY c.symbol, c.timestamp, c.source
-        """,
-        (dataset_id, [str(symbol).upper() for symbol in symbols], timeframe, start, end),
-    ).fetchall()
+    params = (
+        dataset_id,
+        [str(symbol).upper() for symbol in symbols],
+        timeframe,
+        start,
+        end,
+    )
+
+    if include_session_context:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT ON (c.symbol, c.timestamp)
+                   c.symbol, c.timestamp, c.source,
+                   c.open, c.high, c.low, c.close, c.volume,
+                   f.minutes_from_open, f.minutes_to_close,
+                   f.session_relative_volume, f.distance_from_session_vwap
+            FROM research_dataset_candles c
+            LEFT JOIN research_dataset_intraday_features f
+              ON f.dataset_id = c.dataset_id
+             AND f.symbol = c.symbol
+             AND f.timeframe = c.timeframe
+             AND f.timestamp = c.timestamp
+            WHERE c.dataset_id = %s
+              AND c.symbol = ANY(%s)
+              AND c.timeframe = %s
+              AND c.timestamp >= %s
+              AND c.timestamp < %s
+            ORDER BY c.symbol, c.timestamp, c.source
+            """,
+            params,
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT ON (c.symbol, c.timestamp)
+                   c.symbol, c.timestamp, c.source,
+                   c.open, c.high, c.low, c.close, c.volume
+            FROM research_dataset_candles c
+            WHERE c.dataset_id = %s
+              AND c.symbol = ANY(%s)
+              AND c.timeframe = %s
+              AND c.timestamp >= %s
+              AND c.timestamp < %s
+            ORDER BY c.symbol, c.timestamp, c.source
+            """,
+            params,
+        ).fetchall()
+
     output: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         record = dict(row)
         output[str(record["symbol"]).upper()].append(record)
+
     return dict(output)
 
 
