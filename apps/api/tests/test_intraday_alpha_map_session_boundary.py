@@ -129,7 +129,7 @@ class FrozenConn:
     def __init__(self, store: dict):
         self.store = store
 
-    def execute(self, query, params=None):
+    def _rows_for(self, query, params):
         collapsed = " ".join(query.split())
         params = params or ()
         if "FROM research_dataset_trade_flow_features" in collapsed:
@@ -139,15 +139,21 @@ class FrozenConn:
         else:
             raise AssertionError(f"unexpected query: {collapsed}")
         _dataset_id, symbols, timeframe, start, end = params
-        return _Result(
-            [
-                dict(row)
-                for row in source
-                if row["symbol"] in symbols
-                and row["timeframe"] == timeframe
-                and start <= row["timestamp"] < end
-            ]
-        )
+        return [
+            dict(row)
+            for row in source
+            if row["symbol"] in symbols
+            and row["timeframe"] == timeframe
+            and start <= row["timestamp"] < end
+        ]
+
+    def execute(self, query, params=None):
+        return _Result(self._rows_for(query, params))
+
+    def cursor(self, name=None, withhold=False, **kwargs):
+        # Candles stream through a named cursor; see `_ServerCursor`.
+        assert name, "the candle loader must use a named (server-side) cursor"
+        return _ServerCursor(self)
 
 
 class _Result:
@@ -159,6 +165,37 @@ class _Result:
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
+
+
+class _ServerCursor:
+    """Iterable, and refuses to be drained in one block.
+
+    The 1m grid this module builds is small, but the loader it exercises is the
+    one that reads 6.5M rows in production. Refusing `fetchall` here keeps the
+    session-boundary fixtures on exactly the streaming path the VPS runs.
+    """
+
+    def __init__(self, conn):
+        self.conn = conn
+        self.itersize = None
+        self.rows: list[dict] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def execute(self, query, params=None):
+        self.rows = self.conn._rows_for(query, params)
+        return self
+
+    def __iter__(self):
+        assert isinstance(self.itersize, int) and self.itersize > 0
+        return iter(self.rows)
+
+    def fetchall(self):
+        raise AssertionError("the frozen candle stream must be iterated, not materialized")
 
 
 def _measure(store, *, horizons, day) -> dict:

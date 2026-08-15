@@ -63,7 +63,8 @@ from itertools import combinations
 from json import dumps
 from math import erfc, isfinite, log, sqrt
 from statistics import fmean, pstdev
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Iterator, Sequence
+from uuid import uuid4
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -1390,6 +1391,13 @@ def load_alpha_map_panel(
     Feed and source are not parameters: the snapshot already pinned both when
     it was frozen, and accepting them here would let a caller ask for a feed
     the dataset does not contain and get silence instead of a refusal.
+
+    The returned observations hold a live handle to the frozen outcome grid
+    rather than a copy of it, so ``attach_forward_returns`` -- and only it --
+    still reads from ``conn``.  That is what keeps the 1m grid from being
+    resident all at once; see ``_FrozenOutcomeGrid``.  The consequence for
+    callers is that the two functions must be used against the same open
+    connection, which every caller already does.
     """
     signal_minutes = timeframe_minutes(signal_timeframe)
     grid_minutes = timeframe_minutes(grid_timeframe)
@@ -1429,31 +1437,26 @@ def load_alpha_map_panel(
         include_session_context=True,
     )
     horizon_slack = timedelta(minutes=signal_minutes + 90)
-    grid_candles = _dataset_candles_by_symbol(
+    # Not loaded here.  The outcome grid is the one input whose size is set by
+    # the calendar rather than the declaration -- a discovery window is millions
+    # of 1m bars -- and panel construction needs only to know which sessions it
+    # covers.  The bars themselves are read one symbol at a time when the
+    # forward ladder is attached.
+    grid = _FrozenOutcomeGrid(
         conn,
         dataset_id=dataset_id,
         symbols=upper,
         timeframe=grid_timeframe,
         start=start,
         end=end + horizon_slack,
-        include_session_context=False,
     )
-    if not grid_candles:
+    grid_sessions = grid.sessions_with_bars()
+    if not grid_sessions:
         raise ValueError(
             f"dataset {dataset_id} contains no frozen {grid_timeframe} candles. Re-freeze "
             f"it with --outcome-timeframes {grid_timeframe}; the alpha map cannot measure "
             f"sub-{signal_timeframe} horizons without a finer frozen grid."
         )
-
-    grid_by_session: dict[str, dict[date, list[dict[str, Any]]]] = {}
-    for symbol, rows in grid_candles.items():
-        grouped: dict[date, list[dict[str, Any]]] = defaultdict(list)
-        for row in rows:
-            grouped[exchange_session_date(row["timestamp"])].append(row)
-        grid_by_session[symbol] = {
-            session: sorted(items, key=lambda item: item["timestamp"])
-            for session, items in grouped.items()
-        }
 
     signal_index: dict[str, dict[datetime, dict[str, Any]]] = defaultdict(dict)
     for symbol, rows in signal_candles.items():
@@ -1470,8 +1473,7 @@ def load_alpha_map_panel(
             skipped["no_matching_signal_candle"] += 1
             continue
         session = exchange_session_date(timestamp)
-        grid_rows = grid_by_session.get(symbol, {}).get(session)
-        if not grid_rows:
+        if session not in grid_sessions.get(symbol, frozenset()):
             skipped["no_grid_bars_for_session"] += 1
             continue
         decision = bar_close_timestamp(timestamp, timeframe=signal_timeframe)
@@ -1492,7 +1494,8 @@ def load_alpha_map_panel(
                 "cost_bps": estimated_round_trip_cost_bps(
                     cost_model, symbol=symbol, timestamp=decision, stressed=True
                 ),
-                "_grid_rows": grid_rows,
+                "_grid": grid,
+                "_grid_key": (symbol, session),
                 "_decision": decision,
                 "_session_close": session_close,
             }
@@ -1535,17 +1538,30 @@ def attach_forward_returns(
 ) -> dict[str, Any]:
     """Populate each observation's forward ladder and drop the scratch keys.
 
+    This reads the frozen outcome grid from the connection the panel was built
+    against, one symbol at a time.  ``load_alpha_map_panel`` deliberately did
+    not load those bars: holding them for the whole panel is what OOM-killed
+    the discovery run.
+
     ``unavailable_by_reason`` is returned alongside the coverage counts because
     the reasons are diagnostic rather than incidental: a run whose rungs are
     mostly ``session_end_before_horizon`` is telling you the horizon is too long
     for where in the session the signal fires, which is a finding about the
     hypothesis and not a data problem.
+
+    The panel is walked grouped by symbol so the outcome grid stays one symbol
+    resident.  That is an ordering, not a filter: every observation is still
+    measured, each one independently of the others, and the two counters below
+    are sums.  So the order this walks in cannot change what it reports -- it
+    changes only how many of the frozen 1m bars are alive while it does.
     """
     coverage: dict[str, int] = defaultdict(int)
     reasons: dict[str, int] = defaultdict(int)
-    for observation in observations:
+    for observation in sorted(observations, key=lambda row: str(row.get("symbol") or "")):
+        grid = observation.pop("_grid")
+        symbol, session = observation.pop("_grid_key")
         ladder = forward_return_ladder(
-            observation.pop("_grid_rows"),
+            grid.session_bars(symbol, session),
             decision_timestamp=observation.pop("_decision"),
             horizons_seconds=horizons_seconds,
             grid_seconds=grid_seconds,
@@ -1561,6 +1577,239 @@ def attach_forward_returns(
         "available_by_horizon": dict(coverage),
         "unavailable_by_reason": dict(reasons),
     }
+
+
+# ---------------------------------------------------------------------------
+# Frozen candle loading
+#
+# The outcome grid is the only thing in this module whose size is set by the
+# calendar rather than by the declaration: a discovery window over a few dozen
+# symbols is millions of 1m bars.  Everything below exists so that number never
+# becomes a Python-object count.
+# ---------------------------------------------------------------------------
+
+# Rows per round trip from a server-side cursor.  Large enough that the FETCH
+# round trips are not the cost, small enough that the resident page is noise.
+DATASET_CANDLE_ITERSIZE = 10_000
+
+# One source of truth for the DISTINCT ON, so the streaming loader below and
+# `_dataset_candles_by_symbol` cannot drift apart on which row wins when a
+# snapshot was not pinned to a single source.
+_SIGNAL_CANDLE_QUERY = """
+    SELECT DISTINCT ON (c.symbol, c.timestamp)
+           c.symbol, c.timestamp, c.source,
+           c.open, c.high, c.low, c.close, c.volume,
+           f.minutes_from_open, f.minutes_to_close,
+           f.session_relative_volume, f.distance_from_session_vwap
+    FROM research_dataset_candles c
+    LEFT JOIN research_dataset_intraday_features f
+      ON f.dataset_id = c.dataset_id
+     AND f.symbol = c.symbol
+     AND f.timeframe = c.timeframe
+     AND f.timestamp = c.timestamp
+    WHERE c.dataset_id = %s
+      AND c.symbol = ANY(%s)
+      AND c.timeframe = %s
+      AND c.timestamp >= %s
+      AND c.timestamp < %s
+    ORDER BY c.symbol, c.timestamp, c.source
+"""
+
+_GRID_CANDLE_QUERY = """
+    SELECT DISTINCT ON (c.symbol, c.timestamp)
+           c.symbol, c.timestamp, c.source,
+           c.open, c.high, c.low, c.close, c.volume
+    FROM research_dataset_candles c
+    WHERE c.dataset_id = %s
+      AND c.symbol = ANY(%s)
+      AND c.timeframe = %s
+      AND c.timestamp >= %s
+      AND c.timestamp < %s
+    ORDER BY c.symbol, c.timestamp, c.source
+"""
+
+# Which (symbol, session) pairs the frozen grid covers at all.  DISTINCT ON is
+# deliberately absent: it picks *which* of several source rows survives for a
+# (symbol, timestamp), and every one of them carries the same timestamp and so
+# maps to the same exchange session date.  The set this builds is therefore
+# identical to the one the full loader would produce, at two columns per row
+# and without the sort that DISTINCT ON implies.
+_GRID_PRESENCE_QUERY = """
+    SELECT c.symbol, c.timestamp
+    FROM research_dataset_candles c
+    WHERE c.dataset_id = %s
+      AND c.symbol = ANY(%s)
+      AND c.timeframe = %s
+      AND c.timestamp >= %s
+      AND c.timestamp < %s
+"""
+
+
+def _stream_rows(
+    conn: psycopg.Connection,
+    query: str,
+    params: Sequence[Any],
+    *,
+    label: str,
+    itersize: int = DATASET_CANDLE_ITERSIZE,
+) -> Iterator[Any]:
+    """Iterate a result set through a server-side cursor.
+
+    ``fetchall()`` materializes a result twice and holds both copies at the
+    same instant: libpq's buffer for the whole result, and then one Python
+    object per row per column.  On the 1m discovery grid that is roughly 6.5M
+    rows, and the process was OOM-killed at 7.9GiB resident before it had
+    measured anything.  A named cursor keeps at most ``itersize`` rows on this
+    side and lets the caller decide how much of the stream it retains.
+
+    The cursor is declared ``WITH HOLD`` only when the connection is in
+    autocommit, where a plain ``DECLARE`` has no transaction to live in.  The
+    research CLIs run inside a transaction, so the usual path is the cheap one.
+    """
+    withhold = bool(getattr(conn, "autocommit", False))
+    with conn.cursor(name=f"alpha_map_{label}_{uuid4().hex}", withhold=withhold) as cursor:
+        cursor.itersize = itersize
+        cursor.execute(query, params)
+        yield from cursor
+
+
+class _GridBar:
+    """One outcome-grid bar, holding only what the forward ladder reads.
+
+    The full row as a dict is around a kilobyte once psycopg hands back NUMERIC
+    columns as ``Decimal`` and the symbol and source as fresh strings; at 6.5M
+    rows that is most of a VPS spent on five fields and change.  ``symbol``,
+    ``source`` and ``volume`` are never consulted by ``forward_return_ladder``
+    -- the symbol is already the key this bar is filed under -- so they are not
+    kept.
+
+    Mapping access is preserved rather than replaced by attributes so the
+    ladder itself is untouched; a measurement function is the last place to
+    accept a refactor in exchange for memory.
+    """
+
+    __slots__ = ("timestamp", "open", "high", "low", "close")
+
+    def __init__(self, row: Any) -> None:
+        self.timestamp = row["timestamp"]
+        # `_finite` is what the ladder would have applied to these values
+        # anyway, so converting on the way in changes no arithmetic: it only
+        # moves the Decimal -> float conversion off the hot path and out of the
+        # retained set.  A NULL or non-finite price still arrives as None and
+        # still lands in `missing_ohlc` / `missing_entry_price`.
+        self.open = _finite(row["open"])
+        self.high = _finite(row["high"])
+        self.low = _finite(row["low"])
+        self.close = _finite(row["close"])
+
+    def __getitem__(self, key: str) -> Any:
+        try:
+            return getattr(self, key)
+        except AttributeError:
+            raise KeyError(key) from None
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return getattr(self, key, default)
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostic only
+        return f"_GridBar({self.timestamp!r}, close={self.close!r})"
+
+
+class _FrozenOutcomeGrid:
+    """The frozen outcome grid, one symbol resident at a time.
+
+    Holding the whole grid is what the panel used to do, and it is what killed
+    the process: every observation kept a reference to its session's bars, so
+    the last symbol's load could not free the first symbol's.
+
+    Two things make one-symbol residency possible without changing a single
+    measured number.  Panel construction does not need the bars at all -- it
+    needs to know only *whether* a (symbol, session) has any, which is the
+    ``no_grid_bars_for_session`` skip -- so it runs against a two-column
+    presence pass.  And the bars themselves are needed only when the ladder is
+    attached, which walks the panel grouped by symbol.  A cache of exactly one
+    symbol is therefore never a cache miss in the steady state.
+
+    Every read is still bounded by ``dataset_id`` against ``research_dataset_``
+    tables, and still collapses the source dimension with the same DISTINCT ON.
+    Nothing here loosens what the panel is allowed to see; it changes only how
+    much of it is alive at once.
+    """
+
+    def __init__(
+        self,
+        conn: psycopg.Connection,
+        *,
+        dataset_id: int,
+        symbols: Sequence[str],
+        timeframe: str,
+        start: datetime,
+        end: datetime,
+    ) -> None:
+        self._conn = conn
+        self._dataset_id = dataset_id
+        self._symbols = [str(symbol).upper() for symbol in symbols]
+        self._timeframe = timeframe
+        self._start = start
+        self._end = end
+        # Every symbol shares the same minute grid, so the session date of a
+        # given timestamp is computed once for the whole run rather than once
+        # per row.  Pure function of the timestamp, so this is a speedup and
+        # not a semantic change.
+        self._session_dates: dict[datetime, date] = {}
+        self._resident: str | None = None
+        self._sessions: dict[date, list[_GridBar]] = {}
+
+    def _params(self, symbols: Sequence[str]) -> tuple[Any, ...]:
+        return (self._dataset_id, list(symbols), self._timeframe, self._start, self._end)
+
+    def _session_date(self, timestamp: datetime) -> date:
+        cached = self._session_dates.get(timestamp)
+        if cached is None:
+            cached = exchange_session_date(timestamp)
+            self._session_dates[timestamp] = cached
+        return cached
+
+    def sessions_with_bars(self) -> dict[str, set[date]]:
+        """Which exchange sessions the frozen grid covers, per symbol."""
+        present: dict[str, set[date]] = defaultdict(set)
+        for row in _stream_rows(
+            self._conn,
+            _GRID_PRESENCE_QUERY,
+            self._params(self._symbols),
+            label="grid_presence",
+        ):
+            present[str(row["symbol"]).upper()].add(self._session_date(row["timestamp"]))
+        return dict(present)
+
+    def session_bars(self, symbol: str, session: date) -> list[_GridBar]:
+        """One symbol's bars for one exchange session, in chronological order."""
+        symbol = str(symbol).upper()
+        if symbol != self._resident:
+            self._load(symbol)
+        return self._sessions.get(session, [])
+
+    def _load(self, symbol: str) -> None:
+        # Dropped before the next symbol is built rather than after, so the two
+        # are never resident together.
+        self._resident = None
+        self._sessions = {}
+        grouped: dict[date, list[_GridBar]] = defaultdict(list)
+        for row in _stream_rows(
+            self._conn,
+            _GRID_CANDLE_QUERY,
+            self._params([symbol]),
+            label="grid",
+        ):
+            grouped[self._session_date(row["timestamp"])].append(_GridBar(row))
+        # Sorted in place: the stream already arrives in timestamp order, and
+        # building new lists here would put two copies of the symbol side by
+        # side for no gain.
+        for bars in grouped.values():
+            bars.sort(key=lambda bar: bar.timestamp)
+        self._sessions = dict(grouped)
+        self._resident = symbol
+
 
 def _dataset_candles_by_symbol(
     conn: psycopg.Connection,
@@ -1584,6 +1833,12 @@ def _dataset_candles_by_symbol(
 
     DISTINCT ON still collapses the source dimension for snapshots that were
     not pinned to a single source.
+
+    Rows arrive through a server-side cursor, so the result set is never
+    materialized twice.  This still returns every matching row, which is the
+    right shape for the signal timeframe -- one bar per 15 or 30 minutes -- and
+    the wrong shape for a 1m outcome grid.  For that, panel construction uses
+    ``_FrozenOutcomeGrid``, which holds one symbol at a time.
     """
     params = (
         dataset_id,
@@ -1592,49 +1847,10 @@ def _dataset_candles_by_symbol(
         start,
         end,
     )
-
-    if include_session_context:
-        rows = conn.execute(
-            """
-            SELECT DISTINCT ON (c.symbol, c.timestamp)
-                   c.symbol, c.timestamp, c.source,
-                   c.open, c.high, c.low, c.close, c.volume,
-                   f.minutes_from_open, f.minutes_to_close,
-                   f.session_relative_volume, f.distance_from_session_vwap
-            FROM research_dataset_candles c
-            LEFT JOIN research_dataset_intraday_features f
-              ON f.dataset_id = c.dataset_id
-             AND f.symbol = c.symbol
-             AND f.timeframe = c.timeframe
-             AND f.timestamp = c.timestamp
-            WHERE c.dataset_id = %s
-              AND c.symbol = ANY(%s)
-              AND c.timeframe = %s
-              AND c.timestamp >= %s
-              AND c.timestamp < %s
-            ORDER BY c.symbol, c.timestamp, c.source
-            """,
-            params,
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            """
-            SELECT DISTINCT ON (c.symbol, c.timestamp)
-                   c.symbol, c.timestamp, c.source,
-                   c.open, c.high, c.low, c.close, c.volume
-            FROM research_dataset_candles c
-            WHERE c.dataset_id = %s
-              AND c.symbol = ANY(%s)
-              AND c.timeframe = %s
-              AND c.timestamp >= %s
-              AND c.timestamp < %s
-            ORDER BY c.symbol, c.timestamp, c.source
-            """,
-            params,
-        ).fetchall()
+    query = _SIGNAL_CANDLE_QUERY if include_session_context else _GRID_CANDLE_QUERY
 
     output: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in rows:
+    for row in _stream_rows(conn, query, params, label="candles"):
         record = dict(row)
         output[str(record["symbol"]).upper()].append(record)
 

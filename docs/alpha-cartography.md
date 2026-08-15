@@ -256,6 +256,32 @@ Two consequences worth knowing:
   later reader who gets different numbers from the same `dataset_id` has found a
   dataset that was not actually immutable.
 
+### The outcome grid is streamed, one symbol at a time
+
+The signal side is one bar per 15 or 30 minutes and fits in memory without
+thinking about it. The outcome side does not: a discovery window over a few
+dozen symbols is millions of 1m bars, and `fetchall()` on that holds libpq's
+whole result buffer and one Python dict per row at the same instant. On the
+production VPS that was **7.9GiB resident and an OOM kill** before a single cell
+had been measured.
+
+Two changes, neither of which touches a measured number:
+
+- **Candles stream through a server-side cursor** (`itersize`
+  `DATASET_CANDLE_ITERSIZE`), so no result set is materialized twice.
+- **`load_alpha_map_panel` no longer loads the grid at all.** Building the panel
+  needs to know only *which sessions* the grid covers — that is the
+  `no_grid_bars_for_session` skip — so it runs a two-column presence pass. The
+  bars are read when `attach_forward_returns` walks the panel, which it does
+  grouped by symbol, so `_FrozenOutcomeGrid` keeps exactly one symbol resident
+  and drops it before loading the next.
+
+The consequence for callers: `attach_forward_returns` now reads from the same
+connection the panel was built against, and the two must be used together. It
+is still a pure function of the frozen rows — the walk order is an ordering, not
+a filter, and `test_intraday_alpha_map_streaming_loader.py` pins the streamed
+result against the same ladders computed from a fully-resident grid.
+
 ## Freezing a dataset for it
 
 `window_start` bounds a snapshot from below. Without it the only control was

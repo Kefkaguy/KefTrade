@@ -112,13 +112,21 @@ class FrozenOnlyConn:
     get a wrong answer here, it gets an AssertionError naming the table -- which
     is the failure mode this whole test module exists to make impossible to
     reintroduce quietly.
+
+    Candles are served through `cursor(name=...)` because that is what the
+    loader uses: the 1m outcome grid is millions of rows and `fetchall()` on it
+    OOM-killed the process. `_ServerCursor` refuses `fetchall` outright, so a
+    loader that goes back to materializing the whole grid fails here rather
+    than on the VPS.
     """
 
     def __init__(self, store: dict):
         self.store = store
         self.queries: list[str] = []
+        self.cursor_names: list[str] = []
+        self.itersizes: list[int] = []
 
-    def execute(self, query, params=None):
+    def _rows_for(self, query, params):
         collapsed = " ".join(query.split())
         self.queries.append(collapsed)
         for table in LIVE_TABLES:
@@ -129,30 +137,28 @@ class FrozenOnlyConn:
                 )
         params = params or ()
         if "FROM research_dataset_trade_flow_features" in collapsed:
-            dataset_id, symbols, timeframe, start, end = params
-            return _Result(
-                [
-                    dict(row)
-                    for row in self.store["trade_flow"]
-                    if dataset_id == DATASET_ID
-                    and row["symbol"] in symbols
-                    and row["timeframe"] == timeframe
-                    and start <= row["timestamp"] < end
-                ]
-            )
-        if "FROM research_dataset_candles" in collapsed:
-            dataset_id, symbols, timeframe, start, end = params
-            return _Result(
-                [
-                    dict(row)
-                    for row in self.store["candles"]
-                    if dataset_id == DATASET_ID
-                    and row["symbol"] in symbols
-                    and row["timeframe"] == timeframe
-                    and start <= row["timestamp"] < end
-                ]
-            )
-        raise AssertionError(f"unexpected query: {collapsed}")
+            source = self.store["trade_flow"]
+        elif "FROM research_dataset_candles" in collapsed:
+            source = self.store["candles"]
+        else:
+            raise AssertionError(f"unexpected query: {collapsed}")
+        dataset_id, symbols, timeframe, start, end = params
+        return [
+            dict(row)
+            for row in source
+            if dataset_id == DATASET_ID
+            and row["symbol"] in symbols
+            and row["timeframe"] == timeframe
+            and start <= row["timestamp"] < end
+        ]
+
+    def execute(self, query, params=None):
+        return _Result(self._rows_for(query, params))
+
+    def cursor(self, name=None, withhold=False, **kwargs):
+        assert name, "the candle loader must use a named (server-side) cursor"
+        self.cursor_names.append(name)
+        return _ServerCursor(self, name)
 
 
 class _Result:
@@ -164,6 +170,40 @@ class _Result:
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
+
+
+class _ServerCursor:
+    """A named cursor that can be iterated and cannot be drained in one block."""
+
+    def __init__(self, conn, name):
+        self.conn = conn
+        self.name = name
+        self.itersize = None
+        self.rows: list[dict] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def execute(self, query, params=None):
+        self.rows = self.conn._rows_for(query, params)
+        return self
+
+    def __iter__(self):
+        assert isinstance(self.itersize, int) and self.itersize > 0, (
+            "a server-side cursor without an itersize fetches the whole result "
+            "in one block, which is the thing being fixed"
+        )
+        self.conn.itersizes.append(self.itersize)
+        return iter(self.rows)
+
+    def fetchall(self):
+        raise AssertionError(
+            "the frozen candle stream must be iterated, not materialized: "
+            "fetchall() on the 1m outcome grid is what OOM-killed the run"
+        )
 
 
 def _panel(conn: FrozenOnlyConn) -> list[dict]:
