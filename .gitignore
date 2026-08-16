@@ -32,3 +32,9 @@ reports/stage0_microstructure_probe/**/*.parquet
 reports/stage0_microstructure_probe/**/*.csv
 reports/stage0_microstructure_probe/**/*.jsonl
 reports/stage0_probe_run.log
+
+# Tier-1 MBO: validation reports are committed; DBN source files are not.
+# They are large, licensed vendor data, and re-downloadable.
+*.dbn
+*.dbn.zst
+data/databento/

@@ -14,6 +14,12 @@ dependencies = [
   "numpy>=2.0.0",
   "yfinance>=0.2.50",
   "pandas-market-calendars>=4.4.0",
+  # Tier-1 order-level market data. `databento` supplies the DBN reader and the
+  # authoritative Action/Side/flag constants the MBO validator pins itself
+  # against; `sortedcontainers` is the price-level structure Databento's own
+  # reference book implementation uses.
+  "databento>=0.83.0",
+  "sortedcontainers>=2.4.0",
 ]
 
 [project.optional-dependencies]
