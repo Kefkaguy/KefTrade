@@ -307,7 +307,7 @@ def persist_quote_snapshots(conn: psycopg.Connection, quotes: Sequence[dict[str,
             -- Keyed on the nanosecond the venue reported, not the microsecond
             -- Postgres can hold in a timestamptz: two NBBO updates inside one
             -- microsecond are two updates, and collapsing them kept only the
-            -- later state (migration 079).
+            -- later state (migration 080).
             ON CONFLICT(symbol, provider, feed, timestamp_ns)
             DO UPDATE SET
                 bid_price = EXCLUDED.bid_price,
