@@ -1,0 +1,618 @@
+{
+  "stage0_version": "microstructure_stage0_probe_v1",
+  "feed": "sip",
+  "symbols": [
+    "INTC",
+    "NVDA"
+  ],
+  "sessions": [
+    "2026-06-01",
+    "2026-06-02",
+    "2026-06-03",
+    "2026-06-04",
+    "2026-06-05"
+  ],
+  "resumed_from_checkpoint": [
+    "INTC/2026-06-01",
+    "INTC/2026-06-02",
+    "INTC/2026-06-03",
+    "INTC/2026-06-04",
+    "INTC/2026-06-05",
+    "NVDA/2026-06-01",
+    "NVDA/2026-06-02",
+    "NVDA/2026-06-03",
+    "NVDA/2026-06-04",
+    "NVDA/2026-06-05"
+  ],
+  "pooled": {
+    "symbol_sessions": 10,
+    "quotes_parsed": 23016760,
+    "gross_abs_e": 5932095800.0,
+    "rotation_gross_abs_e": 2682730600.0,
+    "rotation_share_of_gross_abs_e": 0.45224,
+    "update_rotation_rate": 0.367987,
+    "microsecond_collapse_rate": 0.00163,
+    "rows_lost_to_microsecond_truncation": 37526,
+    "mean_quotes_per_second": 98.362,
+    "median_spread_bps": 1.5843,
+    "all_windows_exhausted": true
+  },
+  "rotation_kill_rule": {
+    "threshold": 0.3,
+    "measured": 0.45224,
+    "verdict": "exceeds_threshold",
+    "meaning": "Venue rotation accounts for more gross order-flow imbalance than the predeclared limit, so OFI computed from this feed is dominated by which exchange happens to be posting the NBBO."
+  },
+  "per_symbol_session": [
+    {
+      "symbol": "INTC",
+      "session_date": "2026-06-01",
+      "feed": "sip",
+      "pages": 205,
+      "window_exhausted": true,
+      "quotes_received": 2049061,
+      "quotes_parsed": 2049061,
+      "quote_span_seconds": 23399.999,
+      "quotes_per_second": 87.567,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 2049061,
+        "distinct_microsecond_instants": 2044718,
+        "rows_lost_to_microsecond_truncation": 4343,
+        "microsecond_collapse_rate": 0.00212,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 624687500.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 118621800.0,
+          "size_change_same_venue": 232443200.0,
+          "venue_rotation": 273622500.0
+        },
+        "signed_e_by_reason": {
+          "price_change": 398000.0,
+          "size_change_same_venue": 2309600.0,
+          "venue_rotation": 1026900.0
+        },
+        "side_events_by_reason": {
+          "price_change": 425544,
+          "size_change_same_venue": 2943020,
+          "venue_rotation": 729556
+        },
+        "rotation_share_of_gross_abs_e": 0.438015,
+        "rotation_free_gross_abs_e": 351065000.0,
+        "updates_compared": 2049060,
+        "updates_with_any_rotation": 721493,
+        "update_rotation_rate": 0.352109
+      },
+      "stream_health": {
+        "crossed_quotes": 1143,
+        "locked_quotes": 13329,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 1143
+        },
+        "median_spread_bps": 1.827,
+        "spread_samples": 21113,
+        "max_quote_gap_seconds": 3.362,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    },
+    {
+      "symbol": "INTC",
+      "session_date": "2026-06-02",
+      "feed": "sip",
+      "pages": 141,
+      "window_exhausted": true,
+      "quotes_received": 1401044,
+      "quotes_parsed": 1401044,
+      "quote_span_seconds": 23399.994,
+      "quotes_per_second": 59.874,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 1401044,
+        "distinct_microsecond_instants": 1397994,
+        "rows_lost_to_microsecond_truncation": 3050,
+        "microsecond_collapse_rate": 0.002177,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 412645400.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 78727100.0,
+          "size_change_same_venue": 142464300.0,
+          "venue_rotation": 191454000.0
+        },
+        "signed_e_by_reason": {
+          "price_change": -1195700.0,
+          "size_change_same_venue": 2439900.0,
+          "venue_rotation": -1898400.0
+        },
+        "side_events_by_reason": {
+          "price_change": 308672,
+          "size_change_same_venue": 2001738,
+          "venue_rotation": 491676
+        },
+        "rotation_share_of_gross_abs_e": 0.463967,
+        "rotation_free_gross_abs_e": 221191400.0,
+        "updates_compared": 1401043,
+        "updates_with_any_rotation": 486977,
+        "update_rotation_rate": 0.347582
+      },
+      "stream_health": {
+        "crossed_quotes": 563,
+        "locked_quotes": 10634,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 563
+        },
+        "median_spread_bps": 1.8749,
+        "spread_samples": 14437,
+        "max_quote_gap_seconds": 5.238,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    },
+    {
+      "symbol": "INTC",
+      "session_date": "2026-06-03",
+      "feed": "sip",
+      "pages": 183,
+      "window_exhausted": true,
+      "quotes_received": 1822237,
+      "quotes_parsed": 1822237,
+      "quote_span_seconds": 23399.993,
+      "quotes_per_second": 77.873,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 1822237,
+        "distinct_microsecond_instants": 1818584,
+        "rows_lost_to_microsecond_truncation": 3653,
+        "microsecond_collapse_rate": 0.002005,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 593863600.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 110028300.0,
+          "size_change_same_venue": 196234900.0,
+          "venue_rotation": 287600400.0
+        },
+        "signed_e_by_reason": {
+          "price_change": 881700.0,
+          "size_change_same_venue": -919300.0,
+          "venue_rotation": 1618400.0
+        },
+        "side_events_by_reason": {
+          "price_change": 419094,
+          "size_change_same_venue": 2547887,
+          "venue_rotation": 677491
+        },
+        "rotation_share_of_gross_abs_e": 0.484287,
+        "rotation_free_gross_abs_e": 306263200.0,
+        "updates_compared": 1822236,
+        "updates_with_any_rotation": 670524,
+        "update_rotation_rate": 0.367968
+      },
+      "stream_health": {
+        "crossed_quotes": 488,
+        "locked_quotes": 9909,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 488
+        },
+        "median_spread_bps": 2.6257,
+        "spread_samples": 18775,
+        "max_quote_gap_seconds": 4.192,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    },
+    {
+      "symbol": "INTC",
+      "session_date": "2026-06-04",
+      "feed": "sip",
+      "pages": 153,
+      "window_exhausted": true,
+      "quotes_received": 1523272,
+      "quotes_parsed": 1523272,
+      "quote_span_seconds": 23399.936,
+      "quotes_per_second": 65.097,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 1523272,
+        "distinct_microsecond_instants": 1520267,
+        "rows_lost_to_microsecond_truncation": 3005,
+        "microsecond_collapse_rate": 0.001973,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 449705200.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 75488400.0,
+          "size_change_same_venue": 157365600.0,
+          "venue_rotation": 216851200.0
+        },
+        "signed_e_by_reason": {
+          "price_change": 1174600.0,
+          "size_change_same_venue": -451000.0,
+          "venue_rotation": 539800.0
+        },
+        "side_events_by_reason": {
+          "price_change": 321638,
+          "size_change_same_venue": 2133215,
+          "venue_rotation": 591689
+        },
+        "rotation_share_of_gross_abs_e": 0.482207,
+        "rotation_free_gross_abs_e": 232854000.0,
+        "updates_compared": 1523271,
+        "updates_with_any_rotation": 585141,
+        "update_rotation_rate": 0.384135
+      },
+      "stream_health": {
+        "crossed_quotes": 241,
+        "locked_quotes": 8504,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 241
+        },
+        "median_spread_bps": 1.8488,
+        "spread_samples": 15699,
+        "max_quote_gap_seconds": 6.694,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    },
+    {
+      "symbol": "INTC",
+      "session_date": "2026-06-05",
+      "feed": "sip",
+      "pages": 269,
+      "window_exhausted": true,
+      "quotes_received": 2682115,
+      "quotes_parsed": 2682115,
+      "quote_span_seconds": 23399.987,
+      "quotes_per_second": 114.62,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 2682115,
+        "distinct_microsecond_instants": 2677301,
+        "rows_lost_to_microsecond_truncation": 4814,
+        "microsecond_collapse_rate": 0.001795,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 943843200.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 204384900.0,
+          "size_change_same_venue": 261512700.0,
+          "venue_rotation": 477945600.0
+        },
+        "signed_e_by_reason": {
+          "price_change": -4119300.0,
+          "size_change_same_venue": 2261700.0,
+          "venue_rotation": 2866200.0
+        },
+        "side_events_by_reason": {
+          "price_change": 581296,
+          "size_change_same_venue": 3665917,
+          "venue_rotation": 1117015
+        },
+        "rotation_share_of_gross_abs_e": 0.506382,
+        "rotation_free_gross_abs_e": 465897600.0,
+        "updates_compared": 2682114,
+        "updates_with_any_rotation": 1101980,
+        "update_rotation_rate": 0.410862
+      },
+      "stream_health": {
+        "crossed_quotes": 703,
+        "locked_quotes": 16039,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 703
+        },
+        "median_spread_bps": 1.9889,
+        "spread_samples": 27643,
+        "max_quote_gap_seconds": 2.375,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    },
+    {
+      "symbol": "NVDA",
+      "session_date": "2026-06-01",
+      "feed": "sip",
+      "pages": 247,
+      "window_exhausted": true,
+      "quotes_received": 2465399,
+      "quotes_parsed": 2465399,
+      "quote_span_seconds": 23399.995,
+      "quotes_per_second": 105.359,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 2465399,
+        "distinct_microsecond_instants": 2461769,
+        "rows_lost_to_microsecond_truncation": 3630,
+        "microsecond_collapse_rate": 0.001472,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 534841600.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 143423500.0,
+          "size_change_same_venue": 171707400.0,
+          "venue_rotation": 219710700.0
+        },
+        "signed_e_by_reason": {
+          "price_change": 958900.0,
+          "size_change_same_venue": 1018400.0,
+          "venue_rotation": 815700.0
+        },
+        "side_events_by_reason": {
+          "price_change": 726528,
+          "size_change_same_venue": 3364054,
+          "venue_rotation": 840214
+        },
+        "rotation_share_of_gross_abs_e": 0.410796,
+        "rotation_free_gross_abs_e": 315130900.0,
+        "updates_compared": 2465398,
+        "updates_with_any_rotation": 830526,
+        "update_rotation_rate": 0.336873
+      },
+      "stream_health": {
+        "crossed_quotes": 1436,
+        "locked_quotes": 11222,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 1436
+        },
+        "median_spread_bps": 1.3416,
+        "spread_samples": 25408,
+        "max_quote_gap_seconds": 3.115,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    },
+    {
+      "symbol": "NVDA",
+      "session_date": "2026-06-02",
+      "feed": "sip",
+      "pages": 229,
+      "window_exhausted": true,
+      "quotes_received": 2281523,
+      "quotes_parsed": 2281523,
+      "quote_span_seconds": 23399.985,
+      "quotes_per_second": 97.501,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 2281523,
+        "distinct_microsecond_instants": 2278280,
+        "rows_lost_to_microsecond_truncation": 3243,
+        "microsecond_collapse_rate": 0.001421,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 485887500.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 124946100.0,
+          "size_change_same_venue": 182631200.0,
+          "venue_rotation": 178310200.0
+        },
+        "signed_e_by_reason": {
+          "price_change": 49500.0,
+          "size_change_same_venue": -1870400.0,
+          "venue_rotation": -636400.0
+        },
+        "side_events_by_reason": {
+          "price_change": 589829,
+          "size_change_same_venue": 3243194,
+          "venue_rotation": 730021
+        },
+        "rotation_share_of_gross_abs_e": 0.366978,
+        "rotation_free_gross_abs_e": 307577300.0,
+        "updates_compared": 2281522,
+        "updates_with_any_rotation": 721835,
+        "update_rotation_rate": 0.316383
+      },
+      "stream_health": {
+        "crossed_quotes": 655,
+        "locked_quotes": 7842,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 655
+        },
+        "median_spread_bps": 1.3114,
+        "spread_samples": 23513,
+        "max_quote_gap_seconds": 3.039,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    },
+    {
+      "symbol": "NVDA",
+      "session_date": "2026-06-03",
+      "feed": "sip",
+      "pages": 214,
+      "window_exhausted": true,
+      "quotes_received": 2133300,
+      "quotes_parsed": 2133300,
+      "quote_span_seconds": 23399.992,
+      "quotes_per_second": 91.167,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 2133300,
+        "distinct_microsecond_instants": 2130206,
+        "rows_lost_to_microsecond_truncation": 3094,
+        "microsecond_collapse_rate": 0.00145,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 410556800.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 109688100.0,
+          "size_change_same_venue": 145674100.0,
+          "venue_rotation": 155194600.0
+        },
+        "signed_e_by_reason": {
+          "price_change": -71100.0,
+          "size_change_same_venue": -1673900.0,
+          "venue_rotation": 189600.0
+        },
+        "side_events_by_reason": {
+          "price_change": 579278,
+          "size_change_same_venue": 2926876,
+          "venue_rotation": 760444
+        },
+        "rotation_share_of_gross_abs_e": 0.37801,
+        "rotation_free_gross_abs_e": 255362200.0,
+        "updates_compared": 2133299,
+        "updates_with_any_rotation": 751761,
+        "update_rotation_rate": 0.352394
+      },
+      "stream_health": {
+        "crossed_quotes": 1298,
+        "locked_quotes": 12543,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 1298
+        },
+        "median_spread_bps": 0.9279,
+        "spread_samples": 21973,
+        "max_quote_gap_seconds": 3.709,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    },
+    {
+      "symbol": "NVDA",
+      "session_date": "2026-06-04",
+      "feed": "sip",
+      "pages": 252,
+      "window_exhausted": true,
+      "quotes_received": 2511478,
+      "quotes_parsed": 2511478,
+      "quote_span_seconds": 23399.978,
+      "quotes_per_second": 107.328,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 2511478,
+        "distinct_microsecond_instants": 2507674,
+        "rows_lost_to_microsecond_truncation": 3804,
+        "microsecond_collapse_rate": 0.001515,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 560611300.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 131851200.0,
+          "size_change_same_venue": 177251400.0,
+          "venue_rotation": 251508700.0
+        },
+        "signed_e_by_reason": {
+          "price_change": 26000.0,
+          "size_change_same_venue": 480000.0,
+          "venue_rotation": 1304100.0
+        },
+        "side_events_by_reason": {
+          "price_change": 606555,
+          "size_change_same_venue": 3421781,
+          "venue_rotation": 994618
+        },
+        "rotation_share_of_gross_abs_e": 0.448633,
+        "rotation_free_gross_abs_e": 309102600.0,
+        "updates_compared": 2511477,
+        "updates_with_any_rotation": 983007,
+        "update_rotation_rate": 0.391406
+      },
+      "stream_health": {
+        "crossed_quotes": 707,
+        "locked_quotes": 14729,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 707
+        },
+        "median_spread_bps": 0.9292,
+        "spread_samples": 25885,
+        "max_quote_gap_seconds": 3.841,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    },
+    {
+      "symbol": "NVDA",
+      "session_date": "2026-06-05",
+      "feed": "sip",
+      "pages": 415,
+      "window_exhausted": true,
+      "quotes_received": 4147331,
+      "quotes_parsed": 4147331,
+      "quote_span_seconds": 23399.992,
+      "quotes_per_second": 177.236,
+      "timestamp_fidelity": {
+        "distinct_nanosecond_instants": 4147331,
+        "distinct_microsecond_instants": 4142441,
+        "rows_lost_to_microsecond_truncation": 4890,
+        "microsecond_collapse_rate": 0.001179,
+        "rows_at_identical_nanosecond": 0,
+        "nanosecond_collapse_rate": 0.0,
+        "out_of_order_rows": 0
+      },
+      "venue_rotation": {
+        "gross_abs_e": 915453700.0,
+        "gross_abs_e_by_reason": {
+          "price_change": 167477300.0,
+          "size_change_same_venue": 317443700.0,
+          "venue_rotation": 430532700.0
+        },
+        "signed_e_by_reason": {
+          "price_change": 1832900.0,
+          "size_change_same_venue": -1348300.0,
+          "venue_rotation": -1176500.0
+        },
+        "side_events_by_reason": {
+          "price_change": 851256,
+          "size_change_same_venue": 5809332,
+          "venue_rotation": 1634072
+        },
+        "rotation_share_of_gross_abs_e": 0.470294,
+        "rotation_free_gross_abs_e": 484921000.0,
+        "updates_compared": 4147330,
+        "updates_with_any_rotation": 1616623,
+        "update_rotation_rate": 0.389798
+      },
+      "stream_health": {
+        "crossed_quotes": 445,
+        "locked_quotes": 17135,
+        "zero_bid_size": 0,
+        "zero_ask_size": 0,
+        "silent_normalizer_rejections": {
+          "crossed": 445
+        },
+        "median_spread_bps": 0.9701,
+        "spread_samples": 42750,
+        "max_quote_gap_seconds": 1.766,
+        "quote_gaps_over_halt_proxy": 0,
+        "halt_proxy_gap_seconds": 60.0
+      }
+    }
+  ]
+}

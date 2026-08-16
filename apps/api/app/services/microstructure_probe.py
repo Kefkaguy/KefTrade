@@ -24,10 +24,11 @@ a predeclared kill threshold is that it was chosen before the number existed.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime
 from statistics import fmean, median
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 STAGE0_VERSION = "microstructure_stage0_probe_v1"
 
@@ -230,7 +231,7 @@ def parse_rfc3339_nanoseconds(value: str) -> int:
         fraction_ns = 0
         base = datetime.fromisoformat(text)
     if base.tzinfo is None:
-        base = base.replace(tzinfo=timezone.utc)
+        base = base.replace(tzinfo=UTC)
     whole_seconds = int(base.replace(microsecond=0).timestamp())
     return whole_seconds * 1_000_000_000 + fraction_ns
 
@@ -367,8 +368,7 @@ class QuoteStreamProbe:
             self.first_ns = timestamp_ns
         if self._previous_ns is not None:
             gap_seconds = (timestamp_ns - self._previous_ns) / 1_000_000_000
-            if gap_seconds > self.max_gap_seconds:
-                self.max_gap_seconds = gap_seconds
+            self.max_gap_seconds = max(self.max_gap_seconds, gap_seconds)
             if gap_seconds > HALT_PROXY_QUOTE_GAP_SECONDS:
                 self.quote_gaps_over_threshold += 1
         self.last_ns = timestamp_ns
@@ -576,9 +576,9 @@ def session_window(session: date) -> tuple[datetime, datetime]:
     open_hour, open_minute = REGULAR_SESSION_OPEN
     close_hour, close_minute = REGULAR_SESSION_CLOSE
     start = datetime(
-        session.year, session.month, session.day, open_hour, open_minute, tzinfo=timezone.utc
+        session.year, session.month, session.day, open_hour, open_minute, tzinfo=UTC
     )
     end = datetime(
-        session.year, session.month, session.day, close_hour, close_minute, tzinfo=timezone.utc
+        session.year, session.month, session.day, close_hour, close_minute, tzinfo=UTC
     )
     return start, end

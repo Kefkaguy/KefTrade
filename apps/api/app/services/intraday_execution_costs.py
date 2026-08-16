@@ -465,7 +465,20 @@ def aggregate_microstructure_bars(
     *,
     timeframe: str,
 ) -> list[dict[str, Any]]:
-    """Aggregate quote spread/depth and Cont-style OFI into 15m/30m bars."""
+    """Aggregate quote spread/depth and Cont-style OFI into 15m/30m bars.
+
+    WARNING -- ``order_flow_imbalance`` and ``normalized_order_flow_imbalance``
+    are not trustworthy on an Alpaca NBBO feed.  Alpaca returns the size at the
+    *single* venue posting the best price and re-picks that venue whenever the
+    NBBO ties, so a handoff between two venues quoting the same price changes
+    the reported size with no liquidity event behind it.  The Stage 0 probe
+    (2026-08-16, 23.0M SIP quote updates across INTC and NVDA) measured **45.2%
+    of gross |e_n| attributable to venue rotation**, and removing rotation
+    events flipped the sign of the session's net OFI in 4 of 10 symbol-sessions.
+
+    The spread and depth columns are unaffected.  See
+    ``docs/2026-08-16-stage0-microstructure-probe-results.md``.
+    """
     if timeframe not in {"15m", "30m"}:
         raise ValueError("Microstructure aggregation supports 15m or 30m.")
     minutes = int(timeframe[:-1])

@@ -1,0 +1,58 @@
+{
+  "stage0_version": "microstructure_stage0_probe_v1",
+  "question": "Can trading halts, LULD bands or auction imbalances be reconstructed historically from the data we can retrieve?",
+  "probes": [
+    {
+      "symbol": "INTC",
+      "session": "2026-06-01",
+      "endpoints": [
+        {
+          "endpoint": "/v2/stocks/{symbol}/auctions",
+          "status_code": 200,
+          "available": true,
+          "body_preview": "{\"auctions\":[{\"c\":null,\"d\":\"2026-06-01\",\"o\":[{\"c\":\"Q\",\"p\":109.47,\"s\":2,\"t\":\"2026-06-01T13:30:00.021795302Z\",\"x\":\"P\"},{\"c\":\"O\",\"p\":109.5,\"s\":1801271,\"t\":\"2026-06-01T13:30:01.782768216Z\",\"x\":\"Q\"},{\"c\":\"Q\",\"p\":109.5,\"s\":1801271,\"t\":\"2026-06-01T13:30:01.783057122Z\",\"x\":\"Q\"}]}],\"next_page_token\":null,\"symbol\":\"INTC\"}"
+        },
+        {
+          "endpoint": "/v2/stocks/{symbol}/status",
+          "status_code": 404,
+          "available": false,
+          "body_preview": "{\"message\":\"Not Found\"}\n"
+        },
+        {
+          "endpoint": "/v2/stocks/{symbol}/statuses",
+          "status_code": 404,
+          "available": false,
+          "body_preview": "{\"message\":\"Not Found\"}\n"
+        },
+        {
+          "endpoint": "/v2/stocks/{symbol}/halts",
+          "status_code": 404,
+          "available": false,
+          "body_preview": "{\"message\":\"Not Found\"}\n"
+        },
+        {
+          "endpoint": "/v2/stocks/{symbol}/luld",
+          "status_code": 404,
+          "available": false,
+          "body_preview": "{\"message\":\"Not Found\"}\n"
+        },
+        {
+          "endpoint": "/v2/stocks/{symbol}/imbalances",
+          "status_code": 404,
+          "available": false,
+          "body_preview": "{\"message\":\"Not Found\"}\n"
+        },
+        {
+          "endpoint": "/v1beta1/stocks/{symbol}/status",
+          "status_code": 404,
+          "available": false,
+          "body_preview": "{\"message\": \"endpoint not found.\"}\n"
+        }
+      ]
+    }
+  ],
+  "available_endpoints": [
+    "/v2/stocks/{symbol}/auctions"
+  ],
+  "halt_status_history_available": false
+}

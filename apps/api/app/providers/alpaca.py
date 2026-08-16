@@ -1,7 +1,10 @@
 import asyncio
+import logging
+import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Any, AsyncIterator
+from typing import Any
 
 import httpx
 import psycopg
@@ -10,9 +13,6 @@ from psycopg.types.json import Jsonb
 from app.domain.market_data import MarketDataSyncResult
 from app.providers.yfinance_provider import STATIC_STOCK_METADATA, valid_ohlc
 from app.settings import settings
-
-import logging
-import time
 
 logger = logging.getLogger(__name__)
 
@@ -350,8 +350,8 @@ def normalize_stock_quote(
         return None
     if bid <= 0 or ask <= 0 or ask < bid or bid_size < 0 or ask_size < 0:
         return None
-    midpoint = (bid + ask) / Decimal("2")
-    spread_bps = ((ask - bid) / midpoint) * Decimal("10000")
+    midpoint = (bid + ask) / Decimal(2)
+    spread_bps = ((ask - bid) / midpoint) * Decimal(10000)
     return {
         "symbol": symbol.upper(),
         "provider": "alpaca",
@@ -636,7 +636,7 @@ def aggregate_intraday_candles(candles: list[dict[str, Any]], *, target_timefram
                 "high": max(row["high"] for row in rows),
                 "low": min(row["low"] for row in rows),
                 "close": rows[-1]["close"],
-                "volume": sum((row["volume"] for row in rows), Decimal("0")),
+                "volume": sum((row["volume"] for row in rows), Decimal(0)),
             }
         )
     return aggregated

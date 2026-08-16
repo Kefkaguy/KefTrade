@@ -1,0 +1,45 @@
+{
+  "stage0_version": "microstructure_stage0_probe_v1",
+  "reports": [
+    {
+      "trade_flow_version": "intraday_trade_flow_v2_calibration_moments",
+      "trades": 77543,
+      "quotes": 117483,
+      "comparable_trades": 76349,
+      "agreements": 68848,
+      "agreement_rate": 0.901754,
+      "lee_ready_unclassified": 1193,
+      "tick_rule_unclassified": 1194,
+      "disagreements_where_lee_ready_said": {
+        "sell": 3612,
+        "buy": 3889
+      },
+      "symbol": "INTC",
+      "session": "2026-06-01",
+      "window_start": "2026-06-01T14:00:00+00:00",
+      "window_end": "2026-06-01T14:15:00+00:00",
+      "trade_stream_truncated": false,
+      "quote_stream_possibly_truncated": false
+    },
+    {
+      "trade_flow_version": "intraday_trade_flow_v2_calibration_moments",
+      "trades": 165935,
+      "quotes": 132567,
+      "comparable_trades": 162974,
+      "agreements": 143339,
+      "agreement_rate": 0.879521,
+      "lee_ready_unclassified": 2961,
+      "tick_rule_unclassified": 2961,
+      "disagreements_where_lee_ready_said": {
+        "sell": 8527,
+        "buy": 11108
+      },
+      "symbol": "NVDA",
+      "session": "2026-06-01",
+      "window_start": "2026-06-01T14:00:00+00:00",
+      "window_end": "2026-06-01T14:15:00+00:00",
+      "trade_stream_truncated": false,
+      "quote_stream_possibly_truncated": false
+    }
+  ]
+}

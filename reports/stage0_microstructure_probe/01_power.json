@@ -1,0 +1,45 @@
+{
+  "stage0_version": "microstructure_stage0_probe_v1",
+  "source": "Cartea, Jaimungal & Penalva (2015), Algorithmic and High-Frequency Trading, Table 12.1 -- ORCL 2013-11-01, mid-price change 1s after a buy market order conditional on prior imbalance regime.",
+  "horizon_seconds": 1,
+  "tick_bps": 2.966,
+  "conditional_expected_move_bps": {
+    "ask_heavy": 0.0,
+    "neutral": 0.5932,
+    "bid_heavy": 0.9491
+  },
+  "conditional_dispersion_bps": 1.5054,
+  "hurdle_t": 3.0,
+  "power_z": 0.841621,
+  "detectability": {
+    "regime_incremental": {
+      "effect_bps": 0.3559,
+      "required_independent_events": 265
+    },
+    "regime_full_span": {
+      "effect_bps": 0.9491,
+      "required_independent_events": 38
+    }
+  },
+  "materiality": {
+    "regime_incremental": {
+      "effect_bps": 0.3559,
+      "minimum_tradeable_net_bps": 5.0,
+      "shortfall_multiple_vs_minimum": 14.05,
+      "clears_minimum_tradeable": false,
+      "required_gross_bps": 3.1686,
+      "shortfall_multiple_vs_cost_hurdle": 8.9,
+      "clears_cost_hurdle": false
+    },
+    "regime_full_span": {
+      "effect_bps": 0.9491,
+      "minimum_tradeable_net_bps": 5.0,
+      "shortfall_multiple_vs_minimum": 5.27,
+      "clears_minimum_tradeable": false,
+      "required_gross_bps": 3.1686,
+      "shortfall_multiple_vs_cost_hurdle": 3.34,
+      "clears_cost_hurdle": false
+    }
+  },
+  "project_declared_dispersion_bps_30m": 60.0
+}

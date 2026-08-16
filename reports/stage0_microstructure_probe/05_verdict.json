@@ -1,0 +1,81 @@
+{
+  "stage0_version": "microstructure_stage0_probe_v1",
+  "generated_at": "2026-08-16T10:37:08.928420+00:00",
+  "rotation_kill_rule": {
+    "threshold": 0.3,
+    "measured": 0.45224,
+    "verdict": "exceeds_threshold",
+    "meaning": "Venue rotation accounts for more gross order-flow imbalance than the predeclared limit, so OFI computed from this feed is dominated by which exchange happens to be posting the NBBO."
+  },
+  "pooled_stream": {
+    "symbol_sessions": 10,
+    "quotes_parsed": 23016760,
+    "gross_abs_e": 5932095800.0,
+    "rotation_gross_abs_e": 2682730600.0,
+    "rotation_share_of_gross_abs_e": 0.45224,
+    "update_rotation_rate": 0.367987,
+    "microsecond_collapse_rate": 0.00163,
+    "rows_lost_to_microsecond_truncation": 37526,
+    "mean_quotes_per_second": 98.362,
+    "median_spread_bps": 1.5843,
+    "all_windows_exhausted": true
+  },
+  "power": {
+    "stage0_version": "microstructure_stage0_probe_v1",
+    "source": "Cartea, Jaimungal & Penalva (2015), Algorithmic and High-Frequency Trading, Table 12.1 -- ORCL 2013-11-01, mid-price change 1s after a buy market order conditional on prior imbalance regime.",
+    "horizon_seconds": 1,
+    "tick_bps": 2.966,
+    "conditional_expected_move_bps": {
+      "ask_heavy": 0.0,
+      "neutral": 0.5932,
+      "bid_heavy": 0.9491
+    },
+    "conditional_dispersion_bps": 1.5054,
+    "hurdle_t": 3.0,
+    "power_z": 0.841621,
+    "detectability": {
+      "regime_incremental": {
+        "effect_bps": 0.3559,
+        "required_independent_events": 265
+      },
+      "regime_full_span": {
+        "effect_bps": 0.9491,
+        "required_independent_events": 38
+      }
+    },
+    "materiality": {
+      "regime_incremental": {
+        "effect_bps": 0.3559,
+        "minimum_tradeable_net_bps": 5.0,
+        "shortfall_multiple_vs_minimum": 14.05,
+        "clears_minimum_tradeable": false,
+        "required_gross_bps": 3.1686,
+        "shortfall_multiple_vs_cost_hurdle": 8.9,
+        "clears_cost_hurdle": false
+      },
+      "regime_full_span": {
+        "effect_bps": 0.9491,
+        "minimum_tradeable_net_bps": 5.0,
+        "shortfall_multiple_vs_minimum": 5.27,
+        "clears_minimum_tradeable": false,
+        "required_gross_bps": 3.1686,
+        "shortfall_multiple_vs_cost_hurdle": 3.34,
+        "clears_cost_hurdle": false
+      }
+    },
+    "project_declared_dispersion_bps_30m": 60.0
+  },
+  "halt_status_history_available": false,
+  "classifier_agreement_rates": [
+    {
+      "symbol": "INTC",
+      "agreement_rate": 0.901754,
+      "comparable_trades": 76349
+    },
+    {
+      "symbol": "NVDA",
+      "agreement_rate": 0.879521,
+      "comparable_trades": 162974
+    }
+  ]
+}

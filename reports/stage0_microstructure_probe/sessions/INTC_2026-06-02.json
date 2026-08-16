@@ -1,0 +1,57 @@
+{
+  "symbol": "INTC",
+  "session_date": "2026-06-02",
+  "feed": "sip",
+  "pages": 141,
+  "window_exhausted": true,
+  "quotes_received": 1401044,
+  "quotes_parsed": 1401044,
+  "quote_span_seconds": 23399.994,
+  "quotes_per_second": 59.874,
+  "timestamp_fidelity": {
+    "distinct_nanosecond_instants": 1401044,
+    "distinct_microsecond_instants": 1397994,
+    "rows_lost_to_microsecond_truncation": 3050,
+    "microsecond_collapse_rate": 0.002177,
+    "rows_at_identical_nanosecond": 0,
+    "nanosecond_collapse_rate": 0.0,
+    "out_of_order_rows": 0
+  },
+  "venue_rotation": {
+    "gross_abs_e": 412645400.0,
+    "gross_abs_e_by_reason": {
+      "price_change": 78727100.0,
+      "size_change_same_venue": 142464300.0,
+      "venue_rotation": 191454000.0
+    },
+    "signed_e_by_reason": {
+      "price_change": -1195700.0,
+      "size_change_same_venue": 2439900.0,
+      "venue_rotation": -1898400.0
+    },
+    "side_events_by_reason": {
+      "price_change": 308672,
+      "size_change_same_venue": 2001738,
+      "venue_rotation": 491676
+    },
+    "rotation_share_of_gross_abs_e": 0.463967,
+    "rotation_free_gross_abs_e": 221191400.0,
+    "updates_compared": 1401043,
+    "updates_with_any_rotation": 486977,
+    "update_rotation_rate": 0.347582
+  },
+  "stream_health": {
+    "crossed_quotes": 563,
+    "locked_quotes": 10634,
+    "zero_bid_size": 0,
+    "zero_ask_size": 0,
+    "silent_normalizer_rejections": {
+      "crossed": 563
+    },
+    "median_spread_bps": 1.8749,
+    "spread_samples": 14437,
+    "max_quote_gap_seconds": 5.238,
+    "quote_gaps_over_halt_proxy": 0,
+    "halt_proxy_gap_seconds": 60.0
+  }
+}

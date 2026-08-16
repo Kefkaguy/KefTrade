@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -45,7 +45,11 @@ from app.services.microstructure_probe import (
 )
 from app.settings import settings
 
-DEFAULT_OUTPUT_DIR = Path("reports/stage0_microstructure_probe")
+# Anchored to the repository, not to the caller's working directory: a probe
+# invoked from apps/api and one invoked from the repo root must write to the
+# same place, or a resumed run silently starts over somewhere else.
+REPO_ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_OUTPUT_DIR = REPO_ROOT / "reports" / "stage0_microstructure_probe"
 POWER_Z = 0.841621
 
 # Alpaca's public quoted spread for these names is one cent most of the time.
@@ -327,7 +331,7 @@ def verdict(args: argparse.Namespace) -> dict[str, Any]:
     rotation = pieces["quote_stream"]["rotation_kill_rule"]
     payload = {
         "stage0_version": STAGE0_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "rotation_kill_rule": rotation,
         "pooled_stream": pieces["quote_stream"]["pooled"],
         "power": pieces["power"],
