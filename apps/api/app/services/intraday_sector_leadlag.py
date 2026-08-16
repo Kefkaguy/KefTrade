@@ -27,14 +27,17 @@ from app.services.intraday_sector_leadlag_predictor import (
 )
 from app.services.intraday_sector_leadlag_spec import (
     FRESH_TESTS,
+    FROZEN_COST_CALIBRATION_ID,
     HORIZONS_MINUTES,
     MIN_HISTORY_SESSIONS,
     MIN_SECTOR_MEMBERS,
+    PRIOR_EFFECTIVE_TRIALS,
     SECTOR_LEADLAG_VERSION,
     STATE_DIRECTIONS,
     STATE_NEGATIVE_PEER_IMPULSE,
     STATE_POSITIVE_PEER_IMPULSE,
     TARGET_GROSS_LOWER_BOUND_BPS,
+    TOTAL_EFFECTIVE_TRIALS,
     Z_THRESHOLD,
     _jsonable,
     _stable_hash,
@@ -83,8 +86,14 @@ def declare_sector_leadlag(
     prior_effective_trials: int,
     purpose: str,
 ) -> dict[str, Any]:
-    if prior_effective_trials < 0:
-        raise ValueError("prior_effective_trials cannot be negative")
+    if prior_effective_trials != PRIOR_EFFECTIVE_TRIALS:
+        raise ValueError(
+            f"This frozen protocol requires prior_effective_trials={PRIOR_EFFECTIVE_TRIALS}"
+        )
+    if cost_calibration_id != FROZEN_COST_CALIBRATION_ID:
+        raise ValueError(
+            f"This frozen protocol requires cost_calibration_id={FROZEN_COST_CALIBRATION_ID}"
+        )
     splits = get_dataset_splits(conn, dataset_id)
     if splits is None:
         raise ValueError(f"Dataset {dataset_id} has no frozen nested research split")
@@ -99,7 +108,7 @@ def declare_sector_leadlag(
                 raise ValueError(f"Insufficient diversification for {phase}/{state}")
 
     cost_model = load_cost_model(conn, cost_calibration_id)
-    total_trials = prior_effective_trials + FRESH_TESTS
+    total_trials = TOTAL_EFFECTIVE_TRIALS
     specification = {
         "purpose": purpose,
         "dataset_id": dataset_id,
