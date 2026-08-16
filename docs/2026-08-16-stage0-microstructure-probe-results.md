@@ -35,6 +35,35 @@ fails by 3-9×.
 Detectability was never the problem. 265 independent observations is nothing.
 The problem is that the thing being detected is a fifth of a spread.
 
+#### Power-calculation assumption discrepancy (documented, not corrected)
+
+The `power` command derived required N from a **1.5054 bps** dispersion, taken
+from CJP Table 12.1 — the same table the effect came from, so effect and
+dispersion describe one distribution. The project separately records a
+predeclared **60 bps** dispersion (`DECLARED_OBSERVATION_DISPERSION_BPS`,
+`intraday_hypotheses.py`), set for 30-minute-bar order-flow factors.
+
+These are dispersions of **different quantities at different horizons**: a
+one-second mid-price change on a $33 stock moves in ±1-tick increments and
+simply does not have 60 bps of spread. Neither figure is wrong; they are not
+interchangeable. Both are recorded here rather than reconciled, and **no
+observed Stage 0 number has been altered**.
+
+Required independent events under each:
+
+| Dispersion | Incremental (0.356 bps) | Full span (0.949 bps) |
+|---|---|---|
+| 1.5054 bps — CJP table, 1 s (used above) | 265 | 38 |
+| 60 bps — project declared, 30 m | 419,446 | 58,981 |
+
+The choice changes the sample-size answer by three orders of magnitude and
+changes the **conclusion not at all**, because the conclusion turns on
+materiality rather than detectability: the literature effect of 0.356-0.949 bps
+sits below KefTrade's 5.0 bps minimum tradeable net effect and below the
+measured 3.169 bps cost hurdle under either assumption. A future sub-minute
+study would need to declare its own dispersion at its own horizon before
+measuring; that declaration does not exist and is not being invented here.
+
 ### 2. Venue rotation — the kill rule
 
 | Symbol / session | Quotes | q/s | **Rotation % of gross \|e\|** | Updates rotating | Median spread |
@@ -201,6 +230,27 @@ be useful:
 1. **`iter_stock_quote_pages`** — streaming, checkpointed, `Retry-After`-aware quote ingestion with a truthful `exhausted` flag. Removes the 1 M ceiling and the accumulate-in-memory shape in `fetch_stock_quotes`.
 2. **Two confirmed defects**, both small and both real: the microsecond collapse in `intraday_quote_snapshots` (0.163 % silent row loss, and a lookahead leak within each collapsed microsecond), and `normalize_stock_quote`'s uncounted row-by-row rejection of crossed quotes.
 3. **A measured warning on existing code.** `aggregate_microstructure_bars` (`intraday_execution_costs.py:463`) computes `order_flow_imbalance` and `normalized_order_flow_imbalance` from exactly this feed and writes them to `intraday_microstructure_features`. Those columns are ~45 % venue-routing artefact. Anything that has consumed them should be re-read in that light, and the function should carry the warning.
+
+## Cleanup carried out under this verdict
+
+Authorized as platform-integrity work only. No Stage 1, no alpha testing, no
+data purchase, no threshold changed, no historical evidence rewritten.
+
+| # | Action | Where |
+|---|---|---|
+| 1 | Stage 0 report preserved and the NO-GO conclusion recorded | this file, `reports/stage0_microstructure_probe/` |
+| 2 | Quarantined everything whose economic interpretation rests on Alpaca L1 queue size — the `liquidity_shock_reversal_v1` V2 family and the `liquidity_shock_reversal` factor. Both stay registered and readable; both refuse to run with `retired_data_fidelity: Alpaca SIP venue rotation measured at 45.224% of gross OFI vs 30% allowed` | `data_fidelity.py`, `families/v2/base.py`, `families/registry.py`, `intraday_factor_diagnostics.py` |
+| 3 | Certified the affected snapshot fields (`order_flow_imbalance`, `normalized_order_flow_imbalance`, `mean_depth`) as `not_approved_for_queue_interpretation`. Additive record; snapshot rows untouched and their immutability triggers intact | migration `078`, `data_fidelity.snapshot_field_certifications` |
+| 4 | Nanosecond preservation for future ingestion: `timestamp_ns` on normalized quotes and on `intraday_quote_snapshots`, uniqueness re-keyed to the source instant. Historical rows keep their values; the column is derived from what was already stored | `alpaca.py`, migration `078`, `intraday_execution_costs.persist_quote_snapshots` |
+| 5 | Quote rejection accounting: `QuoteNormalizationCounters` reports received / accepted / rejected split by cause, so a halted session can no longer look like a quiet one | `alpaca.py` |
+| 6 | Price- and trade-only measurements preserved and explicitly *not* retired — quoted and effective spread, Lee-Ready aggressor classification. Execution-cost research remains unauthorized | `data_fidelity.PRESERVED_QUOTE_PRICE_FIELDS` |
+| 7 | Tests added and existing affected tests updated | `test_data_fidelity_cleanup.py` (17), `test_microstructure_probe.py` (18), `test_strategy_engine_v2_families.py`, `test_intraday_factor_diagnostics.py` |
+
+**Scope discipline on the retirement.** The finding concerns quoted *sizes*.
+Trade-signed factors (`signed_trade_imbalance_*`) rest on Lee-Ready aggressor
+classification, which Stage 0 validated at 90.2% / 88.0% agreement, and the
+auction factor rests on midpoint and clearing prices. Neither is retired, and a
+test pins that they are not retired by association.
 
 ## Limitations
 

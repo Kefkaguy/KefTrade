@@ -110,7 +110,14 @@ def test_discovery_never_calculates_withheld_confirmation_metrics():
     assert "confirmation" not in market["confirmation"] or "rank_ic" not in market["confirmation"]
     assert market["validation"]["observations"] >= 50
     assert market["cost_clearance"]["clears_stressed"] is True
-    assert result["factors"]["liquidity_shock_reversal"]["status"] == "blocked_missing_quote_data"
+    # Retirement outranks "the side channel is missing". `blocked_missing_quote_data`
+    # invites fetching quotes and retrying; after Stage 0 measured venue rotation at
+    # 45.224% of gross OFI against a 30% ceiling, more quotes cannot help -- the
+    # factor reads a queue size that this feed does not coherently represent.
+    retired = result["factors"]["liquidity_shock_reversal"]
+    assert retired["status"] == "retired_data_fidelity"
+    assert retired["measured_rotation_share"] == 0.45224
+    assert retired["allowed_rotation_share"] == 0.30
 
 
 def test_candle_factor_readiness_does_not_require_quote_or_auction_gates():

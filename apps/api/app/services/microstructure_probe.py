@@ -30,6 +30,8 @@ from datetime import UTC, date, datetime
 from statistics import fmean, median
 from typing import Any
 
+from app.providers.alpaca import parse_rfc3339_nanoseconds
+
 STAGE0_VERSION = "microstructure_stage0_probe_v1"
 
 # ---------------------------------------------------------------------------
@@ -201,39 +203,6 @@ def stage0_power_report(
 # ---------------------------------------------------------------------------
 # 2. Nanosecond timestamps
 # ---------------------------------------------------------------------------
-
-
-def parse_rfc3339_nanoseconds(value: str) -> int:
-    """Parse an RFC-3339 timestamp to integer nanoseconds since the epoch.
-
-    ``datetime.fromisoformat`` floors to microseconds, which is the precision
-    the current quote schema stores and therefore the precision at which
-    distinct NBBO updates start colliding.  Keeping the integer lets the probe
-    measure how much is being lost instead of assuming it is negligible.
-    """
-    text = value.strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    if "." in text:
-        head, tail = text.split(".", 1)
-        digits = ""
-        for character in tail:
-            if character.isdigit():
-                digits += character
-            else:
-                tail = tail[len(digits) :]
-                break
-        else:
-            tail = ""
-        fraction_ns = int((digits + "0" * 9)[:9])
-        base = datetime.fromisoformat(head + (tail or "+00:00"))
-    else:
-        fraction_ns = 0
-        base = datetime.fromisoformat(text)
-    if base.tzinfo is None:
-        base = base.replace(tzinfo=UTC)
-    whole_seconds = int(base.replace(microsecond=0).timestamp())
-    return whole_seconds * 1_000_000_000 + fraction_ns
 
 
 # ---------------------------------------------------------------------------

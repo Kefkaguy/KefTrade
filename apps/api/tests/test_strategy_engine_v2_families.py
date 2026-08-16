@@ -36,7 +36,15 @@ from app.services.labs.intraday.families.v2.base import (
 )
 from app.services.strategy_dna import FAMILY_DNA, build_dna_payload, compute_fingerprint
 
-ARCHITECTURES = v2_families.V2_ARCHITECTURES
+RETIRED_ARCHITECTURES = v2_families.RETIRED_DATA_FIDELITY_V2_ARCHITECTURES
+# A family retired on data fidelity refuses to construct at all, so the
+# behavioural sweeps below cannot instantiate it.  That refusal is asserted
+# directly in `test_retired_family_refuses_every_entry_point` instead.
+ARCHITECTURES = tuple(
+    architecture
+    for architecture in v2_families.V2_ARCHITECTURES
+    if architecture not in RETIRED_ARCHITECTURES
+)
 SESSION_OPEN_UTC = datetime(2026, 3, 2, 14, 30, tzinfo=UTC).timetz()
 BARS_PER_SESSION = 13
 
@@ -110,8 +118,12 @@ def run_family(architecture, bar_specs_by_session, param_overrides=None, *, time
 # ---------------------------------------------------------------------------
 
 def test_all_nineteen_families_are_registered():
-    assert len(ARCHITECTURES) == 19
-    assert set(ARCHITECTURES) == set(V2_FAMILIES)
+    # Every family stays registered, retired ones included: retirement blocks
+    # execution, it does not remove the record that the family existed.
+    assert len(v2_families.V2_ARCHITECTURES) == 19
+    assert set(v2_families.V2_ARCHITECTURES) == set(V2_FAMILIES)
+    # The behavioural sweeps run against the runnable subset.
+    assert len(ARCHITECTURES) == 19 - len(RETIRED_ARCHITECTURES)
 
 
 def test_new_flow_families_are_gated_before_campaigns():
@@ -123,11 +135,35 @@ def test_new_flow_families_are_gated_before_campaigns():
     assert FAMILY_REGISTRY["vwap_execution_pressure_v1"].status == "research_only"
     assert FAMILY_REGISTRY["same_slot_institutional_flow_v1"].status == "research_only"
     assert FAMILY_REGISTRY["gap_down_acceptance_short_confirmation_v1"].status == "confirmation_only"
-    assert FAMILY_REGISTRY["liquidity_shock_reversal_v1"].status == "blocked_data"
+    # Retired by the Stage 0 probe: venue rotation measured at 45.224% of
+    # gross OFI against a 30% ceiling declared beforehand, so the family's
+    # input does not represent what it reads it as.  Stronger than
+    # `blocked_data`, which only meant "fetch the side channel and retry".
+    assert FAMILY_REGISTRY["liquidity_shock_reversal_v1"].status == "retired_data_fidelity"
     assert all(
         FAMILY_REGISTRY[architecture].status == "archived"
         for architecture in v2_families.NEGATIVE_SIGNAL_AUDIT_V2_ARCHITECTURES
     )
+
+
+def test_retired_family_refuses_every_entry_point():
+    """Retired on data fidelity: registered and readable, but unrunnable.
+
+    The Stage 0 probe measured Alpaca venue rotation at 45.224% of gross OFI
+    against a 30% ceiling, so `normalized_order_flow_imbalance` does not mean
+    what this family reads it as.  Nothing is deleted -- the class, hypothesis
+    and grid stay queryable so historical campaigns remain explainable.
+    """
+    for architecture in RETIRED_ARCHITECTURES:
+        assert architecture in V2_FAMILIES
+        assert architecture in V2_HYPOTHESES
+        assert architecture in V2_PARAMETER_GRIDS
+        assert FAMILY_REGISTRY[architecture].status == "retired_data_fidelity"
+
+        with pytest.raises(ValueError, match="retired_data_fidelity"):
+            generate_v2_candidates(architecture)
+        with pytest.raises(ValueError, match="retired_data_fidelity"):
+            V2_FAMILIES[architecture]({"direction": "long"}, timeframe="30m")
 
 
 def test_archived_negative_signal_family_cannot_launch_a_new_campaign():

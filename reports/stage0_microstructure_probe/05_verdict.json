@@ -1,6 +1,6 @@
 {
   "stage0_version": "microstructure_stage0_probe_v1",
-  "generated_at": "2026-08-16T10:37:08.928420+00:00",
+  "generated_at": "2026-08-16T20:35:48.197819+00:00",
   "rotation_kill_rule": {
     "threshold": 0.3,
     "measured": 0.45224,

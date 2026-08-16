@@ -20,11 +20,13 @@ elite gate and been explicitly reviewed.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Any, Callable, Sequence
+from typing import Any
 
+from app.services.data_fidelity import assert_architecture_runnable
 from app.services.labs.intraday.dataset import minimum_entry_lookahead_minutes
 from app.services.labs.intraday.feature_engine_v2 import (
     DEFAULT_CONFIG,
@@ -107,6 +109,10 @@ class V2Strategy:
     minimum_entry_cutoff_minutes: int | None = None
 
     def __init__(self, params: dict[str, Any], *, timeframe: str):
+        # A family retired on data fidelity refuses at construction, before any
+        # parameter or timeframe question is reached: the objection is to the
+        # input, so no configuration of it is runnable.
+        assert_architecture_runnable(self.architecture)
         if timeframe not in self.supported_timeframes:
             raise ValueError(
                 f"{self.architecture}: timeframe {timeframe!r} not permitted; "
@@ -254,7 +260,7 @@ BASE_V2_PARAMETERS: dict[str, Any] = {
     "fee_rate": Decimal("0.001"),
     "slippage_rate": Decimal("0.0005"),
     "risk_per_trade": Decimal("0.01"),
-    "initial_equity": Decimal("10000"),
+    "initial_equity": Decimal(10000),
     "walk_forward_train_ratio": 0.7,
     "max_holding_bars": 0,
     "recent_candle_window_bars": DEFAULT_CONFIG.lookback_bars,
@@ -294,10 +300,16 @@ def generate_v2_candidates(architecture: str, *, max_candidates: int = 8) -> lis
     from hashlib import sha256
     from itertools import product
 
-    from app.services.strategy_discovery import DiscoveryCandidate, canonical_candidate_key
+    from app.services.strategy_discovery import (
+        DiscoveryCandidate,
+        canonical_candidate_key,
+    )
 
     if architecture not in V2_PARAMETER_GRIDS:
         raise ValueError(f"Unknown Strategy Engine V2 family {architecture!r}")
+    # Refuse before expanding the grid, so a retired family cannot produce
+    # candidates that would later fail one at a time deep inside a campaign.
+    assert_architecture_runnable(architecture)
     strategy_cls = V2_FAMILIES[architecture]
     grid = V2_PARAMETER_GRIDS[architecture]
     blocks = V2_BLOCKS[architecture]

@@ -2144,7 +2144,18 @@ CONFIRMATION_ONLY_V2_ARCHITECTURES: tuple[str, ...] = (
     "gap_down_acceptance_short_confirmation_v1",
 )
 
-BLOCKED_DATA_V2_ARCHITECTURES: tuple[str, ...] = (
+BLOCKED_DATA_V2_ARCHITECTURES: tuple[str, ...] = ()
+
+# Retired on data fidelity, not on evidence.  `blocked_data` meant "the side
+# channel is missing, fetch it and retry"; this is the stronger statement that
+# the channel exists, was measured, and does not represent what the family
+# reads it as.  The Stage 0 probe put venue rotation at 45.224% of gross OFI
+# against a 30% ceiling declared beforehand, so no amount of further ingestion
+# makes `normalized_order_flow_imbalance` mean what this family needs.
+#
+# The family stays registered and readable; `assert_architecture_runnable`
+# refuses to construct or expand it.
+RETIRED_DATA_FIDELITY_V2_ARCHITECTURES: tuple[str, ...] = (
     "liquidity_shock_reversal_v1",
 )
 
@@ -2155,4 +2166,5 @@ V2_ARCHITECTURES: tuple[str, ...] = (
     *RESEARCH_ONLY_V2_ARCHITECTURES,
     *CONFIRMATION_ONLY_V2_ARCHITECTURES,
     *BLOCKED_DATA_V2_ARCHITECTURES,
+    *RETIRED_DATA_FIDELITY_V2_ARCHITECTURES,
 )

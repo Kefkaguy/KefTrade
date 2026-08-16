@@ -1,7 +1,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -333,30 +333,153 @@ async def fetch_stock_quotes(
     return status, selected, request_log, request_id
 
 
+def parse_rfc3339_nanoseconds(value: str) -> int:
+    """Parse an RFC-3339 timestamp to integer nanoseconds since the epoch.
+
+    ``datetime.fromisoformat`` floors to microseconds.  Alpaca timestamps carry
+    nanoseconds, so parsing through ``datetime`` alone discards precision that
+    distinguishes consecutive NBBO updates -- the Stage 0 probe measured 37,526
+    of 23,016,760 updates (0.163%) sharing a microsecond with their predecessor.
+    Small, but the survivor of a collapsed microsecond is its *latest* state,
+    which is future information relative to anything inside it.
+    """
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    if "." in text:
+        head, tail = text.split(".", 1)
+        digits = ""
+        for character in tail:
+            if character.isdigit():
+                digits += character
+            else:
+                tail = tail[len(digits) :]
+                break
+        else:
+            tail = ""
+        fraction_ns = int((digits + "0" * 9)[:9])
+        base = datetime.fromisoformat(head + (tail or "+00:00"))
+    else:
+        fraction_ns = 0
+        base = datetime.fromisoformat(text)
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=UTC)
+    whole_seconds = int(base.replace(microsecond=0).timestamp())
+    return whole_seconds * 1_000_000_000 + fraction_ns
+
+
+# Rejection reasons, kept as constants so a counter key cannot drift from the
+# branch that increments it.
+QUOTE_REJECT_UNPARSEABLE = "rejected_unparseable"
+QUOTE_REJECT_NONPOSITIVE_PRICE = "rejected_nonpositive_price"
+QUOTE_REJECT_CROSSED = "rejected_crossed"
+QUOTE_REJECT_NEGATIVE_SIZE = "rejected_negative_size"
+QUOTE_REJECT_REASONS = (
+    QUOTE_REJECT_UNPARSEABLE,
+    QUOTE_REJECT_NONPOSITIVE_PRICE,
+    QUOTE_REJECT_CROSSED,
+    QUOTE_REJECT_NEGATIVE_SIZE,
+)
+
+
+class QuoteNormalizationCounters:
+    """Explicit accounting for every quote seen, accepted or dropped.
+
+    Row-by-row silent rejection is how an abnormal period disappears.  A
+    trading halt produces exactly the rows this normalizer discards -- crossed
+    and locked markets from mass cancellation -- so a session that was halted
+    and a session that was quiet look identical once the drops are unrecorded.
+    The Stage 0 probe measured 241-1,436 crossed quotes per symbol-session in
+    ordinary conditions, none of which were counted anywhere.
+    """
+
+    __slots__ = ("received", "accepted", *QUOTE_REJECT_REASONS)
+
+    def __init__(self) -> None:
+        self.received = 0
+        self.accepted = 0
+        for reason in QUOTE_REJECT_REASONS:
+            setattr(self, reason, 0)
+
+    def record_received(self) -> None:
+        self.received += 1
+
+    def record_accepted(self) -> None:
+        self.accepted += 1
+
+    def record_rejected(self, reason: str) -> None:
+        if reason not in QUOTE_REJECT_REASONS:
+            raise ValueError(f"unknown quote rejection reason {reason!r}")
+        setattr(self, reason, getattr(self, reason) + 1)
+
+    @property
+    def rejected(self) -> int:
+        return sum(getattr(self, reason) for reason in QUOTE_REJECT_REASONS)
+
+    def as_dict(self) -> dict[str, Any]:
+        rejected = self.rejected
+        return {
+            "received": self.received,
+            "accepted": self.accepted,
+            "rejected": rejected,
+            "rejection_rate": (round(rejected / self.received, 6) if self.received else None),
+            **{reason: getattr(self, reason) for reason in QUOTE_REJECT_REASONS},
+        }
+
+
 def normalize_stock_quote(
     symbol: str,
     row: dict[str, Any],
     *,
     feed: str = ALPACA_FEED,
+    counters: QuoteNormalizationCounters | None = None,
 ) -> dict[str, Any] | None:
-    """Normalize one Alpaca quote and reject crossed/empty markets."""
+    """Normalize one Alpaca quote and reject crossed/empty markets.
+
+    Pass ``counters`` to account for what was dropped and why.  The return
+    contract is unchanged, so existing callers keep working -- they just do not
+    learn what they discarded.
+    """
+    if counters is not None:
+        counters.record_received()
+
+    def reject(reason: str) -> None:
+        if counters is not None:
+            counters.record_rejected(reason)
+
     try:
         bid = Decimal(str(row["bp"]))
         ask = Decimal(str(row["ap"]))
         bid_size = Decimal(str(row.get("bs", 0)))
         ask_size = Decimal(str(row.get("as", 0)))
-        timestamp = datetime.fromisoformat(str(row["t"]).replace("Z", "+00:00")).astimezone(UTC)
+        raw_timestamp = str(row["t"])
+        timestamp = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00")).astimezone(UTC)
+        timestamp_ns = parse_rfc3339_nanoseconds(raw_timestamp)
     except (InvalidOperation, KeyError, TypeError, ValueError):
+        reject(QUOTE_REJECT_UNPARSEABLE)
         return None
-    if bid <= 0 or ask <= 0 or ask < bid or bid_size < 0 or ask_size < 0:
+    # Split what used to be one condition, so the counter names the cause.
+    if bid <= 0 or ask <= 0:
+        reject(QUOTE_REJECT_NONPOSITIVE_PRICE)
+        return None
+    if ask < bid:
+        reject(QUOTE_REJECT_CROSSED)
+        return None
+    if bid_size < 0 or ask_size < 0:
+        reject(QUOTE_REJECT_NEGATIVE_SIZE)
         return None
     midpoint = (bid + ask) / Decimal(2)
     spread_bps = ((ask - bid) / midpoint) * Decimal(10000)
+    if counters is not None:
+        counters.record_accepted()
     return {
         "symbol": symbol.upper(),
         "provider": "alpaca",
         "feed": feed,
         "timestamp": timestamp,
+        # Full source precision, carried alongside the microsecond datetime so
+        # persistence can key on the instant the venue actually reported.
+        "timestamp_ns": timestamp_ns,
         "bid_price": bid,
         "ask_price": ask,
         "bid_size": bid_size,
@@ -365,6 +488,24 @@ def normalize_stock_quote(
         "spread_bps": spread_bps,
         "raw_payload": dict(row),
     }
+
+
+def normalize_stock_quotes(
+    symbol: str,
+    rows: Sequence[dict[str, Any]],
+    *,
+    feed: str = ALPACA_FEED,
+) -> tuple[list[dict[str, Any]], QuoteNormalizationCounters]:
+    """Normalize a page of quotes and return the accounting alongside them."""
+    counters = QuoteNormalizationCounters()
+    normalized = [
+        quote
+        for quote in (
+            normalize_stock_quote(symbol, row, feed=feed, counters=counters) for row in rows
+        )
+        if quote is not None
+    ]
+    return normalized, counters
 
 
 async def iter_stock_quote_pages(

@@ -22,3 +22,13 @@ reports/research_archives/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Stage 0 probe: aggregate per-symbol-session reports are evidence and are
+# committed. Raw or bulk quote/trade dumps are not - they are reproducible
+# from the API and would bloat the repository.
+reports/stage0_microstructure_probe/**/*quotes*.json
+reports/stage0_microstructure_probe/**/*raw*.json
+reports/stage0_microstructure_probe/**/*.parquet
+reports/stage0_microstructure_probe/**/*.csv
+reports/stage0_microstructure_probe/**/*.jsonl
+reports/stage0_probe_run.log

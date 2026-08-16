@@ -8,10 +8,11 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from collections import defaultdict
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from math import ceil, floor
 from statistics import fmean, median
-from typing import Any, Iterable, Sequence
+from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
@@ -299,11 +300,15 @@ def persist_quote_snapshots(conn: psycopg.Connection, quotes: Sequence[dict[str,
         cursor.executemany(
             """
             INSERT INTO intraday_quote_snapshots(
-                symbol, provider, feed, timestamp, bid_price, ask_price,
+                symbol, provider, feed, timestamp, timestamp_ns, bid_price, ask_price,
                 bid_size, ask_size, midpoint, spread_bps, raw_payload
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT(symbol, provider, feed, timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            -- Keyed on the nanosecond the venue reported, not the microsecond
+            -- Postgres can hold in a timestamptz: two NBBO updates inside one
+            -- microsecond are two updates, and collapsing them kept only the
+            -- later state (migration 078).
+            ON CONFLICT(symbol, provider, feed, timestamp_ns)
             DO UPDATE SET
                 bid_price = EXCLUDED.bid_price,
                 ask_price = EXCLUDED.ask_price,
@@ -319,6 +324,10 @@ def persist_quote_snapshots(conn: psycopg.Connection, quotes: Sequence[dict[str,
                     row["provider"],
                     row["feed"],
                     row["timestamp"],
+                    # Older callers may not carry it; derive from the datetime
+                    # rather than writing NULL into a unique key.
+                    row.get("timestamp_ns")
+                    or int(row["timestamp"].timestamp() * 1_000_000) * 1_000,
                     row["bid_price"],
                     row["ask_price"],
                     row.get("bid_size"),

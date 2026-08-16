@@ -16,19 +16,18 @@ extended-hours bars.
 from __future__ import annotations
 
 from collections import defaultdict
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from hashlib import sha256
 from json import dumps
 from statistics import fmean
-from typing import Any, Callable, Sequence
+from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
 
-from app.services.labs.intraday.cross_sectional_portfolio import spearman
-from app.services.labs.intraday.dataset_snapshot import load_snapshot_intraday_features
-from app.services.research_architecture import jsonable, load_snapshot_candles
+from app.services.data_fidelity import factor_retirement
 from app.services.intraday_research_integrity import (
     clustered_outcome_statistics,
     cost_model_readiness,
@@ -50,6 +49,9 @@ from app.services.intraday_session_calendar import (
     ordered_regular_sessions,
     regular_session_rows,
 )
+from app.services.labs.intraday.cross_sectional_portfolio import spearman
+from app.services.labs.intraday.dataset_snapshot import load_snapshot_intraday_features
+from app.services.research_architecture import jsonable, load_snapshot_candles
 
 FACTOR_DIAGNOSTICS_VERSION = "intraday_factor_diagnostics_v4_certified_instrument"
 DEFAULT_FACTOR_KEYS = (
@@ -1623,6 +1625,10 @@ def evaluate_factor_discovery(
     validation_p: dict[str, float | None] = {}
     for key in factor_keys:
         spec = FACTOR_SPECS[key]
+        retired = factor_retirement(key)
+        if retired is not None:
+            factor_results[key] = retired
+            continue
         if (
             streamed
             and (spec.factor_type == "cross_sectional" or spec.requires_sector_context)
@@ -1850,6 +1856,10 @@ def evaluate_forward_confirmation(
     p_values: dict[str, float | None] = {}
     for key in factor_keys:
         spec = FACTOR_SPECS[key]
+        retired = factor_retirement(key)
+        if retired is not None:
+            factors[key] = retired
+            continue
         if spec.requires_quotes and not microstructure_by_symbol:
             factors[key] = {"status": "blocked_missing_quote_data"}
             continue

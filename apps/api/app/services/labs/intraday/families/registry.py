@@ -12,10 +12,12 @@ imported unchanged from `labs/intraday/strategy.py` and `labs/intraday/campaign.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, Callable
+from typing import Any
 
+from app.services.data_fidelity import RETIREMENT_CODE
 from app.services.labs.intraday.campaign import (
     OPENING_RANGE_BREAKOUT_ARCHITECTURE,
     ORB_BLOCKS,
@@ -26,7 +28,6 @@ from app.services.labs.intraday.campaign import (
     generate_orb_candidates,
     generate_vwap_reversion_candidates,
 )
-from app.services.labs.intraday.strategy import INTRADAY_STRATEGY_FACTORIES as _ARCHIVED_FACTORIES
 from app.services.labs.intraday.families.ema_trend_continuation import (
     EMA_TREND_CONTINUATION_ARCHITECTURE,
     EMA_TREND_CONTINUATION_BLOCKS,
@@ -63,6 +64,9 @@ from app.services.labs.intraday.families.vwap_trend_continuation import (
     VwapTrendContinuationStrategy,
     generate_vwap_trend_continuation_candidates,
 )
+from app.services.labs.intraday.strategy import (
+    INTRADAY_STRATEGY_FACTORIES as _ARCHIVED_FACTORIES,
+)
 
 SUPPORTED_INTRADAY_TIMEFRAMES = ("15m", "30m")
 
@@ -75,7 +79,11 @@ class IntradayFamilyDefinition:
     blocks: dict[str, str]
     candidate_generator: Callable[..., list[Any]]
     supported_timeframes: tuple[str, ...]
-    status: str  # "archived" | "research_only" | "confirmation_only" | "blocked_data" | "active"
+    # "archived" | "research_only" | "confirmation_only" | "blocked_data"
+    # | "retired_data_fidelity" | "active".  `retired_data_fidelity` is
+    # terminal: the input was measured and found not to represent what the
+    # family reads it as, so no further ingestion revives it.
+    status: str
 
 
 FAMILY_REGISTRY: dict[str, IntradayFamilyDefinition] = {
@@ -174,7 +182,9 @@ def _register_strategy_engine_v2_families() -> None:
     them by default.
     """
 
-    from app.services.labs.intraday.families.v2 import families as v2_module  # noqa: F401  (import registers)
+    from app.services.labs.intraday.families.v2 import (
+        families as v2_module,
+    )
     from app.services.labs.intraday.families.v2.base import (
         SUPPORTED_V2_TIMEFRAMES,
         V2_BLOCKS,
@@ -191,6 +201,8 @@ def _register_strategy_engine_v2_families() -> None:
             return "confirmation_only"
         if architecture in v2_module.BLOCKED_DATA_V2_ARCHITECTURES:
             return "blocked_data"
+        if architecture in v2_module.RETIRED_DATA_FIDELITY_V2_ARCHITECTURES:
+            return RETIREMENT_CODE
         return "archived"
 
     for architecture in v2_module.V2_ARCHITECTURES:
