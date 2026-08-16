@@ -229,18 +229,29 @@ class MboBook:
     every later one, which is the opposite of what a validator is for.
     """
 
-    __slots__ = ("_max_violations", "_violations", "asks", "bids", "orders")
+    __slots__ = ("_counts", "_max_violations", "_violations", "asks", "bids", "orders")
 
     def __init__(self, *, max_recorded_violations: int = 200) -> None:
         self.orders: dict[int, RestingOrder] = {}
         self.bids: SortedDict[int, list[RestingOrder]] = SortedDict()
         self.asks: SortedDict[int, list[RestingOrder]] = SortedDict()
         self._violations: list[Violation] = []
+        self._counts: Counter = Counter()
         self._max_violations = max_recorded_violations
 
     # -- reporting ---------------------------------------------------------
 
     def record(self, kind: str, event: MboEvent, detail: str) -> None:
+        """Count every occurrence; retain a bounded sample of the detail.
+
+        The count and the sample are deliberately separate.  Deriving counts
+        from the retained list -- which an earlier version did -- caps them at
+        the sample size, so a session with 40,000 crossed books reports 200 and
+        looks merely untidy instead of broken.  Samples are bounded because a
+        multi-million-record session should not be able to exhaust memory
+        through its own error path.
+        """
+        self._counts[kind] += 1
         if len(self._violations) < self._max_violations:
             self._violations.append(
                 Violation(
@@ -254,7 +265,13 @@ class MboBook:
 
     @property
     def violations(self) -> list[Violation]:
+        """A bounded sample, for reading. Not a source of counts."""
         return list(self._violations)
+
+    @property
+    def counts(self) -> Counter:
+        """Complete, uncapped occurrence counts by violation kind."""
+        return Counter(self._counts)
 
     # -- inspection --------------------------------------------------------
 
@@ -508,6 +525,15 @@ class ReplayState:
     crossed_events: int = 0
     locked_events: int = 0
     book_states_checked: int = 0
+    # Databento defines F_MAYBE_BAD_BOOK as an unrecoverable channel gap: the
+    # book may be missing updates it will never receive. Counted on its own so
+    # certification can turn on it directly rather than on a derived total.
+    maybe_bad_book_records: int = 0
+    # F_BAD_TS_RECV is a receive-clock problem, not a book-state error. Split
+    # because a snapshot-only occurrence says nothing about the live stream,
+    # while live occurrences are exactly what later latency work needs to know.
+    bad_ts_recv_snapshot_records: int = 0
+    bad_ts_recv_live_records: int = 0
 
 
 def replay(
@@ -559,9 +585,25 @@ def replay(
         if flags & F_MBP:
             state.mbp_records += 1
         if flags & F_MAYBE_BAD_BOOK:
-            book.record(FLAG_MAYBE_BAD_BOOK, event, "F_MAYBE_BAD_BOOK set by publisher")
+            # An unrecoverable channel gap. The reconstruction downstream of
+            # this record may be missing updates that will never arrive, so no
+            # amount of internal consistency afterwards makes the session
+            # trustworthy. Certification fails on a single occurrence.
+            state.maybe_bad_book_records += 1
+            book.record(
+                FLAG_MAYBE_BAD_BOOK,
+                event,
+                "F_MAYBE_BAD_BOOK set by publisher: unrecoverable channel gap",
+            )
         if flags & F_BAD_TS_RECV:
-            book.record(FLAG_BAD_TS_RECV, event, "F_BAD_TS_RECV set by publisher")
+            where = "snapshot" if is_snapshot else "live"
+            if is_snapshot:
+                state.bad_ts_recv_snapshot_records += 1
+            else:
+                state.bad_ts_recv_live_records += 1
+            book.record(
+                FLAG_BAD_TS_RECV, event, f"F_BAD_TS_RECV set by publisher ({where} record)"
+            )
 
         if event.action == ACTION_CLEAR:
             state.clears += 1
@@ -617,8 +659,9 @@ def replay(
                     state.locked_events += 1
                     book.record(LOCKED_BOOK, event, f"bid == ask == {bid.price}")
 
-    for violation in book.violations:
-        state.violations[violation.kind] += 1
+    # Counts come from the book's uncapped counter, never from the bounded
+    # sample list.
+    state.violations = book.counts
     return book, state, book.violations
 
 
@@ -655,12 +698,18 @@ def validation_report(
     bid = book.best_bid()
     ask = book.best_ask()
     spread = (ask.price - bid.price) if (bid and ask) else None
+    # Every action, including the ones that did not occur. A zero is a finding:
+    # Nasdaq TotalView normalizes an order replace as C(old id) + A(new id), so
+    # few or no `M` records is expected rather than evidence of a parsing bug.
+    # Printing only the observed keys makes that impossible to see.
+    by_action = {action: state.by_action.get(action, 0) for action in sorted(KNOWN_ACTIONS)}
     return {
         "validator_version": MBO_VALIDATOR_VERSION,
         "source": source,
         "replay": {
             "records": state.records,
-            "by_action": dict(sorted(state.by_action.items())),
+            "by_action": by_action,
+            "by_action_observed": dict(sorted(state.by_action.items())),
             "by_side": dict(sorted(state.by_side.items())),
             "instrument_ids": sorted(state.instrument_ids),
             "publisher_ids": sorted(state.publisher_ids),
@@ -681,6 +730,18 @@ def validation_report(
             "f_tob_records": state.tob_records,
             "f_mbp_records": state.mbp_records,
             "book_states_checked": state.book_states_checked,
+            # An unrecoverable channel gap. Non-zero means the reconstruction
+            # is missing updates it will never receive.
+            "f_maybe_bad_book_records": state.maybe_bad_book_records,
+            # A receive-clock problem, not a book-state error. Split so that a
+            # snapshot-only occurrence -- which says nothing about the live
+            # stream -- is distinguishable from live occurrences, which are
+            # what later latency and timestamp-quality work needs.
+            "f_bad_ts_recv_records": (
+                state.bad_ts_recv_snapshot_records + state.bad_ts_recv_live_records
+            ),
+            "f_bad_ts_recv_snapshot_records": state.bad_ts_recv_snapshot_records,
+            "f_bad_ts_recv_live_records": state.bad_ts_recv_live_records,
         },
         "final_book": {
             "best_bid": bid.as_dict() if bid else None,
@@ -703,7 +764,22 @@ def validation_report(
             "crossed_book_events": state.crossed_events,
             "locked_book_events": state.locked_events,
             "clean": not fatal,
+            # Certification is a stricter statement than `clean`: a single
+            # F_MAYBE_BAD_BOOK record withdraws it on its own, because internal
+            # consistency after an unrecoverable gap says nothing about the
+            # updates that never arrived. `clean` already fails on it -- this
+            # names *why* rather than leaving a reader to infer it from a
+            # violation table.
+            "certified": (not fatal) and state.maybe_bad_book_records == 0,
+            "uncertified_reason": (
+                "F_MAYBE_BAD_BOOK: Databento reported an unrecoverable channel "
+                f"gap on {state.maybe_bad_book_records} record(s); the book may be "
+                "missing updates that will never arrive"
+                if state.maybe_bad_book_records
+                else None
+            ),
             "sample_violations": [item.as_dict() for item in violations[:25]],
+            "sample_truncated": len(violations) < sum(state.violations.values()),
         },
     }
 

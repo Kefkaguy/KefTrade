@@ -17,10 +17,13 @@ from app.services.mbo_book_validator import (
     CANCEL_EXCEEDS_RESTING_SIZE,
     CROSSED_BOOK,
     DUPLICATE_ORDER_ADD,
+    F_BAD_TS_RECV,
     F_LAST,
+    F_MAYBE_BAD_BOOK,
     F_SNAPSHOT,
     F_TOB,
     FIXED_PRICE_SCALE,
+    FLAG_MAYBE_BAD_BOOK,
     INVALID_SIDE_FOR_ACTION,
     LOCKED_BOOK,
     MODIFY_CHANGED_SIDE,
@@ -531,6 +534,160 @@ def test_from_dbn_reads_genuine_databento_records():
     assert state.violations[UNKNOWN_ORDER_CANCEL] == 0
     assert list(state.instrument_ids) == [42]
     assert list(state.publisher_ids) == [2]
+
+
+# ---------------------------------------------------------------------------
+# Fidelity audit: channel gaps, clock quality, action coverage, sequence ties
+# ---------------------------------------------------------------------------
+
+
+def test_maybe_bad_book_withdraws_certification():
+    """Databento defines F_MAYBE_BAD_BOOK as an unrecoverable channel gap.
+
+    Internal consistency after such a gap says nothing about the updates that
+    never arrived, so one occurrence is enough to withdraw certification -- and
+    the book must still finish replaying so the rest of the session is readable.
+    """
+    book, state, violations = run(
+        [
+            ev("A", "B", 100 * PX, 500, 1),
+            ev("A", "A", 101 * PX, 300, 2, flags=F_LAST | F_MAYBE_BAD_BOOK),
+            ev("A", "B", 99 * PX, 200, 3),
+        ]
+    )
+    assert state.maybe_bad_book_records == 1
+    assert state.violations[FLAG_MAYBE_BAD_BOOK] == 1
+
+    report = validation_report(book, state, violations, source="synthetic")
+    assert report["flags"]["f_maybe_bad_book_records"] == 1
+    assert report["integrity"]["certified"] is False
+    assert report["integrity"]["clean"] is False
+    assert "F_MAYBE_BAD_BOOK" in report["integrity"]["uncertified_reason"]
+    # The replay still completed; the gap is a verdict, not a crash.
+    assert state.records == 3
+    assert book.order_count() == 3
+
+
+def test_a_clean_session_is_certified():
+    book, state, violations = run(
+        [ev("A", "B", 100 * PX, 500, 1), ev("A", "A", 101 * PX, 300, 2)]
+    )
+    report = validation_report(book, state, violations, source="synthetic")
+    assert report["integrity"]["certified"] is True
+    assert report["integrity"]["uncertified_reason"] is None
+    assert report["flags"]["f_maybe_bad_book_records"] == 0
+
+
+def test_bad_ts_recv_is_split_snapshot_versus_live_and_does_not_decertify():
+    """A receive-clock problem is not a book-state error.
+
+    It must not fail certification, but live occurrences have to be visible for
+    later latency and timestamp-quality work.
+    """
+    book, state, violations = run(
+        [
+            ev("R", "N", 0, 0, 0, flags=F_SNAPSHOT | F_BAD_TS_RECV),
+            ev("A", "B", 100 * PX, 500, 1, flags=F_SNAPSHOT | F_LAST | F_BAD_TS_RECV),
+            ev("A", "A", 101 * PX, 300, 2, flags=F_LAST | F_BAD_TS_RECV),
+            ev("A", "A", 102 * PX, 100, 3),
+        ]
+    )
+    assert state.bad_ts_recv_snapshot_records == 2
+    assert state.bad_ts_recv_live_records == 1
+
+    report = validation_report(book, state, violations, source="synthetic")
+    flags = report["flags"]
+    assert flags["f_bad_ts_recv_records"] == 3
+    assert flags["f_bad_ts_recv_snapshot_records"] == 2
+    assert flags["f_bad_ts_recv_live_records"] == 1
+    assert report["integrity"]["certified"] is True, "clock quality is not book correctness"
+    assert report["integrity"]["clean"] is True
+
+
+def test_report_lists_every_action_including_the_absent_ones():
+    """XNAS normalizes an order replace as C(old id) + A(new id), so few or no
+    `M` records is expected. A zero has to be visible to say so."""
+    book, state, violations = run(
+        [
+            ev("A", "B", 100 * PX, 500, 1),
+            ev("C", "B", 100 * PX, 100, 1),
+            ev("T", "B", 100 * PX, 50, 0),
+        ]
+    )
+    report = validation_report(book, state, violations, source="synthetic")
+    by_action = report["replay"]["by_action"]
+    assert set(by_action) == set("ACFMNRT")
+    assert by_action["A"] == 1 and by_action["C"] == 1 and by_action["T"] == 1
+    assert by_action["M"] == 0 and by_action["F"] == 0
+    assert by_action["R"] == 0 and by_action["N"] == 0
+    # Generic M support is unchanged; it simply did not occur here.
+    assert report["replay"]["by_action_observed"] == {"A": 1, "C": 1, "T": 1}
+
+
+def test_replace_normalized_as_cancel_plus_add_reconstructs_correctly():
+    """The XNAS replace shape, end to end, without any `M` record."""
+    book, state, _ = run(
+        [
+            ev("A", "B", 100 * PX, 500, 111),
+            ev("C", "B", 100 * PX, 500, 111),
+            ev("A", "B", 101 * PX, 500, 222),
+        ]
+    )
+    assert state.by_action["M"] == 0
+    assert book.order_count() == 1
+    assert book.best_bid().price == 101 * PX
+    assert 111 not in book.orders
+    assert 222 in book.orders
+
+
+def test_equal_sequence_numbers_within_one_native_event_are_not_regressions():
+    """Records normalized from the same TotalView message share a sequence.
+
+    Only a true backward movement is a regression; flagging ties would report
+    every multi-record event as broken.
+    """
+    _, state, _ = run(
+        [
+            ev("A", "B", 100 * PX, 500, 1, seq=7, ts=1_000, flags=0),
+            ev("C", "B", 100 * PX, 500, 1, seq=7, ts=1_000, flags=0),
+            ev("A", "B", 101 * PX, 500, 2, seq=7, ts=1_000, flags=F_LAST),
+            ev("A", "A", 102 * PX, 100, 3, seq=8, ts=1_001, flags=F_LAST),
+        ]
+    )
+    assert state.violations[SEQUENCE_REGRESSION] == 0
+    assert state.violations[TS_EVENT_REGRESSION] == 0
+
+
+def test_strictly_backward_sequence_is_still_a_regression():
+    _, state, _ = run(
+        [
+            ev("A", "B", 100 * PX, 500, 1, seq=7, ts=1_000),
+            ev("A", "B", 99 * PX, 500, 2, seq=6, ts=1_000),
+        ]
+    )
+    assert state.violations[SEQUENCE_REGRESSION] == 1
+
+
+def test_violation_counts_are_uncapped_while_samples_are_bounded():
+    """Counts must not saturate at the sample limit.
+
+    Deriving counts from the retained sample -- which an earlier version did --
+    reports a session with thousands of failures as having exactly the sample
+    size, which reads as untidy rather than broken.
+    """
+    events = [ev("C", "B", 100 * PX, 1, 900_000 + i) for i in range(50)]
+    _, state, violations = replay(events, max_recorded_violations=5)
+    assert state.violations[UNKNOWN_ORDER_CANCEL] == 50
+    assert len(violations) == 5
+
+
+def test_report_marks_the_sample_as_truncated_when_it_is():
+    events = [ev("C", "B", 100 * PX, 1, 900_000 + i) for i in range(50)]
+    book, state, violations = replay(events, max_recorded_violations=5)
+    report = validation_report(book, state, violations, source="synthetic")
+    assert report["integrity"]["violation_counts"][UNKNOWN_ORDER_CANCEL] == 50
+    assert report["integrity"]["sample_truncated"] is True
+    assert len(report["integrity"]["sample_violations"]) == 5
 
 
 def test_iter_dbn_events_skips_non_mbo_records(monkeypatch):

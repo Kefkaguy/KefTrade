@@ -102,6 +102,39 @@ it a defect would make `clean: false` meaningless. `F_BAD_TS_RECV` is a
 timestamping problem on Databento's receive clock, not a statement about book
 correctness.
 
+### Certification is stricter than `clean`
+
+`F_MAYBE_BAD_BOOK` is Databento's marker for an **unrecoverable channel gap**:
+the reconstruction may be missing updates it will never receive. Internal
+consistency measured *after* such a gap says nothing about what went missing, so
+a single occurrence withdraws certification on its own:
+
+```json
+"integrity": {
+  "clean": false,
+  "certified": false,
+  "uncertified_reason": "F_MAYBE_BAD_BOOK: Databento reported an unrecoverable
+                         channel gap on 1 record(s); the book may be missing
+                         updates that will never arrive"
+}
+```
+
+The replay still finishes — the gap is a verdict, not a crash — so the rest of
+the session stays readable. `flags.f_maybe_bad_book_records` carries the count.
+
+`F_BAD_TS_RECV` is counted **split by snapshot versus live**:
+
+```json
+"f_bad_ts_recv_records": 3,
+"f_bad_ts_recv_snapshot_records": 2,
+"f_bad_ts_recv_live_records": 1
+```
+
+A snapshot-only occurrence says nothing about the live stream. Live occurrences
+are what later latency and timestamp-quality work needs, so they are reported
+explicitly and still do not fail certification — a bad receive clock is not a
+bad book.
+
 **One deliberate divergence from Databento's reference.** Their implementation
 `assert`s on these conditions. This one **records and continues**: an assertion
 turns the first anomaly into a crash and hides every later one, which is the
@@ -110,10 +143,41 @@ reference (an unknown `M` is treated as an add); where it is not, it clamps
 rather than invents (a cancel exceeding resting size clamps at zero, because a
 negative resting size is not a market state).
 
+## Fidelity audit (second pass)
+
+Four changes and two confirmations.
+
+**Sequence ties are permitted — confirmed, not changed.** The check was already
+`event.sequence < last_live_sequence`, strictly less-than, so records normalized
+from the same TotalView message sharing one sequence pass cleanly. Only true
+backward movement counts. This was previously implicit in an operator; it is now
+pinned by `test_equal_sequence_numbers_within_one_native_event_are_not_regressions`
+(three records at sequence 7 → zero violations) and its negative counterpart at
+sequence 7 → 6 → one violation. Same for `ts_event`.
+
+**Violation counts were capped — a real bug the audit found.** Counts were
+derived from the retained sample list, which is bounded at 200. A session with
+40,000 crossed books would have reported 200 and read as untidy rather than
+broken. Counts now come from an uncapped `Counter`; only the sample is bounded,
+and `integrity.sample_truncated` says when it is. This mattered directly for the
+"any occurrence must be counted" requirement on `F_MAYBE_BAD_BOOK`.
+
+**Every action is reported, including absent ones.** `replay.by_action` now
+carries all seven of `A/C/M/R/T/F/N` with explicit zeros, alongside
+`by_action_observed` for what actually occurred. Nasdaq TotalView normalizes an
+order replace as `C(old order_id)` + `A(new order_id)`, so **few or no `M`
+records on the real file would be expected rather than evidence of a parsing
+bug** — and a zero has to be visible to support that reading. Generic `M`
+support is unchanged and still fully tested;
+`test_replace_normalized_as_cancel_plus_add_reconstructs_correctly` covers the
+XNAS replace shape end to end without any `M` record at all.
+
+**`F_MAYBE_BAD_BOOK` and `F_BAD_TS_RECV`** are handled as described above.
+
 ## Test results
 
 ```
-34 passed, 1 skipped
+43 passed, 1 skipped
 ```
 
 The skip is the real-file integration check (see below). Coverage:
@@ -122,6 +186,10 @@ The skip is the real-file integration check (see below). Coverage:
 - **Actions** — add/level aggregation, partial and full cancel, modify as absolute size, all three priority cases, clear.
 - **T/F/N inertness** and the accompanying-cancel rule.
 - **Every violation kind** listed above, each asserted to be both *detected* and *recovered from* without corrupting the book.
+- **Certification** — `F_MAYBE_BAD_BOOK` withdraws it; a clean session keeps it; `F_BAD_TS_RECV` does not affect it.
+- **Uncapped counts** — 50 violations with a sample limit of 5 reports 50 and retains 5.
+- **Sequence ties** — equal sequences within one native event pass; a strictly backward sequence does not.
+- **Action coverage** — all seven actions present in the report, absent ones as explicit zeros.
 - **`F_LAST` boundary rule**, demonstrated by A/B comparison rather than assertion.
 - **Snapshot** preamble accounting and monotonicity exemption.
 - **Top-of-book** normalization and `UNDEF_PRICE` side-clear.
@@ -189,7 +257,7 @@ modify:
 |---|---|
 | `app/services/mbo_book_validator.py` | Replay core, book, violation vocabulary, report builder |
 | `app/cli/mbo_validate.py` | `file` and `constants` commands |
-| `tests/test_mbo_book_validator.py` | 34 synthetic tests + 1 real-file integration check |
+| `tests/test_mbo_book_validator.py` | 43 synthetic tests + 1 real-file integration check |
 | `pyproject.toml` | `databento>=0.83.0`, `sortedcontainers>=2.4.0` |
 
 `sortedcontainers` is the same structure Databento's reference book uses; best
