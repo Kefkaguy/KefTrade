@@ -2,12 +2,15 @@ import inspect
 
 from app.services.intraday_sector_leadlag import (
     FRESH_TESTS,
+    FROZEN_COST_CALIBRATION_ID,
     HORIZONS_MINUTES,
+    PRIOR_EFFECTIVE_TRIALS,
     SECTOR_LEADLAG_VERSION,
     STATE_DIRECTIONS,
     STATE_NEGATIVE_PEER_IMPULSE,
     STATE_POSITIVE_PEER_IMPULSE,
     TARGET_GROSS_LOWER_BOUND_BPS,
+    TOTAL_EFFECTIVE_TRIALS,
     Z_THRESHOLD,
     _build_predictor_states,
     _load_confirmation_cell_events,
@@ -40,6 +43,9 @@ def test_protocol_is_exactly_two_states_by_three_horizons():
     assert Z_THRESHOLD == 1.5
     assert HORIZONS_MINUTES == (5, 10, 15)
     assert FRESH_TESTS == 6
+    assert PRIOR_EFFECTIVE_TRIALS == 502
+    assert TOTAL_EFFECTIVE_TRIALS == 508
+    assert FROZEN_COST_CALIBRATION_ID == 4
     assert STATE_DIRECTIONS == {
         STATE_POSITIVE_PEER_IMPULSE: 1,
         STATE_NEGATIVE_PEER_IMPULSE: -1,
