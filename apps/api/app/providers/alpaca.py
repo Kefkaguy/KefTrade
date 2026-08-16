@@ -28,6 +28,9 @@ MAX_STOCK_QUOTE_PAGES = 100
 # One session of a liquid name can exceed a million prints, so the ceiling is
 # high; the caller folds each page away rather than holding the range.
 MAX_STOCK_TRADE_PAGES = 400
+# Quotes arrive at several times the rate of trades, so the streaming pager
+# needs a correspondingly higher ceiling than the trade one.
+MAX_STOCK_QUOTE_STREAM_PAGES = 4000
 SUPPORTED_TIMEFRAMES = {
     "1m": "1Min",
     "15m": "15Min",
@@ -362,6 +365,91 @@ def normalize_stock_quote(
         "spread_bps": spread_bps,
         "raw_payload": dict(row),
     }
+
+
+async def iter_stock_quote_pages(
+    symbol: str,
+    *,
+    start: datetime,
+    end: datetime,
+    feed: str = ALPACA_FEED,
+    max_pages: int = MAX_STOCK_QUOTE_STREAM_PAGES,
+    rate_limit_retries: int = 12,
+    rate_limit_base_sleep: float = 30.0,
+    request_pause_seconds: float = 0.0,
+) -> AsyncIterator[tuple[list[dict[str, Any]], dict[str, Any]]]:
+    """Yield pages of historical NBBO quotes without accumulating the range.
+
+    The sibling of :func:`iter_stock_trade_pages`, and needed for the same
+    reason with more force: quotes arrive at roughly ten times the volume of
+    trades, so a liquid symbol can print several million in one session.
+    :func:`fetch_stock_quotes` materialises its result in a list and stops at
+    ``MAX_STOCK_QUOTE_PAGES``, which makes a truncated session indistinguishable
+    from a quiet one -- exactly the failure the trade pager was written to
+    avoid.  Each page here carries ``exhausted`` so the caller can record
+    whether the window was actually drained.
+    """
+    if not settings.alpaca_api_key or not settings.alpaca_api_secret:
+        raise RuntimeError("Set ALPACA_API_KEY and ALPACA_API_SECRET to fetch Alpaca quotes.")
+    if start.tzinfo is None or end.tzinfo is None:
+        raise ValueError("Quote start/end must be timezone-aware.")
+    if end <= start:
+        raise ValueError("Quote end must be after start.")
+
+    params: dict[str, Any] = {
+        "start": start.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "end": end.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        "limit": MAX_PAGE_LIMIT,
+        "feed": feed,
+        "sort": "asc",
+    }
+    headers = {
+        "APCA-API-KEY-ID": settings.alpaca_api_key,
+        "APCA-API-SECRET-KEY": settings.alpaca_api_secret,
+    }
+    endpoint = ALPACA_STOCK_QUOTES_ENDPOINT.format(symbol=symbol.upper())
+
+    async with httpx.AsyncClient(
+        base_url=settings.alpaca_data_base_url, timeout=60, headers=headers
+    ) as client:
+        for page in range(max_pages):
+            response = None
+            for attempt in range(rate_limit_retries + 1):
+                response = await client.get(endpoint, params=params)
+                if response.status_code != 429:
+                    break
+                if attempt >= rate_limit_retries:
+                    break
+                retry_after = response.headers.get("Retry-After")
+                delay = (
+                    float(retry_after)
+                    if retry_after and retry_after.replace(".", "", 1).isdigit()
+                    else min(rate_limit_base_sleep * (2 ** min(attempt, 4)), 900.0)
+                )
+                logger.warning(
+                    "Alpaca quote rate limit; retrying",
+                    extra={"symbol": symbol, "page": page, "attempt": attempt + 1, "sleep": delay},
+                )
+                await asyncio.sleep(delay)
+            assert response is not None
+            response.raise_for_status()
+            payload = response.json()
+            quotes = payload.get("quotes") or []
+            token = payload.get("next_page_token")
+            yield quotes, {
+                "page": page,
+                "feed": feed,
+                "received": len(quotes),
+                "status": response.status_code,
+                "request_id": response.headers.get("X-Request-ID"),
+                "next_page_token_present": bool(token),
+                "exhausted": not token or not quotes,
+            }
+            if not token or not quotes:
+                return
+            params["page_token"] = token
+            if request_pause_seconds > 0:
+                await asyncio.sleep(request_pause_seconds)
 
 
 async def iter_stock_trade_pages(
