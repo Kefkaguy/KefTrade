@@ -7,14 +7,12 @@ from typing import Any
 
 from app.cli._refusal import run_command
 from app.db import connect
-from app.services.intraday_news_reaction import (
+from app.services.intraday_news_reaction_v2 import (
     confirm_news_reaction,
-    news_reaction_report,
-    run_news_reaction_discovery,
-)
-from app.services.intraday_news_reaction_governed import (
     declare_news_reaction,
+    news_reaction_report,
     preflight_news_reaction,
+    run_news_reaction_discovery,
 )
 
 
@@ -52,9 +50,9 @@ def confirm(args: argparse.Namespace) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         description=(
-            "Pre-strategy 5m company-news reaction research. News triggers the event; "
-            "the first completed five minutes define continuation/failure state; "
-            "fixed +5/+10/+15/+30m outcomes are measured only after declaration."
+            "Pre-strategy 5m company-news reaction research. V2 is power-pruned before "
+            "any forward outcome inspection: positive-news continuation/failure only, "
+            "four fixed +5/+10/+15/+30m horizons."
         )
     )
     commands = root.add_subparsers(dest="command", required=True)
@@ -63,19 +61,19 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--dataset-id", type=int, required=True)
     p.set_defaults(handler=preflight)
 
-    d = commands.add_parser("declare", help="Freeze the entire 16-cell research specification.")
+    d = commands.add_parser("declare", help="Freeze the power-pruned 8-cell research specification.")
     d.add_argument("--dataset-id", type=int, required=True)
     d.add_argument("--cost-calibration-id", type=int, required=True)
     d.add_argument(
         "--prior-effective-trials",
         type=int,
         required=True,
-        help="Cumulative effective trials already spent on this historical tape before these 16 cells.",
+        help="Cumulative effective trials already spent on this historical tape before these 8 cells.",
     )
     d.add_argument("--purpose", required=True)
     d.set_defaults(handler=declare)
 
-    x = commands.add_parser("discover", help="Spend discovery+validation once for one frozen declaration.")
+    x = commands.add_parser("discover", help="Spend discovery+validation once for one frozen v2 declaration.")
     x.add_argument("--declaration-id", type=int, required=True)
     x.set_defaults(handler=discover)
 
@@ -83,7 +81,7 @@ def parser() -> argparse.ArgumentParser:
     r.add_argument("--run-id", type=int, required=True)
     r.set_defaults(handler=report)
 
-    c = commands.add_parser("confirm", help="Spend untouched confirmation once, only for promoted cells.")
+    c = commands.add_parser("confirm", help="Spend untouched confirmation once, only for promoted v2 cells.")
     c.add_argument("--run-id", type=int, required=True)
     c.set_defaults(handler=confirm)
 
@@ -95,7 +93,7 @@ def main() -> None:
     run_command(
         args.handler,
         args,
-        banner="5m point-in-time news reaction | pre-strategy | governed evidence",
+        banner="5m point-in-time news reaction v2 | positive-only power-pruned | governed evidence",
     )
 
 
