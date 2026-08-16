@@ -145,7 +145,7 @@ def test_normalized_quote_carries_full_source_precision():
 
 
 def test_two_updates_in_one_microsecond_stay_distinct():
-    """The exact collapse migration 078 fixes."""
+    """The exact collapse migration 079 fixes."""
     first = normalize_stock_quote(
         "INTC", {"t": "2026-06-01T13:30:00.123456111Z", "bp": 10.0, "ap": 10.01, "bs": 1, "as": 2}
     )

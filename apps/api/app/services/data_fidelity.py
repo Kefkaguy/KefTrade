@@ -136,7 +136,7 @@ def snapshot_field_certifications(
     """Report which frozen fields are no longer approved, without touching them.
 
     Historical snapshots stay byte-identical and keep their immutability
-    triggers; migration 078 records a separate, additive statement *about*
+    triggers; migration 079 records a separate, additive statement *about*
     them.  This reads that statement back so a dataset can be inspected before
     anything is built on it.
     """
