@@ -82,9 +82,18 @@ SUPERSEDED_LABEL_VERSIONS: tuple[dict[str, str], ...] = (
     },
 )
 
-REQUIRED_FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v2"
+REQUIRED_FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v3"
 REQUIRED_FEATURE_SEMANTICS_HASH = (
-    "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551"
+    "7f613b06e8ba25bc45947c1ea6d3558e4508f73e37d6ef09736ba91d2d3933eb"
+)
+
+# The feature semantics this label family was originally declared over. The
+# label logic did not change with the v3 absorption correction -- labels are
+# resolved from the raw stream against the snapshot spine, and no feature value
+# enters a label -- so labels already on disk remain valid, but only if the
+# regenerated spine is proved identical. See LABEL_LOGIC_HASH.
+SUPERSEDED_REQUIRED_FEATURE_SEMANTICS_HASHES: tuple[str, ...] = (
+    "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551",
 )
 
 NANOS_PER_SECOND = 1_000_000_000
@@ -169,6 +178,25 @@ LABEL_COLUMNS: tuple[str, ...] = (
 
 LABEL_SCHEMA_HASH = hashlib.sha256("\n".join(LABEL_COLUMNS).encode("utf-8")).hexdigest()
 
+# What the labels ARE, independent of the feature-engine semantics they were
+# declared over. Nothing here moves when a feature VALUE changes, because no
+# feature value enters a label: labels are resolved from the raw certified
+# stream against the snapshot spine. An unchanged value is therefore evidence
+# that label files already on disk do not need re-replaying.
+LABEL_LOGIC_HASH = hashlib.sha256(
+    "\n".join(
+        (
+            LABEL_ENGINE_VERSION,
+            "event_time_from_certified_mbo_stream",
+            *(f"{h.name}:{h.kind}:{h.magnitude}" for h in HORIZONS),
+            *LABEL_COLUMNS,
+        )
+    ).encode("utf-8")
+).hexdigest()
+
+# The full provenance binding: the logic PLUS the feature semantics it was
+# declared against. This one does move with a Stage-1 semantic correction, and
+# it is supposed to.
 LABEL_DEFINITION_HASH = hashlib.sha256(
     "\n".join(
         (
@@ -180,6 +208,25 @@ LABEL_DEFINITION_HASH = hashlib.sha256(
         )
     ).encode("utf-8")
 ).hexdigest()
+
+SUPERSEDED_LABEL_DEFINITION_HASHES: tuple[dict[str, str], ...] = (
+    {
+        "label_definition_hash": (
+            "2e8ada7e56d780639a8427b4e88d5e464cb541feacaf0fc8dccf9519097677ac"
+        ),
+        "superseded_before_outcome": "true",
+        "declared_over_feature_semantics": (
+            "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551"
+        ),
+        "label_content_changed": "false",
+        "reason": (
+            "rebound from feature-engine v2 to v3. The absorption correction "
+            "changed feature values, not the snapshot spine and not the label "
+            "resolution, so label content is unaffected. Reuse is admissible "
+            "only against a spine proved identical row for row."
+        ),
+    },
+)
 
 
 # ---------------------------------------------------------------------------

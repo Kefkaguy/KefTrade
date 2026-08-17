@@ -69,6 +69,7 @@ from app.services.mbo_stage2_plan import (
     CSCV_IN_SAMPLE_BLOCKS,
     DESIGN_WIDTH,
     PBO_AUTHORIZATION_CEILING,
+    PLAN_DESIGN_HASH,
     PLAN_HASH,
     PRICE_ONLY_LAGS,
     PRIMARY_CELLS,
@@ -81,8 +82,18 @@ STAGE2_EXECUTOR_VERSION = "tier1_stage2_executor_v1"
 
 # The frozen artefacts this executor is bound to. A mismatch is a refusal.
 EXPECTED_PLAN_VERSION = "tier1_stage2_plan_v3"
+
+# The design, which a Stage-1 semantic correction must never move. Recomputing
+# PLAN_HASH with the superseded v2 bindings reproduces the original
+# ba51ccba... exactly, which is the proof that only the bindings changed.
+EXPECTED_PLAN_DESIGN_HASH = (
+    "44ac79d1c8fcb6ba452fed9820788c00033ed90fd71ce1996ceec9e3a2443b93"
+)
+
+# The design bound to the artefacts it is declared over. Rebound from
+# ba51ccba... when the feature engine was corrected to v3.
 EXPECTED_PLAN_HASH = (
-    "ba51ccba12caf6969bbb0da84ff4cffa956361c56d5ea7bf77b453893331ca6e"
+    "e575428229bc5324fe74ca1593213a7acc39c879bf46eaac77bb1921d8430a25"
 )
 
 SPECIFICATION_GAPS_CLOSED: tuple[dict[str, str], ...] = (
@@ -127,7 +138,10 @@ SPECIFICATION_GAPS_CLOSED: tuple[dict[str, str], ...] = (
             "L3 columns at Stage-2 design-matrix construction, per (symbol, "
             "cadence, feature), within the symbol-day, from strictly prior "
             "observations, withheld below 30 priors and never imputed; the frozen "
-            "Stage-1 Parquet is not modified"
+            "Stage-1 Parquet is not modified. With 30+ priors and a prior SD of "
+            "zero the sensor is dormant: a value equal to the prior mean "
+            "standardizes to exactly 0.0, and a value that differs is withheld "
+            "because no finite prior scale exists yet"
         ),
         "reason": (
             "Plan v3 declares the scaling rule but Stage-1 froze only four columns "
@@ -984,6 +998,12 @@ def assert_frozen_plan() -> None:
         raise ValueError(
             f"plan version {STAGE2_PLAN_VERSION!r} is not the frozen "
             f"{EXPECTED_PLAN_VERSION!r}"
+        )
+    if PLAN_DESIGN_HASH != EXPECTED_PLAN_DESIGN_HASH:
+        raise ValueError(
+            "the Stage-2 design hash has moved; a design element changed, which "
+            "is a new trial and not a rebinding, and Stage 2B may not execute "
+            "against it"
         )
     if PLAN_HASH != EXPECTED_PLAN_HASH:
         raise ValueError(

@@ -90,7 +90,7 @@ from app.services.mbo_book_validator import (
     MboEvent,
 )
 
-FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v2"
+FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v3"
 
 # Superseded before any predictive outcome was inspected. Kept so a reader of an
 # older manifest can tell which semantics produced it.
@@ -108,6 +108,31 @@ SUPERSEDED_ENGINE_VERSIONS: tuple[dict[str, str], ...] = (
         "feature_vocabulary_hash": (
             "25e685913e3a3d05248ef6f09ad44e4b0cab91276bf7bd66d2f0d650f06b82a7"
         ),
+    },
+    {
+        "version": "tier1_mbo_feature_engine_v2",
+        "superseded_before_outcome": "true",
+        "reason": (
+            "absorption was classified on the individual F record, which is "
+            "book-neutral under the certified XNAS normalization: the resting-book "
+            "change arrives on the companion C/M record of the same native event. "
+            "The comparison was therefore a midpoint against itself, so every "
+            "execution was classified as leaving the midpoint unchanged. The "
+            "all-160 non-predictive diagnostic confirmed this: of 19,484,064 "
+            "feature rows, execution_count never differed from "
+            "executions_without_price_move, execution_volume never differed from "
+            "execution_volume_without_price_move, and all 8,315,861 finite "
+            "absorption_ratio values were exactly 1.0. v3 classifies at the "
+            "native-event boundary, from the midpoint before the group's first "
+            "record to the midpoint after its F_LAST."
+        ),
+        "feature_semantics_hash": (
+            "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551"
+        ),
+        "feature_vocabulary_hash": (
+            "25e685913e3a3d05248ef6f09ad44e4b0cab91276bf7bd66d2f0d650f06b82a7"
+        ),
+        "columns_renamed": "none; the vocabulary and snapshot schema are unchanged",
     },
 )
 
@@ -458,6 +483,15 @@ class OrderBookFeatureEngine:
         self._records = 0
         self._pending_depletion: dict[str, int | None] = {"B": None, "A": None}
         self._execution_seen_at_touch: dict[str, int] = {"B": 0, "A": 0}
+        # Native-event group state, delimited by F_LAST.
+        self._group_open = False
+        self._group_pre_midpoint: float | None = None
+        self._group_execution_count = 0
+        self._group_execution_volume = 0
+        # Executions whose native event had no two-sided midpoint at one end.
+        # Never absorbed, and counted so the exclusion is not silent.
+        self._unclassifiable_execution_groups = 0
+        self._unclassifiable_execution_volume = 0
 
     # -- book reading ------------------------------------------------------
 
@@ -503,12 +537,17 @@ class OrderBookFeatureEngine:
     def _accumulate(self, event: MboEvent, before: _TouchState, after: _TouchState) -> None:
         action = event.action
         size = int(event.size) if event.size is not None else 0
-        mid_before = _midpoint(before)
-        mid_after = _midpoint(after)
-        price_moved = (
-            mid_before is not None and mid_after is not None and mid_before != mid_after
-        )
         e_n = _cks_touch_contribution(before, after)
+
+        if action == ACTION_FILL:
+            # Held, not counted. `F` is book-neutral under the certified XNAS
+            # normalization: the resting-book change arrives on the companion
+            # `C`/`M` record in the same native event. Classifying absorption on
+            # the `F` record therefore compared a midpoint with itself, which is
+            # how every finite absorption_ratio came out at exactly 1.0. The
+            # group is settled at its `F_LAST` instead.
+            self._group_execution_count += 1
+            self._group_execution_volume += size
 
         for cadence in self.cadences:
             window = self._windows[cadence.name]
@@ -531,15 +570,6 @@ class OrderBookFeatureEngine:
                 window.cancel_volume += size
             elif action == ACTION_MODIFY:
                 window.modify_count += 1
-            elif action == ACTION_FILL:
-                # Executions and absorption only. The accompanying `T` carries
-                # the trade; adding this size to aggressor volume as well would
-                # count one XNAS execution twice.
-                window.execution_count += 1
-                window.execution_volume += size
-                if not price_moved:
-                    window.executions_without_price_move += 1
-                    window.execution_volume_without_price_move += size
             elif action == ACTION_TRADE:
                 window.trade_count += 1
                 window.trade_volume += size
@@ -581,6 +611,46 @@ class OrderBookFeatureEngine:
         if action == ACTION_CLEAR:
             self._pending_depletion = {"B": None, "A": None}
             self._execution_seen_at_touch = {"B": 0, "A": 0}
+
+    def _settle_native_event(self, after: _TouchState) -> None:
+        """Close the native event at its ``F_LAST`` and classify its executions.
+
+        Absorption is a property of the complete native event, not of the
+        book-neutral ``F`` record inside it: the question is whether the whole
+        execution -- fill, resting-book change, and any companion records --
+        left the midpoint where it was. So the comparison is the midpoint before
+        the group's first record against the midpoint after its ``F_LAST``.
+
+        A group whose pre- or post-midpoint is unavailable, because the book was
+        one-sided or empty at either end, is counted as executed but never as
+        absorbed. "Unknown" is not evidence of absorption.
+        """
+        executions = self._group_execution_count
+        volume = self._group_execution_volume
+        self._group_open = False
+        if not executions:
+            self._group_pre_midpoint = None
+            return
+
+        pre = self._group_pre_midpoint
+        post = _midpoint(after)
+        classifiable = pre is not None and post is not None
+        absorbed = classifiable and pre == post
+        if not classifiable:
+            self._unclassifiable_execution_groups += 1
+            self._unclassifiable_execution_volume += volume
+
+        for cadence in self.cadences:
+            window = self._windows[cadence.name]
+            window.execution_count += executions
+            window.execution_volume += volume
+            if absorbed:
+                window.executions_without_price_move += executions
+                window.execution_volume_without_price_move += volume
+
+        self._group_pre_midpoint = None
+        self._group_execution_count = 0
+        self._group_execution_volume = 0
 
     # -- emission ----------------------------------------------------------
 
@@ -777,6 +847,14 @@ class OrderBookFeatureEngine:
 
             self._records += 1
             before = self._touch()
+            # A native event runs from immediately after the previous F_LAST to
+            # the next F_LAST inclusive. Its coherent "before" midpoint is the
+            # book as it stood before its first record was applied.
+            if not self._group_open:
+                self._group_open = True
+                self._group_pre_midpoint = _midpoint(before)
+                self._group_execution_count = 0
+                self._group_execution_volume = 0
             self.book.apply(event)
             after = self._touch()
             self._accumulate(event, before, after)
@@ -785,6 +863,7 @@ class OrderBookFeatureEngine:
             if not (event.flags & F_LAST):
                 continue
 
+            self._settle_native_event(after)
             self._flast_index += 1
             touch_unchanged = (
                 before.bid_price == after.bid_price and before.ask_price == after.ask_price

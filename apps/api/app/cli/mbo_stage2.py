@@ -33,7 +33,9 @@ from app.services.mbo_feature_engine import (
 from app.services.mbo_label_engine import (
     HORIZONS_BY_NAME,
     LABEL_DEFINITION_HASH,
+    LABEL_LOGIC_HASH,
     LABEL_OK,
+    SUPERSEDED_LABEL_DEFINITION_HASHES,
 )
 from app.services.mbo_stage2_executor import (
     DESIGN_WIDTH,
@@ -46,9 +48,11 @@ from app.services.mbo_stage2_executor import (
     write_summary,
 )
 from app.services.mbo_stage2_plan import (
+    PLAN_DESIGN_HASH,
     PLAN_HASH,
     PRICE_ONLY_LAGS,
     PRIMARY_CELLS,
+    SUPERSEDED_PLAN_HASHES,
 )
 
 DEFAULT_OUTPUT_DIR = Path(__file__).resolve().parents[4] / "reports" / "tier1_stage2_results"
@@ -75,14 +79,41 @@ def _assert_frozen_inputs(features_dir: Path, labels_dir: Path) -> dict[str, Any
     label_manifest = json.loads(
         (labels_dir / "label_batch_manifest.json").read_text(encoding="utf-8")
     )
-    if label_manifest.get("label_definition_hash") != LABEL_DEFINITION_HASH:
-        raise ValueError("label definition hash is not the frozen Stage-2A v2 artefact")
-    if label_manifest.get("stage2_plan_hash") != PLAN_HASH:
+    declared = label_manifest.get("label_definition_hash")
+    superseded = {
+        entry["label_definition_hash"]: entry
+        for entry in SUPERSEDED_LABEL_DEFINITION_HASHES
+    }
+    reused_under = None
+    if declared != LABEL_DEFINITION_HASH:
+        if declared not in superseded:
+            raise ValueError(
+                "label definition hash is neither the current frozen artefact nor "
+                "a recorded superseded one"
+            )
+        # Admissible only because no feature value enters a label. The label
+        # logic itself must be untouched, and every spine row is then verified
+        # against the regenerated features file by file in `grams` -- assumed
+        # nowhere, checked everywhere.
+        reused_under = superseded[declared]
+        if reused_under.get("label_content_changed") != "false":
+            raise ValueError(
+                "the superseded label definition changed label content; these "
+                "labels must be rebuilt, not reused"
+            )
+    if label_manifest.get("stage2_plan_hash") not in {
+        PLAN_HASH,
+        *(entry["plan_hash"] for entry in SUPERSEDED_PLAN_HASHES),
+    }:
         raise ValueError("labels were built against a different Stage-2 plan")
     return {
         "feature_semantics_hash": FEATURE_SEMANTICS_HASH,
         "label_definition_hash": LABEL_DEFINITION_HASH,
+        "label_logic_hash": LABEL_LOGIC_HASH,
+        "plan_design_hash": PLAN_DESIGN_HASH,
         "stage2_plan_hash": PLAN_HASH,
+        "labels_declared_hash": declared,
+        "labels_reused_under_supersession": reused_under,
         "feature_symbol_days": feature_manifest.get("symbol_days"),
         "label_symbol_days_completed": label_manifest.get("symbol_days_completed"),
     }
@@ -119,9 +150,23 @@ def expanding_standardize(
     """The frozen plan-v3 scaling: expanding, prior-only, within the symbol-day.
 
     The mean and standard deviation at row ``t`` are computed from the finite
-    observations strictly *before* ``t``. Below ``min_priors`` of them the value
-    is withheld as NaN rather than imputed, and a column with no prior variation
-    is withheld rather than divided by zero.
+    observations strictly *before* ``t``. The current observation enters the
+    history only after its own standardized value has been determined.
+
+    Three cases, frozen before outcomes:
+
+    - fewer than ``min_priors`` prior finite observations: withheld
+    - at least that many, prior SD > 0: the ordinary prior-only z-score
+    - at least that many, prior SD == 0: the sensor has been dormant. If the
+      current value equals the prior mean it standardizes to exactly ``0.0``;
+      if it differs, the row is withheld, because no finite prior scale exists
+      to express the difference in.
+
+    That third case matters. Withholding a dormant-but-valid sensor forever
+    would let one always-zero column, such as ``modify_count`` on a venue that
+    emits no ``M`` records, withhold every row and annihilate the entire design.
+    A sensor reading zero is information that nothing happened, not missing
+    data.
 
     Values are shifted by the column's first finite observation before
     accumulating. That is numerically, not statistically, motivated: a z-score
@@ -147,8 +192,17 @@ def expanding_standardize(
         deviation = np.sqrt(np.maximum(variance, 0.0))
         standardized = (centered - mean) / deviation
 
-    usable = finite & (prior_count >= min_priors) & (deviation > 0.0)
-    return np.where(usable, standardized, np.nan)
+    have_priors = finite & (prior_count >= min_priors)
+    varying = deviation > 0.0
+    # Dormant: no prior variation, and this row does not break it. The origin
+    # shift makes both sides exactly zero for a genuinely constant column, so
+    # this equality is exact rather than a tolerance.
+    dormant = have_priors & ~varying & (centered == mean)
+    return np.where(
+        have_priors & varying,
+        standardized,
+        np.where(dormant, 0.0, np.nan),
+    )
 
 
 def _symbol_day_matrix(table, feature_names) -> tuple[np.ndarray, np.ndarray]:
@@ -202,6 +256,7 @@ def grams(args: argparse.Namespace) -> dict[str, Any]:
     dates: set[str] = set()
     withheld_by_feature: dict[str, int] = {}
     fully_withheld: list[dict[str, str]] = []
+    spine_certified = 0
 
     label_paths = {
         path.name.split(".")[0]: path
@@ -223,14 +278,25 @@ def grams(args: argparse.Namespace) -> dict[str, Any]:
             print(f"[{index}/{len(feature_paths)}] {stem} {cadence}", flush=True)
 
         table = pq.read_table(
-            path, columns=["sequence_index", *FEATURE_NAMES]
+            path, columns=["sequence_index", "ts_event", *FEATURE_NAMES]
         )
         design, sequence = _symbol_day_matrix(table, FEATURE_NAMES)
+        spine_ts = np.asarray(
+            table.column("ts_event").to_numpy(zero_copy_only=False), np.int64
+        )
+        spine_midpoint = np.asarray(
+            table.column("midpoint").to_numpy(zero_copy_only=False), float
+        )
         del table
 
         horizons = [h for c, h in PRIMARY_CELLS if c == cadence]
         prefixes = {h: HORIZONS_BY_NAME[h].prefix for h in horizons}
-        label_columns = ["cadence", "sequence_index"]
+        label_columns = [
+            "cadence",
+            "sequence_index",
+            "source_ts_event",
+            "source_midpoint",
+        ]
         for prefix in prefixes.values():
             label_columns += [f"{prefix}_status", f"{prefix}_return_bps"]
         labels = pq.read_table(label_path, columns=label_columns)
@@ -245,6 +311,33 @@ def grams(args: argparse.Namespace) -> dict[str, Any]:
                 f"label rows for {stem} {cadence} do not align with the feature "
                 "snapshots one-for-one; refusing to join on assumption"
             )
+        # Spine certification. Labels carry the snapshot they were resolved
+        # against; if the regenerated features reproduce that spine exactly then
+        # the labels are still the labels of these rows, whatever changed in the
+        # feature values. This is what makes reuse across the v2 -> v3 semantics
+        # correction a verified fact rather than an argument.
+        label_ts = np.asarray(
+            labels.column("source_ts_event").to_numpy(zero_copy_only=False), np.int64
+        )[mask]
+        label_midpoint = np.asarray(
+            labels.column("source_midpoint").to_numpy(zero_copy_only=False), float
+        )[mask]
+        if not np.array_equal(label_ts, spine_ts):
+            raise ValueError(
+                f"spine mismatch for {stem} {cadence}: label source_ts_event does "
+                "not reproduce the feature snapshot timestamps, so these labels "
+                "belong to a different extraction and must be rebuilt"
+            )
+        if not np.array_equal(
+            np.nan_to_num(label_midpoint, nan=np.inf),
+            np.nan_to_num(spine_midpoint, nan=np.inf),
+        ):
+            raise ValueError(
+                f"spine mismatch for {stem} {cadence}: label source_midpoint does "
+                "not reproduce the feature snapshot midpoints, so these labels "
+                "must be rebuilt"
+            )
+        spine_certified += 1
 
         finite_design = np.isfinite(design).all(axis=1)
         # A feature with no prior variation on this symbol-day is withheld on
@@ -324,6 +417,17 @@ def grams(args: argparse.Namespace) -> dict[str, Any]:
             "min_prior_observations": MIN_PRIOR_OBSERVATIONS,
             "imputation": "none; withheld rows are dropped",
             "stage1_parquet_modified": False,
+        },
+        "spine_certified_files": spine_certified,
+        "label_reuse": {
+            "labels_rebuilt": provenance["labels_declared_hash"] == LABEL_DEFINITION_HASH,
+            "spine_verified_every_file": spine_certified
+            == len([p for p in feature_paths if p.name.split(".")[1] in CADENCES_IN_GRID]),
+            "basis": (
+                "no feature value enters a label; labels are resolved from the raw "
+                "certified stream against the snapshot spine, and every spine row "
+                "was compared against the regenerated features"
+            ),
         },
         "withheld_by_feature": dict(sorted(withheld_by_feature.items())),
         "features_fully_withheld_on_a_symbol_day": fully_withheld,

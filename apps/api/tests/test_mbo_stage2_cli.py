@@ -24,7 +24,11 @@ from app.cli.mbo_stage2 import (
     grams,
 )
 from app.services.mbo_feature_engine import FEATURE_SEMANTICS_HASH
-from app.services.mbo_label_engine import HORIZONS_BY_NAME, LABEL_DEFINITION_HASH
+from app.services.mbo_label_engine import (
+    HORIZONS_BY_NAME,
+    LABEL_DEFINITION_HASH,
+    SUPERSEDED_LABEL_DEFINITION_HASHES,
+)
 from app.services.mbo_stage2_executor import (
     DESIGN_WIDTH,
     MIN_PRIOR_OBSERVATIONS,
@@ -120,10 +124,40 @@ def test_shift_invariance_survives_a_large_offset():
     np.testing.assert_allclose(base, shifted, rtol=1e-6, equal_nan=True)
 
 
-def test_a_column_with_no_prior_variation_is_withheld_not_divided_by_zero():
+def test_a_permanently_constant_column_contributes_zero_not_nothing():
+    """A dormant sensor such as modify_count on a venue that emits no M records
+    must contribute 0, not withhold every row and annihilate the design."""
     constant = np.full(100, 4.0)
     z = expanding_standardize(constant, min_priors=MIN_PRIOR_OBSERVATIONS)
-    assert np.isnan(z).all()
+    assert np.isnan(z[:MIN_PRIOR_OBSERVATIONS]).all()
+    assert (z[MIN_PRIOR_OBSERVATIONS:] == 0.0).all()
+
+
+def test_a_dormant_column_of_zeros_also_contributes_zero():
+    z = expanding_standardize(np.zeros(100), min_priors=MIN_PRIOR_OBSERVATIONS)
+    assert (z[MIN_PRIOR_OBSERVATIONS:] == 0.0).all()
+
+
+def test_the_row_that_breaks_a_constant_history_is_withheld():
+    """No finite prior scale exists to express the break in, so it is withheld
+    rather than dividing by a zero standard deviation."""
+    values = np.full(100, 4.0)
+    values[60] = 9.0
+    z = expanding_standardize(values, min_priors=MIN_PRIOR_OBSERVATIONS)
+    assert z[59] == 0.0                       # still dormant
+    assert np.isnan(z[60])                    # the break itself: withheld
+    assert np.isfinite(z[61])                 # a prior scale now exists
+    assert z[61] != 0.0
+
+
+def test_the_breaking_observation_enters_history_only_after_being_scored():
+    """Row 60 must be standardized against the constant history alone."""
+    values = np.full(100, 4.0)
+    values[60] = 9.0
+    z = expanding_standardize(values, min_priors=MIN_PRIOR_OBSERVATIONS)
+    prior = values[:61]
+    expected = (values[61] - prior.mean()) / prior.std(ddof=1)
+    assert z[61] == pytest.approx(expected)
 
 
 def test_non_finite_inputs_do_not_contaminate_later_statistics():
@@ -155,7 +189,10 @@ def test_the_l3_block_reaching_the_design_is_standardized_not_raw(frozen_tree):
 
 def _feature_table(seed: int) -> pa.Table:
     rng = np.random.default_rng(seed)
-    columns = {"sequence_index": pa.array(np.arange(ROWS), pa.int64())}
+    columns = {
+        "sequence_index": pa.array(np.arange(ROWS), pa.int64()),
+        "ts_event": pa.array(np.arange(ROWS, dtype=np.int64) * 1_000_000, pa.int64()),
+    }
     for name in FEATURE_NAMES:
         if name == "midpoint":
             values = 100 + np.cumsum(rng.standard_normal(ROWS) * 0.01)
@@ -165,11 +202,14 @@ def _feature_table(seed: int) -> pa.Table:
     return pa.table(columns)
 
 
-def _label_table(cadence: str, seed: int) -> pa.Table:
+def _label_table(cadence: str, seed: int, features: pa.Table) -> pa.Table:
+    """Labels carry the spine of the snapshot they were resolved against."""
     rng = np.random.default_rng(seed + 7)
     columns = {
         "cadence": pa.array([cadence] * ROWS, pa.string()),
         "sequence_index": pa.array(np.arange(ROWS), pa.int64()),
+        "source_ts_event": features.column("ts_event"),
+        "source_midpoint": features.column("midpoint"),
     }
     for cadence_name, horizon in PRIMARY_CELLS:
         if cadence_name != cadence:
@@ -193,13 +233,20 @@ def frozen_tree(tmp_path: Path) -> tuple[Path, Path]:
     for date in DATES:
         for symbol in SYMBOLS:
             stem = f"{symbol}_{date}"
+            built = {}
             for cadence in cadences:
                 seed += 1
                 directory = features / cadence
                 directory.mkdir(parents=True, exist_ok=True)
-                pq.write_table(_feature_table(seed), directory / f"{stem}.{cadence}.parquet")
+                built[cadence] = (_feature_table(seed), seed)
+                pq.write_table(
+                    built[cadence][0], directory / f"{stem}.{cadence}.parquet"
+                )
             labels.mkdir(parents=True, exist_ok=True)
-            tables = [_label_table(cadence, seed) for cadence in cadences]
+            tables = [
+                _label_table(cadence, built[cadence][1], built[cadence][0])
+                for cadence in cadences
+            ]
             pq.write_table(pa.concat_tables(tables, promote_options="default"),
                            labels / f"{stem}.labels.parquet")
     (features / "batch_manifest.json").write_text(
@@ -303,6 +350,55 @@ def test_the_design_is_intercept_then_price_only_then_the_l3_block():
         ),
         equal_nan=True,
     )
+
+
+def test_labels_from_the_superseded_v2_binding_are_reusable(frozen_tree, tmp_path):
+    """The v3 absorption correction changed feature values, not the spine, so
+    labels resolved under the v2 binding remain the labels of these rows."""
+    features, labels = frozen_tree
+    manifest = json.loads((labels / "label_batch_manifest.json").read_text())
+    manifest["label_definition_hash"] = SUPERSEDED_LABEL_DEFINITION_HASHES[0][
+        "label_definition_hash"
+    ]
+    (labels / "label_batch_manifest.json").write_text(json.dumps(manifest))
+    result = grams(_args(features, labels, tmp_path / "out"))
+    assert result["label_reuse"]["labels_rebuilt"] is False
+    assert result["label_reuse"]["spine_verified_every_file"] is True
+    assert result["spine_certified_files"] > 0
+
+
+def test_a_spine_mismatch_is_refused_rather_than_reused(frozen_tree, tmp_path):
+    """Reuse is admissible only against a spine proved identical. Move one
+    timestamp and the labels must be rejected, not silently joined."""
+    features, labels = frozen_tree
+    path = next(labels.glob("*.labels.parquet"))
+    table = pq.read_table(path)
+    ts = np.array(table.column("source_ts_event").to_numpy(zero_copy_only=False), np.int64)
+    ts[7] += 1
+    table = table.set_column(
+        table.schema.get_field_index("source_ts_event"),
+        "source_ts_event",
+        pa.array(ts, pa.int64()),
+    )
+    pq.write_table(table, path)
+    with pytest.raises(ValueError, match="spine mismatch"):
+        grams(_args(features, labels, tmp_path / "out"))
+
+
+def test_a_midpoint_spine_mismatch_is_also_refused(frozen_tree, tmp_path):
+    features, labels = frozen_tree
+    path = next(labels.glob("*.labels.parquet"))
+    table = pq.read_table(path)
+    mid = np.array(table.column("source_midpoint").to_numpy(zero_copy_only=False), float)
+    mid[11] += 0.01
+    table = table.set_column(
+        table.schema.get_field_index("source_midpoint"),
+        "source_midpoint",
+        pa.array(mid, pa.float64()),
+    )
+    pq.write_table(table, path)
+    with pytest.raises(ValueError, match="spine mismatch"):
+        grams(_args(features, labels, tmp_path / "out"))
 
 
 def test_stale_artefacts_are_refused(frozen_tree, tmp_path):

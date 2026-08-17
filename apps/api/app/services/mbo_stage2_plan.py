@@ -508,27 +508,62 @@ def statistical_plan() -> dict[str, Any]:
     }
 
 
+# The DESIGN, with no reference to the artefacts it is declared over. A Stage-1
+# semantic correction must not be able to move this value: if it does, the plan
+# itself changed and that is a new trial, not a rebinding.
+PLAN_DESIGN_ELEMENTS: tuple[str, ...] = (
+    STAGE2_PLAN_VERSION,
+    *(f"{c}:{h}" for c, h in PRIMARY_CELLS),
+    *(f"{name}:{count}" for name, count in SPLIT_DATE_BLOCKS),
+    PRIMARY_TARGET,
+    "residualized=False",
+    str(PRICE_ONLY_LAGS),
+    MODEL_SPEC["l3_model"]["estimator"],
+    str(RIDGE_ALPHAS),
+    MODEL_SPEC["out_of_sample_score"]["incremental_statistic"],
+    MODEL_SPEC["pbo"]["method"],
+    f"cscv_blocks={CSCV_BLOCKS}",
+    f"cscv_configurations={BH_FAMILY_SIZE}",
+    str(PBO_AUTHORIZATION_CEILING),
+    str(BH_FAMILY_SIZE),
+    str(PRIOR_EFFECTIVE_TRIALS),
+    "authorizes=stage3+external_sample;not=real_money",
+)
+
+PLAN_DESIGN_HASH = hashlib.sha256(
+    "\n".join(PLAN_DESIGN_ELEMENTS).encode("utf-8")
+).hexdigest()
+
+# The design PLUS the artefacts it is declared over. This moves when Stage-1
+# semantics are corrected, and it is supposed to.
 PLAN_HASH = hashlib.sha256(
     "\n".join(
         (
-            STAGE2_PLAN_VERSION,
+            PLAN_DESIGN_ELEMENTS[0],
             LABEL_DEFINITION_HASH,
             FEATURE_SEMANTICS_HASH,
-            *(f"{c}:{h}" for c, h in PRIMARY_CELLS),
-            *(f"{name}:{count}" for name, count in SPLIT_DATE_BLOCKS),
-            PRIMARY_TARGET,
-            "residualized=False",
-            str(PRICE_ONLY_LAGS),
-            MODEL_SPEC["l3_model"]["estimator"],
-            str(RIDGE_ALPHAS),
-            MODEL_SPEC["out_of_sample_score"]["incremental_statistic"],
-            MODEL_SPEC["pbo"]["method"],
-            f"cscv_blocks={CSCV_BLOCKS}",
-            f"cscv_configurations={BH_FAMILY_SIZE}",
-            str(PBO_AUTHORIZATION_CEILING),
-            str(BH_FAMILY_SIZE),
-            str(PRIOR_EFFECTIVE_TRIALS),
-            "authorizes=stage3+external_sample;not=real_money",
+            *PLAN_DESIGN_ELEMENTS[1:],
         )
     ).encode("utf-8")
 ).hexdigest()
+
+SUPERSEDED_PLAN_HASHES: tuple[dict[str, str], ...] = (
+    {
+        "plan_hash": (
+            "ba51ccba12caf6969bbb0da84ff4cffa956361c56d5ea7bf77b453893331ca6e"
+        ),
+        "superseded_before_outcome": "true",
+        "design_changed": "false",
+        "declared_over_feature_semantics": (
+            "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551"
+        ),
+        "reason": (
+            "rebound from feature-engine v2 to v3 after the absorption semantics "
+            "correction. Not one design element moved -- the cells, the split, "
+            "the target, the estimator, the alpha set, the statistic, the PBO "
+            "rule, the ceiling, the family size and the prior-trial ledger are "
+            "all unchanged, which PLAN_DESIGN_HASH proves. Only the identity of "
+            "the feature artefact the plan is declared over changed."
+        ),
+    },
+)

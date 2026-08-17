@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 from app.services.mbo_stage2_executor import (
     DESIGN_WIDTH,
+    EXPECTED_PLAN_DESIGN_HASH,
     EXPECTED_PLAN_HASH,
     FAIL_BH,
     FAIL_NEGATIVE_DELTA,
@@ -89,6 +90,62 @@ def cell_blocks(signal: float, *, rows: int = 4_000, seed_base: int = 0):
 def test_the_executor_refuses_a_plan_that_moved():
     assert PLAN_HASH == EXPECTED_PLAN_HASH
     assert_frozen_plan()  # does not raise
+
+
+def test_the_design_survived_the_v3_rebinding_untouched():
+    """The decisive provenance check.
+
+    PLAN_HASH moved when Stage-1 semantics were corrected to v3, because it binds
+    the design to the artefacts it is declared over. Recomputing it with the
+    superseded v2 bindings must reproduce the original ba51ccba... exactly. If it
+    does, no design element moved and this is a rebinding; if it does not, the
+    plan changed and that would be a new trial.
+    """
+    import hashlib
+
+    from app.services.mbo_stage2_plan import (
+        PLAN_DESIGN_ELEMENTS,
+        SUPERSEDED_PLAN_HASHES,
+    )
+
+    old = hashlib.sha256(
+        "\n".join(
+            (
+                PLAN_DESIGN_ELEMENTS[0],
+                "2e8ada7e56d780639a8427b4e88d5e464cb541feacaf0fc8dccf9519097677ac",
+                "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551",
+                *PLAN_DESIGN_ELEMENTS[1:],
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    assert old == "ba51ccba12caf6969bbb0da84ff4cffa956361c56d5ea7bf77b453893331ca6e"
+    assert SUPERSEDED_PLAN_HASHES[0]["plan_hash"] == old
+    assert SUPERSEDED_PLAN_HASHES[0]["design_changed"] == "false"
+
+
+def test_the_frozen_design_elements_are_still_the_declared_ones():
+    from app.services.mbo_stage2_plan import PLAN_DESIGN_HASH
+
+    assert PLAN_DESIGN_HASH == EXPECTED_PLAN_DESIGN_HASH
+    assert len(PRIMARY_CELLS) == BH_FAMILY_SIZE == 14
+    assert RIDGE_ALPHAS == (0.01, 0.1, 1.0, 10.0, 100.0)
+    assert PRICE_ONLY_LAGS == (1, 2, 3, 5, 10)
+
+
+def test_label_logic_did_not_move_so_labels_need_no_replay():
+    """Labels bind to the snapshot spine, not to feature values, so the v3
+    correction cannot have changed a single label."""
+    from app.services.mbo_label_engine import (
+        LABEL_SCHEMA_HASH,
+        SUPERSEDED_LABEL_DEFINITION_HASHES,
+    )
+
+    assert LABEL_SCHEMA_HASH == (
+        "f0d55b8db8755e9638155170196c2dadd2e02c19856d8a7edfe47f9b5b933354"
+    )
+    entry = SUPERSEDED_LABEL_DEFINITION_HASHES[0]
+    assert entry["label_content_changed"] == "false"
+    assert entry["superseded_before_outcome"] == "true"
 
 
 def test_the_two_specification_gaps_are_recorded_as_closed_pre_outcome():
