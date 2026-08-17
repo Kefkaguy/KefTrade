@@ -177,7 +177,7 @@ XNAS replace shape end to end without any `M` record at all.
 ## Test results
 
 ```
-43 passed, 1 skipped
+68 passed, 1 skipped
 ```
 
 The skip is the real-file integration check (see below). Coverage:
@@ -195,6 +195,84 @@ The skip is the real-file integration check (see below). Coverage:
 - **Top-of-book** normalization and `UNDEF_PRICE` side-clear.
 - **Adapter** — `MboEvent.from_dbn` exercised against genuine `databento_dbn.MBOMsg` objects, so field names and enum-to-string conversion are pinned, not assumed.
 - **File reader** — `iter_dbn_events` filters non-MBO records (metadata, symbol mappings) that would otherwise raise mid-replay.
+
+## All-session fidelity gate
+
+The per-file validator answers "is this session reconstructible". The gate
+answers the only question that matters before any measurement:
+
+> Can all 160 frozen Tier-1 XNAS MBO symbol-days be reconstructed from a **known
+> starting state** without structural data or book failures?
+
+### Initialization is now explicit
+
+A reconstruction means nothing unless the state it started from is known. Three
+fixed modes:
+
+| Mode | Meaning | Certified |
+|---|---|---|
+| `formal_snapshot` | Databento marked the opening records `F_SNAPSHOT`; the book was rebuilt from published state | yes |
+| `known_empty_clear` | The very first record is an `R` clear with no snapshot flag; the book provably started empty | yes |
+| `unknown` | Neither — the replay began mid-book against state we never saw | **no** |
+
+`known_empty_clear` is what the real XNAS files do. CMCSA 2025-06-26 opens with
+`index=0 sequence=0 action=R side=N order_id=0 flags=8` (`F_BAD_TS_RECV`, not
+`F_SNAPSHOT`).
+
+**That clear is not retroactively called a snapshot, and the distinction is
+load-bearing.** A snapshot means *we were given the state*; a sequence-0 clear
+means *there was no state to give*. Both are certifiable starts, and they are
+different guarantees. `snapshot_present` stays `false` for a known-empty file,
+and a test asserts it.
+
+The report carries `initialization.mode`, `.certified`, `.first_action`,
+`.first_sequence`, `.first_flags` and `.records_before_initialization`. An
+`unknown` initialization makes the file uncertified **and** not clean.
+
+An `R` arriving after record 0 is *not* a known-empty start — it may be clearing
+state we never saw — so it reads `unknown`. `records_before_initialization`
+makes such a near-miss visible rather than something to infer.
+
+### The batch command
+
+```bash
+python -m app.cli.mbo_validate --output-dir reports/tier1_mbo_validation \
+  batch --directory /path/to/dbn --expected-files 160
+```
+
+Discovers `*.dbn.zst`, processes sequentially, reuses the per-file replay core
+unchanged, streams each file (nothing is expanded to disk), and drops each book
+before opening the next. It writes per-file JSON, one aggregate JSON, and a CSV
+matrix — row by row via `csv`, never through pandas, because loading 160 reports
+into a dataframe would defeat the streaming.
+
+**A failing file does not stop the walk.** It is recorded with its error, still
+occupies a matrix row so the denominator stays honest, and the batch continues.
+The complete report is written *before* the process exits non-zero (code 3), so
+one run surfaces every failing session instead of one restart per failure.
+
+### The gate
+
+`overall_certified` is a conjunction — every clause must hold:
+
+| Check | Requirement |
+|---|---|
+| `expected_file_count_met` | exactly 160 files completed |
+| `no_unreadable_files` | zero unreadable |
+| `all_initializations_certified` | every file has a certified initialization |
+| `all_integrity_certified` | every file has `integrity.certified = true` |
+| `all_clean` | every file has `clean = true` |
+| `no_maybe_bad_book` | zero `F_MAYBE_BAD_BOOK` |
+| `no_fatal_violations` | zero fatal structural violations |
+
+159 clean sessions out of 160 is not "99% certified" — it is uncertified with one
+session to look at. `F_BAD_TS_RECV` is totalled and reported, and never gates.
+
+Matrix columns: source, symbol, date, records, book_states_checked,
+initialization mode and certification, certified, clean,
+`f_maybe_bad_book_records`, `f_bad_ts_recv_live_records`, crossed and locked
+book events, sequence and ts_event regressions, all six unknown-order/structural
+violation counts, all seven `A/C/M/R/T/F/N` action counts, and `read_error`.
 
 ## Status of the real CMCSA file
 
@@ -257,7 +335,9 @@ modify:
 |---|---|
 | `app/services/mbo_book_validator.py` | Replay core, book, violation vocabulary, report builder |
 | `app/cli/mbo_validate.py` | `file` and `constants` commands |
-| `tests/test_mbo_book_validator.py` | 43 synthetic tests + 1 real-file integration check |
+| `app/services/mbo_batch_validator.py` | Directory walk, matrix, aggregate gate |
+| `tests/test_mbo_book_validator.py` | 48 per-file tests + 1 real-file integration check |
+| `tests/test_mbo_batch_validator.py` | 20 batch/gate tests |
 | `pyproject.toml` | `databento>=0.83.0`, `sortedcontainers>=2.4.0` |
 
 `sortedcontainers` is the same structure Databento's reference book uses; best
@@ -266,8 +346,8 @@ liquid session is most records.
 
 ## Limitations, stated plainly
 
-- **The real file has not been replayed.** Everything above is synthetic-semantic validation plus a pinned adapter. The integration assertions are written but unexecuted.
-- **One symbol, one session, one venue** even once it runs. A clean CMCSA 2025-06-26 says nothing about the other 159 files, and the validator should be run across them before any of them is trusted.
+- **The 160-file gate has not been run.** The batch command is written and tested against synthetic streams; it has not walked the real directory. Until it does, "all 160 reconstruct" is untested.
+- **CMCSA 2025-06-26 alone says nothing about the other 159.** One clean session is one session.
 - **Correct-by-construction is not correct-by-comparison.** This checks internal consistency. It does not cross-check the reconstructed BBO against Databento's own MBP-1/TBBO for the same session, which is the stronger test and the obvious next step if you want one.
 - **No performance work.** The replay is a straight Python loop; a multi-million-record session will take minutes, not seconds.
 

@@ -112,6 +112,9 @@ UNDEF_PRICE_WITHOUT_TOB = "undef_price_without_tob"
 SNAPSHOT_AFTER_SESSION_START = "snapshot_after_session_start"
 FLAG_MAYBE_BAD_BOOK = "flag_maybe_bad_book"
 FLAG_BAD_TS_RECV = "flag_bad_ts_recv"
+# Raised once per file when the starting state was never established. See the
+# initialization modes below.
+UNCERTIFIED_INITIALIZATION = "uncertified_initialization"
 
 VIOLATION_KINDS = (
     UNKNOWN_ORDER_CANCEL,
@@ -131,12 +134,40 @@ VIOLATION_KINDS = (
     SNAPSHOT_AFTER_SESSION_START,
     FLAG_MAYBE_BAD_BOOK,
     FLAG_BAD_TS_RECV,
+    UNCERTIFIED_INITIALIZATION,
 )
 
 # A locked book (bid == ask) is legal on Nasdaq across venues and common at the
 # open; it is recorded but is not a defect.  A crossed book on a *single* venue
 # is a reconstruction failure.
 NON_FATAL_VIOLATIONS = frozenset({LOCKED_BOOK, FLAG_BAD_TS_RECV})
+
+# ---------------------------------------------------------------------------
+# Initialization modes.
+#
+# A reconstruction is only meaningful if the state it started from is known.
+# There are two ways that can be true and one way it cannot:
+#
+#   formal_snapshot   -- Databento marked the opening records F_SNAPSHOT, so the
+#                        book was explicitly rebuilt from published state.
+#   known_empty_clear -- the very first record is an `R` clear with no snapshot
+#                        flag, so the book provably started empty.  This is what
+#                        XNAS full-session files do: record 0 is
+#                        `sequence=0 action=R side=N order_id=0`.
+#   unknown           -- neither.  The replay began mid-book against state we
+#                        never saw, and every count downstream is suspect.
+#
+# The first two are deliberately kept distinct.  A sequence-0 clear is *not* a
+# snapshot: no orders were published, the book was simply empty.  Relabelling it
+# would erase the difference between "we were given the state" and "there was no
+# state to give", which are different guarantees.
+# ---------------------------------------------------------------------------
+
+INIT_FORMAL_SNAPSHOT = "formal_snapshot"
+INIT_KNOWN_EMPTY_CLEAR = "known_empty_clear"
+INIT_UNKNOWN = "unknown"
+CERTIFIED_INIT_MODES = frozenset({INIT_FORMAL_SNAPSHOT, INIT_KNOWN_EMPTY_CLEAR})
+INIT_MODES = (INIT_FORMAL_SNAPSHOT, INIT_KNOWN_EMPTY_CLEAR, INIT_UNKNOWN)
 
 
 @dataclass(slots=True)
@@ -534,6 +565,17 @@ class ReplayState:
     # while live occurrences are exactly what later latency work needs to know.
     bad_ts_recv_snapshot_records: int = 0
     bad_ts_recv_live_records: int = 0
+    # How the book's starting state was established. See INIT_* above.
+    init_mode: str = INIT_UNKNOWN
+    init_first_action: str | None = None
+    init_first_sequence: int | None = None
+    init_first_flags: int | None = None
+    init_records_before: int = 0
+    init_resolved: bool = False
+
+    @property
+    def init_certified(self) -> bool:
+        return self.init_mode in CERTIFIED_INIT_MODES
 
 
 def replay(
@@ -564,6 +606,34 @@ def replay(
         flags = event.flags
         is_snapshot = bool(flags & F_SNAPSHOT)
         is_last = bool(flags & F_LAST)
+
+        # Resolve how this file's starting state was established, once, from
+        # the leading records. Book-neutral actions (T/F/N) are scanned past
+        # rather than treated as initialization, because they mutate nothing.
+        if not state.init_resolved:
+            index = state.records - 1
+            if state.records == 1:
+                state.init_first_action = event.action
+                state.init_first_sequence = event.sequence
+                state.init_first_flags = event.flags
+            if is_snapshot:
+                state.init_mode = INIT_FORMAL_SNAPSHOT
+                state.init_records_before = index
+                state.init_resolved = True
+            elif event.action == ACTION_CLEAR:
+                # A clear proves the book is empty only if nothing preceded it.
+                # Anywhere but record 0 it may be clearing state we never saw.
+                state.init_mode = (
+                    INIT_KNOWN_EMPTY_CLEAR if index == 0 else INIT_UNKNOWN
+                )
+                state.init_records_before = index
+                state.init_resolved = True
+            elif event.action in (ACTION_ADD, ACTION_CANCEL, ACTION_MODIFY):
+                # An order mutation before any clear or snapshot: the replay is
+                # building on state it was never given.
+                state.init_mode = INIT_UNKNOWN
+                state.init_records_before = index
+                state.init_resolved = True
         if is_snapshot:
             state.snapshot_records += 1
             if event.action == ACTION_ADD:
@@ -659,9 +729,17 @@ def replay(
                     state.locked_events += 1
                     book.record(LOCKED_BOOK, event, f"bid == ask == {bid.price}")
 
+    # An unresolved initialization means the stream held nothing but
+    # book-neutral records, which is not a starting state either.
+    if not state.init_resolved:
+        state.init_mode = INIT_UNKNOWN
+        state.init_records_before = state.records
+
     # Counts come from the book's uncapped counter, never from the bounded
     # sample list.
     state.violations = book.counts
+    if not state.init_certified:
+        state.violations[UNCERTIFIED_INITIALIZATION] = 1
     return book, state, book.violations
 
 
@@ -679,6 +757,25 @@ def iter_dbn_events(path: str) -> Iterator[MboEvent]:
         if getattr(record, "action", None) is None or not hasattr(record, "order_id"):
             continue  # metadata, symbol mappings, error records
         yield MboEvent.from_dbn(record)
+
+
+def _uncertified_reason(state: ReplayState) -> str | None:
+    """Why certification was withdrawn, most decisive cause first."""
+    reasons: list[str] = []
+    if state.maybe_bad_book_records:
+        reasons.append(
+            "F_MAYBE_BAD_BOOK: Databento reported an unrecoverable channel gap on "
+            f"{state.maybe_bad_book_records} record(s); the book may be missing "
+            "updates that will never arrive"
+        )
+    if not state.init_certified:
+        reasons.append(
+            f"initialization mode {state.init_mode!r}: the replay began from a "
+            "state that was never established, so the reconstruction is "
+            f"building on unseen orders (first action {state.init_first_action!r}, "
+            f"{state.init_records_before} record(s) before initialization)"
+        )
+    return "; ".join(reasons) or None
 
 
 def validation_report(
@@ -725,6 +822,14 @@ def validation_report(
             "total_clears": state.clears,
             "snapshot_present": state.snapshot_records > 0,
         },
+        "initialization": {
+            "mode": state.init_mode,
+            "certified": state.init_certified,
+            "first_action": state.init_first_action,
+            "first_sequence": state.init_first_sequence,
+            "first_flags": state.init_first_flags,
+            "records_before_initialization": state.init_records_before,
+        },
         "flags": {
             "f_last_records": state.last_records,
             "f_tob_records": state.tob_records,
@@ -770,14 +875,12 @@ def validation_report(
             # updates that never arrived. `clean` already fails on it -- this
             # names *why* rather than leaving a reader to infer it from a
             # violation table.
-            "certified": (not fatal) and state.maybe_bad_book_records == 0,
-            "uncertified_reason": (
-                "F_MAYBE_BAD_BOOK: Databento reported an unrecoverable channel "
-                f"gap on {state.maybe_bad_book_records} record(s); the book may be "
-                "missing updates that will never arrive"
-                if state.maybe_bad_book_records
-                else None
+            "certified": (
+                (not fatal)
+                and state.maybe_bad_book_records == 0
+                and state.init_certified
             ),
+            "uncertified_reason": _uncertified_reason(state),
             "sample_violations": [item.as_dict() for item in violations[:25]],
             "sample_truncated": len(violations) < sum(state.violations.values()),
         },

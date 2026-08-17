@@ -24,12 +24,16 @@ from app.services.mbo_book_validator import (
     F_TOB,
     FIXED_PRICE_SCALE,
     FLAG_MAYBE_BAD_BOOK,
+    INIT_FORMAL_SNAPSHOT,
+    INIT_KNOWN_EMPTY_CLEAR,
+    INIT_UNKNOWN,
     INVALID_SIDE_FOR_ACTION,
     LOCKED_BOOK,
     MODIFY_CHANGED_SIDE,
     NEGATIVE_OR_UNDEFINED_SIZE,
     SEQUENCE_REGRESSION,
     TS_EVENT_REGRESSION,
+    UNCERTIFIED_INITIALIZATION,
     UNDEF_ORDER_SIZE,
     UNDEF_PRICE,
     UNKNOWN_ORDER_CANCEL,
@@ -71,6 +75,27 @@ def ev(
 
 def run(events):
     return replay(events)
+
+
+def opened(events):
+    """Prepend the XNAS session opening: a sequence-0 `R` clear.
+
+    Tests that assert on `certified` or `clean` need a session whose starting
+    state was established, because an unknown initialization now fails both.
+    Real files open exactly this way, so this makes the fixtures more faithful
+    rather than less.
+    """
+    opening = MboEvent(
+        ts_event=0,
+        action="R",
+        side="N",
+        price=0,
+        size=0,
+        order_id=0,
+        flags=F_BAD_TS_RECV,
+        sequence=0,
+    )
+    return [opening, *events]
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +336,7 @@ def test_crossed_book_is_reported():
 def test_locked_book_is_recorded_but_not_fatal():
     """Bid == ask happens legitimately; it is reported, not treated as a defect."""
     book, state, violations = run(
-        [ev("A", "B", 100 * PX, 100, 1), ev("A", "A", 100 * PX, 100, 2)]
+        opened([ev("A", "B", 100 * PX, 100, 1), ev("A", "A", 100 * PX, 100, 2)])
     )
     assert state.violations[LOCKED_BOOK] == 1
     report = validation_report(book, state, violations, source="synthetic")
@@ -436,12 +461,12 @@ def test_undef_price_with_tob_clears_that_side():
 
 def test_report_exposes_bbo_depth_and_order_counts():
     book, state, violations = run(
-        [
+        opened([
             ev("A", "B", 100 * PX, 500, 1),
             ev("A", "B", 99 * PX, 300, 2),
             ev("A", "A", 101 * PX, 400, 3),
             ev("A", "A", 102 * PX, 200, 4),
-        ]
+        ])
     )
     report = validation_report(book, state, violations, source="synthetic", depth_levels=5)
     final = report["final_book"]
@@ -537,6 +562,108 @@ def test_from_dbn_reads_genuine_databento_records():
 
 
 # ---------------------------------------------------------------------------
+# Initialization: was the starting state ever established?
+# ---------------------------------------------------------------------------
+
+
+def test_formal_snapshot_initialization_is_certified():
+    book, state, violations = run(
+        [
+            ev("R", "N", 0, 0, 0, flags=F_SNAPSHOT),
+            ev("A", "B", 100 * PX, 500, 1, flags=F_SNAPSHOT),
+            ev("A", "A", 101 * PX, 300, 2, flags=F_SNAPSHOT | F_LAST),
+            ev("A", "B", 99 * PX, 100, 3),
+        ]
+    )
+    report = validation_report(book, state, violations, source="synthetic")
+    init = report["initialization"]
+    assert init["mode"] == INIT_FORMAL_SNAPSHOT
+    assert init["certified"] is True
+    assert init["records_before_initialization"] == 0
+    assert report["integrity"]["certified"] is True
+
+
+def test_known_empty_sequence_zero_clear_is_certified_and_not_called_a_snapshot():
+    """The real XNAS shape: record 0 is `sequence=0 action=R side=N order_id=0`
+    with flags=8 (F_BAD_TS_RECV) and no F_SNAPSHOT.
+
+    It is a certified start -- the book provably began empty -- but it must not
+    be relabelled a snapshot. "We were given the state" and "there was no state
+    to give" are different guarantees.
+    """
+    book, state, violations = run(
+        [
+            ev("R", "N", 0, 0, 0, seq=0, ts=0, flags=F_BAD_TS_RECV),
+            ev("A", "B", 100 * PX, 500, 1),
+            ev("A", "A", 101 * PX, 300, 2),
+        ]
+    )
+    report = validation_report(book, state, violations, source="synthetic")
+    init = report["initialization"]
+    assert init["mode"] == INIT_KNOWN_EMPTY_CLEAR
+    assert init["certified"] is True
+    assert init["first_action"] == "R"
+    assert init["first_sequence"] == 0
+    assert init["first_flags"] == F_BAD_TS_RECV
+    assert init["records_before_initialization"] == 0
+    # The distinction is preserved on both sides.
+    assert report["snapshot"]["snapshot_present"] is False
+    assert report["snapshot"]["snapshot_records"] == 0
+    assert report["integrity"]["certified"] is True
+
+
+def test_unknown_initialization_fails_certification():
+    """A replay that starts on an order mutation is building on unseen state."""
+    book, state, violations = run(
+        [ev("A", "B", 100 * PX, 500, 1), ev("A", "A", 101 * PX, 300, 2)]
+    )
+    report = validation_report(book, state, violations, source="synthetic")
+    init = report["initialization"]
+    assert init["mode"] == INIT_UNKNOWN
+    assert init["certified"] is False
+    assert init["first_action"] == "A"
+    assert report["integrity"]["certified"] is False
+    assert report["integrity"]["clean"] is False
+    assert "initialization" in report["integrity"]["uncertified_reason"]
+    assert report["integrity"]["violation_counts"][UNCERTIFIED_INITIALIZATION] == 1
+
+
+def test_a_clear_arriving_late_is_not_a_known_empty_start():
+    """An `R` at index 3 may be clearing state we never saw."""
+    book, state, violations = run(
+        [
+            ev("A", "B", 100 * PX, 500, 1),
+            ev("A", "A", 101 * PX, 300, 2),
+            ev("C", "B", 100 * PX, 500, 1),
+            ev("R", "N", 0, 0, 0),
+        ]
+    )
+    report = validation_report(book, state, violations, source="synthetic")
+    assert report["initialization"]["mode"] == INIT_UNKNOWN
+    assert report["initialization"]["records_before_initialization"] == 0
+
+
+def test_book_neutral_records_before_the_clear_are_scanned_past():
+    """T/F/N mutate nothing, so they do not spoil a known-empty start...
+
+    ...but they are counted, so a near-miss is visible rather than inferred.
+    """
+    book, state, violations = run(
+        [
+            ev("N", "N", 0, 0, 0),
+            ev("T", "B", 100 * PX, 10, 0),
+            ev("R", "N", 0, 0, 0),
+            ev("A", "B", 100 * PX, 500, 1),
+        ]
+    )
+    report = validation_report(book, state, violations, source="synthetic")
+    init = report["initialization"]
+    # Strict rule: the clear was not record 0, so this is not a known-empty start.
+    assert init["mode"] == INIT_UNKNOWN
+    assert init["records_before_initialization"] == 2
+
+
+# ---------------------------------------------------------------------------
 # Fidelity audit: channel gaps, clock quality, action coverage, sequence ties
 # ---------------------------------------------------------------------------
 
@@ -549,12 +676,13 @@ def test_maybe_bad_book_withdraws_certification():
     the book must still finish replaying so the rest of the session is readable.
     """
     book, state, violations = run(
-        [
+        opened([
             ev("A", "B", 100 * PX, 500, 1),
             ev("A", "A", 101 * PX, 300, 2, flags=F_LAST | F_MAYBE_BAD_BOOK),
             ev("A", "B", 99 * PX, 200, 3),
-        ]
+        ])
     )
+    assert state.init_certified is True, "the flag alone must be what decertifies"
     assert state.maybe_bad_book_records == 1
     assert state.violations[FLAG_MAYBE_BAD_BOOK] == 1
 
@@ -564,13 +692,13 @@ def test_maybe_bad_book_withdraws_certification():
     assert report["integrity"]["clean"] is False
     assert "F_MAYBE_BAD_BOOK" in report["integrity"]["uncertified_reason"]
     # The replay still completed; the gap is a verdict, not a crash.
-    assert state.records == 3
+    assert state.records == 4  # the opening clear plus three adds
     assert book.order_count() == 3
 
 
 def test_a_clean_session_is_certified():
     book, state, violations = run(
-        [ev("A", "B", 100 * PX, 500, 1), ev("A", "A", 101 * PX, 300, 2)]
+        opened([ev("A", "B", 100 * PX, 500, 1), ev("A", "A", 101 * PX, 300, 2)])
     )
     report = validation_report(book, state, violations, source="synthetic")
     assert report["integrity"]["certified"] is True
