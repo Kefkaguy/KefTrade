@@ -1,217 +1,203 @@
-# Stage 2A — causal forward labels and the frozen prediction plan
+# Stage 2A v2 — exact event-time labels and the frozen executable plan
 
 **Scope:** label construction and test specification only.
-**Not done:** no feature-label correlation, no information coefficient, no
-ranking, no cell measured, no threshold, no P/L. **Stops before predictive
-results.**
-
-Everything below was declared **before any relationship between a feature and a
-label was inspected**. That ordering is the only thing that makes the
-multiplicity accounting meaningful.
+**Not done:** no feature-label correlation, no IC, no rank, no cell measured, no
+threshold, no P/L. **Stops before predictive results.**
 
 ```
-label_engine_version    tier1_mbo_label_engine_v1
-label_definition_hash   35249ad2d70ae4669e28...
-label_schema_hash       18e395bd8bc837a4bf99...
-stage2_plan_version     tier1_stage2_plan_v1
-plan_hash               42534dca107486b5cca5...
-built against           tier1_mbo_feature_engine_v2
-                        semantics 4aaeb9cb6d6700524d7f...
+label_engine_version    tier1_mbo_label_engine_v2
+label_definition_hash   2e8ada7e56d780639a84...
+label_schema_hash       f0d55b8db8755e963815...
+stage2_plan_version     tier1_stage2_plan_v2
+plan_hash               e959a556b8be89b75ebf47479deafd7de67d8fd117edb83aa853bb8fd110a94c
+built against           tier1_mbo_feature_engine_v2 / 4aaeb9cb6d67...
 features modified       NO
+label columns           72  (9 shared + 9 × 7 horizons)
 ```
 
-The label builder refuses to run against a feature set whose
-`feature_semantics_hash` is not the frozen Stage-1 v2 value, so a label set can
-never be silently paired with different feature semantics. A test asserts the
-frozen Parquet is byte-identical after labelling.
+## v1 superseded before outcome
 
-## Label definitions
+Commit **`f3289c9701ea8c7d431d941a60b20b5cf447c548`** is preserved in
+`SUPERSEDED_LABEL_VERSIONS` and `SUPERSEDED_PLAN_VERSIONS`. No predictive result
+had been inspected, so these are corrections to a wrong measurement and a
+loose plan — not tuning.
 
-Seven horizons, **declared together** so a disappointing one cannot be dropped
-and none can be substituted for another.
+| v1 defect | v2 |
+|---|---|
+| Labels derived from the sampled Stage-1 cadence sequence | Resolved from the certified MBO stream |
+| 137 M long rows (source × horizon) | 19.5 M wide rows, one per source snapshot |
+| 1,652 individual-feature cells | 14 block-level cells |
+| Split by fraction | Split by whole session-date blocks, 10 / 6 / 4 |
+| Model, scaling, score, statistic, pass criteria unspecified | All declared exactly |
+| Lifetime exposure used as the BH denominator | Separated: BH = 14, lifetime = 522 |
 
-| Name | Kind | Definition |
+## A. Exact event-time labels
+
+Labels come from replaying each raw symbol-day through the **same `MboBook` the
+Tier-1 gate certified 160/160 on**.
+
+| Horizon | Definition |
+|---|---|
+| `next_change` | first completed `F_LAST` state with `ts_event > t_s` whose midpoint differs from the source midpoint |
+| `next_2_changes` | the next state after that whose midpoint differs from *the first change's* midpoint |
+| `1s` `5s` `10s` `30s` `60s` | first **coherent** completed `F_LAST` state with `ts_event >= t_s + H` |
+
+**A state before the target is never used.** Time labels satisfy
+`label_ts >= t_s + H`; change labels satisfy `label_ts > t_s`.
+
+Verified on a stream with 1 ms event spacing: `next_change` resolves **1 ms**
+after the source, where v1 would have waited for the next whole second. A
+one-sided book is not a midpoint change, and a restated identical midpoint is not
+a change either — both tested.
+
+Per horizon, preserved: `target_ts_event`, `label_ts_event`, `label_ts_recv`,
+`realized_lag_ns`, `future_midpoint`, `midpoint_change`, `return_bps`,
+`available_ts_recv`, `status`.
+
+`available_ts_recv` is the later of the source feature availability and the
+resolving record's `ts_recv`, so it never precedes an input.
+
+### Streaming, one replay per symbol-day
+
+337 M book states are never materialized. The resolver holds only sources still
+awaiting a label:
+
+- **Time horizons** keep a FIFO per horizon. Targets are monotone in `t_s`, so
+  the head is always next to resolve — amortized O(1).
+- **Change horizons** group pending sources by the midpoint they are waiting to
+  differ from. When a state arrives at midpoint `m`, every group keyed other
+  than `m` resolves at once. `next_2_changes` sources then re-enter keyed by the
+  midpoint that resolved their first change.
+
+Multiple cadences resolve on the **same single replay**; two sources at the same
+instant receive the same label instants (tested).
+
+### Session edges and missing labels
+
+One raw file is one symbol-day; resolution never leaves it. An overnight gap is
+not a 60-second horizon. Missing labels are named — `source_midpoint_unavailable`,
+`session_end_before_horizon`, `no_further_midpoint_change` — and never imputed,
+forward-filled or interpolated.
+
+## B. Wide storage
+
+One row per Stage-1 source snapshot, 72 columns. v1's long layout turned 19.5 M
+snapshots into 137 M rows — larger than the feature set it described. The join to
+features is now one-to-one on `(symbol, session_date, cadence, sequence_index)`.
+
+## C. Primary grid — 14 block-level cells
+
+The 59 features are **sensors, not 59 strategies**. The primary authorization
+test is the incremental predictive value of the *complete* frozen L3 block beyond
+a price-only baseline.
+
+| Cadence | Horizons | Cells |
 |---|---|---|
-| `next_change` | changes | the next coherent snapshot whose midpoint differs from the source |
-| `next_2_changes` | changes | the second such snapshot |
-| `1s` | time | first coherent state at or after `source_ts + 1s` |
-| `5s` | time | …`+ 5s` |
-| `10s` | time | …`+ 10s` |
-| `30s` | time | …`+ 30s` |
-| `60s` | time | …`+ 60s` |
+| `1s` | 1s, 5s, 10s, 30s, 60s | 5 |
+| `5s` | 1s, 5s, 10s, 30s, 60s | 5 |
+| `50ev` | next_change, next_2_changes | 2 |
+| `200ev` | next_change, next_2_changes | 2 |
+| | | **14** |
 
-### The at-or-after rule
+Time horizons pair with time cadences, change horizons with event cadences: a
+60-second horizon on a 200-event clock would test the clock mismatch, not the
+book.
 
-For a time horizon `H`, `t_target = source_ts + H`. The label is the **first**
-snapshot at or after `t_target` carrying a coherent midpoint — not the nearest,
-never one before. If the first candidate at or after the target has no midpoint
-(one side of the touch empty), the scan continues forward and
-`skipped_incoherent_states` records how many were passed over.
+**No individual-feature ranking in the primary run.** Feature decomposition is a
+later, separately declared and separately counted stage, and only if the
+block-level hypothesis survives.
 
-`realized_lag_ns = label_ts − t_target`, always `≥ 0`, is preserved. **A label
-with a large realized lag is a thin-book observation, not a 60-second horizon
-quietly relabelled** — keeping the lag is what lets Stage 2B tell those apart. A
-horizon is never shortened to fit the data.
+## D. Chronological split by whole session-date blocks
 
-### A limitation of labelling from the frozen snapshot set
-
-**Change-count horizons are defined on the snapshot sequence of the same
-cadence**, not on raw book events. "Next midpoint change" at the 1s cadence is
-the next *second* whose midpoint differs — a coarser object than the next
-event-time tick that Gould-Bonart measure. Labelling at event-time resolution
-would require re-replaying 562 M records rather than reading the frozen 19.5 M
-snapshots. Stated here rather than left to be inferred; if event-time change
-labels are wanted, that is a separate declared build.
-
-### Session edges
-
-One Parquet file is one symbol-day, and a label search never leaves it. Nothing
-crosses a session boundary — **an overnight gap is not a 60-second horizon.**
-
-### Missing-label rules
-
-Named, never imputed. There is no fill value, no forward fill, no
-interpolation: a filled label is an invented observation that would count toward
-significance as though it had been measured.
-
-| Status | Meaning |
+| Block | Session dates |
 |---|---|
-| `ok` | resolved |
-| `source_midpoint_unavailable` | the source snapshot had no coherent midpoint |
-| `session_end_before_horizon` | no snapshot exists at or after the target inside the symbol-day |
-| `no_valid_future_state` | snapshots exist past the target but none carries a midpoint |
-| `no_further_midpoint_change` | the midpoint never moves again (change horizons) |
+| discovery | earliest **10** |
+| validation | next **6** |
+| confirmation | final **4** (single use) |
 
-Longer horizons run out before shorter ones, and neither borrows from the other:
-an 11-second session yields 1s labels and **zero** 60s labels.
+20 dates × 8 symbols = 160 symbol-days. **All eight symbols move together and a
+date is never split across sets** — two symbols from the same session are not
+independent, so splitting a date leaks the day's regime across the boundary.
 
-### Preserved columns
+No additional embargo period is applied, and the reason is stated rather than
+asserted: whole-date blocks already exceed the longest label (60 s) by orders of
+magnitude.
 
-23 columns per `(snapshot, horizon)`. Join key: `symbol`, `session_date`,
-`cadence`, `sequence_index`.
+## E. The executable model, frozen
 
-| Group | Columns |
+| Element | Declared |
 |---|---|
-| Horizon | `horizon`, `horizon_kind`, `horizon_magnitude` |
-| Source | `source_ts_event`, `source_grid_ts_event`, `source_midpoint`, `source_ts_recv`, `source_feature_available_ts_recv` |
-| Target / label | `target_ts_event`, `label_sequence_index`, `label_ts_event`, `label_ts_recv`, `realized_lag_ns`, `skipped_incoherent_states` |
-| Outcome | `future_midpoint`, `midpoint_change`, `return_bps` |
-| Latency provenance | `label_available_ts_recv` |
-| Status | `label_status` |
+| Primary target | `return_bps` for the cell's horizon, rows with status `ok` only, never imputed |
+| Price-only inputs | lagged own-cadence midpoint log-returns at lags **1, 2, 3, 5, 10** plus each sign; prior-only, within symbol-day; OLS with intercept |
+| L3 model | **ridge regression**, inputs = the price-only lags **plus** all 59 features; **nested**, never a separate fit |
+| Scaling | per (symbol, cadence) expanding standardization on strictly prior observations; withheld below 30 priors |
+| Cross-sectional residualization | at each grid instant subtract the equal-weighted cross-sectional mean of the **target** across the 8 symbols; requires ≥ 6 of 8 present else the row drops; features are not residualized |
+| Hyperparameter | ridge alpha ∈ {0.01, 0.1, 1, 10, 100}, chosen **inside discovery only** by expanding-origin CV, then frozen; re-tuning on validation or confirmation is forbidden |
+| Out-of-sample score | out-of-sample R² of the residualized target; the test statistic is `delta_R2 = R2(l3) − R2(baseline)` |
+| Inference | session-clustered t on **per-session-date** `delta_R2` — one observation per date, so 19.5 M rows cannot pose as 19.5 M degrees of freedom; effective N reported beside raw N |
+| Block bootstrap | whole session dates, 2,000 resamples, two-sided 95 % percentile on `delta_R2` |
+| BH family | the **14** cells of this run, FDR 0.10 |
+| Discovery pass | `delta_R2 > 0`, session-clustered t ≥ 3.0, bootstrap lower bound > 0 |
+| Validation pass | same sign, t ≥ 3.0, survives BH across the 14, **and** point estimate ≥ half the discovery estimate |
+| Confirmation | single use, run once, only for validation survivors; same sign, `delta_R2 > 0`, bootstrap lower bound > 0. No re-run, no re-split |
+| Monotonicity | 0.70, declared to apply to the later ordinal feature-decomposition stage; explicitly **does not gate** the block-level test |
+| PBO | CSCV with S = 16 contiguous date blocks, all **C(16,8) = 12,870** balanced partitions; select best in-sample configuration per partition, record its out-of-sample rank; PBO = fraction landing in the bottom half. Configuration set = 14 cells × 5 alphas. Metric = `delta_R2`. **PBO > 0.50 authorizes nothing** |
 
-`label_available_ts_recv` is the latest of the source feature availability, the
-label state's feature availability, and the label record's `ts_recv` — so it
-never precedes anything the label rests on, and Stage 3 can simulate latency
-without re-deriving when a row could first have been known.
+Why the validation half-estimate rule: a discovery estimate that collapses in
+validation is a discovery artefact, and "same sign, still significant" alone does
+not catch that.
 
-## Frozen statistical plan
+## F. Governance — two counts, kept apart
 
-| Element | Declared value |
-|---|---|
-| Splits | chronological **50 / 30 / 20** by session date — discovery / validation / confirmation |
-| Embargo | one **60 s** horizon dropped at each boundary, covering the longest label |
-| Confirmation | single-use |
-| Transformations | expanding / prior-only **only**; full-sample statistics forbidden |
-| Baseline | `price_only` — lagged midpoint returns and tick signs, prior-only |
-| Incremental test | nested per `(cadence, horizon)`; the **increment** over baseline is reported, never the level alone |
-| Clustering | by session **and** symbol; effective N reported beside raw N |
-| Block bootstrap | symbol-day blocks, 2,000 resamples |
-| Multiplicity | Benjamini-Hochberg, FDR **0.10**, across **every declared cell**, not the reported subset |
-| Monotonicity | **≥ 0.70** where ordinal feature-response testing applies |
-| Overfitting | PBO via CSCV, 16 partitions; **PBO > 0.5 authorizes no strategy**, whatever any single cell's t-statistic |
-| Economic gate | Stage 2 pre-authorizes nothing; 5.0 bps minimum and t ≥ 3.0 remain Stage 3's bar |
+v1 used lifetime exposure as the BH denominator. These are different quantities:
 
-Prohibited, explicitly: horizon substitution or nearest-horizon selection after
-results; adding, dropping or renaming a horizon after results; re-splitting after
-seeing a split's outcome; reporting a subset while correcting for that subset;
-threshold selection inside Stage 2; any transformation using data at or after the
-observation.
+| Quantity | Value | Use |
+|---|---|---|
+| **BH family** | **14** | multiplicity control within this run |
+| Ridge-alpha looks | 5 | seen by **PBO**, not by BH — a choice, not a hypothesis about the book |
+| Prior effective trials | **508** (floor) | lifetime bookkeeping |
+| **Lifetime effective trials** | **522** | deflated-Sharpe style correction; programme-level judgement |
 
-### Why a price-only baseline is not optional
-
-Short-horizon midpoint changes mean-revert on their own — CJP measure ~59 %
-two-step reversal on AAPL, and find the *conditional* rate is indistinguishable
-from the unconditional one. A book feature that merely recovers bid-ask bounce
-has added nothing, and without a baseline it would read as a finding.
-
-## Multiplicity accounting
-
-The grid is the **full** frozen vocabulary at every cadence against every
-horizon. Pre-screening features now would be arbitrary at best and
-outcome-informed at worst.
-
-```
-features            59
-transforms           1   (Stage 1 already ships prior-only normalized variants)
-cadences             4   (1s, 5s, 50ev, 200ev)
-horizons             7
-                  ----
-feature cells     1,652   = 59 x 1 x 4 x 7
-incremental tests    28   = 4 x 7
-                  ----
-declared this stage 1,680
-prior effective       508
-                  ----
-cumulative          2,188
-```
-
-28 price-only baseline fits are counted separately: a baseline is not a
-hypothesis about the book, though each incremental test against one is.
-
-### The ledger does not reset
-
-Tier-1 is **better input to the same question, not a new question**. The candle
-work, the gap experiment, the order-flow factors, the news and sector studies and
-the Stage-0 probe all consumed exposure against the same eventual decision.
-Reusing a fresh dataset for a fourteenth idea is a fourteen-idea problem.
-`PRIOR_EFFECTIVE_TRIALS = 508` is a declared **floor**, not an estimate to be
-revised down.
-
-### What 1,680 cells costs — stated now, not after
-
-This is the honest price of declaring the full grid rather than a hand-picked
-subset. Under BH at FDR 0.10 across 1,680 cells, the smallest p-values must fall
-near `0.10 / 1680 ≈ 6 × 10⁻⁵` for the first discovery to survive; a cell with a
-nominal p of 0.01 will not. Combined with PBO — which can veto the entire grid
-regardless of individual t-statistics — **the design is deliberately hard to
-pass.**
-
-Two consequences worth accepting up front:
-
-1. A genuine but modest effect may fail to survive this correction. That is the
-   cost of not having pre-screened, and pre-screening on outcomes would have
-   been worse.
-2. If a narrower grid is preferred, it must be declared **now**, before any
-   outcome — not selected later from the results.
+Correcting 14 cells as though they were 522 would be as wrong as correcting 522
+looks as though they were 14. The ledger still does **not** reset — Tier-1 is
+better input to the same question — and 508 remains a floor, not an estimate to
+revise down.
 
 ## Tests
 
 ```
-37 Stage-2A tests pass (25 label engine, 12 statistical plan)
+44 Stage-2A tests pass (22 label engine, 22 plan), 1 skipped
 ```
 
-Full suite: **1925 passed**, one pre-existing unrelated failure (below).
+Full suite: **1931 passed**. The skip is the real-file integration test.
 
-Label semantics: at-or-after with exact target hit, sparse grid with recorded
-lag, skipped incoherent states, missing-not-backfilled at session end,
-incoherent source, change horizons skipping unchanged and incoherent snapshots, a
-flat session producing no change labels, longer horizons exhausting before
-shorter ones, no horizon collapsing onto another's instant.
+Label semantics: event-time `next_change` at millisecond resolution; second
+event-time change; repeated midpoint is not a change; one-sided book is not a
+change; flat book yields no change labels; at-or-after with recorded lag; sparse
+future never shortens the horizon; missing not backfilled; longer horizons
+exhaust before shorter; each time horizon resolves to its own distinct instant;
+incoherent source blocks every horizon.
 
-Leakage on the label side: appending future snapshots cannot change an already
-resolved label; perturbing the far future cannot change a label resolved before
-it; a label never reads a state before its own target; label availability never
-precedes the feature row or the label state.
+Leakage: extending the stream cannot change an already-resolved label; a label
+never reads a state before its target; a state at exactly the source instant is
+never its own label; availability never precedes the feature row or the
+resolving record.
 
-Plan: the grid is the full vocabulary; the cell count is exact; the ledger does
-not reset and totals 2,188; splits are 50/30/20 with a 60 s embargo;
-prior-only transformations only; the increment is what is reported; BH applies
-across every declared cell; monotonicity 0.70 and PBO 0.5 are the declared
-values; the prohibitions name horizon shopping explicitly.
+Plan: 14 cells exactly; clock pairing enforced; no feature ranking in the primary
+run; 10/6/4 whole-date blocks; every required model element declared; nested L3
+model; tuning confined to discovery; increment not level; session-clustered
+inference; all three pass criteria; PBO implementation and metric; BH = 14 while
+lifetime = 522; alpha looks in PBO but not BH; the prohibition list closes
+horizon shopping, date movement, re-tuning, feature ranking and confirmation
+re-runs.
 
-Integration: a real Stage-1 Parquet is written with the actual engine, its
-labelling spine read back, and the feature file asserted byte-identical
-afterwards.
+Integration (opt-in): one real symbol-day, Stage-1 features built from it, labels
+resolved from the same certified stream in a single replay, with the frozen
+Parquet asserted byte-identical afterwards.
+
+```bash
+KEFTRADE_MBO_TEST_FILE=/path/to/xnas-itch-20250626.mbo.CMCSA.0000.dbn.zst python -m pytest tests/test_mbo_label_engine.py -q
+```
 
 ## Usage
 
@@ -222,23 +208,28 @@ python -m app.cli.mbo_labels definitions
 python -m app.cli.mbo_labels plan
 ```
 ```bash
-python -m app.cli.mbo_labels --output-dir reports/tier1_stage2_labels build --features-dir reports/tier1_mbo_features
+python -m app.cli.mbo_labels --output-dir reports/tier1_stage2_labels build --features-dir reports/tier1_mbo_features --raw-dir /path/to/dbn
 ```
+
+`build` now requires `--raw-dir`: labels are event-time, so the certified stream
+is not optional. A symbol-day with features but no raw file is recorded as a
+failure rather than labelled from the grid.
 
 ## Limitations, stated plainly
 
-- **No labels have been built from the real dataset.** The builder is tested against synthetic spines and one real synthetic-source Parquet; it has not walked the 160-symbol-day feature set.
-- **Change horizons are cadence-resolution, not event-resolution.** See above. This is the largest definitional compromise in Stage 2A.
-- **Label storage is not yet estimated.** 19.5 M snapshots × 7 horizons ≈ 137 M label rows across four cadences. At the ~130 bytes/row Stage 1 measured this would be far larger than the feature set, and the row count should be reduced by declaring which cadences carry which horizons — a decision that must be made **before** outcomes, and has not been made.
-- **`PRIOR_EFFECTIVE_TRIALS = 508` is asserted, not recomputed.** The live ledger was not queried; the figure is carried forward as a declared floor.
+- **No labels built from the real dataset.** Tested against synthetic streams and one opt-in real-file integration case; the 160 symbol-days have not been walked.
+- **Label build cost is a second full replay.** Stage-1 extraction replayed 562 M records once; labelling replays them again. If that is unacceptable, features and labels could be produced in one pass — but that would couple the frozen artefact to the label build, and I chose not to touch Stage 1.
+- **`PRIOR_EFFECTIVE_TRIALS = 508` is asserted, not recomputed.** The live ledger was not queried; carried forward as a declared floor.
+- **The 6-of-8 residualization quorum is a judgement.** Declared before outcomes, but not derived from anything.
+- **PBO's S = 16 exceeds the 20 available dates only narrowly.** With 20 dates and 16 blocks, blocks are 1–2 dates each; the partition count is large but the blocks are small. That is a real weakness of a 20-date sample, not of the method, and it is why PBO is a veto rather than a score to optimize.
 
 ## Pre-existing unrelated failure
 
 `test_phase10_modules_have_no_runtime_ddl` fails on six temp-table
 `CREATE INDEX` calls in `intraday_sector_leadlag_predictor.py`, from the
-sector-leadlag merge (69015a1). Verified pre-existing. Unrelated to Stage 2.
+sector-leadlag merge (69015a1). Verified pre-existing; unrelated.
 
 ## Stopping here
 
 No feature-label relationship has been computed. No cell measured, no
-correlation, no ranking, no threshold, no P/L.
+correlation, no IC, no rank, no P/L.

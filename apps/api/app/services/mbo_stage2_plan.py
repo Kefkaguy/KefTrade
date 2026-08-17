@@ -1,25 +1,37 @@
-"""Stage 2A: the frozen statistical plan for the Tier-1 prediction test.
+"""Stage 2A v2: the frozen, executable Stage-2 prediction plan.
 
-Declared **before any predictive outcome is viewed**. That ordering is the whole
-value of this module: a plan written after seeing which horizon worked is not a
-plan, and a multiplicity count assembled after choosing what to report is not a
-correction.
+Declared **before any feature-label relationship is visible**. Every choice that
+could otherwise be made after seeing results is fixed here, exactly, including
+the model, the scaling, the score, the test statistic and the pass criteria. An
+unspecified choice is a degree of freedom, and a degree of freedom exercised
+after the fact is not a decision -- it is a result.
 
-This module computes no result. It declares the design, counts the cells the
-design commits to, and carries the project's accumulated search exposure
-forward. Nothing here reads a feature or a label value.
+## What v2 corrected
 
-## What was already spent
+v1 declared a 1,652-cell grid of individual features against every horizon at
+every cadence. That treated 59 sensors as 59 independent strategies and would
+have produced a winner ranking whose top cell was mostly selection.
 
-The multiplicity ledger **does not reset** because Tier-1 is a new dataset
-family. It is the same research programme asking the same question with better
-inputs, and the candle work, the gap experiment, the order-flow factors, the
-news and sector studies and the Stage-0 probe all consumed exposure against the
-same eventual decision. Reusing a fresh dataset for a fourteenth idea is a
-fourteen-idea problem.
+The primary authorization test is now **block-level**: does the complete frozen
+L3 feature block carry incremental predictive information beyond a price-only
+baseline? Fourteen cells, one per admissible (cadence, horizon) pair. No
+individual-feature ranking is computed in the primary run at all. Feature
+decomposition is a later, separately counted stage, and only if the block-level
+hypothesis survives.
 
-`PRIOR_EFFECTIVE_TRIALS` is a declared **floor**, not an estimate to be revised
-downward.
+## Lifetime exposure is not the BH family
+
+Two different quantities, conflated in v1:
+
+* **Lifetime effective trials** -- everything this research programme has ever
+  spent against the same eventual decision. Carries the 508 floor forward and
+  only grows. Used for deflated-Sharpe style corrections and for judging whether
+  the programme as a whole has earned a conclusion.
+* **The BH family** -- the 14 primary cells declared in *this* run. Multiplicity
+  control within a run is applied across the cells of that run.
+
+Correcting 14 cells as though they were 522 would be as wrong as correcting 522
+looks as though they were 14. Both numbers are reported.
 """
 
 from __future__ import annotations
@@ -28,31 +40,42 @@ import hashlib
 from typing import Any
 
 from app.services.intraday_hypotheses import (
-    DECLARED_OBSERVATION_DISPERSION_BPS,
     MINIMUM_TRADEABLE_NET_BPS,
     REQUIRED_T_STATISTIC,
 )
 from app.services.mbo_feature_engine import (
-    ABSORPTION_FEATURES,
-    AGGRESSIVE_FLOW_FEATURES,
-    BOOK_STATE_FEATURES,
-    CADENCES,
     FEATURE_SEMANTICS_HASH,
     FEATURE_VOCABULARY,
-    LIFECYCLE_FEATURES,
     NORMALIZED_FEATURES,
-    PRESSURE_FEATURES,
 )
 from app.services.mbo_label_engine import (
-    HORIZON_NAMES,
     LABEL_DEFINITION_HASH,
     LABEL_ENGINE_VERSION,
 )
 
-STAGE2_PLAN_VERSION = "tier1_stage2_plan_v1"
+STAGE2_PLAN_VERSION = "tier1_stage2_plan_v2"
 
-# Carried forward from the prior programme. A floor: the true exposure is at
-# least this, never less.
+SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_stage2_plan_v1",
+        "commit": "f3289c9701ea8c7d431d941a60b20b5cf447c548",
+        "superseded_before_outcome": "true",
+        "reason": (
+            "declared a 1,652-cell individual-feature grid, treating 59 sensors as "
+            "59 independent strategies and inviting a winner ranking that would be "
+            "mostly selection; split by fraction rather than by whole session-date "
+            "blocks; left the executable model, scaling, score, test statistic and "
+            "pass criteria unspecified; and conflated lifetime exposure with the "
+            "within-run BH family."
+        ),
+        "declared_trials": "1680",
+    },
+)
+
+# ---------------------------------------------------------------------------
+# Lifetime exposure ledger (bookkeeping) vs the BH family (this run)
+# ---------------------------------------------------------------------------
+
 PRIOR_EFFECTIVE_TRIALS = 508
 PRIOR_EXPOSURE_SOURCES: tuple[str, ...] = (
     "candle-only gap experiment (six predeclared factors, retired)",
@@ -63,202 +86,301 @@ PRIOR_EXPOSURE_SOURCES: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# The declared grid
+# C. The primary hypothesis grid: 14 block-level cells
 # ---------------------------------------------------------------------------
 #
-# Every feature in the frozen vocabulary, at every cadence, against every
-# horizon. Declared in full rather than pre-screened: choosing a subset now
-# would either be arbitrary or -- worse -- informed by a peek at the outcomes.
-# The cost of that honesty is a large multiplicity, which is counted below
-# rather than hidden.
+# Time horizons are tested on time cadences and change horizons on event
+# cadences. Pairing a 60-second horizon with a 200-event clock, or a
+# next-change horizon with a 5-second clock, would test a mismatch between the
+# sampling clock and the outcome clock rather than a hypothesis about the book.
 
-PREDICTOR_FEATURES: tuple[str, ...] = FEATURE_VOCABULARY
+PRIMARY_CELLS: tuple[tuple[str, str], ...] = (
+    ("1s", "1s"),
+    ("1s", "5s"),
+    ("1s", "10s"),
+    ("1s", "30s"),
+    ("1s", "60s"),
+    ("5s", "1s"),
+    ("5s", "5s"),
+    ("5s", "10s"),
+    ("5s", "30s"),
+    ("5s", "60s"),
+    ("50ev", "next_change"),
+    ("50ev", "next_2_changes"),
+    ("200ev", "next_change"),
+    ("200ev", "next_2_changes"),
+)
 
-# Stage 1 already ships prior-only normalized variants of four features, so no
-# further transform is applied here. Adding a transform family would multiply
-# the grid without adding a hypothesis.
-TRANSFORMS: tuple[str, ...] = ("identity",)
+BH_FAMILY_SIZE = len(PRIMARY_CELLS)
 
-CADENCE_NAMES: tuple[str, ...] = tuple(c.name for c in CADENCES)
+# ---------------------------------------------------------------------------
+# D. Chronological split by complete session-date blocks
+# ---------------------------------------------------------------------------
+#
+# All eight symbols move together. A date is never split across sets: two
+# symbols from the same session are not independent, so putting one in training
+# and one in test leaks the day's regime across the boundary.
 
-SPLIT_FRACTIONS: tuple[float, float, float] = (0.50, 0.30, 0.20)
-SPLIT_NAMES: tuple[str, ...] = ("discovery", "validation", "confirmation")
-
-# One embargo unit is the longest label horizon, so no training row's label can
-# overlap the first test row's feature window.
+SPLIT_DATE_BLOCKS: tuple[tuple[str, int], ...] = (
+    ("discovery", 10),
+    ("validation", 6),
+    ("confirmation", 4),
+)
+TOTAL_SESSION_DATES = sum(count for _, count in SPLIT_DATE_BLOCKS)
 EMBARGO_HORIZON = "60s"
+EMBARGO_DATES = 0  # whole-date blocks already exceed any intraday horizon
 
-MONOTONICITY_MINIMUM = 0.70
-PBO_AUTHORIZATION_CEILING = 0.50
-BH_FALSE_DISCOVERY_RATE = 0.10
-BLOCK_BOOTSTRAP_RESAMPLES = 2_000
-CSCV_PARTITIONS = 16
+# ---------------------------------------------------------------------------
+# E. The executable model, frozen
+# ---------------------------------------------------------------------------
 
+PRIMARY_TARGET = "return_bps"
 
-def declared_cell_count() -> dict[str, Any]:
-    """Exactly how many looks the design commits to, before any are taken."""
-    features = len(PREDICTOR_FEATURES)
-    transforms = len(TRANSFORMS)
-    cadences = len(CADENCE_NAMES)
-    horizons = len(HORIZON_NAMES)
+PRICE_ONLY_LAGS: tuple[int, ...] = (1, 2, 3, 5, 10)
 
-    feature_cells = features * transforms * cadences * horizons
-    # One nested price-only-versus-price-plus-L3 comparison per (cadence,
-    # horizon). These are the tests that actually answer "is there incremental
-    # information", and they are trials too.
-    incremental_tests = cadences * horizons
-    baseline_fits = cadences * horizons
-
-    declared = feature_cells + incremental_tests
-    return {
-        "features": features,
-        "transforms": transforms,
-        "cadences": cadences,
-        "horizons": horizons,
-        "feature_cells": feature_cells,
-        "incremental_information_tests": incremental_tests,
-        "price_only_baseline_fits": baseline_fits,
-        "declared_trials_this_stage": declared,
-        "prior_effective_trials": PRIOR_EFFECTIVE_TRIALS,
-        "cumulative_effective_trials": PRIOR_EFFECTIVE_TRIALS + declared,
-        "ledger_resets": False,
-        "note": (
-            "Baseline fits are counted separately from the trial total because a "
-            "baseline is not a hypothesis about the book -- but each incremental "
-            "test against one is."
+MODEL_SPEC: dict[str, Any] = {
+    "primary_target": {
+        "column": PRIMARY_TARGET,
+        "definition": (
+            "the horizon's signed midpoint return in basis points, from the wide "
+            "label table, used only where that horizon's status is 'ok'"
         ),
+        "rows_excluded": "any row whose horizon status is not 'ok'; never imputed",
+    },
+    "price_only_baseline": {
+        "inputs": (
+            f"lagged own-cadence midpoint log-returns at lags {list(PRICE_ONLY_LAGS)} "
+            "plus the sign of each, computed within the symbol-day and prior-only"
+        ),
+        "estimator": "ordinary least squares, no regularization, intercept fitted",
+        "purpose": (
+            "short-horizon midpoint changes mean-revert unaided; a book feature that "
+            "only recovers bid-ask bounce has added nothing"
+        ),
+    },
+    "l3_model": {
+        "estimator": "ridge regression",
+        "inputs": "the price-only lags PLUS all 59 frozen Stage-1 features",
+        "form": "nested -- the L3 model is the baseline's inputs augmented, never a separate fit",
+        "reason": (
+            "ridge, because 59 correlated sensors under OLS is a variance problem, "
+            "and the hypothesis is about the block rather than about which sensor "
+            "wins"
+        ),
+    },
+    "scaling": {
+        "rule": (
+            "per (symbol, cadence), expanding-window standardization using strictly "
+            "prior observations within the symbol-day; withheld below 30 priors"
+        ),
+        "forbidden": "any statistic computed over data at or after the observation",
+        "already_frozen_in_stage1": list(NORMALIZED_FEATURES),
+    },
+    "cross_sectional_residualization": {
+        "rule": (
+            "at each grid instant, subtract the equal-weighted cross-sectional mean "
+            "of the target across the eight symbols before fitting; the residual is "
+            "the modelled quantity"
+        ),
+        "reason": (
+            "without it a market-wide move fires on eight names at once and reads as "
+            "eight independent confirmations of one bet"
+        ),
+        "applies_to": "the target only; features are not residualized in the primary run",
+        "requires": "at least 6 of 8 symbols present at the instant, else the row is dropped",
+    },
+    "hyperparameter_rule": {
+        "parameter": "ridge alpha",
+        "candidates": [0.01, 0.1, 1.0, 10.0, 100.0],
+        "selection": (
+            "chosen inside the DISCOVERY block only, by the same out-of-sample score, "
+            "using expanding-origin cross-validation over discovery dates; the chosen "
+            "alpha is then frozen and reused unchanged for validation and confirmation"
+        ),
+        "forbidden": "re-tuning on validation or confirmation for any reason",
+    },
+    "out_of_sample_score": {
+        "primary": "out-of-sample R^2 of the residualized target",
+        "incremental_statistic": "delta_R2 = R2(l3_model) - R2(price_only_baseline)",
+        "reported": "delta_R2 with its interval; the level of R2 is reported beside it but is not the test",
+    },
+    "inference": {
+        "test_statistic": (
+            "session-clustered t on the per-session-date delta_R2, one observation "
+            "per session date, so 19.5 M rows cannot masquerade as 19.5 M degrees of "
+            "freedom"
+        ),
+        "effective_n": "reported beside raw N for every cell",
+        "block_bootstrap": {
+            "unit": "whole session dates (all eight symbols together)",
+            "resamples": 2000,
+            "statistic": "delta_R2",
+            "interval": "two-sided 95% percentile",
+        },
+    },
+    "bh_family": {
+        "members": "the 14 primary cells of this run",
+        "size": BH_FAMILY_SIZE,
+        "false_discovery_rate": 0.10,
+        "note": (
+            "lifetime exposure is tracked separately and is not the BH denominator"
+        ),
+    },
+    "pass_criteria": {
+        "discovery": (
+            "delta_R2 > 0 with session-clustered t >= 3.0 and a bootstrap lower bound "
+            "above 0; failure here ends the cell"
+        ),
+        "validation": (
+            "same sign, delta_R2 > 0, session-clustered t >= 3.0, survives BH across "
+            "the 14-cell family, and the point estimate is at least half the "
+            "discovery estimate -- a validation estimate that collapses is a "
+            "discovery artefact"
+        ),
+        "confirmation": (
+            "single use, run once, only for cells that passed validation; same sign "
+            "and delta_R2 > 0 with a bootstrap lower bound above 0. No re-run, no "
+            "re-split, no second look"
+        ),
+        "monotonicity": {
+            "minimum": 0.70,
+            "applies_to": (
+                "the later, separately counted feature-decomposition stage where "
+                "ordinal bucketed feature-response testing applies; the block-level "
+                "primary test is not ordinal and monotonicity does not gate it"
+            ),
+        },
+    },
+    "pbo": {
+        "method": "CSCV (combinatorially symmetric cross-validation)",
+        "implementation": (
+            "session dates split into S=16 contiguous blocks; all C(16,8)=12,870 "
+            "balanced partitions into in-sample and out-of-sample halves; for each, "
+            "select the configuration with the best in-sample performance metric and "
+            "record its out-of-sample rank; PBO is the fraction of partitions whose "
+            "selected configuration lands in the bottom half out of sample"
+        ),
+        "configuration_set": (
+            "the 14 primary cells plus the 5 ridge-alpha candidates -- the choices "
+            "actually made, not a synthetic grid"
+        ),
+        "performance_metric": "delta_R2 of the residualized target",
+        "authorization_ceiling": 0.50,
+        "rule": (
+            "PBO above 0.50 authorizes no strategy from the grid regardless of any "
+            "individual cell's t-statistic. A grid always produces a best cell; its "
+            "t says nothing about how many it beat."
+        ),
+    },
+}
+
+
+def multiplicity_accounting() -> dict[str, Any]:
+    """The two distinct counts, kept apart."""
+    return {
+        "bh_family": {
+            "description": "primary cells declared in this run; the BH denominator",
+            "size": BH_FAMILY_SIZE,
+            "false_discovery_rate": 0.10,
+            "cells": [{"cadence": c, "horizon": h} for c, h in PRIMARY_CELLS],
+        },
+        "hyperparameter_looks": {
+            "ridge_alpha_candidates": len(MODEL_SPEC["hyperparameter_rule"]["candidates"]),
+            "confined_to": "discovery block only",
+            "counted_in_pbo_configuration_set": True,
+            "counted_in_bh_family": False,
+            "reason": (
+                "alpha is selected inside discovery and frozen; it is not a separate "
+                "hypothesis about the book, but it is a choice, so PBO sees it"
+            ),
+        },
+        "lifetime_exposure_ledger": {
+            "description": (
+                "everything the programme has spent against the same eventual "
+                "decision; bookkeeping, not the BH denominator"
+            ),
+            "prior_effective_trials": PRIOR_EFFECTIVE_TRIALS,
+            "prior_exposure_sources": list(PRIOR_EXPOSURE_SOURCES),
+            "added_this_stage": BH_FAMILY_SIZE,
+            "lifetime_effective_trials": PRIOR_EFFECTIVE_TRIALS + BH_FAMILY_SIZE,
+            "resets_for_new_dataset_family": False,
+            "reason": (
+                "Tier-1 is better input to the same question, not a new question"
+            ),
+        },
+        "deferred_stages_not_counted_here": {
+            "feature_decomposition": (
+                "individual-feature attribution runs only if the block-level "
+                "hypothesis survives, and is declared and counted separately then"
+            ),
+            "declared_now": False,
+        },
     }
 
 
 def statistical_plan() -> dict[str, Any]:
-    """The frozen plan. No result, no data, no threshold fitted to an outcome."""
-    counts = declared_cell_count()
     return {
         "stage2_plan_version": STAGE2_PLAN_VERSION,
         "label_engine_version": LABEL_ENGINE_VERSION,
         "label_definition_hash": LABEL_DEFINITION_HASH,
         "feature_semantics_hash": FEATURE_SEMANTICS_HASH,
+        "superseded_plan_versions": [dict(e) for e in SUPERSEDED_PLAN_VERSIONS],
         "declared_before_any_outcome_viewed": True,
         "contains_predictive_result": False,
+        "primary_hypothesis": (
+            "The complete frozen Stage-1 L3 feature block carries incremental "
+            "predictive information about the residualized forward midpoint return "
+            "beyond a price-only baseline."
+        ),
+        "primary_grid": {
+            "form": "block-level, one cell per admissible (cadence, horizon) pair",
+            "cells": [{"cadence": c, "horizon": h} for c, h in PRIMARY_CELLS],
+            "count": BH_FAMILY_SIZE,
+            "individual_feature_ranking_in_primary_run": False,
+            "pairing_rule": (
+                "time horizons on time cadences, change horizons on event cadences; "
+                "a mismatched clock tests the mismatch, not the book"
+            ),
+            "features_in_block": len(FEATURE_VOCABULARY),
+        },
         "splits": {
-            "kind": "chronological",
-            "fractions": dict(zip(SPLIT_NAMES, SPLIT_FRACTIONS, strict=True)),
-            "unit": "symbol-day, ordered by session date",
+            "kind": "chronological, whole session-date blocks",
+            "blocks": [
+                {"name": name, "session_dates": count} for name, count in SPLIT_DATE_BLOCKS
+            ],
+            "total_session_dates": TOTAL_SESSION_DATES,
+            "all_symbols_move_together": True,
+            "date_never_split_across_sets": True,
+            "reason": (
+                "two symbols from the same session are not independent; splitting a "
+                "date leaks the day's regime across the boundary"
+            ),
             "embargo": (
-                f"one {EMBARGO_HORIZON} horizon of wall-clock time is dropped at each "
-                "split boundary, so no training label can overlap a test feature "
-                "window"
+                f"whole-date blocks already exceed the longest label ({EMBARGO_HORIZON}), "
+                "so no additional embargo period is required and none is applied"
             ),
             "confirmation_is_single_use": True,
-            "rule": (
-                "Splits are fixed by date before measurement. A boundary moved after "
-                "seeing a result is a new declaration and counts again."
-            ),
         },
-        "transformations": {
-            "allowed": "expanding / prior-only only",
-            "forbidden": (
-                "full-sample means, variances, quantiles, winsorization bounds, or "
-                "any statistic computed over data that includes the observation "
-                "being transformed"
-            ),
-            "already_frozen_in_stage1": list(NORMALIZED_FEATURES),
-        },
-        "baseline": {
-            "name": "price_only",
-            "inputs": (
-                "lagged midpoint returns and tick signs from the same cadence, "
-                "prior-only"
-            ),
-            "purpose": (
-                "Short-horizon midpoint changes mean-revert on their own. A book "
-                "feature that only recovers bid-ask bounce has added nothing, and "
-                "without a baseline it would look like a finding."
-            ),
-        },
-        "incremental_test": {
-            "form": "nested comparison per (cadence, horizon)",
-            "reported": "increment in out-of-sample skill over the baseline",
-            "not_reported_alone": "the level of skill, which the baseline can supply",
-        },
-        "inference": {
-            "clustering": (
-                "by session and by symbol. Adjacent snapshots are near-duplicates: "
-                "19.5 M rows are not 19.5 M degrees of freedom, and every cell must "
-                "report an effective N alongside its raw N."
-            ),
-            "block_bootstrap": {
-                "unit": "symbol-day blocks",
-                "resamples": BLOCK_BOOTSTRAP_RESAMPLES,
-                "reason": "preserves within-session dependence that an iid resample destroys",
-            },
-            "multiplicity": {
-                "method": "Benjamini-Hochberg",
-                "false_discovery_rate": BH_FALSE_DISCOVERY_RATE,
-                "applied_across": "every declared cell in the run, not the reported subset",
-            },
-            "monotonicity": {
-                "minimum": MONOTONICITY_MINIMUM,
-                "applies_to": "ordinal feature-response testing (bucketed features)",
-                "reason": (
-                    "a relationship that pays only in one interior bucket is "
-                    "describing a handful of observations, not a relationship"
-                ),
-            },
-            "overfitting": {
-                "method": "PBO via CSCV",
-                "partitions": CSCV_PARTITIONS,
-                "authorization_ceiling": PBO_AUTHORIZATION_CEILING,
-                "rule": (
-                    "PBO above 0.5 authorizes no strategy from the grid, regardless "
-                    "of any individual cell's t-statistic. A grid always produces a "
-                    "best cell; its t says nothing about how many it beat."
-                ),
-            },
-        },
+        "model": MODEL_SPEC,
+        "multiplicity": multiplicity_accounting(),
         "economic_gate": {
             "minimum_tradeable_net_bps": MINIMUM_TRADEABLE_NET_BPS,
             "required_t_statistic": REQUIRED_T_STATISTIC,
-            "declared_dispersion_bps_30m": DECLARED_OBSERVATION_DISPERSION_BPS,
             "note": (
                 "Statistical significance is not the bar. Stage 3 applies cost and "
-                "latency; Stage 2 does not pre-authorize anything."
+                "latency; Stage 2 pre-authorizes nothing."
             ),
         },
-        "multiplicity_ledger": {
-            "prior_effective_trials": PRIOR_EFFECTIVE_TRIALS,
-            "prior_exposure_sources": list(PRIOR_EXPOSURE_SOURCES),
-            "resets_for_new_dataset_family": False,
-            "reason": (
-                "Tier-1 is better input to the same question, not a new question. "
-                "Exposure accumulated against the same eventual decision."
-            ),
-            **{
-                key: counts[key]
-                for key in (
-                    "declared_trials_this_stage",
-                    "cumulative_effective_trials",
-                )
-            },
-        },
-        "grid": counts,
-        "feature_groups": {
-            "book_state": len(BOOK_STATE_FEATURES),
-            "pressure": len(PRESSURE_FEATURES),
-            "order_lifecycle": len(LIFECYCLE_FEATURES),
-            "aggressive_flow": len(AGGRESSIVE_FLOW_FEATURES),
-            "absorption_resilience": len(ABSORPTION_FEATURES),
-            "prior_only_normalized": len(NORMALIZED_FEATURES),
-        },
-        "horizons": list(HORIZON_NAMES),
-        "cadences": list(CADENCE_NAMES),
         "prohibited": [
             "horizon substitution or nearest-horizon selection after results",
-            "adding, dropping or renaming a horizon after results",
-            "re-splitting after seeing a split's outcome",
+            "adding, dropping or renaming a horizon or cell after results",
+            "re-splitting, or moving a date between blocks, after results",
+            "re-tuning ridge alpha outside the discovery block",
+            "individual-feature ranking inside the primary run",
             "reporting a subset of cells while correcting for that subset",
             "threshold selection inside Stage 2",
             "any transformation using data at or after the observation",
+            "re-running confirmation for any reason",
         ],
     }
 
@@ -269,16 +391,16 @@ PLAN_HASH = hashlib.sha256(
             STAGE2_PLAN_VERSION,
             LABEL_DEFINITION_HASH,
             FEATURE_SEMANTICS_HASH,
-            *PREDICTOR_FEATURES,
-            *TRANSFORMS,
-            *CADENCE_NAMES,
-            *HORIZON_NAMES,
-            *SPLIT_NAMES,
-            str(SPLIT_FRACTIONS),
-            EMBARGO_HORIZON,
-            str(MONOTONICITY_MINIMUM),
-            str(PBO_AUTHORIZATION_CEILING),
-            str(BH_FALSE_DISCOVERY_RATE),
+            *(f"{c}:{h}" for c, h in PRIMARY_CELLS),
+            *(f"{name}:{count}" for name, count in SPLIT_DATE_BLOCKS),
+            PRIMARY_TARGET,
+            str(PRICE_ONLY_LAGS),
+            MODEL_SPEC["l3_model"]["estimator"],
+            str(MODEL_SPEC["hyperparameter_rule"]["candidates"]),
+            MODEL_SPEC["out_of_sample_score"]["incremental_statistic"],
+            MODEL_SPEC["pbo"]["method"],
+            str(MODEL_SPEC["pbo"]["authorization_ceiling"]),
+            str(BH_FAMILY_SIZE),
             str(PRIOR_EFFECTIVE_TRIALS),
         )
     ).encode("utf-8")

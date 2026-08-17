@@ -1,346 +1,415 @@
-"""Stage 2A: label semantics, session edges, and label-side leakage.
+"""Stage 2A v2: event-time label semantics, wide storage, and label leakage.
 
-No feature-label relationship is computed anywhere in this file. These tests pin
-what a label *is*, not whether it is predictable.
+No feature-label relationship is computed anywhere in this file.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from app.services.mbo_book_validator import (
+    F_BAD_TS_RECV,
+    F_LAST,
+    FIXED_PRICE_SCALE,
+    MboEvent,
+)
 from app.services.mbo_label_engine import (
     HORIZON_NAMES,
     HORIZONS,
     LABEL_COLUMNS,
-    LABEL_DEFINITION_HASH,
     LABEL_NO_FURTHER_MIDPOINT_CHANGE,
-    LABEL_NO_VALID_FUTURE_STATE,
     LABEL_OK,
     LABEL_SESSION_END_BEFORE_HORIZON,
     LABEL_SOURCE_MIDPOINT_UNAVAILABLE,
-    LABEL_STATUSES,
     NANOS_PER_SECOND,
     REQUIRED_FEATURE_SEMANTICS_HASH,
-    Horizon,
-    SnapshotSpine,
-    build_labels,
+    SHARED_COLUMNS,
+    SUPERSEDED_LABEL_VERSIONS,
+    SourceSnapshot,
     label_definitions,
     label_status_summary,
+    resolve_symbol_day_labels,
 )
 
 S = NANOS_PER_SECOND
+PX = FIXED_PRICE_SCALE
+MS = 1_000_000
 
 
-def spine(midpoints, *, step_ns=S, start=10 * S, cadence="1s", recv_offset=1_000):
-    """A synthetic snapshot spine on a regular grid.
-
-    `None` in `midpoints` marks an incoherent state -- one side of the touch
-    empty -- which can be neither a source nor a label.
-    """
-    n = len(midpoints)
-    ts = [start + i * step_ns for i in range(n)]
-    return SnapshotSpine(
-        symbol="TEST",
-        session_date="2025-06-26",
-        cadence=cadence,
-        sequence_index=list(range(n)),
+def opening(ts=0):
+    return MboEvent(
         ts_event=ts,
-        grid_ts_event=list(ts),
-        ts_recv=[t + recv_offset for t in ts],
-        feature_available_ts_recv=[t + recv_offset for t in ts],
-        midpoint=list(midpoints),
+        action="R",
+        side="N",
+        price=0,
+        size=0,
+        order_id=0,
+        flags=F_BAD_TS_RECV,
+        sequence=0,
+        ts_recv=ts + 1,
     )
 
 
-def labels(spine_obj, horizons=HORIZONS):
-    return list(build_labels(spine_obj, horizons))
-
-
-def only(rows, horizon, sequence_index):
-    return next(
-        r for r in rows if r["horizon"] == horizon and r["sequence_index"] == sequence_index
+def ev(ts, action, side, price, size, order_id, seq, *, recv=None, flags=F_LAST):
+    return MboEvent(
+        ts_event=ts,
+        action=action,
+        side=side,
+        price=price,
+        size=size,
+        order_id=order_id,
+        flags=flags,
+        sequence=seq,
+        ts_recv=ts + 1_000 if recv is None else recv,
     )
 
 
-ONE_SEC = (Horizon("1s", "time", S),)
-NEXT = (Horizon("next_change", "changes", 1),)
-NEXT2 = (Horizon("next_2_changes", "changes", 2),)
+def source(ts, midpoint, *, cadence="1s", index=0, recv=None):
+    return SourceSnapshot(
+        cadence=cadence,
+        sequence_index=index,
+        ts_event=ts,
+        grid_ts_event=ts,
+        midpoint=midpoint,
+        ts_recv=ts + 500 if recv is None else recv,
+        feature_available_ts_recv=ts + 500 if recv is None else recv,
+    )
+
+
+def resolve(sources, events):
+    return resolve_symbol_day_labels(
+        symbol="TEST", session_date="2025-06-26", sources=sources, events=events
+    )
+
+
+def two_sided_book(start_ts, *, bid=100 * PX, ask=101 * PX):
+    """Open a coherent book so midpoints exist from the start."""
+    return [
+        opening(start_ts - 2),
+        ev(start_ts - 1, "A", "B", bid, 100, 1, 1),
+        ev(start_ts, "A", "A", ask, 100, 2, 2),
+    ]
 
 
 # ---------------------------------------------------------------------------
-# Frozen declaration
+# Governance
 # ---------------------------------------------------------------------------
 
 
-def test_seven_horizons_are_frozen_together():
-    assert HORIZON_NAMES == (
-        "next_change",
-        "next_2_changes",
-        "1s",
-        "5s",
-        "10s",
-        "30s",
-        "60s",
-    )
-
-
-def test_definitions_name_the_feature_artefact_they_were_built_against():
+def test_labels_come_from_the_event_stream_not_the_sampled_cadence():
     definitions = label_definitions()
+    assert definitions["derived_from_sampled_cadence"] is False
+    assert "certified XNAS MBO stream" in definitions["label_source"]
+    assert definitions["storage"].startswith("wide")
+    assert definitions["row_multiplier_vs_sources"] == 1
     assert definitions["built_against"]["feature_semantics_hash"] == (
         REQUIRED_FEATURE_SEMANTICS_HASH
     )
-    assert definitions["built_against"]["features_modified"] is False
     assert definitions["contains_predictive_result"] is False
-    assert definitions["label_definition_hash"] == LABEL_DEFINITION_HASH
 
 
-def test_every_label_row_carries_the_declared_columns():
-    rows = labels(spine([100.0, 100.5, 101.0]))
-    assert rows
+def test_v1_is_preserved_as_superseded_before_outcome():
+    assert len(SUPERSEDED_LABEL_VERSIONS) == 1
+    v1 = SUPERSEDED_LABEL_VERSIONS[0]
+    assert v1["version"] == "tier1_mbo_label_engine_v1"
+    assert v1["commit"].startswith("f3289c9")
+    assert v1["superseded_before_outcome"] == "true"
+    assert "sampled Stage-1 cadence sequence" in v1["reason"]
+
+
+# ---------------------------------------------------------------------------
+# B. Wide storage
+# ---------------------------------------------------------------------------
+
+
+def test_one_row_per_source_snapshot_not_seven():
+    events = two_sided_book(10 * S)
+    for i in range(1, 40):
+        events.append(ev(10 * S + i * S, "A", "B", (100 + i) * PX, 100, 100 + i, 100 + i))
+    sources = [source(10 * S + i * S, 100.5 * PX, index=i) for i in range(5)]
+    rows = resolve(sources, events)
+    assert len(rows) == len(sources) == 5, "wide storage: one row per snapshot"
     for row in rows:
         assert set(row) == set(LABEL_COLUMNS)
-        assert row["label_status"] in LABEL_STATUSES
+    # Every horizon has its own columns on the same row.
+    assert len(LABEL_COLUMNS) == len(SHARED_COLUMNS) + 9 * len(HORIZONS)
 
 
 # ---------------------------------------------------------------------------
-# Time horizons: the at-or-after rule
+# A. Exact event-time change horizons
 # ---------------------------------------------------------------------------
 
 
-def test_time_label_takes_the_first_state_at_or_after_the_target():
-    rows = labels(spine([100.0, 101.0, 102.0]), ONE_SEC)
-    first = only(rows, "1s", 0)
-    assert first["label_status"] == LABEL_OK
-    assert first["target_ts_event"] == 11 * S
-    assert first["label_ts_event"] == 11 * S
-    assert first["realized_lag_ns"] == 0
-    assert first["future_midpoint"] == 101.0
-    assert first["midpoint_change"] == pytest.approx(1.0)
-    assert first["return_bps"] == pytest.approx(1.0 / 100.0 * 10_000)
+def test_next_change_resolves_at_event_time_not_at_the_next_cadence_boundary():
+    """The v1 defect: a 1s source resolved at the next *second* whose midpoint
+    differed. The true next change here is one millisecond later."""
+    events = two_sided_book(10 * S)
+    # Mid moves 1 ms after the source instant.
+    events.append(ev(10 * S + MS, "A", "B", 100 * PX + 10**7, 100, 3, 3))
+    # And keeps moving, well inside the same second.
+    events.append(ev(10 * S + 2 * MS, "A", "B", 100 * PX + 2 * 10**7, 100, 4, 4))
+    events.append(ev(20 * S, "A", "A", 105 * PX, 100, 5, 5))
+
+    source_mid = (100 * PX + 101 * PX) / 2
+    rows = resolve([source(10 * S, source_mid)], events)
+    row = rows[0]
+    assert row["next_change_status"] == LABEL_OK
+    assert row["next_change_label_ts_event"] == 10 * S + MS
+    assert row["next_change_label_ts_event"] - row["source_ts_event"] == MS
 
 
-def test_a_state_exactly_at_the_target_is_used():
-    rows = labels(spine([100.0, 100.0, 103.0], step_ns=S), ONE_SEC)
-    assert only(rows, "1s", 0)["label_ts_event"] == 11 * S
+def test_next_two_changes_is_the_second_event_time_change():
+    events = two_sided_book(10 * S)
+    events.append(ev(10 * S + MS, "A", "B", 100 * PX + 10**7, 100, 3, 3))
+    events.append(ev(10 * S + 2 * MS, "A", "B", 100 * PX + 2 * 10**7, 100, 4, 4))
+    events.append(ev(20 * S, "A", "A", 105 * PX, 100, 5, 5))
+
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    assert row["next_2_changes_label_ts_event"] == 10 * S + 2 * MS
+    assert row["next_2_changes_label_ts_event"] > row["next_change_label_ts_event"]
 
 
-def test_a_sparse_grid_takes_the_next_state_after_the_target_and_records_the_lag():
-    """The horizon is never shortened to fit the data."""
-    rows = labels(spine([100.0, 105.0], step_ns=7 * S), ONE_SEC)
-    row = only(rows, "1s", 0)
-    assert row["target_ts_event"] == 11 * S
-    assert row["label_ts_event"] == 17 * S
-    assert row["realized_lag_ns"] == 6 * S
-    assert row["future_midpoint"] == 105.0
+def test_a_repeated_midpoint_is_not_a_change():
+    events = two_sided_book(10 * S)
+    # Same midpoint restated several times, then a genuine move.
+    for i in range(1, 5):
+        events.append(ev(10 * S + i * MS, "A", "B", 100 * PX, 50, 10 + i, 10 + i))
+    events.append(ev(10 * S + 9 * MS, "A", "B", 100 * PX + 10**7, 100, 20, 20))
+    events.append(ev(20 * S, "A", "A", 105 * PX, 100, 21, 21))
+
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    assert row["next_change_label_ts_event"] == 10 * S + 9 * MS
 
 
-def test_incoherent_future_states_are_skipped_and_counted():
-    rows = labels(spine([100.0, None, None, 104.0]), ONE_SEC)
-    row = only(rows, "1s", 0)
-    assert row["label_status"] == LABEL_OK
-    assert row["skipped_incoherent_states"] == 2
-    assert row["label_ts_event"] == 13 * S
-    assert row["future_midpoint"] == 104.0
+def test_a_one_sided_book_is_not_a_midpoint_change():
+    events = two_sided_book(10 * S)
+    # Cancel the whole ask: the book becomes one-sided, which is not a change.
+    events.append(ev(10 * S + MS, "C", "A", 101 * PX, 100, 2, 3))
+    # Restore a different ask: now the midpoint has genuinely changed.
+    events.append(ev(10 * S + 2 * MS, "A", "A", 102 * PX, 100, 4, 4))
+    events.append(ev(20 * S, "A", "B", 100 * PX, 100, 5, 5))
+
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    assert row["next_change_label_ts_event"] == 10 * S + 2 * MS
 
 
-def test_no_state_after_the_target_is_missing_not_backfilled():
-    """The last snapshot of a session has no 1s label. It is not given one."""
-    rows = labels(spine([100.0, 101.0]), ONE_SEC)
-    last = only(rows, "1s", 1)
-    assert last["label_status"] == LABEL_SESSION_END_BEFORE_HORIZON
-    assert last["future_midpoint"] is None
-    assert last["return_bps"] is None
-    assert last["label_ts_event"] is None
+def test_a_flat_book_yields_no_change_labels():
+    events = two_sided_book(10 * S)
+    for i in range(1, 20):
+        events.append(ev(10 * S + i * MS, "A", "B", 100 * PX, 10, 100 + i, 100 + i))
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    assert row["next_change_status"] == LABEL_NO_FURTHER_MIDPOINT_CHANGE
+    assert row["next_2_changes_status"] == LABEL_NO_FURTHER_MIDPOINT_CHANGE
+    assert row["next_change_future_midpoint"] is None
 
 
-def test_a_future_that_never_becomes_coherent_is_named_distinctly():
-    rows = labels(spine([100.0, None, None]), ONE_SEC)
-    row = only(rows, "1s", 0)
-    assert row["label_status"] == LABEL_NO_VALID_FUTURE_STATE
+# ---------------------------------------------------------------------------
+# A. Time horizons: at or after the target, never before
+# ---------------------------------------------------------------------------
 
 
-def test_an_incoherent_source_yields_no_label_at_any_horizon():
-    rows = labels(spine([None, 101.0, 102.0]))
-    for horizon in HORIZON_NAMES:
-        row = only(rows, horizon, 0)
-        assert row["label_status"] == LABEL_SOURCE_MIDPOINT_UNAVAILABLE
-        assert row["future_midpoint"] is None
+def test_time_label_is_the_first_state_at_or_after_the_target():
+    events = two_sided_book(10 * S)
+    for i in range(1, 2_100):
+        events.append(ev(10 * S + i * MS, "A", "B", (100 * PX) + (i % 4) * 10**7, 100, 1000 + i, 1000 + i))
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    assert row["h1s_target_ts_event"] == 11 * S
+    assert row["h1s_label_ts_event"] >= 11 * S
+    assert row["h1s_realized_lag_ns"] >= 0
+    assert row["h1s_realized_lag_ns"] < MS, "a 1 ms stream should land within a tick"
+
+
+def test_a_sparse_future_records_the_lag_and_never_shortens_the_horizon():
+    events = two_sided_book(10 * S)
+    events.append(ev(17 * S, "A", "B", 104 * PX, 100, 3, 3))
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    assert row["h1s_target_ts_event"] == 11 * S
+    assert row["h1s_label_ts_event"] == 17 * S
+    assert row["h1s_realized_lag_ns"] == 6 * S
+
+
+def test_no_state_at_or_after_the_target_is_missing_not_backfilled():
+    events = two_sided_book(10 * S)
+    events.append(ev(10 * S + 100 * MS, "A", "B", 100 * PX + 10**7, 100, 3, 3))
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    # A 60s horizon cannot resolve inside a 100 ms session.
+    assert row["h60s_status"] == LABEL_SESSION_END_BEFORE_HORIZON
+    assert row["h60s_future_midpoint"] is None
+    assert row["h60s_return_bps"] is None
+    # But the shorter change horizon did resolve.
+    assert row["next_change_status"] == LABEL_OK
 
 
 def test_longer_horizons_run_out_before_shorter_ones():
-    """A 60s label needs 60 seconds; a 1s label needs one. Neither borrows."""
-    rows = labels(spine([100.0 + i for i in range(12)]))
-    summary = label_status_summary(rows)
-    ok_1s = summary["by_horizon"]["1s"][LABEL_OK]
-    ok_60s = summary["by_horizon"]["60s"][LABEL_OK]
-    assert ok_1s > ok_60s
-    assert ok_60s == 0, "an 11-second session cannot carry a 60-second label"
+    events = two_sided_book(10 * S)
+    for i in range(1, 12):
+        events.append(ev(10 * S + i * S, "A", "B", (100 + i) * PX, 100, 100 + i, 100 + i))
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    assert row["h1s_status"] == LABEL_OK
+    assert row["h5s_status"] == LABEL_OK
+    assert row["h60s_status"] == LABEL_SESSION_END_BEFORE_HORIZON
+
+
+def test_every_time_horizon_resolves_to_its_own_instant():
+    events = two_sided_book(10 * S)
+    for i in range(1, 700):
+        events.append(
+            ev(10 * S + i * 100 * MS, "A", "B", (100 * PX) + (i % 5) * 10**7, 100, 1000 + i, 1000 + i)
+        )
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    instants = [row[f"h{name}_label_ts_event"] for name in ("1s", "5s", "10s", "30s", "60s")]
+    assert all(value is not None for value in instants)
+    assert instants == sorted(instants)
+    assert len(set(instants)) == 5, "distinct horizons must not collapse onto one label"
+
+
+def test_an_incoherent_source_midpoint_blocks_every_horizon():
+    events = two_sided_book(10 * S)
+    events.append(ev(15 * S, "A", "B", 103 * PX, 100, 3, 3))
+    row = resolve([source(10 * S, None)], events)[0]
+    for horizon in HORIZONS:
+        assert row[f"{horizon.prefix}_status"] == LABEL_SOURCE_MIDPOINT_UNAVAILABLE
+        assert row[f"{horizon.prefix}_future_midpoint"] is None
 
 
 # ---------------------------------------------------------------------------
-# Change-count horizons
+# Provenance
 # ---------------------------------------------------------------------------
 
 
-def test_next_change_skips_snapshots_whose_midpoint_is_unchanged():
-    rows = labels(spine([100.0, 100.0, 100.0, 101.0]), NEXT)
-    row = only(rows, "next_change", 0)
-    assert row["label_sequence_index"] == 3
-    assert row["future_midpoint"] == 101.0
-    assert row["midpoint_change"] == pytest.approx(1.0)
-    # A change horizon has no target instant.
-    assert row["target_ts_event"] is None
-    assert row["realized_lag_ns"] is None
+def test_return_and_change_are_relative_to_the_source_midpoint():
+    events = two_sided_book(10 * S)
+    # Move the bid up one dollar: mid goes 100.5 -> 101.0
+    events.append(ev(11 * S, "A", "B", 101 * PX, 500, 3, 3))
+    events.append(ev(12 * S, "A", "B", 101 * PX, 500, 4, 4))
+    source_mid = 100.5 * PX
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    assert row["source_midpoint"] == source_mid
+    assert row["h1s_midpoint_change"] == pytest.approx(0.5 * PX)
+    assert row["h1s_return_bps"] == pytest.approx(0.5 / 100.5 * 10_000)
 
 
-def test_next_two_changes_finds_the_second_distinct_move():
-    rows = labels(spine([100.0, 100.0, 101.0, 101.0, 99.0]), NEXT2)
-    row = only(rows, "next_2_changes", 0)
-    assert row["label_sequence_index"] == 4
-    assert row["future_midpoint"] == 99.0
-    assert row["midpoint_change"] == pytest.approx(-1.0)
+def test_label_availability_never_precedes_the_feature_row_or_the_label_record():
+    events = two_sided_book(10 * S)
+    for i in range(1, 200):
+        events.append(
+            ev(10 * S + i * 50 * MS, "A", "B", (100 * PX) + (i % 3) * 10**7, 100,
+               1000 + i, 1000 + i, recv=10 * S + i * 50 * MS + 7_000)
+        )
+    source_mid = (100 * PX + 101 * PX) / 2
+    row = resolve([source(10 * S, source_mid)], events)[0]
+    for horizon in HORIZONS:
+        if row[f"{horizon.prefix}_status"] != LABEL_OK:
+            continue
+        assert (
+            row[f"{horizon.prefix}_available_ts_recv"]
+            >= row["source_feature_available_ts_recv"]
+        )
+        assert (
+            row[f"{horizon.prefix}_available_ts_recv"]
+            >= row[f"{horizon.prefix}_label_ts_recv"]
+        )
+        assert row[f"{horizon.prefix}_label_ts_event"] > row["source_ts_event"]
 
 
-def test_next_two_changes_is_missing_when_only_one_move_remains():
-    rows = labels(spine([100.0, 101.0]), NEXT2)
-    assert only(rows, "next_2_changes", 0)["label_status"] == (
-        LABEL_NO_FURTHER_MIDPOINT_CHANGE
+def test_labels_never_cross_a_symbol_day():
+    """Resolution is confined to the events handed to it, which are one file."""
+    monday_events = two_sided_book(10 * S) + [ev(11 * S, "A", "B", 101 * PX, 100, 3, 3)]
+    row = resolve([source(10 * S, 100.5 * PX)], monday_events)[0]
+    # The 60s horizon finds nothing; the next session is not consulted.
+    assert row["h60s_status"] == LABEL_SESSION_END_BEFORE_HORIZON
+    assert row["session_date"] == "2025-06-26"
+
+
+# ---------------------------------------------------------------------------
+# Leakage
+# ---------------------------------------------------------------------------
+
+
+def test_extending_the_stream_cannot_change_an_already_resolved_label():
+    base = two_sided_book(10 * S)
+    for i in range(1, 400):
+        base.append(
+            ev(10 * S + i * 20 * MS, "A", "B", (100 * PX) + (i % 4) * 10**7, 100, 1000 + i, 1000 + i)
+        )
+    extension = [
+        ev(10 * S + 8 * S + i * 20 * MS, "A", "B", (500 * PX) + i * 10**7, 100, 9000 + i, 9000 + i)
+        for i in range(1, 200)
+    ]
+    sources = [source(10 * S + i * 500 * MS, 100.5 * PX, index=i) for i in range(6)]
+
+    short = {(r["cadence"], r["sequence_index"]): r for r in resolve(sources, base)}
+    long = {(r["cadence"], r["sequence_index"]): r for r in resolve(sources, base + extension)}
+
+    for key, row in short.items():
+        for horizon in HORIZONS:
+            prefix = horizon.prefix
+            if row[f"{prefix}_status"] != LABEL_OK:
+                continue  # a status that was pending may legitimately resolve later
+            for suffix in ("label_ts_event", "future_midpoint", "return_bps", "realized_lag_ns"):
+                assert long[key][f"{prefix}_{suffix}"] == row[f"{prefix}_{suffix}"], (
+                    f"{key} {prefix}_{suffix} changed when the stream was extended"
+                )
+
+
+def test_a_label_never_reads_a_state_before_its_target():
+    events = two_sided_book(10 * S)
+    for i in range(1, 800):
+        events.append(
+            ev(10 * S + i * 100 * MS, "A", "B", (100 * PX) + (i % 6) * 10**7, 100, 1000 + i, 1000 + i)
+        )
+    sources = [source(10 * S + i * S, 100.5 * PX, index=i) for i in range(10)]
+    for row in resolve(sources, events):
+        for horizon in HORIZONS:
+            if horizon.kind != "time" or row[f"{horizon.prefix}_status"] != LABEL_OK:
+                continue
+            assert (
+                row[f"{horizon.prefix}_label_ts_event"]
+                >= row[f"{horizon.prefix}_target_ts_event"]
+            )
+            assert row[f"{horizon.prefix}_realized_lag_ns"] >= 0
+
+
+def test_a_source_is_never_labelled_by_a_state_at_or_before_itself():
+    events = two_sided_book(10 * S)
+    # A state at exactly the source instant must not become its own label.
+    events.append(ev(10 * S, "A", "B", 100 * PX + 10**7, 100, 3, 3))
+    events.append(ev(11 * S, "A", "B", 100 * PX + 2 * 10**7, 100, 4, 4))
+    row = resolve([source(10 * S, 100.5 * PX)], events)[0]
+    assert row["next_change_label_ts_event"] > 10 * S
+
+
+def test_multiple_cadences_resolve_independently_on_one_replay():
+    events = two_sided_book(10 * S)
+    for i in range(1, 1_200):
+        events.append(
+            ev(10 * S + i * 10 * MS, "A", "B", (100 * PX) + (i % 7) * 10**7, 100, 1000 + i, 1000 + i)
+        )
+    sources = [
+        source(10 * S + 1 * S, 100.5 * PX, cadence="1s", index=1),
+        source(10 * S + 1 * S, 100.5 * PX, cadence="5s", index=0),
+        source(10 * S + 2 * S, 100.5 * PX, cadence="50ev", index=3),
+    ]
+    rows = resolve(sources, events)
+    assert len(rows) == 3
+    assert {r["cadence"] for r in rows} == {"1s", "5s", "50ev"}
+    # Two sources at the same instant get the same label instants.
+    at_one_second = [r for r in rows if r["source_ts_event"] == 10 * S + 1 * S]
+    assert len(at_one_second) == 2
+    assert (
+        at_one_second[0]["h1s_label_ts_event"] == at_one_second[1]["h1s_label_ts_event"]
     )
-
-
-def test_a_flat_session_has_no_change_labels_at_all():
-    rows = labels(spine([100.0] * 8), NEXT)
-    statuses = {row["label_status"] for row in rows}
-    assert statuses == {LABEL_NO_FURTHER_MIDPOINT_CHANGE}
-
-
-def test_change_horizons_skip_incoherent_states_rather_than_treating_them_as_changes():
-    rows = labels(spine([100.0, None, 100.0, 102.0]), NEXT)
-    row = only(rows, "next_change", 0)
-    assert row["label_sequence_index"] == 3, "a gap is not a midpoint change"
-    assert row["future_midpoint"] == 102.0
-
-
-# ---------------------------------------------------------------------------
-# Session edges
-# ---------------------------------------------------------------------------
-
-
-def test_labels_never_leave_the_symbol_day():
-    """Two sessions labelled separately produce no cross-session label.
-
-    An overnight gap is not a 60-second horizon.
-    """
-    monday = labels(spine([100.0, 101.0, 102.0]), ONE_SEC)
-    tuesday_spine = spine([200.0, 201.0, 202.0], start=90_000 * S)
-    tuesday_spine.session_date = "2025-06-27"
-    tuesday = labels(tuesday_spine, ONE_SEC)
-
-    for row in monday:
-        assert row["session_date"] == "2025-06-26"
-        if row["label_ts_event"] is not None:
-            assert row["label_ts_event"] < 90_000 * S
-    assert only(monday, "1s", 2)["label_status"] == LABEL_SESSION_END_BEFORE_HORIZON
-    for row in tuesday:
-        assert row["session_date"] == "2025-06-27"
-
-
-# ---------------------------------------------------------------------------
-# Provenance and availability
-# ---------------------------------------------------------------------------
-
-
-def test_label_availability_never_precedes_the_feature_row_or_the_label_state():
-    rows = labels(spine([100.0 + i for i in range(20)]))
-    for row in rows:
-        if row["label_status"] != LABEL_OK:
-            continue
-        assert row["label_available_ts_recv"] >= row["source_feature_available_ts_recv"]
-        assert row["label_available_ts_recv"] >= row["label_ts_recv"]
-        # A label is always strictly in the future of its source.
-        assert row["label_ts_event"] > row["source_ts_event"]
-
-
-def test_source_and_label_timestamps_are_both_preserved():
-    rows = labels(spine([100.0, 101.0]), ONE_SEC)
-    row = only(rows, "1s", 0)
-    assert row["source_ts_event"] == 10 * S
-    assert row["source_grid_ts_event"] == 10 * S
-    assert row["source_midpoint"] == 100.0
-    assert row["label_ts_event"] == 11 * S
-    assert row["label_ts_recv"] == 11 * S + 1_000
-
-
-# ---------------------------------------------------------------------------
-# Leakage: the future cannot change an earlier label
-# ---------------------------------------------------------------------------
-
-
-def test_appending_future_snapshots_cannot_change_earlier_labels():
-    """Truncation invariance on the label side.
-
-    Extending a session must not alter any label that was already resolvable,
-    which is the label-side analogue of the Stage-1 feature invariance.
-    """
-    short = spine([100.0, 101.0, 102.0, 103.0, 104.0])
-    long = spine([100.0, 101.0, 102.0, 103.0, 104.0, 999.0, -999.0, 500.0])
-
-    short_rows = {
-        (r["horizon"], r["sequence_index"]): r
-        for r in labels(short)
-        if r["label_status"] == LABEL_OK
-    }
-    long_rows = {
-        (r["horizon"], r["sequence_index"]): r for r in labels(long)
-    }
-    assert short_rows, "the fixture must resolve some labels"
-    for key, row in short_rows.items():
-        assert long_rows[key] == row, f"{key} changed when the future was extended"
-
-
-def test_perturbing_the_far_future_cannot_change_a_resolved_label():
-    base_mids = [100.0 + i * 0.5 for i in range(30)]
-    original = labels(spine(base_mids))
-    perturbed_mids = list(base_mids)
-    for index in range(20, 30):
-        perturbed_mids[index] = 5_000.0 + index
-    perturbed = labels(spine(perturbed_mids))
-
-    def resolved_before(rows, cutoff_ts):
-        return {
-            (r["horizon"], r["sequence_index"]): r
-            for r in rows
-            if r["label_status"] == LABEL_OK and r["label_ts_event"] < cutoff_ts
-        }
-
-    cutoff = 10 * S + 20 * S
-    before = resolved_before(original, cutoff)
-    after = resolved_before(perturbed, cutoff)
-    assert before, "the fixture must resolve labels before the cutoff"
-    assert before == after
-
-
-def test_a_label_never_reads_a_state_before_its_own_target():
-    rows = labels(spine([100.0 + i for i in range(40)]))
-    for row in rows:
-        if row["label_status"] != LABEL_OK or row["horizon_kind"] != "time":
-            continue
-        assert row["label_ts_event"] >= row["target_ts_event"]
-        assert row["realized_lag_ns"] >= 0
-
-
-def test_no_horizon_is_substituted_for_another():
-    """Every horizon resolves independently; none inherits another's label."""
-    rows = labels(spine([100.0 + i for i in range(80)]))
-    by_horizon = {}
-    for row in rows:
-        if row["sequence_index"] == 0 and row["label_status"] == LABEL_OK:
-            by_horizon[row["horizon"]] = row["label_ts_event"]
-    for name, magnitude in (("1s", 1), ("5s", 5), ("10s", 10), ("30s", 30)):
-        assert by_horizon[name] == 10 * S + magnitude * S, name
-    # Distinct horizons must not collapse onto one label instant.
-    time_labels = [by_horizon[n] for n in ("1s", "5s", "10s", "30s")]
-    assert len(set(time_labels)) == len(time_labels)
 
 
 # ---------------------------------------------------------------------------
@@ -348,89 +417,116 @@ def test_no_horizon_is_substituted_for_another():
 # ---------------------------------------------------------------------------
 
 
-def test_labels_read_from_a_real_stage1_parquet_without_modifying_it(tmp_path):
-    """End to end against the actual frozen artefact shape.
-
-    Writes a Stage-1 feature file with the real engine, reads the labelling
-    spine back out of it, and asserts the feature file is byte-identical
-    afterwards -- Stage 2A must not touch the frozen dataset.
-    """
-    from app.services.mbo_book_validator import F_BAD_TS_RECV, F_LAST, MboEvent
-    from app.services.mbo_feature_engine import Cadence
-    from app.services.mbo_feature_store import write_session_features
-    from app.services.mbo_label_engine import read_spine
-
-    px = 1_000_000_000
-    events = [
-        MboEvent(
-            ts_event=10 * S,
-            action="R",
-            side="N",
-            price=0,
-            size=0,
-            order_id=0,
-            flags=F_BAD_TS_RECV,
-            sequence=0,
-            ts_recv=10 * S + 1,
-        )
-    ]
-    seq = 1
-    for step in range(60):
-        ts = 10 * S + step * 400_000_000
-        side = "B" if step % 2 else "A"
-        # A drifting touch, so midpoints actually change and change-horizons
-        # have something to find.
-        price = (100 * px - (step % 5) * 10**7) if side == "B" else (
-            101 * px + (step % 5) * 10**7
-        )
+def test_status_summary_reports_every_horizon_and_no_relationship():
+    events = two_sided_book(10 * S)
+    for i in range(1, 300):
         events.append(
-            MboEvent(
-                ts_event=ts,
-                action="A",
-                side=side,
-                price=price,
-                size=100,
-                order_id=seq,
-                flags=F_LAST,
-                sequence=seq,
-                ts_recv=ts + 1_000,
-            )
+            ev(10 * S + i * 40 * MS, "A", "B", (100 * PX) + (i % 3) * 10**7, 100, 1000 + i, 1000 + i)
         )
-        seq += 1
-
-    features_dir = tmp_path / "features"
-    manifest = write_session_features(
-        events,
-        symbol="TEST",
-        session_date="2025-06-26",
-        output_dir=features_dir,
-        cadences=(Cadence("1s", "time", S),),
-    )
-    feature_path = features_dir / manifest["cadences"]["1s"]["path"]
-    before = feature_path.read_bytes()
-
-    spine_obj = read_spine(str(feature_path))
-    assert spine_obj.symbol == "TEST"
-    assert spine_obj.session_date == "2025-06-26"
-    assert spine_obj.cadence == "1s"
-    assert len(spine_obj) == manifest["cadences"]["1s"]["rows"]
-
-    rows = list(build_labels(spine_obj))
-    assert len(rows) == len(spine_obj) * len(HORIZONS)
-    resolved = [r for r in rows if r["label_status"] == LABEL_OK]
-    assert resolved, "a 24-second session must resolve some labels"
-    for row in resolved:
-        assert row["label_ts_event"] > row["source_ts_event"]
-        assert row["label_available_ts_recv"] >= row["source_feature_available_ts_recv"]
-
-    # The frozen dataset is untouched.
-    assert feature_path.read_bytes() == before
-
-
-def test_status_summary_reports_every_horizon_and_never_a_relationship():
-    rows = labels(spine([100.0 + (i % 3) for i in range(15)]))
-    summary = label_status_summary(rows)
+    sources = [source(10 * S + i * 500 * MS, 100.5 * PX, index=i) for i in range(8)]
+    summary = label_status_summary(resolve(sources, events))
+    assert summary["rows"] == 8
     assert set(summary["by_horizon"]) == set(HORIZON_NAMES)
     assert summary["contains_predictive_result"] is False
-    for name in HORIZON_NAMES:
-        assert sum(summary["by_horizon"][name].values()) == 15
+    for counts in summary["by_horizon"].values():
+        assert sum(counts.values()) == 8
+
+
+# ---------------------------------------------------------------------------
+# Integration: real MBO file + real Stage-1 features
+# ---------------------------------------------------------------------------
+
+CMCSA_FILE = "xnas-itch-20250626.mbo.CMCSA.0000.dbn.zst"
+
+
+def _find_cmcsa_file():
+    import os
+
+    override = os.environ.get("KEFTRADE_MBO_TEST_FILE")
+    if override and Path(override).is_file():
+        return Path(override)
+    for root in (
+        Path(__file__).resolve().parents[3] / "data" / "databento",
+        Path(__file__).resolve().parents[3],
+        Path("/opt/keftrade/data/databento"),
+        Path("/opt/keftrade"),
+    ):
+        candidate = root / CMCSA_FILE
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+@pytest.mark.skipif(
+    _find_cmcsa_file() is None,
+    reason=f"{CMCSA_FILE} not present; set KEFTRADE_MBO_TEST_FILE to run",
+)
+def test_real_mbo_stream_labels_real_stage1_snapshots(tmp_path):
+    """One raw symbol-day, Stage-1 features built from it, labels resolved from
+    the same certified stream in a single replay.
+
+    Asserts structure and causality only. No predictive quantity is computed.
+    """
+    from app.services.mbo_book_validator import iter_dbn_events
+    from app.services.mbo_feature_engine import CADENCES
+    from app.services.mbo_feature_store import write_session_features
+    from app.services.mbo_label_engine import read_source_snapshots
+
+    path = _find_cmcsa_file()
+    features_dir = tmp_path / "features"
+    manifest = write_session_features(
+        iter_dbn_events(str(path)),
+        symbol="CMCSA",
+        session_date="2025-06-26",
+        output_dir=features_dir,
+        source_path=path,
+        cadences=CADENCES,
+    )
+    feature_paths = [
+        str(features_dir / manifest["cadences"][c.name]["path"]) for c in CADENCES
+    ]
+    before = {p: Path(p).read_bytes() for p in feature_paths}
+
+    symbol, session_date, sources = read_source_snapshots(feature_paths)
+    assert symbol == "CMCSA"
+    assert session_date == "2025-06-26"
+    assert len(sources) == manifest["total_rows"]
+    # Sorted by event time, which the streaming resolver requires.
+    assert [s.ts_event for s in sources] == sorted(s.ts_event for s in sources)
+
+    rows = resolve_symbol_day_labels(
+        symbol=symbol,
+        session_date=session_date,
+        sources=sources,
+        events=iter_dbn_events(str(path)),
+    )
+    assert len(rows) == len(sources), "wide storage: one row per source snapshot"
+
+    summary = label_status_summary(rows)
+    assert summary["rows"] == len(sources)
+    # Short horizons must resolve far more often than a 60-second one.
+    assert (
+        summary["by_horizon"]["1s"][LABEL_OK] >= summary["by_horizon"]["60s"][LABEL_OK]
+    )
+    assert summary["by_horizon"]["next_change"][LABEL_OK] > 0
+
+    for row in rows:
+        for horizon in HORIZONS:
+            prefix = horizon.prefix
+            if row[f"{prefix}_status"] != LABEL_OK:
+                continue
+            assert row[f"{prefix}_label_ts_event"] > row["source_ts_event"]
+            if horizon.kind == "time":
+                assert (
+                    row[f"{prefix}_label_ts_event"]
+                    >= row[f"{prefix}_target_ts_event"]
+                )
+                assert row[f"{prefix}_realized_lag_ns"] >= 0
+            assert (
+                row[f"{prefix}_available_ts_recv"]
+                >= row["source_feature_available_ts_recv"]
+            )
+
+    # The frozen feature dataset is untouched.
+    for parquet_path, payload in before.items():
+        assert Path(parquet_path).read_bytes() == payload

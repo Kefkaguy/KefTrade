@@ -1,78 +1,87 @@
-"""Stage 2A: causal forward-label construction.
+"""Stage 2A v2: exact event-time forward labels.
 
-Builds forward labels against the **frozen** Stage-1 v2 feature dataset. It
-reads that dataset and never writes to it; labels land in their own files, keyed
-so they can be joined back.
+Labels are resolved from the **original certified XNAS MBO stream**, replayed
+through the same ``MboBook`` the Tier-1 gate certified 160/160 on. v1 derived
+them from the sampled Stage-1 cadence sequence, which made "the next midpoint
+change" mean "the next *second* whose midpoint differs" -- a coarser object than
+the event-time tick the hypothesis is about. That is corrected here.
 
-This module computes **no** correlation, no information coefficient, no ranking,
-no threshold and no P/L. It produces the dependent variable and stops. Freezing
-the label definitions before any relationship is inspected is the point: a
-horizon chosen after seeing which one worked is not a horizon, it is a result.
+Computes no correlation, no information coefficient, no ranking, no threshold
+and no P/L. It produces the dependent variable and stops.
 
-## Horizons, frozen
+## Exact definitions
 
-Seven, declared together so a disappointing one cannot be dropped afterwards
-and none can be substituted for another.
+For a source snapshot at ``t_s`` with the midpoint its feature row carried:
 
-| Name | Kind | Definition |
-|---|---|---|
-| `next_change` | changes | the next snapshot whose midpoint differs from the source |
-| `next_2_changes` | changes | the second such snapshot |
-| `1s` `5s` `10s` `30s` `60s` | time | the first valid future coherent state at or after `source + H` |
+| Horizon | Definition |
+|---|---|
+| `next_change` | the first completed `F_LAST` state with `ts_event > t_s` whose midpoint differs from the source midpoint |
+| `next_2_changes` | the next completed `F_LAST` state after that whose midpoint differs from *its* midpoint -- the second event-time change |
+| `1s` `5s` `10s` `30s` `60s` | the first coherent completed `F_LAST` state with `ts_event >= t_s + H` |
 
-**Change-count horizons are defined on the snapshot sequence of the same
-cadence**, not on raw book events. A "next midpoint change" at the 1s cadence is
-the next *second* whose midpoint differs, which is a coarser object than the
-next event-time tick. That is a real limitation of labelling from the frozen
-snapshot set rather than by re-replaying 562 M events, and it is stated here
-rather than left for a reader to infer.
+**A state before the target is never used.** For time horizons the label instant
+is always `>= t_s + H`; for change horizons it is always `> t_s`.
 
-## The at-or-after rule
+Preserved per horizon: the exact target, the actual label event timestamp, its
+``ts_recv``, the availability timestamp, and the realized lag. A large realized
+lag is a thin-book observation, not a horizon quietly shortened, and keeping the
+lag is what lets a later stage tell them apart.
 
-For a time horizon `H`, the target instant is `t_target = source_ts + H`. The
-label is the **first** snapshot at or after `t_target` that carries a coherent
-midpoint. Not the nearest; not the one before. If the first candidate at or
-after `t_target` has no midpoint, the scan continues forward, and the number
-skipped is recorded.
+## Streaming resolution
 
-`realized_lag_ns = label_ts - t_target` is preserved, and is always `>= 0`. A
-label whose realized lag is large is a thin-book observation, not a 60-second
-horizon quietly relabelled -- and keeping the lag is what lets a later stage
-tell the difference.
+Each raw symbol-day is replayed **once**. 337 M book states are never
+materialized: the resolver holds only the source snapshots still awaiting a
+label, and every horizon resolves through a structure that costs amortized
+constant time per resolution.
 
-**No substitution.** If no valid state exists at or after `t_target` inside the
-symbol-day, the label is missing with a named reason. It is never backfilled
-from an earlier state, and never taken from the next session.
+* Time horizons keep a FIFO per horizon. Targets are monotone in `t_s`, so the
+  queue head is always the next to resolve.
+* Change horizons group pending sources by the midpoint they are waiting to
+  differ from. When a state arrives at midpoint `m`, every group whose key is
+  not `m` resolves at once; the group keyed `m` waits. `next_2_changes` sources
+  then re-enter the same structure keyed by the midpoint that just resolved
+  their first change.
 
 ## Session edges
 
-One Parquet file is one symbol-day, and a label search never leaves it. Nothing
-is carried across the session boundary: an overnight gap is not a 60-second
-horizon. A horizon extending past the last available coherent state yields
-`session_end_before_horizon`.
+One raw file is one symbol-day and resolution never leaves it. An overnight gap
+is not a 60-second horizon.
 
 ## Missing labels are named, never imputed
 
-Every row gets a `label_status`. There is no fill value, no forward fill and no
-interpolation, because a filled label is an invented observation that would
-count toward significance as though it had been measured.
+There is no fill value, no forward fill and no interpolation: a filled label
+would count toward significance as though it had been measured.
 """
 
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
-from app.services.mbo_feature_engine import (
-    FEATURE_VOCABULARY_HASH,
+from app.services.mbo_book_validator import F_LAST, MboBook, MboEvent
+
+LABEL_ENGINE_VERSION = "tier1_mbo_label_engine_v2"
+
+SUPERSEDED_LABEL_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_mbo_label_engine_v1",
+        "commit": "f3289c9701ea8c7d431d941a60b20b5cf447c548",
+        "superseded_before_outcome": "true",
+        "reason": (
+            "labels were derived from the sampled Stage-1 cadence sequence rather "
+            "than the certified event stream, so change horizons measured the next "
+            "sampled interval whose midpoint differed instead of the next event-time "
+            "midpoint change; and labels were stored long (one row per source-horizon) "
+            "rather than wide."
+        ),
+        "label_definition_hash": (
+            "35249ad2d70ae4669e28"  # truncated in the v1 report; full value in git
+        ),
+    },
 )
 
-LABEL_ENGINE_VERSION = "tier1_mbo_label_engine_v1"
-
-# The frozen Stage-1 artefact these labels are built against. Recorded so a
-# label set can never be silently paired with a different feature semantics.
 REQUIRED_FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v2"
 REQUIRED_FEATURE_SEMANTICS_HASH = (
     "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551"
@@ -83,73 +92,79 @@ NANOS_PER_SECOND = 1_000_000_000
 
 @dataclass(frozen=True, slots=True)
 class Horizon:
-    """One frozen forward horizon."""
-
     name: str
     kind: str  # "time" or "changes"
-    #: nanoseconds for "time"; a count of distinct midpoint changes otherwise
-    magnitude: int
+    magnitude: int  # nanoseconds for time; change count otherwise
+    prefix: str  # column prefix; never starts with a digit
 
 
 HORIZONS: tuple[Horizon, ...] = (
-    Horizon("next_change", "changes", 1),
-    Horizon("next_2_changes", "changes", 2),
-    Horizon("1s", "time", 1 * NANOS_PER_SECOND),
-    Horizon("5s", "time", 5 * NANOS_PER_SECOND),
-    Horizon("10s", "time", 10 * NANOS_PER_SECOND),
-    Horizon("30s", "time", 30 * NANOS_PER_SECOND),
-    Horizon("60s", "time", 60 * NANOS_PER_SECOND),
+    Horizon("next_change", "changes", 1, "next_change"),
+    Horizon("next_2_changes", "changes", 2, "next_2_changes"),
+    Horizon("1s", "time", 1 * NANOS_PER_SECOND, "h1s"),
+    Horizon("5s", "time", 5 * NANOS_PER_SECOND, "h5s"),
+    Horizon("10s", "time", 10 * NANOS_PER_SECOND, "h10s"),
+    Horizon("30s", "time", 30 * NANOS_PER_SECOND, "h30s"),
+    Horizon("60s", "time", 60 * NANOS_PER_SECOND, "h60s"),
 )
 
 HORIZON_NAMES: tuple[str, ...] = tuple(h.name for h in HORIZONS)
-
-# ---------------------------------------------------------------------------
-# Label status vocabulary. Fixed strings: a missing label must always be
-# missing for a stated reason, and the reasons must be comparable across runs.
-# ---------------------------------------------------------------------------
+HORIZONS_BY_NAME: dict[str, Horizon] = {h.name: h for h in HORIZONS}
+TIME_HORIZONS: tuple[Horizon, ...] = tuple(h for h in HORIZONS if h.kind == "time")
+CHANGE_HORIZONS: tuple[Horizon, ...] = tuple(h for h in HORIZONS if h.kind == "changes")
 
 LABEL_OK = "ok"
 LABEL_SOURCE_MIDPOINT_UNAVAILABLE = "source_midpoint_unavailable"
 LABEL_SESSION_END_BEFORE_HORIZON = "session_end_before_horizon"
 LABEL_NO_FURTHER_MIDPOINT_CHANGE = "no_further_midpoint_change"
-LABEL_NO_VALID_FUTURE_STATE = "no_valid_future_state"
 
 LABEL_STATUSES: tuple[str, ...] = (
     LABEL_OK,
     LABEL_SOURCE_MIDPOINT_UNAVAILABLE,
     LABEL_SESSION_END_BEFORE_HORIZON,
     LABEL_NO_FURTHER_MIDPOINT_CHANGE,
-    LABEL_NO_VALID_FUTURE_STATE,
 )
 
-LABEL_COLUMNS: tuple[str, ...] = (
-    # Join key back to the frozen feature row.
+# ---------------------------------------------------------------------------
+# Wide schema: one row per Stage-1 source snapshot.
+#
+# v1 exploded each snapshot into seven rows, which multiplied 19.5 M snapshots
+# into 137 M label rows -- larger than the feature set it describes. Wide keeps
+# the join one-to-one.
+# ---------------------------------------------------------------------------
+
+SHARED_COLUMNS: tuple[str, ...] = (
     "symbol",
     "session_date",
     "cadence",
     "sequence_index",
-    "horizon",
-    "horizon_kind",
-    "horizon_magnitude",
-    # Source side.
     "source_ts_event",
     "source_grid_ts_event",
     "source_midpoint",
     "source_ts_recv",
     "source_feature_available_ts_recv",
-    # Target and realized label side.
+)
+
+PER_HORIZON_SUFFIXES: tuple[str, ...] = (
+    "status",
     "target_ts_event",
-    "label_sequence_index",
     "label_ts_event",
     "label_ts_recv",
     "realized_lag_ns",
-    "skipped_incoherent_states",
     "future_midpoint",
     "midpoint_change",
     "return_bps",
-    # Provenance for latency simulation: when the label could first be known.
-    "label_available_ts_recv",
-    "label_status",
+    "available_ts_recv",
+)
+
+
+def horizon_columns(horizon: Horizon) -> tuple[str, ...]:
+    return tuple(f"{horizon.prefix}_{suffix}" for suffix in PER_HORIZON_SUFFIXES)
+
+
+LABEL_COLUMNS: tuple[str, ...] = (
+    *SHARED_COLUMNS,
+    *(column for horizon in HORIZONS for column in horizon_columns(horizon)),
 )
 
 LABEL_SCHEMA_HASH = hashlib.sha256("\n".join(LABEL_COLUMNS).encode("utf-8")).hexdigest()
@@ -159,6 +174,7 @@ LABEL_DEFINITION_HASH = hashlib.sha256(
         (
             LABEL_ENGINE_VERSION,
             REQUIRED_FEATURE_SEMANTICS_HASH,
+            "event_time_from_certified_mbo_stream",
             *(f"{h.name}:{h.kind}:{h.magnitude}" for h in HORIZONS),
             *LABEL_COLUMNS,
         )
@@ -167,30 +183,21 @@ LABEL_DEFINITION_HASH = hashlib.sha256(
 
 
 # ---------------------------------------------------------------------------
-# The snapshot spine a label set is built from
+# Source snapshots
 # ---------------------------------------------------------------------------
 
 
 @dataclass(slots=True)
-class SnapshotSpine:
-    """The minimal per-snapshot columns labelling needs, in emission order.
+class SourceSnapshot:
+    """One frozen Stage-1 feature row awaiting labels."""
 
-    Deliberately narrow: labelling reads five columns out of 73, so a symbol-day
-    spine is small even where the feature file is not.
-    """
-
-    symbol: str
-    session_date: str
     cadence: str
-    sequence_index: list[int]
-    ts_event: list[int]
-    grid_ts_event: list[int | None]
-    ts_recv: list[int]
-    feature_available_ts_recv: list[int]
-    midpoint: list[float | None]
-
-    def __len__(self) -> int:
-        return len(self.sequence_index)
+    sequence_index: int
+    ts_event: int
+    grid_ts_event: int | None
+    midpoint: float | None
+    ts_recv: int
+    feature_available_ts_recv: int
 
 
 SPINE_COLUMNS: tuple[str, ...] = (
@@ -206,264 +213,366 @@ SPINE_COLUMNS: tuple[str, ...] = (
 )
 
 
-def spine_from_columns(
-    *,
-    symbol: str,
-    session_date: str,
-    cadence: str,
-    columns: dict[str, list[Any]],
-) -> SnapshotSpine:
-    """Build a spine from already-extracted columns, in file order."""
-    return SnapshotSpine(
-        symbol=symbol,
-        session_date=session_date,
-        cadence=cadence,
-        sequence_index=[int(v) for v in columns["sequence_index"]],
-        ts_event=[int(v) for v in columns["ts_event"]],
-        grid_ts_event=[None if v is None else int(v) for v in columns["grid_ts_event"]],
-        ts_recv=[int(v or 0) for v in columns["source_ts_recv"]],
-        feature_available_ts_recv=[
-            int(v or 0) for v in columns["feature_available_ts_recv"]
-        ],
-        midpoint=[None if v is None else float(v) for v in columns["midpoint"]],
-    )
+def read_source_snapshots(paths: Sequence[str]) -> tuple[str, str, list[SourceSnapshot]]:
+    """Read the Stage-1 rows for one symbol-day across every cadence file.
 
-
-def read_spine(path: str) -> SnapshotSpine:
-    """Read the labelling spine out of one frozen Stage-1 Parquet file.
-
-    Reads a projection, never the whole feature table, and never writes.
+    Reads a nine-column projection out of 73 and never writes. Returns snapshots
+    sorted by ``ts_event``, which is what the streaming resolver requires.
     """
     import pyarrow.parquet as pq
 
-    table = pq.read_table(path, columns=list(SPINE_COLUMNS))
-    data = table.to_pydict()
-    symbols = {s for s in data["symbol"] if s}
-    dates = {d for d in data["session_date"] if d}
-    cadences = {c for c in data["cadence"] if c}
-    if len(symbols) != 1 or len(dates) != 1 or len(cadences) != 1:
-        raise ValueError(
-            f"{path} mixes symbol/session/cadence ({symbols}, {dates}, {cadences}); "
-            "labels are constructed per symbol-day per cadence"
-        )
-    return spine_from_columns(
-        symbol=symbols.pop(),
-        session_date=dates.pop(),
-        cadence=cadences.pop(),
-        columns=data,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Label construction
-# ---------------------------------------------------------------------------
-
-
-def _coherent_indices(spine: SnapshotSpine) -> list[int]:
-    """Positions carrying a usable midpoint, in order.
-
-    A snapshot with no midpoint is not a coherent book state: one side of the
-    touch was empty. It cannot be a label, and it cannot be a source.
-    """
-    return [i for i, mid in enumerate(spine.midpoint) if mid is not None]
-
-
-def _next_change_map(spine: SnapshotSpine, coherent: Sequence[int]) -> dict[int, int]:
-    """For each coherent position, the next coherent position whose midpoint differs.
-
-    Built in one backward pass, so a session where the midpoint sits still for
-    thousands of snapshots costs the same as one where it never does.
-    """
-    following: dict[int, int] = {}
-    successor: int | None = None
-    for position in reversed(range(len(coherent))):
-        index = coherent[position]
-        if position + 1 < len(coherent):
-            candidate = coherent[position + 1]
-            if spine.midpoint[candidate] != spine.midpoint[index]:
-                successor = candidate
-            else:
-                successor = following.get(candidate)
-        else:
-            successor = None
-        if successor is not None:
-            following[index] = successor
-    return following
-
-
-def _empty_row(
-    spine: SnapshotSpine,
-    index: int,
-    horizon: Horizon,
-    status: str,
-    *,
-    target_ts: int | None,
-) -> dict[str, Any]:
-    return {
-        "symbol": spine.symbol,
-        "session_date": spine.session_date,
-        "cadence": spine.cadence,
-        "sequence_index": spine.sequence_index[index],
-        "horizon": horizon.name,
-        "horizon_kind": horizon.kind,
-        "horizon_magnitude": horizon.magnitude,
-        "source_ts_event": spine.ts_event[index],
-        "source_grid_ts_event": spine.grid_ts_event[index],
-        "source_midpoint": spine.midpoint[index],
-        "source_ts_recv": spine.ts_recv[index],
-        "source_feature_available_ts_recv": spine.feature_available_ts_recv[index],
-        "target_ts_event": target_ts,
-        "label_sequence_index": None,
-        "label_ts_event": None,
-        "label_ts_recv": None,
-        "realized_lag_ns": None,
-        "skipped_incoherent_states": None,
-        "future_midpoint": None,
-        "midpoint_change": None,
-        "return_bps": None,
-        "label_available_ts_recv": None,
-        "label_status": status,
-    }
-
-
-def build_labels(spine: SnapshotSpine, horizons: Sequence[Horizon] = HORIZONS) -> Iterator[dict[str, Any]]:
-    """Yield one label row per (snapshot, horizon). Never imputes."""
-    coherent = _coherent_indices(spine)
-    coherent_set = set(coherent)
-    change_map = _next_change_map(spine, coherent)
-    total = len(spine)
-
-    for index in range(total):
-        source_mid = spine.midpoint[index]
-        source_ts = spine.ts_event[index]
-        for horizon in horizons:
-            target_ts = (
-                source_ts + horizon.magnitude if horizon.kind == "time" else None
-            )
-            if source_mid is None or index not in coherent_set:
-                yield _empty_row(
-                    spine,
-                    index,
-                    horizon,
-                    LABEL_SOURCE_MIDPOINT_UNAVAILABLE,
-                    target_ts=target_ts,
-                )
-                continue
-
-            if horizon.kind == "changes":
-                label_index: int | None = index
-                for _ in range(horizon.magnitude):
-                    label_index = change_map.get(label_index) if label_index is not None else None
-                    if label_index is None:
-                        break
-                if label_index is None:
-                    yield _empty_row(
-                        spine,
-                        index,
-                        horizon,
-                        LABEL_NO_FURTHER_MIDPOINT_CHANGE,
-                        target_ts=None,
-                    )
-                    continue
-                skipped = 0
-                realized_lag = None
-            else:
-                assert target_ts is not None
-                label_index = None
-                skipped = 0
-                # First coherent state at or after the target. Not the nearest,
-                # and never one before it.
-                for candidate in range(index + 1, total):
-                    if spine.ts_event[candidate] < target_ts:
-                        continue
-                    if spine.midpoint[candidate] is None:
-                        skipped += 1
-                        continue
-                    label_index = candidate
-                    break
-                if label_index is None:
-                    reached_target = any(
-                        spine.ts_event[c] >= target_ts for c in range(index + 1, total)
-                    )
-                    yield _empty_row(
-                        spine,
-                        index,
-                        horizon,
-                        LABEL_NO_VALID_FUTURE_STATE
-                        if reached_target
-                        else LABEL_SESSION_END_BEFORE_HORIZON,
-                        target_ts=target_ts,
-                    )
-                    continue
-                realized_lag = spine.ts_event[label_index] - target_ts
-
-            future_mid = spine.midpoint[label_index]
-            assert future_mid is not None
-            change = future_mid - source_mid
-            row = _empty_row(spine, index, horizon, LABEL_OK, target_ts=target_ts)
-            row.update(
-                {
-                    "label_sequence_index": spine.sequence_index[label_index],
-                    "label_ts_event": spine.ts_event[label_index],
-                    "label_ts_recv": spine.ts_recv[label_index],
-                    "realized_lag_ns": realized_lag,
-                    "skipped_incoherent_states": skipped,
-                    "future_midpoint": future_mid,
-                    "midpoint_change": change,
-                    "return_bps": (change / source_mid * 10_000) if source_mid else None,
-                    # When the label could first have been known: the later of
-                    # the two records it rests on. Never earlier than the
-                    # feature row it will be joined to.
-                    "label_available_ts_recv": max(
-                        spine.feature_available_ts_recv[index],
-                        spine.feature_available_ts_recv[label_index],
-                        spine.ts_recv[label_index],
+    symbols: set[str] = set()
+    dates: set[str] = set()
+    snapshots: list[SourceSnapshot] = []
+    for path in paths:
+        data = pq.read_table(path, columns=list(SPINE_COLUMNS)).to_pydict()
+        symbols.update(s for s in data["symbol"] if s)
+        dates.update(d for d in data["session_date"] if d)
+        for index in range(len(data["sequence_index"])):
+            snapshots.append(
+                SourceSnapshot(
+                    cadence=data["cadence"][index],
+                    sequence_index=int(data["sequence_index"][index]),
+                    ts_event=int(data["ts_event"][index]),
+                    grid_ts_event=(
+                        None
+                        if data["grid_ts_event"][index] is None
+                        else int(data["grid_ts_event"][index])
                     ),
-                }
+                    midpoint=(
+                        None
+                        if data["midpoint"][index] is None
+                        else float(data["midpoint"][index])
+                    ),
+                    ts_recv=int(data["source_ts_recv"][index] or 0),
+                    feature_available_ts_recv=int(
+                        data["feature_available_ts_recv"][index] or 0
+                    ),
+                )
             )
-            yield row
+    if len(symbols) != 1 or len(dates) != 1:
+        raise ValueError(
+            f"source files mix symbol/session ({symbols}, {dates}); labels are "
+            "resolved per symbol-day"
+        )
+    # Stable within a timestamp so the output order is deterministic.
+    snapshots.sort(key=lambda s: (s.ts_event, s.cadence, s.sequence_index))
+    return symbols.pop(), dates.pop(), snapshots
+
+
+# ---------------------------------------------------------------------------
+# Streaming resolution against the certified event stream
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _Pending:
+    """One source's in-flight label state."""
+
+    snapshot: SourceSnapshot
+    row: dict[str, Any]
+    #: horizon name -> the midpoint this source is currently waiting to differ from
+    awaiting_change: dict[str, float] = field(default_factory=dict)
+    #: how many further changes each change-horizon still needs
+    changes_remaining: dict[str, int] = field(default_factory=dict)
+    unresolved: int = 0
+
+
+def _blank_row(symbol: str, session_date: str, snapshot: SourceSnapshot) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "symbol": symbol,
+        "session_date": session_date,
+        "cadence": snapshot.cadence,
+        "sequence_index": snapshot.sequence_index,
+        "source_ts_event": snapshot.ts_event,
+        "source_grid_ts_event": snapshot.grid_ts_event,
+        "source_midpoint": snapshot.midpoint,
+        "source_ts_recv": snapshot.ts_recv,
+        "source_feature_available_ts_recv": snapshot.feature_available_ts_recv,
+    }
+    for horizon in HORIZONS:
+        for column in horizon_columns(horizon):
+            row[column] = None
+        row[f"{horizon.prefix}_status"] = LABEL_SESSION_END_BEFORE_HORIZON
+        if horizon.kind == "time":
+            row[f"{horizon.prefix}_target_ts_event"] = (
+                snapshot.ts_event + horizon.magnitude
+            )
+        else:
+            row[f"{horizon.prefix}_status"] = LABEL_NO_FURTHER_MIDPOINT_CHANGE
+    return row
+
+
+def _record(
+    pending: _Pending,
+    horizon: Horizon,
+    *,
+    ts_event: int,
+    ts_recv: int,
+    midpoint: float,
+) -> None:
+    snapshot = pending.snapshot
+    source_mid = snapshot.midpoint
+    assert source_mid is not None
+    prefix = horizon.prefix
+    row = pending.row
+    change = midpoint - source_mid
+    target = row.get(f"{prefix}_target_ts_event")
+    row[f"{prefix}_status"] = LABEL_OK
+    row[f"{prefix}_label_ts_event"] = ts_event
+    row[f"{prefix}_label_ts_recv"] = ts_recv
+    row[f"{prefix}_realized_lag_ns"] = None if target is None else ts_event - target
+    row[f"{prefix}_future_midpoint"] = midpoint
+    row[f"{prefix}_midpoint_change"] = change
+    row[f"{prefix}_return_bps"] = (change / source_mid * 10_000) if source_mid else None
+    # When the label could first have been known: never before the feature row
+    # it joins to, nor before the record that resolved it.
+    row[f"{prefix}_available_ts_recv"] = max(
+        snapshot.feature_available_ts_recv, ts_recv
+    )
+    pending.unresolved -= 1
+
+
+class EventTimeLabelResolver:
+    """Resolves labels for a symbol-day in one pass over the event stream.
+
+    Holds only the sources still awaiting a label. Nothing about the book is
+    retained beyond the current state, so the 337 M certified book states are
+    streamed rather than materialized.
+    """
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        session_date: str,
+        sources: Sequence[SourceSnapshot],
+        horizons: Sequence[Horizon] = HORIZONS,
+    ) -> None:
+        self.symbol = symbol
+        self.session_date = session_date
+        self.horizons = tuple(horizons)
+        self._time_horizons = tuple(h for h in self.horizons if h.kind == "time")
+        self._change_horizons = tuple(h for h in self.horizons if h.kind == "changes")
+        self._sources = list(sources)
+        self._cursor = 0
+        self._rows: dict[tuple[str, int], dict[str, Any]] = {}
+        self._order: list[tuple[str, int]] = []
+        self._pending: dict[tuple[str, int], _Pending] = {}
+        # horizon name -> FIFO of keys, ordered by target (monotone in ts_event)
+        self._time_queues: dict[str, list[tuple[str, int]]] = {
+            h.name: [] for h in self._time_horizons
+        }
+        self._time_heads: dict[str, int] = {h.name: 0 for h in self._time_horizons}
+        # horizon name -> midpoint being waited on -> keys
+        self._change_groups: dict[str, dict[float, list[tuple[str, int]]]] = {
+            h.name: {} for h in self._change_horizons
+        }
+        self.book = MboBook(max_recorded_violations=0)
+        self.flast_states = 0
+        self.records = 0
+
+    # -- source activation -------------------------------------------------
+
+    def _activate(self, ts_event: int) -> None:
+        """Admit every source strictly before ``ts_event`` as pending."""
+        while self._cursor < len(self._sources):
+            snapshot = self._sources[self._cursor]
+            if snapshot.ts_event >= ts_event:
+                break
+            self._cursor += 1
+            key = (snapshot.cadence, snapshot.sequence_index)
+            row = _blank_row(self.symbol, self.session_date, snapshot)
+            self._rows[key] = row
+            self._order.append(key)
+            if snapshot.midpoint is None:
+                # No coherent source midpoint: no horizon is resolvable, and the
+                # reason is the source, not the future.
+                for horizon in self.horizons:
+                    row[f"{horizon.prefix}_status"] = LABEL_SOURCE_MIDPOINT_UNAVAILABLE
+                continue
+            pending = _Pending(snapshot=snapshot, row=row)
+            for horizon in self._time_horizons:
+                self._time_queues[horizon.name].append(key)
+                pending.unresolved += 1
+            for horizon in self._change_horizons:
+                pending.awaiting_change[horizon.name] = snapshot.midpoint
+                pending.changes_remaining[horizon.name] = horizon.magnitude
+                self._change_groups[horizon.name].setdefault(
+                    snapshot.midpoint, []
+                ).append(key)
+                pending.unresolved += 1
+            self._pending[key] = pending
+
+    # -- resolution --------------------------------------------------------
+
+    def _resolve_time(self, ts_event: int, ts_recv: int, midpoint: float) -> None:
+        for horizon in self._time_horizons:
+            queue = self._time_queues[horizon.name]
+            head = self._time_heads[horizon.name]
+            while head < len(queue):
+                key = queue[head]
+                pending = self._pending.get(key)
+                if pending is None:  # already fully resolved and released
+                    head += 1
+                    continue
+                target = pending.row[f"{horizon.prefix}_target_ts_event"]
+                if target > ts_event:
+                    break
+                _record(
+                    pending,
+                    horizon,
+                    ts_event=ts_event,
+                    ts_recv=ts_recv,
+                    midpoint=midpoint,
+                )
+                head += 1
+                self._release(key, pending)
+            self._time_heads[horizon.name] = head
+
+    def _resolve_changes(self, ts_event: int, ts_recv: int, midpoint: float) -> None:
+        for horizon in self._change_horizons:
+            groups = self._change_groups[horizon.name]
+            # Every group whose awaited midpoint is not the current one changed.
+            for awaited in [key for key in groups if key != midpoint]:
+                keys = groups.pop(awaited)
+                for key in keys:
+                    pending = self._pending.get(key)
+                    if pending is None:
+                        continue
+                    remaining = pending.changes_remaining[horizon.name] - 1
+                    pending.changes_remaining[horizon.name] = remaining
+                    if remaining == 0:
+                        _record(
+                            pending,
+                            horizon,
+                            ts_event=ts_event,
+                            ts_recv=ts_recv,
+                            midpoint=midpoint,
+                        )
+                        self._release(key, pending)
+                    else:
+                        # The next change must differ from the midpoint that
+                        # just resolved this one.
+                        pending.awaiting_change[horizon.name] = midpoint
+                        groups.setdefault(midpoint, []).append(key)
+
+    def _release(self, key: tuple[str, int], pending: _Pending) -> None:
+        if pending.unresolved <= 0:
+            self._pending.pop(key, None)
+
+    # -- driver ------------------------------------------------------------
+
+    def process(self, events: Iterable[MboEvent]) -> None:
+        """Replay the certified stream once, resolving pending labels as it goes."""
+        for event in events:
+            self.records += 1
+            self.book.apply(event)
+            if not (event.flags & F_LAST):
+                continue
+            self.flast_states += 1
+            bid = self.book.best_bid()
+            ask = self.book.best_ask()
+            ts_event = event.ts_event
+            # Sources strictly before this state become eligible: "subsequent"
+            # means ts_event > t_s.
+            self._activate(ts_event)
+            if bid is None or ask is None:
+                # Not a coherent state. It cannot be a label, and a change
+                # horizon must not treat a one-sided book as a midpoint change.
+                continue
+            midpoint = (bid.price + ask.price) / 2
+            self._resolve_time(ts_event, event.ts_recv, midpoint)
+            self._resolve_changes(ts_event, event.ts_recv, midpoint)
+
+        # Anything still pending never got its state inside the symbol-day.
+        # Blank rows already carry the correct terminal status, and sources
+        # never activated are emitted with it too.
+        self._activate_remaining()
+
+    def _activate_remaining(self) -> None:
+        while self._cursor < len(self._sources):
+            snapshot = self._sources[self._cursor]
+            self._cursor += 1
+            key = (snapshot.cadence, snapshot.sequence_index)
+            row = _blank_row(self.symbol, self.session_date, snapshot)
+            if snapshot.midpoint is None:
+                for horizon in self.horizons:
+                    row[f"{horizon.prefix}_status"] = LABEL_SOURCE_MIDPOINT_UNAVAILABLE
+            self._rows[key] = row
+            self._order.append(key)
+
+    def rows(self) -> Iterator[dict[str, Any]]:
+        """One row per source snapshot, in source order."""
+        for key in self._order:
+            yield self._rows[key]
+
+
+def resolve_symbol_day_labels(
+    *,
+    symbol: str,
+    session_date: str,
+    sources: Sequence[SourceSnapshot],
+    events: Iterable[MboEvent],
+    horizons: Sequence[Horizon] = HORIZONS,
+) -> list[dict[str, Any]]:
+    """Convenience wrapper: one replay, one wide row per source snapshot."""
+    resolver = EventTimeLabelResolver(
+        symbol=symbol, session_date=session_date, sources=sources, horizons=horizons
+    )
+    resolver.process(events)
+    return list(resolver.rows())
 
 
 def label_definitions() -> dict[str, Any]:
-    """The frozen label specification, as data."""
     return {
         "label_engine_version": LABEL_ENGINE_VERSION,
         "label_definition_hash": LABEL_DEFINITION_HASH,
         "label_schema_hash": LABEL_SCHEMA_HASH,
+        "superseded_label_versions": [dict(e) for e in SUPERSEDED_LABEL_VERSIONS],
+        "label_source": "certified XNAS MBO stream replayed through MboBook",
+        "derived_from_sampled_cadence": False,
+        "storage": "wide -- one row per Stage-1 source snapshot",
+        "row_multiplier_vs_sources": 1,
         "built_against": {
             "feature_engine_version": REQUIRED_FEATURE_ENGINE_VERSION,
             "feature_semantics_hash": REQUIRED_FEATURE_SEMANTICS_HASH,
-            "feature_vocabulary_hash": FEATURE_VOCABULARY_HASH,
             "features_modified": False,
         },
         "horizons": [
-            {"name": h.name, "kind": h.kind, "magnitude": h.magnitude} for h in HORIZONS
+            {
+                "name": h.name,
+                "kind": h.kind,
+                "magnitude": h.magnitude,
+                "column_prefix": h.prefix,
+            }
+            for h in HORIZONS
         ],
         "columns": list(LABEL_COLUMNS),
+        "per_horizon_suffixes": list(PER_HORIZON_SUFFIXES),
         "statuses": list(LABEL_STATUSES),
         "rules": {
             "time_horizon": (
-                "label = first snapshot at or after source_ts + H carrying a coherent "
-                "midpoint. Not the nearest; never one before the target. "
-                "realized_lag_ns = label_ts - target_ts, always >= 0."
+                "first coherent completed F_LAST state with ts_event >= t_s + H. A "
+                "state before the target is never used. realized_lag_ns = "
+                "label_ts_event - target, always >= 0."
             ),
             "change_horizon": (
-                "label = the Nth following coherent snapshot whose midpoint differs "
-                "from its predecessor, defined on the snapshot sequence of the same "
-                "cadence -- coarser than an event-time tick."
+                "next_change is the first completed F_LAST state with ts_event > t_s "
+                "whose midpoint differs from the source midpoint. next_2_changes is "
+                "the next state after that whose midpoint differs from the first "
+                "change's midpoint. Event-time, not cadence-sampled."
+            ),
+            "incoherent_states": (
+                "A one-sided book is not a coherent state: it cannot be a label, and "
+                "a change horizon must not read it as a midpoint change."
             ),
             "session_edges": (
-                "One file is one symbol-day; a label search never leaves it. Nothing "
-                "is carried across a session boundary."
+                "One raw file is one symbol-day; resolution never leaves it."
             ),
-            "missing_labels": (
-                "Named via label_status. Never imputed, forward-filled or "
-                "interpolated: a filled label would count toward significance as "
-                "though it had been measured."
-            ),
+            "missing_labels": "named via per-horizon status; never imputed",
             "no_substitution": (
-                "Horizons are frozen together. A horizon is never replaced by a "
-                "nearer one, and none may be added or dropped after outcomes."
+                "Horizons are frozen together; none is replaced by a nearer one."
             ),
         },
         "contains_predictive_result": False,
@@ -471,31 +580,24 @@ def label_definitions() -> dict[str, Any]:
 
 
 def label_status_summary(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Coverage by horizon and status. Counts only -- no relationship to features."""
-    by_horizon: dict[str, dict[str, int]] = {}
+    """Per-horizon status counts. Counts only -- no relationship to features."""
+    by_horizon: dict[str, dict[str, int]] = {
+        h.name: dict.fromkeys(LABEL_STATUSES, 0) for h in HORIZONS
+    }
+    by_cadence: dict[str, int] = {}
     for row in rows:
-        bucket = by_horizon.setdefault(
-            row["horizon"], dict.fromkeys(LABEL_STATUSES, 0)
-        )
-        bucket[row["label_status"]] += 1
+        by_cadence[row["cadence"]] = by_cadence.get(row["cadence"], 0) + 1
+        for horizon in HORIZONS:
+            status = row[f"{horizon.prefix}_status"]
+            by_horizon[horizon.name][status] += 1
     return {
         "label_engine_version": LABEL_ENGINE_VERSION,
         "rows": len(rows),
-        "by_horizon": {
-            name: dict(by_horizon.get(name, dict.fromkeys(LABEL_STATUSES, 0)))
-            for name in HORIZON_NAMES
-        },
+        "rows_by_cadence": dict(sorted(by_cadence.items())),
+        "by_horizon": by_horizon,
         "labelled_share_by_horizon": {
-            name: (
-                round(
-                    by_horizon.get(name, {}).get(LABEL_OK, 0)
-                    / sum(by_horizon.get(name, {}).values()),
-                    6,
-                )
-                if sum(by_horizon.get(name, {}).values())
-                else None
-            )
-            for name in HORIZON_NAMES
+            name: (round(counts[LABEL_OK] / len(rows), 6) if rows else None)
+            for name, counts in by_horizon.items()
         },
         "contains_predictive_result": False,
     }
