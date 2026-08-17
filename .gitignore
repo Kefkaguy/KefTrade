@@ -41,3 +41,6 @@ data/databento/
 
 # Stage 1 derived features are reproducible from the DBN sources.
 reports/tier1_mbo_features/
+
+# Stage 2A labels are reproducible from the frozen features.
+reports/tier1_stage2_labels/
