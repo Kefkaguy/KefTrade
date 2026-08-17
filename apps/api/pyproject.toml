@@ -20,6 +20,9 @@ dependencies = [
   # reference book implementation uses.
   "databento>=0.83.0",
   "sortedcontainers>=2.4.0",
+  # Stage 1 stores derived order-book state as columnar Parquet; the raw
+  # events never enter Postgres.
+  "pyarrow>=17.0.0",
 ]
 
 [project.optional-dependencies]

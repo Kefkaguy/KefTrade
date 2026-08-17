@@ -38,3 +38,6 @@ reports/stage0_probe_run.log
 *.dbn
 *.dbn.zst
 data/databento/
+
+# Stage 1 derived features are reproducible from the DBN sources.
+reports/tier1_mbo_features/
