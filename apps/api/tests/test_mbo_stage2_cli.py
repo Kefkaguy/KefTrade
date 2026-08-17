@@ -20,11 +20,16 @@ from app.cli.mbo_stage2 import (
     _price_only_columns,
     _symbol_day_matrix,
     build_parser,
+    expanding_standardize,
     grams,
 )
 from app.services.mbo_feature_engine import FEATURE_SEMANTICS_HASH
 from app.services.mbo_label_engine import HORIZONS_BY_NAME, LABEL_DEFINITION_HASH
-from app.services.mbo_stage2_executor import DESIGN_WIDTH, PRICE_ONLY_WIDTH
+from app.services.mbo_stage2_executor import (
+    DESIGN_WIDTH,
+    MIN_PRIOR_OBSERVATIONS,
+    PRICE_ONLY_WIDTH,
+)
 from app.services.mbo_stage2_plan import PLAN_HASH, PRICE_ONLY_LAGS, PRIMARY_CELLS
 
 DATES = ["2025-06-02", "2025-06-03"]
@@ -53,6 +58,99 @@ def test_price_only_columns_never_read_the_future():
     tampered[30:] += 5.0
     after = _price_only_columns(tampered)
     np.testing.assert_allclose(base[:30], after[:30], equal_nan=True)
+
+
+# ---------------------------------------------------------------------------
+# Correction A -- the frozen Stage-2 scaling rule
+# ---------------------------------------------------------------------------
+
+
+def test_standardization_uses_only_strictly_prior_observations():
+    values = np.arange(1.0, 61.0)
+    z = expanding_standardize(values, min_priors=5)
+    # Row 10 must be standardized by the first ten values and nothing else.
+    prior = values[:10]
+    expected = (values[10] - prior.mean()) / prior.std(ddof=1)
+    assert z[10] == pytest.approx(expected)
+
+
+def test_values_below_the_prior_minimum_are_withheld_not_imputed():
+    values = np.arange(1.0, 61.0)
+    z = expanding_standardize(values, min_priors=MIN_PRIOR_OBSERVATIONS)
+    assert np.isnan(z[:MIN_PRIOR_OBSERVATIONS]).all()
+    assert np.isfinite(z[MIN_PRIOR_OBSERVATIONS:]).all()
+    assert not (z[:MIN_PRIOR_OBSERVATIONS] == 0).any()  # withheld, never zero
+
+
+def test_truncation_invariance_appending_rows_cannot_move_an_earlier_row():
+    """The whole point of prior-only: a longer session must not rewrite history."""
+    rng = np.random.default_rng(3)
+    full = rng.standard_normal(200) * 3.0 + 7.0
+    short = expanding_standardize(full[:120], min_priors=MIN_PRIOR_OBSERVATIONS)
+    long = expanding_standardize(full, min_priors=MIN_PRIOR_OBSERVATIONS)
+    np.testing.assert_allclose(short, long[:120], rtol=1e-12, equal_nan=True)
+
+
+def test_future_perturbation_cannot_move_an_earlier_row():
+    rng = np.random.default_rng(4)
+    values = rng.standard_normal(200) * 3.0 + 7.0
+    base = expanding_standardize(values, min_priors=MIN_PRIOR_OBSERVATIONS)
+    tampered = values.copy()
+    tampered[120:] += 500.0  # a violent change, strictly in the future
+    after = expanding_standardize(tampered, min_priors=MIN_PRIOR_OBSERVATIONS)
+    np.testing.assert_allclose(base[:120], after[:120], rtol=1e-12, equal_nan=True)
+
+
+@pytest.mark.parametrize("factor", [1e-6, 0.5, 3.0, 1e6])
+def test_scale_invariance_of_the_standardized_column(factor):
+    """A positive rescaling of the raw input must not change the z-scores."""
+    rng = np.random.default_rng(5)
+    values = rng.standard_normal(150) * 2.0 + 100.0
+    base = expanding_standardize(values, min_priors=MIN_PRIOR_OBSERVATIONS)
+    scaled = expanding_standardize(values * factor, min_priors=MIN_PRIOR_OBSERVATIONS)
+    np.testing.assert_allclose(base, scaled, rtol=1e-9, equal_nan=True)
+
+
+def test_shift_invariance_survives_a_large_offset():
+    """Price-level columns have a mean that dwarfs their spread."""
+    rng = np.random.default_rng(6)
+    values = rng.standard_normal(150) * 0.01
+    base = expanding_standardize(values, min_priors=MIN_PRIOR_OBSERVATIONS)
+    shifted = expanding_standardize(values + 100_000.0, min_priors=MIN_PRIOR_OBSERVATIONS)
+    np.testing.assert_allclose(base, shifted, rtol=1e-6, equal_nan=True)
+
+
+def test_a_column_with_no_prior_variation_is_withheld_not_divided_by_zero():
+    constant = np.full(100, 4.0)
+    z = expanding_standardize(constant, min_priors=MIN_PRIOR_OBSERVATIONS)
+    assert np.isnan(z).all()
+
+
+def test_non_finite_inputs_do_not_contaminate_later_statistics():
+    values = np.arange(1.0, 81.0)
+    holed = values.copy()
+    holed[5] = np.nan
+    z = expanding_standardize(holed, min_priors=5)
+    prior = np.array([v for v in holed[:20] if np.isfinite(v)])
+    expected = (holed[20] - prior.mean()) / prior.std(ddof=1)
+    assert z[20] == pytest.approx(expected)
+    assert np.isnan(z[5])
+
+
+def test_the_l3_block_reaching_the_design_is_standardized_not_raw(frozen_tree):
+    features, _ = frozen_tree
+    cadence = PRIMARY_CELLS[0][0]
+    path = next((features / cadence).glob("*.parquet"))
+    table = pq.read_table(path)
+    design, _ = _symbol_day_matrix(table, FEATURE_NAMES)
+    midpoint_column = design[:, PRICE_ONLY_WIDTH + FEATURE_NAMES.index("midpoint")]
+    raw = np.asarray(table.column("midpoint").to_numpy(zero_copy_only=False), float)
+    # Standardized, so it must not still be a price near 100.
+    assert np.isnan(midpoint_column[:MIN_PRIOR_OBSERVATIONS]).all()
+    tail = midpoint_column[MIN_PRIOR_OBSERVATIONS:]
+    assert np.abs(tail[np.isfinite(tail)]).max() < 50.0
+    assert not np.allclose(midpoint_column[MIN_PRIOR_OBSERVATIONS:],
+                           raw[MIN_PRIOR_OBSERVATIONS:], equal_nan=True)
 
 
 def _feature_table(seed: int) -> pa.Table:
@@ -146,8 +244,9 @@ def test_a_date_block_sums_both_symbols(frozen_tree, tmp_path):
     grams(_args(features, labels, out))
     cells, _ = _load_grams(out)
     gram = cells[f"{PRIMARY_CELLS[0][0]}|{PRIMARY_CELLS[0][1]}"][DATES[0]]
-    # 3 unusable statuses and the first max(lag) rows lack price history.
-    usable_per_symbol = ROWS - max(PRICE_ONLY_LAGS)
+    # The binding constraint is now the 30 priors the scaling rule requires,
+    # which subsumes both the 3 unusable statuses and the 10 lag rows.
+    usable_per_symbol = ROWS - MIN_PRIOR_OBSERVATIONS
     assert gram.n == len(SYMBOLS) * usable_per_symbol
 
 
@@ -194,11 +293,15 @@ def test_the_design_is_intercept_then_price_only_then_the_l3_block():
     assert design.shape == (ROWS, DESIGN_WIDTH)
     assert (design[:, 0] == 1.0).all()
     assert len(sequence) == ROWS
-    # The L3 block starts exactly where the price-only block ends.
+    # The L3 block starts exactly where the price-only block ends. Its columns
+    # are standardized, so identity is checked against the standardized column.
     midpoint_index = PRICE_ONLY_WIDTH + FEATURE_NAMES.index("midpoint")
     np.testing.assert_allclose(
         design[:, midpoint_index],
-        np.asarray(table.column("midpoint").to_numpy(zero_copy_only=False), float),
+        expanding_standardize(
+            np.asarray(table.column("midpoint").to_numpy(zero_copy_only=False), float)
+        ),
+        equal_nan=True,
     )
 
 

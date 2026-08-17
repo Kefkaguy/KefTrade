@@ -20,10 +20,12 @@ from app.services.mbo_stage2_executor import (
     PRICE_ONLY_WIDTH,
     SPECIFICATION_GAPS_CLOSED,
     Gram,
+    _slice,
     assert_frozen_plan,
     benjamini_hochberg,
     clustered_t,
     delta_r2,
+    fit,
     nested_cscv_pbo,
     run_stage2,
     select_alpha,
@@ -96,6 +98,8 @@ def test_the_two_specification_gaps_are_recorded_as_closed_pre_outcome():
         "training_set_per_evaluation_block",
         "price_only_lag_convention",
         "rows_with_a_withheld_feature",
+        "ridge_penalty_scope",
+        "stage2_scaling_application_point",
     }
     for gap in SPECIFICATION_GAPS_CLOSED:
         assert gap["closed_before_any_outcome"] == "true"
@@ -156,6 +160,78 @@ def test_clustered_t_p_value_is_a_student_t_tail():
     # Sanity against a known-ish value: large t on 4 df is a small but not
     # vanishing p.
     assert 0 < p < 0.001
+
+
+# ---------------------------------------------------------------------------
+# The penalty covers the L3 block only
+# ---------------------------------------------------------------------------
+
+
+def _gram_with_dead_l3(rows: int = 4000, seed: int = 17) -> Gram:
+    """A world where the 59 L3 columns are identically zero: no information, and
+    no way for any alpha to manufacture any."""
+    rng = np.random.default_rng(seed)
+    x = np.zeros((rows, DESIGN_WIDTH))
+    x[:, 0] = 1.0
+    x[:, 1:PRICE_ONLY_WIDTH] = rng.standard_normal((rows, PRICE_ONLY_WIDTH - 1))
+    y = 0.30 * x[:, 1] - 0.20 * x[:, 2] + rng.standard_normal(rows)
+    gram = Gram.zeros(DESIGN_WIDTH)
+    gram.add_rows(x, y)
+    return gram
+
+
+@pytest.mark.parametrize("alpha", RIDGE_ALPHAS)
+def test_a_dead_l3_block_reduces_the_augmented_fit_to_the_baseline_ols(alpha):
+    """The decisive test for the penalty scope.
+
+    If the ridge penalty touched the price-only columns, the augmented fit would
+    shrink them and delta_R2 would go negative purely from regularization --
+    reporting the L3 block as harmful when it is merely absent.
+    """
+    gram = _gram_with_dead_l3()
+    augmented = fit(gram, alpha)
+    baseline = fit(_slice(gram, PRICE_ONLY_WIDTH), 0.0)
+    assert augmented is not None and baseline is not None
+    np.testing.assert_allclose(augmented[:PRICE_ONLY_WIDTH], baseline, rtol=1e-10)
+    np.testing.assert_allclose(augmented[PRICE_ONLY_WIDTH:], 0.0, atol=1e-12)
+
+
+@pytest.mark.parametrize("alpha", RIDGE_ALPHAS)
+def test_delta_r2_is_zero_when_the_l3_block_carries_nothing(alpha):
+    gram = _gram_with_dead_l3()
+    test_gram = _gram_with_dead_l3(rows=2000, seed=71)
+    assert delta_r2(gram, test_gram, alpha) == pytest.approx(0.0, abs=1e-12)
+
+
+def test_the_price_only_columns_are_never_shrunk():
+    """Same design, two alphas three orders of magnitude apart: the baseline
+    coefficients must be identical, because nothing penalizes them."""
+    gram = make_gram(4000, signal=0.5, seed=23)
+    low = fit(gram, 0.01)
+    high = fit(gram, 100.0)
+    assert low is not None and high is not None
+    # The L3 coefficients respond to alpha ...
+    assert not np.allclose(low[PRICE_ONLY_WIDTH:], high[PRICE_ONLY_WIDTH:], atol=1e-6)
+    # ... and the price-only ones move only through their correlation with the
+    # L3 block, never through a penalty of their own.
+    assert np.isfinite(low[:PRICE_ONLY_WIDTH]).all()
+
+
+def test_a_very_large_alpha_returns_the_baseline_solution():
+    """alpha -> infinity must drive the L3 coefficients to zero and leave the
+    baseline OLS fit, which is what 'nested' means."""
+    gram = make_gram(4000, signal=0.5, seed=29)
+    augmented = fit(gram, 1e14)
+    baseline = fit(_slice(gram, PRICE_ONLY_WIDTH), 0.0)
+    assert augmented is not None and baseline is not None
+    np.testing.assert_allclose(augmented[PRICE_ONLY_WIDTH:], 0.0, atol=1e-8)
+    np.testing.assert_allclose(augmented[:PRICE_ONLY_WIDTH], baseline, rtol=1e-6)
+
+
+def test_a_gram_narrower_than_the_penalty_offset_is_pure_ols():
+    """The baseline slice must be OLS whatever alpha is passed."""
+    gram = _slice(make_gram(2000, signal=0.0, seed=31), PRICE_ONLY_WIDTH)
+    np.testing.assert_allclose(fit(gram, 0.0), fit(gram, 100.0), rtol=1e-12)
 
 
 # ---------------------------------------------------------------------------

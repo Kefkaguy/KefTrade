@@ -101,6 +101,44 @@ SPECIFICATION_GAPS_CLOSED: tuple[dict[str, str], ...] = (
         ),
     },
     {
+        "gap": "ridge_penalty_scope",
+        "closed_before_any_outcome": "true",
+        "decision": (
+            "the ridge penalty applies to the 59 L3 columns only; the intercept "
+            "and the 10 price-only columns carry penalty 0, so the augmented fit "
+            "contains the baseline OLS fit exactly as its alpha -> infinity limit"
+        ),
+        "reason": (
+            "Plan v3 named the estimator 'ridge' and the baseline 'ordinary least "
+            "squares, no regularization' but did not say which columns the penalty "
+            "covers. Shrinking the price-only columns inside the augmented model "
+            "while fitting them by OLS in the baseline would make delta_R2 a "
+            "mixture of incremental L3 information and regularization of the "
+            "baseline, and could turn either sign. The plan calls the L3 model "
+            "'nested -- the baseline's inputs augmented, never a separate fit', "
+            "which only holds if the shared columns are treated identically."
+        ),
+    },
+    {
+        "gap": "stage2_scaling_application_point",
+        "closed_before_any_outcome": "true",
+        "decision": (
+            "the plan-v3 expanding prior-only standardization is applied to all 59 "
+            "L3 columns at Stage-2 design-matrix construction, per (symbol, "
+            "cadence, feature), within the symbol-day, from strictly prior "
+            "observations, withheld below 30 priors and never imputed; the frozen "
+            "Stage-1 Parquet is not modified"
+        ),
+        "reason": (
+            "Plan v3 declares the scaling rule but Stage-1 froze only four columns "
+            "in standardized form. Feeding the other 55 raw into a penalized fit "
+            "would make the ridge penalty depend on each feature's arbitrary unit, "
+            "so alpha would mean a different amount of shrinkage per column. "
+            "Applying it at design-matrix construction keeps it prior-only and "
+            "within symbol-day, which is what preserves per-date Gram additivity."
+        ),
+    },
+    {
         "gap": "price_only_lag_convention",
         "closed_before_any_outcome": "true",
         "decision": (
@@ -240,15 +278,26 @@ def _slice(gram: Gram, width: int) -> Gram:
 # ---------------------------------------------------------------------------
 
 
-def fit(gram: Gram, alpha: float) -> np.ndarray | None:
-    """Ridge (or OLS at alpha 0). The intercept column is never penalized."""
+def fit(
+    gram: Gram, alpha: float, *, penalty_from: int = PRICE_ONLY_WIDTH
+) -> np.ndarray | None:
+    """Ridge on the L3 block only; the intercept and the baseline are OLS.
+
+    The penalty starts at ``penalty_from``, so columns 0..10 -- the intercept
+    and the ten price-only variables -- are never shrunk. Penalizing them would
+    make the augmented model something other than the baseline plus the L3
+    block: ``delta_R2`` would then mix incremental L3 information with
+    regularization of a baseline that is fitted by OLS on its own. A Gram
+    narrower than ``penalty_from`` is therefore solved as pure OLS.
+    """
     if gram.n <= 0:
         return None
     width = gram.xtx.shape[0]
-    penalty = np.eye(width) * alpha
-    penalty[0, 0] = 0.0
+    penalized = np.zeros(width)
+    if alpha and width > penalty_from:
+        penalized[penalty_from:] = alpha
     try:
-        return np.linalg.solve(gram.xtx + penalty, gram.xty)
+        return np.linalg.solve(gram.xtx + np.diag(penalized), gram.xty)
     except np.linalg.LinAlgError:
         return None
 
@@ -925,6 +974,12 @@ def run_stage2(
 
 def assert_frozen_plan() -> None:
     """Refuse to execute against a plan that has moved."""
+    if CSCV_IN_SAMPLE_BLOCKS != CSCV_BLOCKS // 2:
+        raise ValueError(
+            f"the plan declares {CSCV_BLOCKS} CSCV blocks with "
+            f"{CSCV_IN_SAMPLE_BLOCKS} in sample, which is not the half-split the "
+            "procedure derives; one of the two has moved"
+        )
     if STAGE2_PLAN_VERSION != EXPECTED_PLAN_VERSION:
         raise ValueError(
             f"plan version {STAGE2_PLAN_VERSION!r} is not the frozen "

@@ -37,6 +37,7 @@ from app.services.mbo_label_engine import (
 )
 from app.services.mbo_stage2_executor import (
     DESIGN_WIDTH,
+    MIN_PRIOR_OBSERVATIONS,
     PRICE_ONLY_WIDTH,
     STAGE2_EXECUTOR_VERSION,
     Gram,
@@ -112,13 +113,59 @@ def _price_only_columns(midpoint: np.ndarray) -> np.ndarray:
     return np.column_stack(columns + signs)
 
 
+def expanding_standardize(
+    values: np.ndarray, *, min_priors: int = MIN_PRIOR_OBSERVATIONS
+) -> np.ndarray:
+    """The frozen plan-v3 scaling: expanding, prior-only, within the symbol-day.
+
+    The mean and standard deviation at row ``t`` are computed from the finite
+    observations strictly *before* ``t``. Below ``min_priors`` of them the value
+    is withheld as NaN rather than imputed, and a column with no prior variation
+    is withheld rather than divided by zero.
+
+    Values are shifted by the column's first finite observation before
+    accumulating. That is numerically, not statistically, motivated: a z-score
+    is invariant to the shift, but ``sum(x^2) - n * mean^2`` loses most of its
+    precision when the mean dwarfs the spread -- which is exactly the case for
+    the price-level columns. The shift also makes a genuinely constant column
+    produce an exact zero variance, so it is withheld rather than dividing tiny
+    float dust by tinier float dust.
+    """
+    finite = np.isfinite(values)
+    if not finite.any():
+        return np.full(values.shape, np.nan)
+    origin = float(values[finite][0])
+    centered = np.where(finite, values - origin, 0.0)
+
+    prior_count = np.concatenate(([0.0], np.cumsum(finite.astype(float))[:-1]))
+    prior_sum = np.concatenate(([0.0], np.cumsum(centered)[:-1]))
+    prior_sumsq = np.concatenate(([0.0], np.cumsum(centered * centered)[:-1]))
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        mean = prior_sum / prior_count
+        variance = (prior_sumsq - prior_count * mean * mean) / (prior_count - 1.0)
+        deviation = np.sqrt(np.maximum(variance, 0.0))
+        standardized = (centered - mean) / deviation
+
+    usable = finite & (prior_count >= min_priors) & (deviation > 0.0)
+    return np.where(usable, standardized, np.nan)
+
+
 def _symbol_day_matrix(table, feature_names) -> tuple[np.ndarray, np.ndarray]:
-    """The 70-wide design and the sequence index, before label joining."""
+    """The 70-wide design and the sequence index, before label joining.
+
+    The 59 L3 columns are standardized here rather than in Stage 1: the frozen
+    Stage-1 Parquet is never modified, and doing it per symbol-day keeps the
+    scaling prior-only and partition-independent, which is what makes the
+    per-date Grams additive.
+    """
     midpoint = np.asarray(table.column("midpoint").to_numpy(zero_copy_only=False), float)
     price_only = _price_only_columns(midpoint)
     block = np.column_stack(
         [
-            np.asarray(table.column(name).to_numpy(zero_copy_only=False), float)
+            expanding_standardize(
+                np.asarray(table.column(name).to_numpy(zero_copy_only=False), float)
+            )
             for name in feature_names
         ]
     )
@@ -153,6 +200,8 @@ def grams(args: argparse.Namespace) -> dict[str, Any]:
     }
     per_symbol_day: list[dict[str, Any]] = []
     dates: set[str] = set()
+    withheld_by_feature: dict[str, int] = {}
+    fully_withheld: list[dict[str, str]] = []
 
     label_paths = {
         path.name.split(".")[0]: path
@@ -198,6 +247,19 @@ def grams(args: argparse.Namespace) -> dict[str, Any]:
             )
 
         finite_design = np.isfinite(design).all(axis=1)
+        # A feature with no prior variation on this symbol-day is withheld on
+        # every row, which removes the whole symbol-day from every cell. That is
+        # the declared no-imputation rule doing its job, but it is silent, so
+        # count it per feature rather than letting cells quietly shrink.
+        block_finite = np.isfinite(design[:, PRICE_ONLY_WIDTH:])
+        for position, name in enumerate(FEATURE_NAMES):
+            missing = int((~block_finite[:, position]).sum())
+            if missing:
+                withheld_by_feature[name] = withheld_by_feature.get(name, 0) + missing
+            if missing == len(design):
+                fully_withheld.append(
+                    {"symbol_day": stem, "cadence": cadence, "feature": name}
+                )
         history = np.zeros(len(design), dtype=bool)
         history[max(PRICE_ONLY_LAGS) :] = True
         usable_row = finite_design & history
@@ -256,6 +318,15 @@ def grams(args: argparse.Namespace) -> dict[str, Any]:
         "session_date_count": len(ordered_dates),
         "symbol_day_cadence_files": len(per_symbol_day),
         "row_accounting": dropped,
+        "stage2_scaling": {
+            "rule": "expanding, prior-only, within symbol-day, per (symbol, cadence, feature)",
+            "applied_to": "the 59 L3 columns",
+            "min_prior_observations": MIN_PRIOR_OBSERVATIONS,
+            "imputation": "none; withheld rows are dropped",
+            "stage1_parquet_modified": False,
+        },
+        "withheld_by_feature": dict(sorted(withheld_by_feature.items())),
+        "features_fully_withheld_on_a_symbol_day": fully_withheld,
         "grams_bytes": gram_path.stat().st_size,
         "contains_predictive_result": False,
     }
