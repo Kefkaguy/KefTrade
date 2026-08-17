@@ -92,14 +92,14 @@ def test_the_executor_refuses_a_plan_that_moved():
     assert_frozen_plan()  # does not raise
 
 
-def test_the_design_survived_the_v3_rebinding_untouched():
+def test_the_design_survived_every_rebinding_untouched():
     """The decisive provenance check.
 
-    PLAN_HASH moved when Stage-1 semantics were corrected to v3, because it binds
-    the design to the artefacts it is declared over. Recomputing it with the
-    superseded v2 bindings must reproduce the original ba51ccba... exactly. If it
-    does, no design element moved and this is a rebinding; if it does not, the
-    plan changed and that would be a new trial.
+    PLAN_HASH moves whenever Stage-1 semantics are corrected, because it binds
+    the design to the artefacts it is declared over. Every superseded value must
+    be reproducible from the SAME design elements and only different bindings.
+    If one is not, a design element moved and that would be a new trial rather
+    than a rebinding.
     """
     import hashlib
 
@@ -108,19 +108,39 @@ def test_the_design_survived_the_v3_rebinding_untouched():
         SUPERSEDED_PLAN_HASHES,
     )
 
-    old = hashlib.sha256(
-        "\n".join(
-            (
-                PLAN_DESIGN_ELEMENTS[0],
-                "2e8ada7e56d780639a8427b4e88d5e464cb541feacaf0fc8dccf9519097677ac",
-                "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551",
-                *PLAN_DESIGN_ELEMENTS[1:],
-            )
-        ).encode("utf-8")
-    ).hexdigest()
-    assert old == "ba51ccba12caf6969bbb0da84ff4cffa956361c56d5ea7bf77b453893331ca6e"
-    assert SUPERSEDED_PLAN_HASHES[0]["plan_hash"] == old
-    assert SUPERSEDED_PLAN_HASHES[0]["design_changed"] == "false"
+    def rebind(label_hash: str, semantics_hash: str) -> str:
+        return hashlib.sha256(
+            "\n".join(
+                (
+                    PLAN_DESIGN_ELEMENTS[0],
+                    label_hash,
+                    semantics_hash,
+                    *PLAN_DESIGN_ELEMENTS[1:],
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+
+    for entry in SUPERSEDED_PLAN_HASHES:
+        assert entry["design_changed"] == "false"
+        assert entry["superseded_before_outcome"] == "true"
+
+    # v2 bindings reproduce the original frozen plan hash exactly.
+    assert rebind(
+        "2e8ada7e56d780639a8427b4e88d5e464cb541feacaf0fc8dccf9519097677ac",
+        "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551",
+    ) == "ba51ccba12caf6969bbb0da84ff4cffa956361c56d5ea7bf77b453893331ca6e"
+
+    # v3 bindings reproduce the intermediate one.
+    assert rebind(
+        "75239cc325d7aaa12caf2a24dd4c6f378788fb2e360ff76281731204410e9d73",
+        "7f613b06e8ba25bc45947c1ea6d3558e4508f73e37d6ef09736ba91d2d3933eb",
+    ) == "e575428229bc5324fe74ca1593213a7acc39c879bf46eaac77bb1921d8430a25"
+
+    recorded = {entry["plan_hash"] for entry in SUPERSEDED_PLAN_HASHES}
+    assert recorded == {
+        "ba51ccba12caf6969bbb0da84ff4cffa956361c56d5ea7bf77b453893331ca6e",
+        "e575428229bc5324fe74ca1593213a7acc39c879bf46eaac77bb1921d8430a25",
+    }
 
 
 def test_the_frozen_design_elements_are_still_the_declared_ones():

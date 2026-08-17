@@ -355,11 +355,11 @@ def test_perturbing_future_ts_recv_leaves_earlier_rows_unchanged():
 def test_engine_version_was_incremented():
     # v2's corrections still hold; the engine has since moved to v3 for the
     # absorption boundary. See test_mbo_feature_engine_v3.py.
-    assert FEATURE_ENGINE_VERSION == "tier1_mbo_feature_engine_v3"
+    assert FEATURE_ENGINE_VERSION == "tier1_mbo_feature_engine_v4"
 
 
 def test_the_superseded_version_is_preserved_with_its_reason():
-    assert len(SUPERSEDED_ENGINE_VERSIONS) == 2
+    assert len(SUPERSEDED_ENGINE_VERSIONS) == 3
     superseded = SUPERSEDED_ENGINE_VERSIONS[0]
     assert superseded["version"] == "tier1_mbo_feature_engine_v1"
     assert superseded["superseded_before_outcome"] == "true"

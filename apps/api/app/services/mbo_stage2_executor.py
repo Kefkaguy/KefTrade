@@ -91,9 +91,10 @@ EXPECTED_PLAN_DESIGN_HASH = (
 )
 
 # The design bound to the artefacts it is declared over. Rebound from
-# ba51ccba... when the feature engine was corrected to v3.
+# ba51ccba... when the feature engine was corrected, first to v3 and then
+# to v4. Every superseded value is preserved in SUPERSEDED_PLAN_HASHES.
 EXPECTED_PLAN_HASH = (
-    "e575428229bc5324fe74ca1593213a7acc39c879bf46eaac77bb1921d8430a25"
+    "19671245f7a83defff54902118afd2491cfcfdbf5a8e7dc6e648d9c4785e9ca3"
 )
 
 SPECIFICATION_GAPS_CLOSED: tuple[dict[str, str], ...] = (

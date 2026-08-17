@@ -82,9 +82,9 @@ SUPERSEDED_LABEL_VERSIONS: tuple[dict[str, str], ...] = (
     },
 )
 
-REQUIRED_FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v3"
+REQUIRED_FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v4"
 REQUIRED_FEATURE_SEMANTICS_HASH = (
-    "7f613b06e8ba25bc45947c1ea6d3558e4508f73e37d6ef09736ba91d2d3933eb"
+    "fbe8add54376592e4c1a7196124086f6c5a69bf3bd0748dc1f08fa7db0d7563c"
 )
 
 # The feature semantics this label family was originally declared over. The
@@ -94,6 +94,7 @@ REQUIRED_FEATURE_SEMANTICS_HASH = (
 # regenerated spine is proved identical. See LABEL_LOGIC_HASH.
 SUPERSEDED_REQUIRED_FEATURE_SEMANTICS_HASHES: tuple[str, ...] = (
     "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551",
+    "7f613b06e8ba25bc45947c1ea6d3558e4508f73e37d6ef09736ba91d2d3933eb",
 )
 
 NANOS_PER_SECOND = 1_000_000_000
@@ -210,6 +211,21 @@ LABEL_DEFINITION_HASH = hashlib.sha256(
 ).hexdigest()
 
 SUPERSEDED_LABEL_DEFINITION_HASHES: tuple[dict[str, str], ...] = (
+    {
+        "label_definition_hash": (
+            "75239cc325d7aaa12caf2a24dd4c6f378788fb2e360ff76281731204410e9d73"
+        ),
+        "superseded_before_outcome": "true",
+        "declared_over_feature_semantics": (
+            "7f613b06e8ba25bc45947c1ea6d3558e4508f73e37d6ef09736ba91d2d3933eb"
+        ),
+        "label_content_changed": "false",
+        "reason": (
+            "rebound from feature-engine v3 to v4 for the queue_persistence "
+            "coherent-state correction. As with the v2 -> v3 rebinding, no "
+            "feature value enters a label and the snapshot spine is untouched."
+        ),
+    },
     {
         "label_definition_hash": (
             "2e8ada7e56d780639a8427b4e88d5e464cb541feacaf0fc8dccf9519097677ac"

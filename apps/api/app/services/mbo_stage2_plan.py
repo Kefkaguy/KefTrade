@@ -550,6 +550,21 @@ PLAN_HASH = hashlib.sha256(
 SUPERSEDED_PLAN_HASHES: tuple[dict[str, str], ...] = (
     {
         "plan_hash": (
+            "e575428229bc5324fe74ca1593213a7acc39c879bf46eaac77bb1921d8430a25"
+        ),
+        "superseded_before_outcome": "true",
+        "design_changed": "false",
+        "declared_over_feature_semantics": (
+            "7f613b06e8ba25bc45947c1ea6d3558e4508f73e37d6ef09736ba91d2d3933eb"
+        ),
+        "reason": (
+            "rebound from feature-engine v3 to v4 for the queue_persistence "
+            "coherent-state correction. PLAN_DESIGN_HASH is unchanged across "
+            "both rebindings, which is the proof that no design element moved."
+        ),
+    },
+    {
+        "plan_hash": (
             "ba51ccba12caf6969bbb0da84ff4cffa956361c56d5ea7bf77b453893331ca6e"
         ),
         "superseded_before_outcome": "true",

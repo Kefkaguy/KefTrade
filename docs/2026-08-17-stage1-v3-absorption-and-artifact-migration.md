@@ -196,3 +196,117 @@ cd apps/api && python -m app.cli.mbo_labels build --features-dir ../../reports/t
 - No feature was added, removed, renamed or selected. The vocabulary is still
   the frozen 59.
 - **347 tests pass**, 3 skipped, across the MBO suite.
+
+---
+
+# Addendum — v4: `queue_persistence` at the coherent boundary
+
+A second instance of the same mistake, found and corrected **before** the
+all-160 rebuild. No dataset was ever extracted under v3, so nothing needs
+migrating from it; the rebuild goes straight from v2 artefacts to v4.
+
+## The defect
+
+`queue_persistence` is declared as *the share of the window's `F_LAST` states
+where neither touch price moved*. It was computed as:
+
+```python
+touch_unchanged = (
+    before.bid_price == after.bid_price and before.ask_price == after.ask_price
+)
+```
+
+`before` and `after` bracket **only the final normalized record** of the native
+event — the one that happened to carry the `F_LAST` flag. Two distinct errors
+follow.
+
+**1. Transient state instead of coherent state.** Inside a multi-record native
+event the touch can move on an early record and be left alone by the last one.
+The event then reads as persistent although the touch plainly moved from one
+completed state to the next. The converse also held: a touch that moved and was
+rebuilt at the same price within one event counted as two changes.
+
+**2. Absent touches compared equal.** `bid_price` is `None` when a side is
+empty, and `None == None` is `True`. A one-sided or empty book at both ends
+therefore counted as *evidence of persistence*, which is exactly backwards — it
+is absence of evidence.
+
+## The correction
+
+`_touch_persisted(previous_completed, current)`:
+
+- previous bid/ask = the prior completed `F_LAST` state (`self._completed`,
+  which is still the previous one at the point of comparison and is replaced
+  immediately after);
+- current bid/ask = the book after the current `F_LAST`;
+- unchanged only if **both** touch prices are present at both ends and equal;
+- a missing previous state (the session's first `F_LAST`) or a one-sided book at
+  either end counts as changed, never as persistent.
+
+## Targeted audit of coherent/`F_LAST`-declared features
+
+Scope: every feature whose *documented* semantics explicitly reference completed
+`F_LAST` states or coherent transitions.
+
+| Feature | Declared over | Computed from | Verdict |
+|---|---|---|---|
+| `queue_persistence` | `F_LAST` → `F_LAST` transition | final record's `before`/`after` | **defective — corrected in v4** |
+| `mean_touch_depth` | average over the window's `F_LAST` states | post-`F_LAST` touch, once per completed event | correct, no change |
+| `executions_without_price_move`, `execution_volume_without_price_move`, `absorption_ratio` | complete native event | pre-group vs post-`F_LAST` midpoint | correct as of v3 |
+| all snapshot book-state columns (`best_bid_price`, `spread`, `midpoint`, `queue_imbalance`, `microprice`, depths, levels, `resting_orders`) | last completed `F_LAST` at or before the instant | `CompletedState` captured at `F_LAST` | correct, no change |
+
+`mean_touch_depth` was the only other `F_LAST`-declared feature, and it is a
+*level* rather than a transition, sampled once per completed event from the
+post-`F_LAST` book. It needed no correction, and
+`test_mean_touch_depth_samples_the_coherent_state_once_per_flast` now pins that
+so a transient interior size cannot enter the average.
+
+### Flagged, deliberately not changed
+
+These are computed per normalized record. Their documented semantics do **not**
+reference `F_LAST` or coherent states, so changing them would be an unmandated
+semantic change rather than a correction — but they carry the same structural
+risk and are recorded here for a decision:
+
+| Feature | Risk if judged coherently instead |
+|---|---|
+| `best_bid_changes`, `best_ask_changes` | a touch that moves and reverts inside one native event counts 2 changes; the coherent view counts 0 |
+| `queue_depletion_events` | a transient interior zero (cancel then re-add at the same price in one event) counts as a depletion the coherent view never saw |
+| `depletion_followed_by_quote_move` | inherits the above, since a depletion arms its pending flag |
+| `order_flow_imbalance` (CKS `Σ e_n`) | the kernel is conditional on price direction and so is **not** additive across intra-event transients; a per-record sum can differ from one `e_n` across the coherent group |
+| `touch_replenishment_*`, `refill_after_execution_volume` | "an add at or inside the prevailing touch" is per-record by definition; lowest risk of the set |
+
+I have not touched these. If you want any of them moved to coherent-state
+semantics, that is a further declared correction with its own version bump.
+
+## Final hashes
+
+| Artefact | Value |
+|---|---|
+| `FEATURE_ENGINE_VERSION` | `tier1_mbo_feature_engine_v4` |
+| `FEATURE_SEMANTICS_HASH` | `fbe8add54376592e4c1a7196124086f6c5a69bf3bd0748dc1f08fa7db0d7563c` |
+| `FEATURE_VOCABULARY_HASH` | `25e685913e3a3d05248ef6f09ad44e4b0cab91276bf7bd66d2f0d650f06b82a7` *(unchanged)* |
+| `SNAPSHOT_SCHEMA_HASH` | `7e19d06b91a2faa6178a767462fe6e1c2b3ad5865c2db2055e82c02dd47185e9` *(unchanged)* |
+| `LABEL_LOGIC_HASH` | `36cb54fd69b580bfdb521e940d85344cf0fc06fcf89bccea1fa2cc863fcfa7b4` *(unchanged)* |
+| `LABEL_DEFINITION_HASH` | `ba4f1a38562a13603f9766aec828f8c4505ede505b30443db57e207b51fb510b` |
+| `LABEL_SCHEMA_HASH` | `f0d55b8db8755e9638155170196c2dadd2e02c19856d8a7edfe47f9b5b933354` *(unchanged)* |
+| `PLAN_DESIGN_HASH` | `44ac79d1c8fcb6ba452fed9820788c00033ed90fd71ce1996ceec9e3a2443b93` *(unchanged)* |
+| `PLAN_HASH` | `19671245f7a83defff54902118afd2491cfcfdbf5a8e7dc6e648d9c4785e9ca3` |
+
+`PLAN_DESIGN_HASH` is unchanged across **both** rebindings, and every superseded
+plan hash is reproducible from the same design elements with only the bindings
+swapped — asserted in `test_the_design_survived_every_rebinding_untouched`. The
+Stage-2 statistical design is untouched: 14 cells, 10/6/4, raw `return_bps`,
+ridge, five alphas, `delta_R2`, nested CSCV, 0.50 ceiling, BH family 14, 508
+prior effective trials.
+
+## Migration, restated
+
+Unchanged from the v3 plan above, with one simplification: because no artefact
+was ever produced under v3, the rebuild is a single hop from the existing v2
+feature files to v4. Labels remain reusable under spine certification — the
+`grams` command now recognises both superseded label-definition hashes and still
+refuses on any spine mismatch, row by row.
+
+**No predictive outcome has been computed or inspected. Stage 2B has not been
+run, and the feature rebuild has not been started.**

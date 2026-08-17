@@ -90,7 +90,7 @@ from app.services.mbo_book_validator import (
     MboEvent,
 )
 
-FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v3"
+FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v4"
 
 # Superseded before any predictive outcome was inspected. Kept so a reader of an
 # older manifest can tell which semantics produced it.
@@ -133,6 +133,32 @@ SUPERSEDED_ENGINE_VERSIONS: tuple[dict[str, str], ...] = (
             "25e685913e3a3d05248ef6f09ad44e4b0cab91276bf7bd66d2f0d650f06b82a7"
         ),
         "columns_renamed": "none; the vocabulary and snapshot schema are unchanged",
+    },
+    {
+        "version": "tier1_mbo_feature_engine_v3",
+        "superseded_before_outcome": "true",
+        "reason": (
+            "queue_persistence is declared as the share of the window's F_LAST "
+            "states where neither touch price moved, but it was computed from the "
+            "before/after of the single normalized record that happened to carry "
+            "the F_LAST flag. Inside a multi-record native event the touch can "
+            "move on an earlier record and not on the last one, which read as "
+            "persistent. The same expression also compared two None touch prices "
+            "as equal, so a one-sided or empty book counted as evidence of "
+            "persistence. v4 compares the previous completed F_LAST state against "
+            "the new one and requires both touches to be present."
+        ),
+        "feature_semantics_hash": (
+            "7f613b06e8ba25bc45947c1ea6d3558e4508f73e37d6ef09736ba91d2d3933eb"
+        ),
+        "feature_vocabulary_hash": (
+            "25e685913e3a3d05248ef6f09ad44e4b0cab91276bf7bd66d2f0d650f06b82a7"
+        ),
+        "columns_renamed": "none; the vocabulary and snapshot schema are unchanged",
+        "datasets_extracted_under_this_version": (
+            "none; v3 was corrected before the all-160 rebuild, so no artefact "
+            "carries v3 provenance and nothing needs migrating from it"
+        ),
     },
 )
 
@@ -865,9 +891,9 @@ class OrderBookFeatureEngine:
 
             self._settle_native_event(after)
             self._flast_index += 1
-            touch_unchanged = (
-                before.bid_price == after.bid_price and before.ask_price == after.ask_price
-            )
+            # `self._completed` is still the PREVIOUS completed F_LAST here; it
+            # is replaced below, after this comparison has been made.
+            touch_unchanged = _touch_persisted(self._completed, after)
             for cadence in self.cadences:
                 window = self._windows[cadence.name]
                 window.flast_events += 1
@@ -908,6 +934,36 @@ def _midpoint(state: _TouchState) -> float | None:
     if state.bid_price is None or state.ask_price is None:
         return None
     return (state.bid_price + state.ask_price) / 2
+
+
+def _touch_persisted(previous: CompletedState | None, current: _TouchState) -> bool:
+    """Did the touch survive from the last completed ``F_LAST`` to this one?
+
+    ``queue_persistence`` is declared over *completed* book states, so the
+    comparison is the previous coherent state against the new one -- not the
+    ``before``/``after`` of whichever normalized record happened to carry the
+    ``F_LAST`` flag. Inside a multi-record native event the touch can move and
+    then be rebuilt, or move on an earlier record and not on the last one; the
+    final record's own transition says nothing about the event as a whole.
+
+    Persistence must be positively established. A missing previous state (the
+    first ``F_LAST`` of the session) or a one-sided book at either end is
+    absence of evidence, not evidence of persistence, so it counts as changed.
+    """
+    if previous is None:
+        return False
+    prices = (
+        previous.best_bid_price,
+        previous.best_ask_price,
+        current.bid_price,
+        current.ask_price,
+    )
+    if any(price is None for price in prices):
+        return False
+    return (
+        previous.best_bid_price == current.bid_price
+        and previous.best_ask_price == current.ask_price
+    )
 
 
 def _is_at_touch(event: MboEvent, before: _TouchState) -> bool:

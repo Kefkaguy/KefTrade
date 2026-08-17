@@ -1,4 +1,8 @@
-"""Stage 1 v3: absorption is a property of the native event, not of `F`.
+"""Stage 1 v3 and v4: coherent native-event semantics.
+
+Both corrections are the same mistake in two places -- a quantity declared over
+*completed* book states was computed from the transient before/after of whichever
+normalized record happened to carry the flag.
 
 `F` is book-neutral under the certified XNAS normalization -- the resting-book
 change arrives on the companion `C`/`M` record of the same native event. v2
@@ -8,6 +12,11 @@ it: 8,315,861 finite absorption_ratio values, all exactly 1.0.
 
 v3 settles each native event at its `F_LAST`, comparing the midpoint before the
 group's first record against the midpoint after its last.
+
+v4 does the same for `queue_persistence`, which is declared as the share of the
+window's `F_LAST` states where neither touch price moved, but was computed from
+the final record's own before/after -- and which also compared two absent touch
+prices as equal, so a one-sided book counted as persistent.
 """
 
 from __future__ import annotations
@@ -260,8 +269,7 @@ def test_a_one_sided_opening_book_is_not_counted_as_absorbed():
 # ---------------------------------------------------------------------------
 
 
-def test_the_engine_is_v3_and_v2_is_recorded_as_superseded():
-    assert FEATURE_ENGINE_VERSION == "tier1_mbo_feature_engine_v3"
+def test_v2_is_recorded_as_superseded_with_the_diagnostic_that_found_it():
     versions = {entry["version"] for entry in SUPERSEDED_ENGINE_VERSIONS}
     assert "tier1_mbo_feature_engine_v2" in versions
     v2 = next(
@@ -276,9 +284,10 @@ def test_the_engine_is_v3_and_v2_is_recorded_as_superseded():
 def test_the_semantics_hash_moved_but_the_vocabulary_did_not():
     """The correction renamed nothing, which is exactly why a name hash alone is
     not sufficient provenance."""
-    assert FEATURE_SEMANTICS_HASH != (
-        "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551"
-    )
+    assert FEATURE_SEMANTICS_HASH not in {
+        "4aaeb9cb6d6700524d7fb065036612376d482a5cdff47d555d42c8a895c62551",  # v2
+        "7f613b06e8ba25bc45947c1ea6d3558e4508f73e37d6ef09736ba91d2d3933eb",  # v3
+    }
     assert FEATURE_VOCABULARY_HASH == (
         "25e685913e3a3d05248ef6f09ad44e4b0cab91276bf7bd66d2f0d650f06b82a7"
     )
@@ -292,3 +301,120 @@ def test_modify_count_is_still_a_frozen_sensor():
     always zero; it stays in the vocabulary and contributes zero."""
     assert "modify_count" in FEATURE_VOCABULARY
     assert len(FEATURE_VOCABULARY) == 59
+
+
+# ---------------------------------------------------------------------------
+# v4: queue_persistence over completed F_LAST states
+# ---------------------------------------------------------------------------
+
+
+def test_touch_moved_earlier_in_the_native_event_is_not_persistent():
+    """The correction that motivated v4.
+
+    Inside one native event the touch moves on an early record and the final
+    normalized record leaves it alone. Judging the event by that last record's
+    own before/after reads "unchanged"; judging it coherently, from the previous
+    completed F_LAST to this one, the touch plainly moved.
+    """
+    events = [
+        *book(),  # bid 100, ask 101 -- completed F_LAST #1
+        # One native event: the bid is pulled and rebuilt lower, then an
+        # unrelated deep add carries the F_LAST without touching the top.
+        ev(S, "C", "B", 100 * PX, 500, 1, 10),
+        ev(S, "A", "B", 98 * PX, 400, 3, 10),
+        ev(S, "A", "B", 90 * PX, 100, 4, 10, flags=F_LAST),
+        *[ev(2 * S + i, "A", "A", 105 * PX, 10, 60 + i, 20 + i, flags=F_LAST) for i in range(2)],
+    ]
+    rows = run(events)
+    # The window containing the moving native event must not call it persistent.
+    moved = [r for r in rows if r["queue_persistence"] is not None][1]
+    assert moved["queue_persistence"] == 0.0
+
+
+def test_a_genuinely_unchanged_touch_is_persistent():
+    """The mirror case: a native event that leaves both touch prices where they
+    were must still count as persistence."""
+    events = [
+        *book(),
+        # Deep adds only; the touch is untouched from F_LAST to F_LAST.
+        ev(S, "A", "B", 90 * PX, 100, 3, 10),
+        ev(S, "A", "A", 110 * PX, 100, 4, 10, flags=F_LAST),
+        *[ev(2 * S + i, "A", "B", 91 * PX, 10, 60 + i, 20 + i, flags=F_LAST) for i in range(2)],
+    ]
+    rows = run(events)
+    persistent = [r for r in rows if r["queue_persistence"] is not None][1]
+    assert persistent["queue_persistence"] == 1.0
+
+
+def test_a_touch_that_moves_and_returns_within_one_event_is_persistent():
+    """Coherent means coherent in both directions: transient excursions inside a
+    native event are invisible from one completed state to the next."""
+    events = [
+        *book(),
+        ev(S, "C", "B", 100 * PX, 500, 1, 10),
+        ev(S, "A", "B", 100 * PX, 500, 5, 10, flags=F_LAST),
+        *[ev(2 * S + i, "A", "B", 90 * PX, 10, 60 + i, 20 + i, flags=F_LAST) for i in range(2)],
+    ]
+    rows = run(events)
+    restored = [r for r in rows if r["queue_persistence"] is not None][1]
+    assert restored["queue_persistence"] == 1.0
+
+
+def test_a_one_sided_book_is_not_evidence_of_persistence():
+    """Two absent touches compared with `==` were equal, so an empty or
+    one-sided book counted as persistent. It is absence of evidence."""
+    events = [
+        ev(0, "A", "B", 100 * PX, 500, 1, 1, flags=F_LAST),  # bid only
+        ev(S, "A", "B", 99 * PX, 100, 2, 10, flags=F_LAST),  # still bid only
+        ev(2 * S, "A", "B", 98 * PX, 100, 3, 20, flags=F_LAST),
+    ]
+    rows = run(events)
+    for row in rows:
+        assert row["queue_persistence"] in (None, 0.0)
+
+
+def test_the_first_flast_of_the_session_is_not_persistent():
+    """There is no previous completed state to persist from."""
+    events = [
+        ev(0, "A", "B", 100 * PX, 500, 1, 1),
+        ev(0, "A", "A", 101 * PX, 500, 2, 2, flags=F_LAST),
+        *[ev(2 * S + i, "A", "B", 90 * PX, 10, 60 + i, 20 + i, flags=F_LAST) for i in range(2)],
+    ]
+    first = run(events)[0]
+    assert first["queue_persistence"] == 0.0
+
+
+def test_the_engine_is_v4_and_v3_is_recorded_as_superseded():
+    v3 = next(
+        e for e in SUPERSEDED_ENGINE_VERSIONS
+        if e["version"] == "tier1_mbo_feature_engine_v3"
+    )
+    assert FEATURE_ENGINE_VERSION == "tier1_mbo_feature_engine_v4"
+    assert v3["superseded_before_outcome"] == "true"
+    assert "queue_persistence" in v3["reason"]
+    # v3 never produced an artefact, so nothing needs migrating from it.
+    assert "none" in v3["datasets_extracted_under_this_version"]
+
+
+def test_mean_touch_depth_samples_the_coherent_state_once_per_flast():
+    """Audit result, pinned.
+
+    `mean_touch_depth` is the other feature declared over F_LAST states. Unlike
+    persistence it is a level rather than a transition, and it was already
+    sampled from the post-F_LAST book once per completed event -- so it needed
+    no correction. This test keeps it that way: the transient sizes inside a
+    native event must not enter the average.
+    """
+    events = [
+        *book(size=500),  # touch depth (500 + 500) / 2 = 500
+        # One native event whose interior briefly shows a much larger bid, but
+        # whose completed state is back to 500 on each side.
+        ev(S, "A", "B", 100 * PX, 9_000, 3, 10),
+        ev(S, "C", "B", 100 * PX, 9_000, 3, 10, flags=F_LAST),
+        *[ev(2 * S + i, "A", "B", 90 * PX, 10, 60 + i, 20 + i, flags=F_LAST) for i in range(2)],
+    ]
+    rows = run(events)
+    settled_window = [r for r in rows if r["window_flast_events"]][1]
+    assert settled_window["window_flast_events"] == 1
+    # 500, not a blend with the transient 9,000.
+    assert settled_window["mean_touch_depth"] == 500.0
