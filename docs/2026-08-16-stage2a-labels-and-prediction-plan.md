@@ -85,8 +85,20 @@ substituting a flattened version. So it was measured first:
 | Solves per cell-partition | 46 (5 alphas × 8 LOBO folds + 5 + 1) |
 | **Total solves** | **8,288,280** |
 | Measured 70×70 solve | 23.1 µs |
-| **Projected wall clock** | **3.2 minutes, single core** |
+| Projected wall clock, solves only | 3.2 minutes — *an under-estimate, see below* |
+| **Measured wall clock, end to end** | **6.91 minutes, single core** |
 | Resident Gram blocks | 11.1 MB |
+
+**Correction (Stage 2B).** The 3.2-minute figure above was computed before the
+executor existed and counted only the Cholesky solves. It omitted Gram
+assembly, which dominates: summing 8 blocks of a 70×70 matrix for each of 14
+cells in each of 12,870 partitions is tens of millions of matrix additions, not
+solves. The first implementation was assembled naively and did not finish in ten
+minutes. Rebuilding leave-one-out as a subtraction from a precomputed total
+(`train − block` rather than re-summing the training blocks) brought the
+complete procedure to a **measured 6.91 minutes**. The conclusion is unchanged
+and PBO stays, but the original number was wrong by a factor of two and is
+recorded here rather than quietly replaced.
 
 What makes it cheap: standardization is prior-only *within* symbol-day, so the
 design matrix does not depend on how dates are split. Per-date Gram matrices

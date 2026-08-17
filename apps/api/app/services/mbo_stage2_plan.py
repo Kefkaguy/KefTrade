@@ -341,7 +341,12 @@ MODEL_SPEC: dict[str, Any] = {
                 * BH_FAMILY_SIZE
                 * (len(RIDGE_ALPHAS) * CSCV_IN_SAMPLE_BLOCKS + len(RIDGE_ALPHAS) + 1)
             ),
-            "measured_single_core_minutes": 3.2,
+            # Corrected after building the executor. The 3.2 figure counted only
+            # the Cholesky solves and omitted Gram assembly, which dominates:
+            # 12,870 partitions x 14 cells x 8 blocks of 70x70 accumulation. The
+            # figure below is measured end-to-end over all 12,870 partitions.
+            "measured_single_core_minutes": 6.91,
+            "superseded_estimate_single_core_minutes": 3.2,
             "resident_memory_mb": 11.1,
             "if_infeasible": (
                 "PBO would have been removed as an authorization statistic before "
