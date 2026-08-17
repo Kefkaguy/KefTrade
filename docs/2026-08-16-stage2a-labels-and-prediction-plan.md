@@ -1,4 +1,4 @@
-# Stage 2A v2 — exact event-time labels and the frozen executable plan
+# Stage 2A — exact event-time labels (v2) and the final frozen plan (v3)
 
 **Scope:** label construction and test specification only.
 **Not done:** no feature-label correlation, no IC, no rank, no cell measured, no
@@ -8,8 +8,8 @@ threshold, no P/L. **Stops before predictive results.**
 label_engine_version    tier1_mbo_label_engine_v2
 label_definition_hash   2e8ada7e56d780639a84...
 label_schema_hash       f0d55b8db8755e963815...
-stage2_plan_version     tier1_stage2_plan_v2
-plan_hash               e959a556b8be89b75ebf47479deafd7de67d8fd117edb83aa853bb8fd110a94c
+stage2_plan_version     tier1_stage2_plan_v3
+plan_hash               ba51ccba12caf6969bbb0da84ff4cffa956361c56d5ea7bf77b453893331ca6e
 built against           tier1_mbo_feature_engine_v2 / 4aaeb9cb6d67...
 features modified       NO
 label columns           72  (9 shared + 9 × 7 horizons)
@@ -30,6 +30,88 @@ loose plan — not tuning.
 | Split by fraction | Split by whole session-date blocks, 10 / 6 / 4 |
 | Model, scaling, score, statistic, pass criteria unspecified | All declared exactly |
 | Lifetime exposure used as the BH denominator | Separated: BH = 14, lifetime = 522 |
+
+## Plan v3 — two corrections, pre-outcome
+
+Commit **`a28b322971c4e2f476069c302f9b6d915e67f7b0`** is preserved as plan v2,
+superseded-before-outcome. The label engine and Stage-1 features are unchanged.
+
+### 1. The primary target is the raw event-time return
+
+v2 residualized the target against the equal-weighted cross-sectional mean of
+the eight symbols at each instant. **That rule is undefined for the event
+cadences.** 1s and 5s grids are cross-symbol aligned by construction, but 50ev
+and 200ev clocks advance on each symbol's own event count and are asynchronous —
+"the same instant across eight symbols" does not exist there, and a quorum rule
+cannot rescue a definition with no shared instants.
+
+The dependence it was meant to control is already handled: whole session-date
+splits keep all eight symbols on the same side of every boundary, and inference
+is one observation per session date. And the primary question is *absolute*
+future-price predictability beyond a price-only baseline, which the raw return
+measures directly.
+
+`return_bps` is now the primary target for all 14 cells. **No residualized
+secondary family is declared** — if one is wanted later it is a separate
+declaration with its own count.
+
+### 2. PBO is nested, not flattened
+
+v2's configuration set was "14 cells + 5 alpha values". Alpha is a
+hyperparameter *inside* a cell, not a rival configuration. The set is the **14
+cells**. Within each CSCV partition, for each cell independently:
+
+1. select alpha using **only that partition's in-sample dates**, from the frozen
+   candidate set, by leave-one-block-out CV over the in-sample blocks;
+2. fit the cell with that alpha on the full in-sample half;
+3. score in-sample and out-of-sample `delta_R2`.
+
+Then select the cell with the best in-sample `delta_R2` and record its rank among
+the 14 out-of-sample scores. **PBO = the fraction of partitions whose
+in-sample-selected cell ranks in the bottom half out of sample.**
+
+On the ordinary chronological path, no validation or confirmation date may enter
+any alpha choice — stated as its own rule, not implied.
+
+#### Feasibility was measured, not assumed
+
+The declared alternative was *removing* PBO as an authorization statistic, never
+substituting a flattened version. So it was measured first:
+
+| | |
+|---|---|
+| Partitions, C(16,8) | 12,870 |
+| Design width | 70 |
+| Solves per cell-partition | 46 (5 alphas × 8 LOBO folds + 5 + 1) |
+| **Total solves** | **8,288,280** |
+| Measured 70×70 solve | 23.1 µs |
+| **Projected wall clock** | **3.2 minutes, single core** |
+| Resident Gram blocks | 11.1 MB |
+
+What makes it cheap: standardization is prior-only *within* symbol-day, so the
+design matrix does not depend on how dates are split. Per-date Gram matrices
+(`X'X`, `X'y`, `y'y`, `n`) are therefore **additive**, and any partition's fit is
+a sum of 14 × 20 precomputed blocks followed by one Cholesky solve. No row-level
+data is revisited per partition.
+
+**PBO stays.**
+
+### 3. What passing Stage 2 authorizes
+
+The final four dates are an **internal** single-use confirmation gate — not an
+external sample. Clearing every Stage-2 gate authorizes exactly:
+
+- Stage-3 economic, cost and latency testing;
+- acquisition or use of a larger, **completely untouched external** confirmation
+  sample.
+
+It authorizes **no real-money deployment** and no live capital. Four internal
+dates from the same frozen 160-symbol-day batch cannot establish behaviour on
+data the programme has never touched; they are the last internal check, not
+evidence about the world.
+
+BH family remains the **14** primary cells. The lifetime ledger keeps the **508**
+floor and stands at **522**.
 
 ## A. Exact event-time labels
 
@@ -131,9 +213,9 @@ magnitude.
 | Price-only inputs | lagged own-cadence midpoint log-returns at lags **1, 2, 3, 5, 10** plus each sign; prior-only, within symbol-day; OLS with intercept |
 | L3 model | **ridge regression**, inputs = the price-only lags **plus** all 59 features; **nested**, never a separate fit |
 | Scaling | per (symbol, cadence) expanding standardization on strictly prior observations; withheld below 30 priors |
-| Cross-sectional residualization | at each grid instant subtract the equal-weighted cross-sectional mean of the **target** across the 8 symbols; requires ≥ 6 of 8 present else the row drops; features are not residualized |
+| Cross-sectional residualization | **not applied** — undefined for the asynchronous event cadences; see plan v3 above |
 | Hyperparameter | ridge alpha ∈ {0.01, 0.1, 1, 10, 100}, chosen **inside discovery only** by expanding-origin CV, then frozen; re-tuning on validation or confirmation is forbidden |
-| Out-of-sample score | out-of-sample R² of the residualized target; the test statistic is `delta_R2 = R2(l3) − R2(baseline)` |
+| Out-of-sample score | out-of-sample R² of the **raw** `return_bps` target; the test statistic is `delta_R2 = R2(l3) − R2(baseline)` |
 | Inference | session-clustered t on **per-session-date** `delta_R2` — one observation per date, so 19.5 M rows cannot pose as 19.5 M degrees of freedom; effective N reported beside raw N |
 | Block bootstrap | whole session dates, 2,000 resamples, two-sided 95 % percentile on `delta_R2` |
 | BH family | the **14** cells of this run, FDR 0.10 |
@@ -141,7 +223,7 @@ magnitude.
 | Validation pass | same sign, t ≥ 3.0, survives BH across the 14, **and** point estimate ≥ half the discovery estimate |
 | Confirmation | single use, run once, only for validation survivors; same sign, `delta_R2 > 0`, bootstrap lower bound > 0. No re-run, no re-split |
 | Monotonicity | 0.70, declared to apply to the later ordinal feature-decomposition stage; explicitly **does not gate** the block-level test |
-| PBO | CSCV with S = 16 contiguous date blocks, all **C(16,8) = 12,870** balanced partitions; select best in-sample configuration per partition, record its out-of-sample rank; PBO = fraction landing in the bottom half. Configuration set = 14 cells × 5 alphas. Metric = `delta_R2`. **PBO > 0.50 authorizes nothing** |
+| PBO | **nested** CSCV, S = 16, C(16,8) = 12,870 partitions; alpha re-tuned inside each partition's in-sample half. Configuration set = **14 cells** (alpha is nested, not flattened). Metric = `delta_R2` on the raw target. **PBO > 0.50 authorizes nothing** |
 
 Why the validation half-estimate rule: a discovery estimate that collapses in
 validation is a discovery artefact, and "same sign, still significant" alone does
@@ -154,7 +236,7 @@ v1 used lifetime exposure as the BH denominator. These are different quantities:
 | Quantity | Value | Use |
 |---|---|---|
 | **BH family** | **14** | multiplicity control within this run |
-| Ridge-alpha looks | 5 | seen by **PBO**, not by BH — a choice, not a hypothesis about the book |
+| Ridge-alpha looks | 5 | **nested inside each cell**; absorbed into the PBO estimate, not counted as configurations or in BH |
 | Prior effective trials | **508** (floor) | lifetime bookkeeping |
 | **Lifetime effective trials** | **522** | deflated-Sharpe style correction; programme-level judgement |
 
@@ -166,10 +248,10 @@ revise down.
 ## Tests
 
 ```
-44 Stage-2A tests pass (22 label engine, 22 plan), 1 skipped
+51 Stage-2A tests pass (22 label engine, 29 plan), 1 skipped
 ```
 
-Full suite: **1931 passed**. The skip is the real-file integration test.
+Full suite: **1938 passed**. The skip is the real-file integration test.
 
 Label semantics: event-time `next_change` at millisecond resolution; second
 event-time change; repeated midpoint is not a change; one-sided book is not a
@@ -220,8 +302,8 @@ failure rather than labelled from the grid.
 - **No labels built from the real dataset.** Tested against synthetic streams and one opt-in real-file integration case; the 160 symbol-days have not been walked.
 - **Label build cost is a second full replay.** Stage-1 extraction replayed 562 M records once; labelling replays them again. If that is unacceptable, features and labels could be produced in one pass — but that would couple the frozen artefact to the label build, and I chose not to touch Stage 1.
 - **`PRIOR_EFFECTIVE_TRIALS = 508` is asserted, not recomputed.** The live ledger was not queried; carried forward as a declared floor.
-- **The 6-of-8 residualization quorum is a judgement.** Declared before outcomes, but not derived from anything.
-- **PBO's S = 16 exceeds the 20 available dates only narrowly.** With 20 dates and 16 blocks, blocks are 1–2 dates each; the partition count is large but the blocks are small. That is a real weakness of a 20-date sample, not of the method, and it is why PBO is a veto rather than a score to optimize.
+- **PBO's S = 16 against 20 dates gives blocks of 1–2 dates each.** The partition count is large but the blocks are thin. That is a real weakness of a 20-date sample, not of the method, and it is why PBO is a veto rather than a score to optimize.
+- **The primary target is absolute, not market-relative.** A cell can now pass on market-wide predictability that a residualized target would have removed. That is the declared question, but it means a survivor needs Stage-3 to establish it is not simply beta.
 
 ## Pre-existing unrelated failure
 

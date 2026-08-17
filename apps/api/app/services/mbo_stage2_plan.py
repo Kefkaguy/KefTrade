@@ -1,42 +1,57 @@
-"""Stage 2A v2: the frozen, executable Stage-2 prediction plan.
+"""Stage 2A v3: the final frozen, executable Stage-2 prediction plan.
 
 Declared **before any feature-label relationship is visible**. Every choice that
 could otherwise be made after seeing results is fixed here, exactly, including
-the model, the scaling, the score, the test statistic and the pass criteria. An
-unspecified choice is a degree of freedom, and a degree of freedom exercised
-after the fact is not a decision -- it is a result.
+the model, the scaling, the score, the test statistic, the pass criteria and the
+overfitting procedure. An unspecified choice is a degree of freedom, and a
+degree of freedom exercised after the fact is not a decision -- it is a result.
 
-## What v2 corrected
+## What v3 corrected
 
-v1 declared a 1,652-cell grid of individual features against every horizon at
-every cadence. That treated 59 sensors as 59 independent strategies and would
-have produced a winner ranking whose top cell was mostly selection.
+**1. The primary target is the raw event-time return.** v2 residualized the
+target against the equal-weighted cross-sectional mean of the eight symbols at
+each instant. That rule is *undefined* for the event cadences: 1s and 5s grids
+are cross-symbol aligned by construction, but 50ev and 200ev clocks advance on
+each symbol's own event count and are asynchronous, so "the same instant across
+eight symbols" does not exist there. A quorum rule cannot rescue a
+same-instant definition that has no instants.
 
-The primary authorization test is now **block-level**: does the complete frozen
-L3 feature block carry incremental predictive information beyond a price-only
-baseline? Fourteen cells, one per admissible (cadence, horizon) pair. No
-individual-feature ranking is computed in the primary run at all. Feature
-decomposition is a later, separately counted stage, and only if the block-level
-hypothesis survives.
+The dependence residualization was meant to control is already handled: whole
+session-date splits keep all eight symbols on the same side of every boundary,
+and inference is one observation per session date, so eight symbols never enter
+as eight independent sessions. And the primary question is *absolute* future
+price predictability beyond a price-only baseline, which is what the raw return
+measures.
+
+No residualized-target secondary family is declared. If one is wanted later it
+must be declared separately and counted separately.
+
+**2. PBO is nested, not a flattened configuration set.** v2 defined the CSCV
+configuration set as "14 cells + 5 alpha values", which is wrong: alpha is a
+hyperparameter *inside* each cell, not an independent configuration competing
+with them. The configuration set is the **14 cells**. Alpha is selected inside
+each partition's in-sample half, per cell, from the frozen candidate set.
 
 ## Lifetime exposure is not the BH family
 
-Two different quantities, conflated in v1:
+* **Lifetime effective trials** -- everything this programme has spent against
+  the same eventual decision. Carries the 508 floor and only grows.
+* **The BH family** -- the 14 primary cells of this run.
 
-* **Lifetime effective trials** -- everything this research programme has ever
-  spent against the same eventual decision. Carries the 508 floor forward and
-  only grows. Used for deflated-Sharpe style corrections and for judging whether
-  the programme as a whole has earned a conclusion.
-* **The BH family** -- the 14 primary cells declared in *this* run. Multiplicity
-  control within a run is applied across the cells of that run.
+Correcting 14 cells as though they were 522 would be as wrong as the reverse.
 
-Correcting 14 cells as though they were 522 would be as wrong as correcting 522
-looks as though they were 14. Both numbers are reported.
+## What passing Stage 2 authorizes
+
+The final four dates are an **internal** single-use confirmation gate. Clearing
+every Stage-2 gate authorizes exactly two things: Stage-3 economic, cost and
+latency testing, and the acquisition or use of a larger, completely untouched
+external confirmation sample. It authorizes **no real-money deployment**.
 """
 
 from __future__ import annotations
 
 import hashlib
+from math import comb
 from typing import Any
 
 from app.services.intraday_hypotheses import (
@@ -53,7 +68,7 @@ from app.services.mbo_label_engine import (
     LABEL_ENGINE_VERSION,
 )
 
-STAGE2_PLAN_VERSION = "tier1_stage2_plan_v2"
+STAGE2_PLAN_VERSION = "tier1_stage2_plan_v3"
 
 SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
     {
@@ -62,19 +77,23 @@ SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
         "superseded_before_outcome": "true",
         "reason": (
             "declared a 1,652-cell individual-feature grid, treating 59 sensors as "
-            "59 independent strategies and inviting a winner ranking that would be "
-            "mostly selection; split by fraction rather than by whole session-date "
-            "blocks; left the executable model, scaling, score, test statistic and "
-            "pass criteria unspecified; and conflated lifetime exposure with the "
-            "within-run BH family."
+            "59 independent strategies; split by fraction rather than whole "
+            "session-date blocks; left the executable model unspecified; and "
+            "conflated lifetime exposure with the within-run BH family."
         ),
-        "declared_trials": "1680",
+    },
+    {
+        "version": "tier1_stage2_plan_v2",
+        "commit": "a28b322971c4e2f476069c302f9b6d915e67f7b0",
+        "superseded_before_outcome": "true",
+        "reason": (
+            "residualized the primary target cross-sectionally at each instant, a "
+            "rule undefined for the asynchronous 50ev/200ev cadences; and defined "
+            "the CSCV configuration set as 14 cells plus 5 alpha values, treating a "
+            "within-cell hyperparameter as an independent configuration."
+        ),
     },
 )
-
-# ---------------------------------------------------------------------------
-# Lifetime exposure ledger (bookkeeping) vs the BH family (this run)
-# ---------------------------------------------------------------------------
 
 PRIOR_EFFECTIVE_TRIALS = 508
 PRIOR_EXPOSURE_SOURCES: tuple[str, ...] = (
@@ -86,13 +105,8 @@ PRIOR_EXPOSURE_SOURCES: tuple[str, ...] = (
 )
 
 # ---------------------------------------------------------------------------
-# C. The primary hypothesis grid: 14 block-level cells
+# The primary hypothesis grid: 14 block-level cells
 # ---------------------------------------------------------------------------
-#
-# Time horizons are tested on time cadences and change horizons on event
-# cadences. Pairing a 60-second horizon with a 200-event clock, or a
-# next-change horizon with a 5-second clock, would test a mismatch between the
-# sampling clock and the outcome clock rather than a hypothesis about the book.
 
 PRIMARY_CELLS: tuple[tuple[str, str], ...] = (
     ("1s", "1s"),
@@ -113,14 +127,6 @@ PRIMARY_CELLS: tuple[tuple[str, str], ...] = (
 
 BH_FAMILY_SIZE = len(PRIMARY_CELLS)
 
-# ---------------------------------------------------------------------------
-# D. Chronological split by complete session-date blocks
-# ---------------------------------------------------------------------------
-#
-# All eight symbols move together. A date is never split across sets: two
-# symbols from the same session are not independent, so putting one in training
-# and one in test leaks the day's regime across the boundary.
-
 SPLIT_DATE_BLOCKS: tuple[tuple[str, int], ...] = (
     ("discovery", 10),
     ("validation", 6),
@@ -128,24 +134,48 @@ SPLIT_DATE_BLOCKS: tuple[tuple[str, int], ...] = (
 )
 TOTAL_SESSION_DATES = sum(count for _, count in SPLIT_DATE_BLOCKS)
 EMBARGO_HORIZON = "60s"
-EMBARGO_DATES = 0  # whole-date blocks already exceed any intraday horizon
-
-# ---------------------------------------------------------------------------
-# E. The executable model, frozen
-# ---------------------------------------------------------------------------
 
 PRIMARY_TARGET = "return_bps"
-
 PRICE_ONLY_LAGS: tuple[int, ...] = (1, 2, 3, 5, 10)
+RIDGE_ALPHAS: tuple[float, ...] = (0.01, 0.1, 1.0, 10.0, 100.0)
+
+# CSCV geometry.
+CSCV_BLOCKS = 16
+CSCV_IN_SAMPLE_BLOCKS = CSCV_BLOCKS // 2
+CSCV_PARTITIONS = comb(CSCV_BLOCKS, CSCV_IN_SAMPLE_BLOCKS)
+PBO_AUTHORIZATION_CEILING = 0.50
+BH_FALSE_DISCOVERY_RATE = 0.10
+BLOCK_BOOTSTRAP_RESAMPLES = 2000
+
+# Design width: 5 lagged returns + 5 signs + 59 features + intercept.
+DESIGN_WIDTH = 2 * len(PRICE_ONLY_LAGS) + len(FEATURE_VOCABULARY) + 1
+
 
 MODEL_SPEC: dict[str, Any] = {
     "primary_target": {
         "column": PRIMARY_TARGET,
         "definition": (
-            "the horizon's signed midpoint return in basis points, from the wide "
-            "label table, used only where that horizon's status is 'ok'"
+            "the cell horizon's signed midpoint return in basis points, taken "
+            "directly from the wide event-time label table, used only where that "
+            "horizon's status is 'ok'"
         ),
+        "residualized": False,
         "rows_excluded": "any row whose horizon status is not 'ok'; never imputed",
+        "why_not_residualized": (
+            "A same-instant cross-sectional mean is undefined for the 50ev and "
+            "200ev cadences, whose clocks advance on each symbol's own event count "
+            "and are therefore asynchronous across symbols; a quorum rule cannot "
+            "rescue a definition that has no shared instants. The cross-symbol "
+            "dependence it was meant to control is already handled by whole "
+            "session-date splits and per-date inference. And the primary question "
+            "is absolute future-price predictability beyond a price-only baseline, "
+            "which the raw return measures directly."
+        ),
+        "residualized_secondary_family_declared": False,
+        "note_on_later_declaration": (
+            "If a residualized-target family is wanted later it must be declared "
+            "separately and counted separately; it is not part of this run."
+        ),
     },
     "price_only_baseline": {
         "inputs": (
@@ -154,14 +184,18 @@ MODEL_SPEC: dict[str, Any] = {
         ),
         "estimator": "ordinary least squares, no regularization, intercept fitted",
         "purpose": (
-            "short-horizon midpoint changes mean-revert unaided; a book feature that "
-            "only recovers bid-ask bounce has added nothing"
+            "short-horizon midpoint changes mean-revert unaided; a book feature "
+            "that only recovers bid-ask bounce has added nothing"
         ),
     },
     "l3_model": {
         "estimator": "ridge regression",
         "inputs": "the price-only lags PLUS all 59 frozen Stage-1 features",
-        "form": "nested -- the L3 model is the baseline's inputs augmented, never a separate fit",
+        "form": (
+            "nested -- the L3 model is the baseline's inputs augmented, never a "
+            "separate fit"
+        ),
+        "design_width": DESIGN_WIDTH,
         "reason": (
             "ridge, because 59 correlated sensors under OLS is a variance problem, "
             "and the hypothesis is about the block rather than about which sensor "
@@ -174,46 +208,56 @@ MODEL_SPEC: dict[str, Any] = {
             "prior observations within the symbol-day; withheld below 30 priors"
         ),
         "forbidden": "any statistic computed over data at or after the observation",
+        "partition_independent": True,
+        "consequence": (
+            "Because standardization looks only within a symbol-day and only "
+            "backwards, the design matrix does not depend on how dates are split. "
+            "That is what makes per-date Gram matrices additive, and therefore what "
+            "makes the nested CSCV below computationally feasible."
+        ),
         "already_frozen_in_stage1": list(NORMALIZED_FEATURES),
     },
     "cross_sectional_residualization": {
-        "rule": (
-            "at each grid instant, subtract the equal-weighted cross-sectional mean "
-            "of the target across the eight symbols before fitting; the residual is "
-            "the modelled quantity"
-        ),
-        "reason": (
-            "without it a market-wide move fires on eight names at once and reads as "
-            "eight independent confirmations of one bet"
-        ),
-        "applies_to": "the target only; features are not residualized in the primary run",
-        "requires": "at least 6 of 8 symbols present at the instant, else the row is dropped",
+        "applied": False,
+        "reason": "see primary_target.why_not_residualized",
     },
     "hyperparameter_rule": {
         "parameter": "ridge alpha",
-        "candidates": [0.01, 0.1, 1.0, 10.0, 100.0],
-        "selection": (
-            "chosen inside the DISCOVERY block only, by the same out-of-sample score, "
-            "using expanding-origin cross-validation over discovery dates; the chosen "
-            "alpha is then frozen and reused unchanged for validation and confirmation"
+        "candidates": list(RIDGE_ALPHAS),
+        "chronological_path": (
+            "selected inside the DISCOVERY block only, by leave-one-date-out "
+            "cross-validation over the 10 discovery dates, maximizing mean "
+            "out-of-fold delta_R2; then frozen and reused unchanged for validation "
+            "and confirmation"
+        ),
+        "leakage_rule": (
+            "No validation or confirmation date may enter any alpha choice on the "
+            "ordinary chronological path, directly or through a fold boundary."
+        ),
+        "inside_cscv": (
+            "re-selected independently within each CSCV partition's in-sample half; "
+            "see pbo.implementation"
         ),
         "forbidden": "re-tuning on validation or confirmation for any reason",
     },
     "out_of_sample_score": {
-        "primary": "out-of-sample R^2 of the residualized target",
+        "primary": "out-of-sample R^2 of the raw return_bps target",
         "incremental_statistic": "delta_R2 = R2(l3_model) - R2(price_only_baseline)",
-        "reported": "delta_R2 with its interval; the level of R2 is reported beside it but is not the test",
+        "reported": (
+            "delta_R2 with its interval; the level of R2 is reported beside it but "
+            "is not the test"
+        ),
     },
     "inference": {
         "test_statistic": (
             "session-clustered t on the per-session-date delta_R2, one observation "
-            "per session date, so 19.5 M rows cannot masquerade as 19.5 M degrees of "
-            "freedom"
+            "per session date, so 19.5 M rows cannot masquerade as 19.5 M degrees "
+            "of freedom"
         ),
         "effective_n": "reported beside raw N for every cell",
         "block_bootstrap": {
             "unit": "whole session dates (all eight symbols together)",
-            "resamples": 2000,
+            "resamples": BLOCK_BOOTSTRAP_RESAMPLES,
             "statistic": "delta_R2",
             "interval": "two-sided 95% percentile",
         },
@@ -221,15 +265,13 @@ MODEL_SPEC: dict[str, Any] = {
     "bh_family": {
         "members": "the 14 primary cells of this run",
         "size": BH_FAMILY_SIZE,
-        "false_discovery_rate": 0.10,
-        "note": (
-            "lifetime exposure is tracked separately and is not the BH denominator"
-        ),
+        "false_discovery_rate": BH_FALSE_DISCOVERY_RATE,
+        "note": "lifetime exposure is tracked separately and is not the BH denominator",
     },
     "pass_criteria": {
         "discovery": (
-            "delta_R2 > 0 with session-clustered t >= 3.0 and a bootstrap lower bound "
-            "above 0; failure here ends the cell"
+            "delta_R2 > 0 with session-clustered t >= 3.0 and a bootstrap lower "
+            "bound above 0; failure here ends the cell"
         ),
         "validation": (
             "same sign, delta_R2 > 0, session-clustered t >= 3.0, survives BH across "
@@ -252,46 +294,112 @@ MODEL_SPEC: dict[str, Any] = {
         },
     },
     "pbo": {
-        "method": "CSCV (combinatorially symmetric cross-validation)",
-        "implementation": (
-            "session dates split into S=16 contiguous blocks; all C(16,8)=12,870 "
-            "balanced partitions into in-sample and out-of-sample halves; for each, "
-            "select the configuration with the best in-sample performance metric and "
-            "record its out-of-sample rank; PBO is the fraction of partitions whose "
-            "selected configuration lands in the bottom half out of sample"
-        ),
+        "method": "nested CSCV (combinatorially symmetric cross-validation)",
         "configuration_set": (
-            "the 14 primary cells plus the 5 ridge-alpha candidates -- the choices "
-            "actually made, not a synthetic grid"
+            "the 14 primary cells. Alpha is a hyperparameter inside a cell, not a "
+            "configuration competing with cells, so it does not enter the set."
         ),
-        "performance_metric": "delta_R2 of the residualized target",
-        "authorization_ceiling": 0.50,
+        "configuration_count": BH_FAMILY_SIZE,
+        "implementation": (
+            f"Session dates are divided into S={CSCV_BLOCKS} contiguous blocks. For "
+            f"each of the C({CSCV_BLOCKS},{CSCV_IN_SAMPLE_BLOCKS})="
+            f"{CSCV_PARTITIONS:,} balanced partitions into an in-sample half and an "
+            "out-of-sample half, and for each of the 14 cells independently: "
+            "(1) select alpha using ONLY that partition's in-sample dates, from the "
+            "frozen candidate set, by leave-one-block-out CV over the in-sample "
+            "blocks; (2) fit the cell with that alpha on the full in-sample half; "
+            "(3) score in-sample and out-of-sample delta_R2. Then select the cell "
+            "with the best in-sample delta_R2 and record its rank among the 14 "
+            "out-of-sample scores. PBO is the fraction of partitions whose "
+            "in-sample-selected cell ranks in the bottom half out of sample."
+        ),
+        "alpha_is_nested_not_flattened": True,
+        "performance_metric": "delta_R2 of the raw return_bps target",
+        "authorization_ceiling": PBO_AUTHORIZATION_CEILING,
         "rule": (
             "PBO above 0.50 authorizes no strategy from the grid regardless of any "
             "individual cell's t-statistic. A grid always produces a best cell; its "
             "t says nothing about how many it beat."
         ),
+        "feasibility": {
+            "assessed_before_outcomes": True,
+            "feasible": True,
+            "why": (
+                "Standardization is prior-only within symbol-day, so the design "
+                "matrix is partition-independent and per-date Gram matrices "
+                "(X'X, X'y, y'y, n) are additive. Any partition's fit is a sum of "
+                "precomputed per-date blocks followed by one Cholesky solve, so no "
+                "row-level data is revisited per partition."
+            ),
+            "precomputed_blocks": BH_FAMILY_SIZE * TOTAL_SESSION_DATES,
+            "design_width": DESIGN_WIDTH,
+            "solves_per_cell_partition": (
+                len(RIDGE_ALPHAS) * CSCV_IN_SAMPLE_BLOCKS + len(RIDGE_ALPHAS) + 1
+            ),
+            "total_solves": (
+                CSCV_PARTITIONS
+                * BH_FAMILY_SIZE
+                * (len(RIDGE_ALPHAS) * CSCV_IN_SAMPLE_BLOCKS + len(RIDGE_ALPHAS) + 1)
+            ),
+            "measured_single_core_minutes": 3.2,
+            "resident_memory_mb": 11.1,
+            "if_infeasible": (
+                "PBO would have been removed as an authorization statistic before "
+                "outcomes rather than computed in a flattened, invalid form. It was "
+                "measured as feasible, so it stays."
+            ),
+        },
     },
 }
 
 
+def authorization_scope() -> dict[str, Any]:
+    """Exactly what clearing every Stage-2 gate does and does not permit."""
+    return {
+        "confirmation_block": {
+            "session_dates": 4,
+            "kind": "internal single-use confirmation gate",
+            "single_use": True,
+            "is_an_external_sample": False,
+        },
+        "passing_stage2_authorizes": [
+            "Stage-3 economic, cost and latency testing",
+            (
+                "acquisition or use of a larger, completely untouched external "
+                "confirmation sample"
+            ),
+        ],
+        "passing_stage2_does_not_authorize": [
+            "real-money deployment",
+            "any live capital allocation",
+            "treating the 4-date internal gate as an external validation",
+        ],
+        "reason": (
+            "Four internal dates drawn from the same frozen 160-symbol-day batch "
+            "cannot establish out-of-sample behaviour on data the programme has "
+            "never touched. They are the last internal check, not evidence about "
+            "the world."
+        ),
+    }
+
+
 def multiplicity_accounting() -> dict[str, Any]:
-    """The two distinct counts, kept apart."""
     return {
         "bh_family": {
             "description": "primary cells declared in this run; the BH denominator",
             "size": BH_FAMILY_SIZE,
-            "false_discovery_rate": 0.10,
+            "false_discovery_rate": BH_FALSE_DISCOVERY_RATE,
             "cells": [{"cadence": c, "horizon": h} for c, h in PRIMARY_CELLS],
         },
         "hyperparameter_looks": {
-            "ridge_alpha_candidates": len(MODEL_SPEC["hyperparameter_rule"]["candidates"]),
-            "confined_to": "discovery block only",
-            "counted_in_pbo_configuration_set": True,
+            "ridge_alpha_candidates": len(RIDGE_ALPHAS),
+            "treated_as": "a hyperparameter nested inside each cell",
+            "counted_as_pbo_configurations": False,
             "counted_in_bh_family": False,
-            "reason": (
-                "alpha is selected inside discovery and frozen; it is not a separate "
-                "hypothesis about the book, but it is a choice, so PBO sees it"
+            "handled_by": (
+                "re-selection inside each CSCV partition's in-sample half, so the "
+                "cost of tuning is absorbed into the PBO estimate rather than "
+                "counted as extra configurations competing with the cells"
             ),
         },
         "lifetime_exposure_ledger": {
@@ -304,14 +412,16 @@ def multiplicity_accounting() -> dict[str, Any]:
             "added_this_stage": BH_FAMILY_SIZE,
             "lifetime_effective_trials": PRIOR_EFFECTIVE_TRIALS + BH_FAMILY_SIZE,
             "resets_for_new_dataset_family": False,
-            "reason": (
-                "Tier-1 is better input to the same question, not a new question"
-            ),
+            "reason": "Tier-1 is better input to the same question, not a new question",
         },
         "deferred_stages_not_counted_here": {
             "feature_decomposition": (
                 "individual-feature attribution runs only if the block-level "
                 "hypothesis survives, and is declared and counted separately then"
+            ),
+            "residualized_target_family": (
+                "not declared; if wanted later it is a separate declaration with its "
+                "own count"
             ),
             "declared_now": False,
         },
@@ -329,8 +439,8 @@ def statistical_plan() -> dict[str, Any]:
         "contains_predictive_result": False,
         "primary_hypothesis": (
             "The complete frozen Stage-1 L3 feature block carries incremental "
-            "predictive information about the residualized forward midpoint return "
-            "beyond a price-only baseline."
+            "predictive information about the raw forward midpoint return beyond a "
+            "price-only baseline."
         ),
         "primary_grid": {
             "form": "block-level, one cell per admissible (cadence, horizon) pair",
@@ -346,7 +456,8 @@ def statistical_plan() -> dict[str, Any]:
         "splits": {
             "kind": "chronological, whole session-date blocks",
             "blocks": [
-                {"name": name, "session_dates": count} for name, count in SPLIT_DATE_BLOCKS
+                {"name": name, "session_dates": count}
+                for name, count in SPLIT_DATE_BLOCKS
             ],
             "total_session_dates": TOTAL_SESSION_DATES,
             "all_symbols_move_together": True,
@@ -356,13 +467,15 @@ def statistical_plan() -> dict[str, Any]:
                 "date leaks the day's regime across the boundary"
             ),
             "embargo": (
-                f"whole-date blocks already exceed the longest label ({EMBARGO_HORIZON}), "
-                "so no additional embargo period is required and none is applied"
+                f"whole-date blocks already exceed the longest label "
+                f"({EMBARGO_HORIZON}), so no additional embargo period is required "
+                "and none is applied"
             ),
             "confirmation_is_single_use": True,
         },
         "model": MODEL_SPEC,
         "multiplicity": multiplicity_accounting(),
+        "authorization_scope": authorization_scope(),
         "economic_gate": {
             "minimum_tradeable_net_bps": MINIMUM_TRADEABLE_NET_BPS,
             "required_t_statistic": REQUIRED_T_STATISTIC,
@@ -375,12 +488,17 @@ def statistical_plan() -> dict[str, Any]:
             "horizon substitution or nearest-horizon selection after results",
             "adding, dropping or renaming a horizon or cell after results",
             "re-splitting, or moving a date between blocks, after results",
-            "re-tuning ridge alpha outside the discovery block",
+            "re-tuning ridge alpha outside the discovery block on the chronological path",
+            "letting any validation or confirmation date enter an alpha choice",
+            "flattening alpha into the PBO configuration set",
             "individual-feature ranking inside the primary run",
+            "residualizing the primary target",
             "reporting a subset of cells while correcting for that subset",
             "threshold selection inside Stage 2",
             "any transformation using data at or after the observation",
             "re-running confirmation for any reason",
+            "treating the internal confirmation block as an external sample",
+            "deploying real money on the strength of Stage 2 alone",
         ],
     }
 
@@ -394,14 +512,18 @@ PLAN_HASH = hashlib.sha256(
             *(f"{c}:{h}" for c, h in PRIMARY_CELLS),
             *(f"{name}:{count}" for name, count in SPLIT_DATE_BLOCKS),
             PRIMARY_TARGET,
+            "residualized=False",
             str(PRICE_ONLY_LAGS),
             MODEL_SPEC["l3_model"]["estimator"],
-            str(MODEL_SPEC["hyperparameter_rule"]["candidates"]),
+            str(RIDGE_ALPHAS),
             MODEL_SPEC["out_of_sample_score"]["incremental_statistic"],
             MODEL_SPEC["pbo"]["method"],
-            str(MODEL_SPEC["pbo"]["authorization_ceiling"]),
+            f"cscv_blocks={CSCV_BLOCKS}",
+            f"cscv_configurations={BH_FAMILY_SIZE}",
+            str(PBO_AUTHORIZATION_CEILING),
             str(BH_FAMILY_SIZE),
             str(PRIOR_EFFECTIVE_TRIALS),
+            "authorizes=stage3+external_sample;not=real_money",
         )
     ).encode("utf-8")
 ).hexdigest()
