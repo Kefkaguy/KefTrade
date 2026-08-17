@@ -160,31 +160,27 @@ def test_trade_side_b_is_a_buy_aggressor():
     assert last["aggressor_imbalance"] == pytest.approx(1.0)
 
 
-def test_fill_side_b_is_a_sell_aggressor():
-    """On a Fill, side=B means a resting BUY was filled -- a seller hit it.
+def test_fill_never_contributes_to_aggressor_volume():
+    """v2: a Fill is an execution, not a separate trade.
 
-    Signing fills the same way as trades inverts every aggressor feature. This
-    is the single most consequential sign in the vocabulary.
+    Its `side` names the *resting* side and is still meaningful, but the
+    accompanying `T` already carries the trade. v1 signed both, which doubled
+    every execution.
     """
     ev = Clock()
     rows = snapshots(
-        [opening(), ev("A", "B", 100 * PX, 500, 1), ev("F", "B", 100 * PX, 200, 1)]
+        [opening(), ev("A", "B", 100 * PX, 500, 1), ev("F", "B", 100 * PX, 200, 1)],
+        cadences=(Cadence("all", "events", 2),),
     )
     last = rows[-1]
-    assert last["sell_aggressor_volume"] == 200
     assert last["buy_aggressor_volume"] == 0
-    assert last["signed_trade_volume"] == -200
-
-
-def test_fill_and_trade_of_the_same_side_letter_have_opposite_signs():
-    ev = Clock()
-    trade = snapshots([opening(), ev("T", "A", 100 * PX, 100, 0)])[-1]
-    ev2 = Clock()
-    fill = snapshots(
-        [opening(), ev2("A", "A", 100 * PX, 500, 1), ev2("F", "A", 100 * PX, 100, 1)]
-    )[-1]
-    assert trade["signed_trade_volume"] == -100  # sell aggressor
-    assert fill["signed_trade_volume"] == 100  # resting sell filled -> buyer hit it
+    assert last["sell_aggressor_volume"] == 0
+    assert last["signed_trade_volume"] == 0
+    assert last["trade_volume"] == 0
+    assert last["aggressor_imbalance"] is None
+    # The fill is still a full citizen of the execution/lifecycle features.
+    assert last["execution_count"] == 1
+    assert last["execution_volume"] == 200
 
 
 def test_side_none_trades_are_counted_but_never_signed():

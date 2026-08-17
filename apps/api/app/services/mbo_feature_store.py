@@ -36,9 +36,12 @@ from app.services.mbo_book_validator import MBO_VALIDATOR_VERSION
 from app.services.mbo_feature_engine import (
     CADENCES,
     FEATURE_ENGINE_VERSION,
+    FEATURE_SEMANTICS_HASH,
     FEATURE_VOCABULARY,
     FEATURE_VOCABULARY_HASH,
     SNAPSHOT_COLUMNS,
+    SNAPSHOT_SCHEMA_HASH,
+    SUPERSEDED_ENGINE_VERSIONS,
     Cadence,
     OrderBookFeatureEngine,
     feature_definitions,
@@ -51,6 +54,11 @@ DEFAULT_ROW_GROUP = 50_000
 
 _INT_COLUMNS = {
     "ts_event",
+    # v2 provenance: nullable for event cadences, which have no grid boundary.
+    "grid_ts_event",
+    "source_ts_event",
+    "source_ts_recv",
+    "feature_available_ts_recv",
     "sequence",
     "flast_index",
     "sequence_index",
@@ -216,6 +224,11 @@ def write_session_features(
         "feature_engine_version": FEATURE_ENGINE_VERSION,
         "validator_version": MBO_VALIDATOR_VERSION,
         "feature_vocabulary_hash": FEATURE_VOCABULARY_HASH,
+        "snapshot_schema_hash": SNAPSHOT_SCHEMA_HASH,
+        # Binds the engine version to the schema, so a semantic correction that
+        # renames nothing still changes the recorded provenance.
+        "feature_semantics_hash": FEATURE_SEMANTICS_HASH,
+        "superseded_engine_versions": [dict(e) for e in SUPERSEDED_ENGINE_VERSIONS],
         "feature_count": len(FEATURE_VOCABULARY),
         "symbol": symbol,
         "session_date": session_date,
@@ -248,6 +261,7 @@ def iter_manifests(output_dir: Path) -> Iterator[dict[str, Any]]:
 def batch_manifest(output_dir: Path, manifests: list[dict[str, Any]]) -> dict[str, Any]:
     """One record describing the whole extraction, plus the definitions."""
     hashes = {m["feature_vocabulary_hash"] for m in manifests}
+    semantics = {m.get("feature_semantics_hash") for m in manifests}
     engines = {m["feature_engine_version"] for m in manifests}
     summary = {
         "feature_store_version": FEATURE_STORE_VERSION,
@@ -273,6 +287,9 @@ def batch_manifest(output_dir: Path, manifests: list[dict[str, Any]]) -> dict[st
         # did not move mid-extraction.
         "feature_vocabulary_hashes": sorted(hashes),
         "feature_vocabulary_consistent": len(hashes) <= 1,
+        # The stricter check: names can match while semantics differ.
+        "feature_semantics_hashes": sorted(h for h in semantics if h),
+        "feature_semantics_consistent": len({h for h in semantics if h}) <= 1,
         "feature_engine_versions": sorted(engines),
         "definitions": feature_definitions(),
         "contains_forward_information": False,

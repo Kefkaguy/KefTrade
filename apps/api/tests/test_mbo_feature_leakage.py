@@ -134,11 +134,29 @@ def run(events):
 
 
 def index_of_event(events, snapshot) -> int:
-    """Position of the event a snapshot was emitted on."""
+    """The last event index that may be kept for this snapshot to still emit.
+
+    Event cadences emit *on* their source event, so the cut is that event.
+
+    Time cadences emit at a grid boundary, which only becomes final once an
+    event arrives with `ts_event > boundary`. That trigger event contributes
+    nothing to the snapshot -- boundaries are flushed before it is applied --
+    so including it is causally sound, and excluding it would simply prevent
+    the boundary from being emitted at all.
+    """
+    grid_ts = snapshot["grid_ts_event"]
+    if grid_ts is None:
+        for position, event in enumerate(events):
+            if (
+                event.ts_event == snapshot["source_ts_event"]
+                and event.sequence == snapshot["sequence"]
+            ):
+                return position
+        raise AssertionError("event-cadence snapshot has no source event")
     for position, event in enumerate(events):
-        if event.sequence == snapshot["sequence"] and event.ts_event == snapshot["ts_event"]:
+        if event.ts_event > grid_ts:
             return position
-    raise AssertionError("snapshot does not correspond to any event")
+    return len(events) - 1
 
 
 # ---------------------------------------------------------------------------

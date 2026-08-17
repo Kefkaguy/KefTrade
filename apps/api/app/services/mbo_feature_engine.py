@@ -12,41 +12,59 @@ this module or anywhere it is called from. Stage 1 stops before prediction, and
 the feature vocabulary is frozen *before* any outcome is inspected so that the
 choice of what to measure cannot be contaminated by what turned out to work.
 
+## v2: three pre-outcome corrections
+
+Found by audit before any predictive result was inspected, so these are
+corrections to a measurement that was wrong, not tuning toward a result that
+was wanted. `SUPERSEDED_ENGINE_VERSIONS` records what they replaced.
+
+**1. Aggressive flow was double counted.** XNAS normalizes one displayed
+execution as `T` → `F` → `C`. v1 added the size to buy/sell aggressor volume on
+*both* the `T` and the `F`, so a 100-share execution produced 200 shares of
+signed flow. The two records describe the same trade from different sides.
+
+The split is now strict:
+
+| Record | Contributes to |
+|---|---|
+| `T` Trade | `trade_count`, `trade_volume`, buy/sell aggressor volume, `signed_trade_volume`, `aggressor_imbalance`, `unclassified_trade_volume` |
+| `F` Fill | `execution_count`, `execution_volume`, absorption, and the refill/lifecycle features |
+
+`F` never touches aggressor volume. Its `side` is still meaningful -- it names
+the *resting* side, the opposite of the aggressor -- but the `T` already
+carries the trade, so signing the `F` as well counts it twice.
+
+**2. Time grids are absolute UTC, not per-symbol.** v1 anchored the 1s/5s grids
+to each file's first `F_LAST`, so two symbols sampled on grids offset from each
+other by an arbitrary sub-second amount and were not comparable at the same
+instant. Boundaries are now absolute multiples of the interval in UTC
+nanoseconds, identical for every symbol.
+
+A time-grid snapshot at boundary `t` may use **only the last completed `F_LAST`
+with `ts_event <= t`**. An event at `t + 1ns` belongs strictly to the next
+interval and cannot touch it. An interval with no events emits the last known
+book state with zero new window-flow primitives, rather than being skipped --
+a quiet second is an observation.
+
+**3. Availability timestamps are preserved.** `grid_ts_event`,
+`source_ts_event`, `source_ts_recv` and `feature_available_ts_recv` are carried
+so a later stage can simulate latency without re-deriving when a row could
+first have been known. `feature_available_ts_recv` is the maximum `ts_recv`
+over every record the snapshot depended on, so it never precedes an input.
+
 ## Causality
 
-Every snapshot is emitted at a completed `F_LAST` boundary and describes only
-events at or before it. Three specific disciplines:
-
-* **Windowed counters cover `(previous snapshot of this cadence, now]`.** They
-  are reset on emission, so a window can never reach forward.
-* **Normalization is prior-only and session-local.** Expanding mean and
-  variance are computed from snapshots *strictly before* the current one,
-  within the same symbol-day. A statistic that needed the whole session would
-  leak the session's future into its own past.
-* **Nothing is carried across symbol-days.** Each file starts cold.
-
-## The polarity trap
-
-Databento's `side` means opposite things on `T` and `F`, and signing both the
-same way inverts every aggressor feature:
-
-| Action | `side=B` | Signed aggressive flow |
-|---|---|---|
-| `T` Trade | the trade aggressor was a **buyer** | **+** |
-| `F` Fill | a resting **buy** order was filled | **−** (a seller hit it) |
-
-`side=N` is never signed. Databento list the cases: auctions, trades against
-non-displayed orders, implied orders, off-exchange prints, and sources that do
-not disseminate a side. Those still count toward volume and are reported as
-unclassified, exactly as the Stage 0 trade-flow work did -- dividing signed flow
-by total rather than by classified volume would drag every window toward zero in
-proportion to how many prints happened to be unsignable.
+* **Windowed counters cover `(previous snapshot of this cadence, now]`.** Reset
+  on emission, so a window cannot reach forward by construction.
+* **Normalization is prior-only and session-local.** Welford over snapshots
+  *strictly before* the current one, within the same symbol-day.
+* **Nothing crosses symbol-days.** Each file starts cold.
 
 ## Raw primitives are preserved
 
-Every ratio is stored beside the counts it came from, so any derived value can
-be recomputed and audited. `cancel_add_ratio` without `cancel_count` and
-`add_count` is an assertion; with them it is a measurement.
+Every ratio is stored beside the counts it came from. `cancel_add_ratio`
+without `cancel_count` and `add_count` is an assertion; with them it is a
+measurement.
 """
 
 from __future__ import annotations
@@ -72,19 +90,29 @@ from app.services.mbo_book_validator import (
     MboEvent,
 )
 
-FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v1"
+FEATURE_ENGINE_VERSION = "tier1_mbo_feature_engine_v2"
 
-# Depth is reported at these fixed level counts. Declared, not tuned.
+# Superseded before any predictive outcome was inspected. Kept so a reader of an
+# older manifest can tell which semantics produced it.
+SUPERSEDED_ENGINE_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_mbo_feature_engine_v1",
+        "superseded_before_outcome": "true",
+        "reason": (
+            "T and F from one XNAS execution both incremented aggressor volume, "
+            "double counting signed aggressive flow; time grids were anchored to "
+            "each file's first F_LAST rather than absolute UTC, so symbols were "
+            "not comparable at the same instant; availability timestamps were "
+            "absent."
+        ),
+        "feature_vocabulary_hash": (
+            "25e685913e3a3d05248ef6f09ad44e4b0cab91276bf7bd66d2f0d650f06b82a7"
+        ),
+    },
+)
+
 DEPTH_LEVELS: tuple[int, ...] = (1, 5, 10)
-
-# Prior-only normalization is withheld below this many prior observations
-# rather than computed from a handful and presented as a z-score.
 MIN_PRIOR_OBSERVATIONS = 30
-
-
-# ---------------------------------------------------------------------------
-# Sampling cadences
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,11 +135,6 @@ CADENCES: tuple[Cadence, ...] = (
 # ---------------------------------------------------------------------------
 # The frozen feature vocabulary
 # ---------------------------------------------------------------------------
-#
-# Frozen 2026-08-16, before any predictive outcome was inspected. Adding,
-# removing or renaming a column changes FEATURE_VOCABULARY_HASH, which is
-# recorded in every manifest -- so a vocabulary that moved after results were
-# seen is visible rather than deniable.
 
 BOOK_STATE_FEATURES: tuple[str, ...] = (
     "best_bid_price",
@@ -188,7 +211,16 @@ CONTEXT_COLUMNS: tuple[str, ...] = (
     "session_date",
     "cadence",
     "sequence_index",
+    # Nominal snapshot time: the grid boundary for time cadences, the source
+    # event for event cadences.
     "ts_event",
+    # Absolute UTC grid boundary; None for event cadences.
+    "grid_ts_event",
+    # The last completed F_LAST at or before the snapshot instant.
+    "source_ts_event",
+    "source_ts_recv",
+    # Never precedes any record the snapshot depended on.
+    "feature_available_ts_recv",
     "sequence",
     "flast_index",
     "window_ns",
@@ -214,12 +246,25 @@ FEATURE_VOCABULARY: tuple[str, ...] = (
 
 SNAPSHOT_COLUMNS: tuple[str, ...] = (*CONTEXT_COLUMNS, *FEATURE_VOCABULARY)
 
+# Names only. Unchanged by v2 -- the correction was to what `T` and `F` mean,
+# not to what the columns are called, which is exactly why a name hash alone is
+# not sufficient provenance.
 FEATURE_VOCABULARY_HASH = hashlib.sha256(
     "\n".join(FEATURE_VOCABULARY).encode("utf-8")
 ).hexdigest()
 
-# Features whose value is a window aggregate rather than an instantaneous book
-# reading. Recorded so a consumer cannot mistake one for the other.
+# The full written schema, including the v2 provenance columns.
+SNAPSHOT_SCHEMA_HASH = hashlib.sha256(
+    "\n".join(SNAPSHOT_COLUMNS).encode("utf-8")
+).hexdigest()
+
+# Binds the engine version to the vocabulary, so a semantic correction that
+# leaves every column name untouched still changes the recorded hash. A hash
+# over names alone would have called v1 and v2 identical.
+FEATURE_SEMANTICS_HASH = hashlib.sha256(
+    "\n".join((FEATURE_ENGINE_VERSION, *SNAPSHOT_COLUMNS)).encode("utf-8")
+).hexdigest()
+
 WINDOWED_FEATURES: frozenset[str] = frozenset(
     (*LIFECYCLE_FEATURES, *AGGRESSIVE_FLOW_FEATURES, *ABSORPTION_FEATURES)
 ) | {"order_flow_imbalance", "order_flow_imbalance_normalized", "mean_touch_depth"}
@@ -229,18 +274,13 @@ def _safe_ratio(numerator: float, denominator: float) -> float | None:
     return numerator / denominator if denominator else None
 
 
-# ---------------------------------------------------------------------------
-# Prior-only normalization
-# ---------------------------------------------------------------------------
-
-
 class ExpandingNormalizer:
     """Welford mean/variance over **strictly prior** observations.
 
-    ``value`` is normalized against the statistics of everything seen before
-    it, then folded in. Folding first would let an observation normalize
-    against itself, which is a small leak that flatters exactly the extreme
-    readings a later stage would care about.
+    The value is normalized against the statistics of everything before it,
+    then folded in. Folding first would let an observation normalize against
+    itself -- a small leak that flatters exactly the extreme readings a later
+    stage would care about.
     """
 
     __slots__ = ("_count", "_m2", "_mean")
@@ -269,22 +309,14 @@ class ExpandingNormalizer:
         return self._count
 
 
-# ---------------------------------------------------------------------------
-# Window accumulator
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class WindowAccumulator:
-    """Everything that happened since this cadence last emitted.
-
-    Reset on emission, so the window is ``(previous snapshot, now]`` and cannot
-    reach forward by construction.
-    """
+    """Everything since this cadence last emitted: ``(previous, now]``."""
 
     records: int = 0
     flast_events: int = 0
     start_ts: int | None = None
+    max_ts_recv: int = 0
 
     add_count: int = 0
     add_volume: int = 0
@@ -316,43 +348,41 @@ class WindowAccumulator:
     execution_volume_without_price_move: int = 0
     refill_after_execution_volume: int = 0
 
+    _RESET_FIELDS = (
+        "records",
+        "flast_events",
+        "add_count",
+        "add_volume",
+        "cancel_count",
+        "cancel_volume",
+        "modify_count",
+        "execution_count",
+        "execution_volume",
+        "trade_count",
+        "trade_volume",
+        "buy_aggressor_volume",
+        "sell_aggressor_volume",
+        "unclassified_trade_volume",
+        "touch_replenishment_volume",
+        "touch_replenishment_events",
+        "queue_depletion_events",
+        "depletion_followed_by_quote_move",
+        "best_bid_changes",
+        "best_ask_changes",
+        "flast_with_unchanged_touch",
+        "executions_without_price_move",
+        "execution_volume_without_price_move",
+        "refill_after_execution_volume",
+        "touch_depth_samples",
+        "max_ts_recv",
+    )
+
     def reset(self, ts: int) -> None:
-        for name, default in (
-            ("records", 0),
-            ("flast_events", 0),
-            ("add_count", 0),
-            ("add_volume", 0),
-            ("cancel_count", 0),
-            ("cancel_volume", 0),
-            ("modify_count", 0),
-            ("execution_count", 0),
-            ("execution_volume", 0),
-            ("trade_count", 0),
-            ("trade_volume", 0),
-            ("buy_aggressor_volume", 0),
-            ("sell_aggressor_volume", 0),
-            ("unclassified_trade_volume", 0),
-            ("ofi", 0.0),
-            ("touch_depth_sum", 0.0),
-            ("touch_depth_samples", 0),
-            ("touch_replenishment_volume", 0),
-            ("touch_replenishment_events", 0),
-            ("queue_depletion_events", 0),
-            ("depletion_followed_by_quote_move", 0),
-            ("best_bid_changes", 0),
-            ("best_ask_changes", 0),
-            ("flast_with_unchanged_touch", 0),
-            ("executions_without_price_move", 0),
-            ("execution_volume_without_price_move", 0),
-            ("refill_after_execution_volume", 0),
-        ):
-            setattr(self, name, default)
+        for name in self._RESET_FIELDS:
+            setattr(self, name, 0)
+        self.ofi = 0.0
+        self.touch_depth_sum = 0.0
         self.start_ts = ts
-
-
-# ---------------------------------------------------------------------------
-# The engine
-# ---------------------------------------------------------------------------
 
 
 @dataclass(slots=True)
@@ -363,13 +393,44 @@ class _TouchState:
     ask_size: int = 0
 
 
+@dataclass(slots=True)
+class CompletedState:
+    """Book readings at a completed ``F_LAST``, with its source timestamps.
+
+    Captured at the boundary rather than read live, because a time-grid
+    snapshot at ``t`` must reflect the last completed event at or before ``t``
+    -- not whatever the book looks like when the *next* event happens to arrive
+    and trigger the emission.
+    """
+
+    ts_event: int
+    ts_recv: int
+    sequence: int
+    flast_index: int
+    best_bid_price: int | None
+    best_ask_price: int | None
+    bid_size: int
+    ask_size: int
+    bid_count: int
+    ask_count: int
+    bid_depth_5: int
+    ask_depth_5: int
+    bid_depth_10: int
+    ask_depth_10: int
+    bid_order_count_5: int
+    ask_order_count_5: int
+    bid_levels: int
+    ask_levels: int
+    resting_orders: int
+
+
 class OrderBookFeatureEngine:
     """Replays MBO events, maintaining a book and emitting causal snapshots.
 
-    The book is the *same* ``MboBook`` the Tier-1 validator uses -- the gate
-    that passed 160/160 validated this exact reconstruction, so the features
-    are built on the artefact that was certified rather than a second
-    implementation that might disagree with it.
+    Drives the *same* ``MboBook`` the Tier-1 validator uses -- the gate that
+    passed 160/160 certified this exact reconstruction, so features are built on
+    the artefact that was certified rather than a second implementation that
+    might disagree with it.
     """
 
     def __init__(
@@ -385,25 +446,22 @@ class OrderBookFeatureEngine:
         self.book = MboBook(max_recorded_violations=0)
         self._windows = {cadence.name: WindowAccumulator() for cadence in cadences}
         self._emitted = dict.fromkeys((c.name for c in cadences), 0)
-        self._next_time_boundary: dict[str, int | None] = {
+        self._next_boundary: dict[str, int | None] = {
             c.name: None for c in cadences if c.kind == "time"
         }
         self._normalizers: dict[str, dict[str, ExpandingNormalizer]] = {
             c.name: {name: ExpandingNormalizer() for name in NORMALIZED_FEATURES}
             for c in cadences
         }
-        self._touch = _TouchState()
+        self._completed: CompletedState | None = None
         self._flast_index = 0
         self._records = 0
-        # Set when the touch empties, cleared when the price then moves, so
-        # "depletion followed by a quote move" is a sequence rather than a
-        # coincidence of two counters in the same window.
         self._pending_depletion: dict[str, int | None] = {"B": None, "A": None}
         self._execution_seen_at_touch: dict[str, int] = {"B": 0, "A": 0}
 
-    # -- per-event bookkeeping --------------------------------------------
+    # -- book reading ------------------------------------------------------
 
-    def _observe_pre_state(self) -> _TouchState:
+    def _touch(self) -> _TouchState:
         bid = self.book.best_bid()
         ask = self.book.best_ask()
         return _TouchState(
@@ -413,15 +471,43 @@ class OrderBookFeatureEngine:
             ask_size=ask.size if ask else 0,
         )
 
+    def _capture(self, event: MboEvent) -> CompletedState:
+        bid = self.book.best_bid()
+        ask = self.book.best_ask()
+        depth = self.book.depth(max(DEPTH_LEVELS))
+        levels = self.book.level_counts()
+        return CompletedState(
+            ts_event=event.ts_event,
+            ts_recv=event.ts_recv,
+            sequence=event.sequence,
+            flast_index=self._flast_index,
+            best_bid_price=bid.price if bid else None,
+            best_ask_price=ask.price if ask else None,
+            bid_size=bid.size if bid else 0,
+            ask_size=ask.size if ask else 0,
+            bid_count=bid.count if bid else 0,
+            ask_count=ask.count if ask else 0,
+            bid_depth_5=_cumulative(depth["bids"], 5, "size"),
+            ask_depth_5=_cumulative(depth["asks"], 5, "size"),
+            bid_depth_10=_cumulative(depth["bids"], 10, "size"),
+            ask_depth_10=_cumulative(depth["asks"], 10, "size"),
+            bid_order_count_5=_cumulative(depth["bids"], 5, "count"),
+            ask_order_count_5=_cumulative(depth["asks"], 5, "count"),
+            bid_levels=levels["bid_levels"],
+            ask_levels=levels["ask_levels"],
+            resting_orders=self.book.order_count(),
+        )
+
+    # -- per-event bookkeeping --------------------------------------------
+
     def _accumulate(self, event: MboEvent, before: _TouchState, after: _TouchState) -> None:
         action = event.action
         size = int(event.size) if event.size is not None else 0
         mid_before = _midpoint(before)
         mid_after = _midpoint(after)
-        price_moved = mid_before is not None and mid_after is not None and mid_before != mid_after
-
-        # Cont-Kukanov-Stoikov e_n over the touch, computed on the same kernel
-        # the validator uses, but from L3 state rather than a vendor NBBO.
+        price_moved = (
+            mid_before is not None and mid_after is not None and mid_before != mid_after
+        )
         e_n = _cks_touch_contribution(before, after)
 
         for cadence in self.cadences:
@@ -429,6 +515,7 @@ class OrderBookFeatureEngine:
             window.records += 1
             if window.start_ts is None:
                 window.start_ts = event.ts_event
+            window.max_ts_recv = max(window.max_ts_recv, event.ts_recv)
             window.ofi += e_n
 
             if action == ACTION_ADD:
@@ -445,20 +532,18 @@ class OrderBookFeatureEngine:
             elif action == ACTION_MODIFY:
                 window.modify_count += 1
             elif action == ACTION_FILL:
+                # Executions and absorption only. The accompanying `T` carries
+                # the trade; adding this size to aggressor volume as well would
+                # count one XNAS execution twice.
                 window.execution_count += 1
                 window.execution_volume += size
                 if not price_moved:
                     window.executions_without_price_move += 1
                     window.execution_volume_without_price_move += size
-                # A fill names the resting side; the aggressor is the opposite.
-                if event.side == SIDE_BID:
-                    window.sell_aggressor_volume += size
-                elif event.side == SIDE_ASK:
-                    window.buy_aggressor_volume += size
             elif action == ACTION_TRADE:
                 window.trade_count += 1
                 window.trade_volume += size
-                # A trade names the aggressor directly.
+                # The trade names its aggressor directly.
                 if event.side == SIDE_BID:
                     window.buy_aggressor_volume += size
                 elif event.side == SIDE_ASK:
@@ -473,7 +558,6 @@ class OrderBookFeatureEngine:
             if before.ask_price != after.ask_price:
                 window.best_ask_changes += 1
 
-        # Depletion is a book transition, tracked once rather than per cadence.
         for side, before_size, after_size, before_px, after_px in (
             ("B", before.bid_size, after.bid_size, before.bid_price, after.bid_price),
             ("A", before.ask_size, after.ask_size, before.ask_price, after.ask_price),
@@ -482,7 +566,10 @@ class OrderBookFeatureEngine:
                 for cadence in self.cadences:
                     self._windows[cadence.name].queue_depletion_events += 1
                 self._pending_depletion[side] = before_px
-            elif self._pending_depletion[side] is not None and after_px != self._pending_depletion[side]:
+            elif (
+                self._pending_depletion[side] is not None
+                and after_px != self._pending_depletion[side]
+            ):
                 for cadence in self.cadences:
                     self._windows[cadence.name].depletion_followed_by_quote_move += 1
                 self._pending_depletion[side] = None
@@ -497,27 +584,20 @@ class OrderBookFeatureEngine:
 
     # -- emission ----------------------------------------------------------
 
-    def _due(self, cadence: Cadence, event: MboEvent) -> bool:
-        if cadence.kind == "events":
-            return self._windows[cadence.name].flast_events >= cadence.interval
-        boundary = self._next_time_boundary[cadence.name]
-        if boundary is None:
-            # Anchor the grid to the first F_LAST seen, so a session that opens
-            # at an arbitrary nanosecond is not sampled on a fictional clock.
-            self._next_time_boundary[cadence.name] = event.ts_event + cadence.interval
-            return False
-        return event.ts_event >= boundary
-
-    def _snapshot(self, cadence: Cadence, event: MboEvent) -> dict[str, Any]:
+    def _snapshot(
+        self,
+        cadence: Cadence,
+        state: CompletedState,
+        *,
+        nominal_ts: int,
+        grid_ts: int | None,
+    ) -> dict[str, Any]:
         window = self._windows[cadence.name]
-        bid = self.book.best_bid()
-        ask = self.book.best_ask()
-        depth = self.book.depth(max(DEPTH_LEVELS))
+        best_bid_price = state.best_bid_price
+        best_ask_price = state.best_ask_price
+        bid_size = state.bid_size
+        ask_size = state.ask_size
 
-        best_bid_price = bid.price if bid else None
-        best_ask_price = ask.price if ask else None
-        bid_size = bid.size if bid else 0
-        ask_size = ask.size if ask else 0
         spread = (
             best_ask_price - best_bid_price
             if best_bid_price is not None and best_ask_price is not None
@@ -528,9 +608,7 @@ class OrderBookFeatureEngine:
             if best_bid_price is not None and best_ask_price is not None
             else None
         )
-        spread_bps = (
-            spread / midpoint * 10_000 if spread is not None and midpoint else None
-        )
+        spread_bps = spread / midpoint * 10_000 if spread is not None and midpoint else None
         touch_total = bid_size + ask_size
         queue_imbalance = _safe_ratio(bid_size, touch_total)
         normalized_qi = _safe_ratio(bid_size - ask_size, touch_total)
@@ -548,26 +626,29 @@ class OrderBookFeatureEngine:
             else None
         )
         mean_touch_depth = _safe_ratio(window.touch_depth_sum, window.touch_depth_samples)
-        window_ns = (
-            event.ts_event - window.start_ts if window.start_ts is not None else 0
-        )
+        window_ns = nominal_ts - window.start_ts if window.start_ts is not None else 0
         window_seconds = window_ns / 1e9 if window_ns else None
-
         classified_volume = window.buy_aggressor_volume + window.sell_aggressor_volume
-        total_trade_volume = window.trade_volume
+
+        # Never earlier than any record this snapshot depended on: the window's
+        # records, and the state-defining event.
+        available_ts_recv = max(window.max_ts_recv, state.ts_recv)
 
         row: dict[str, Any] = {
             "symbol": self.symbol,
             "session_date": self.session_date,
             "cadence": cadence.name,
             "sequence_index": self._emitted[cadence.name],
-            "ts_event": event.ts_event,
-            "sequence": event.sequence,
-            "flast_index": self._flast_index,
+            "ts_event": nominal_ts,
+            "grid_ts_event": grid_ts,
+            "source_ts_event": state.ts_event,
+            "source_ts_recv": state.ts_recv,
+            "feature_available_ts_recv": available_ts_recv,
+            "sequence": state.sequence,
+            "flast_index": state.flast_index,
             "window_ns": window_ns,
             "window_flast_events": window.flast_events,
             "window_records": window.records,
-            # -- book state
             "best_bid_price": best_bid_price,
             "best_ask_price": best_ask_price,
             "spread": spread,
@@ -575,18 +656,17 @@ class OrderBookFeatureEngine:
             "midpoint": midpoint,
             "bid_size_l1": bid_size,
             "ask_size_l1": ask_size,
-            "bid_order_count_l1": bid.count if bid else 0,
-            "ask_order_count_l1": ask.count if ask else 0,
-            "bid_depth_5": _cumulative(depth["bids"], 5, "size"),
-            "ask_depth_5": _cumulative(depth["asks"], 5, "size"),
-            "bid_depth_10": _cumulative(depth["bids"], 10, "size"),
-            "ask_depth_10": _cumulative(depth["asks"], 10, "size"),
-            "bid_order_count_5": _cumulative(depth["bids"], 5, "count"),
-            "ask_order_count_5": _cumulative(depth["asks"], 5, "count"),
-            "bid_levels": self.book.level_counts()["bid_levels"],
-            "ask_levels": self.book.level_counts()["ask_levels"],
-            "resting_orders": self.book.order_count(),
-            # -- pressure
+            "bid_order_count_l1": state.bid_count,
+            "ask_order_count_l1": state.ask_count,
+            "bid_depth_5": state.bid_depth_5,
+            "ask_depth_5": state.ask_depth_5,
+            "bid_depth_10": state.bid_depth_10,
+            "ask_depth_10": state.ask_depth_10,
+            "bid_order_count_5": state.bid_order_count_5,
+            "ask_order_count_5": state.ask_order_count_5,
+            "bid_levels": state.bid_levels,
+            "ask_levels": state.ask_levels,
+            "resting_orders": state.resting_orders,
             "queue_imbalance": queue_imbalance,
             "normalized_queue_imbalance": normalized_qi,
             "microprice": microprice,
@@ -597,7 +677,6 @@ class OrderBookFeatureEngine:
                 window.ofi / mean_touch_depth if mean_touch_depth else None
             ),
             "mean_touch_depth": mean_touch_depth,
-            # -- lifecycle
             "add_count": window.add_count,
             "add_volume": window.add_volume,
             "cancel_count": window.cancel_count,
@@ -615,18 +694,17 @@ class OrderBookFeatureEngine:
             ),
             "best_bid_changes": window.best_bid_changes,
             "best_ask_changes": window.best_ask_changes,
-            # -- aggressive flow
             "trade_count": window.trade_count,
-            "trade_volume": total_trade_volume,
+            "trade_volume": window.trade_volume,
             "buy_aggressor_volume": window.buy_aggressor_volume,
             "sell_aggressor_volume": window.sell_aggressor_volume,
             "unclassified_trade_volume": window.unclassified_trade_volume,
             "unclassified_trade_share": _safe_ratio(
-                window.unclassified_trade_volume, total_trade_volume
+                window.unclassified_trade_volume, window.trade_volume
             ),
             "signed_trade_volume": window.buy_aggressor_volume - window.sell_aggressor_volume,
-            # Over *classified* volume only. Dividing by total would drag the
-            # imbalance toward zero in proportion to unsignable prints.
+            # Over *classified* volume only, so unsignable prints cannot drag
+            # the imbalance toward zero.
             "aggressor_imbalance": _safe_ratio(
                 window.buy_aggressor_volume - window.sell_aggressor_volume,
                 classified_volume,
@@ -634,7 +712,6 @@ class OrderBookFeatureEngine:
             "execution_intensity": (
                 window.execution_count / window_seconds if window_seconds else None
             ),
-            # -- absorption / resilience
             "executions_without_price_move": window.executions_without_price_move,
             "execution_volume_without_price_move": window.execution_volume_without_price_move,
             "absorption_ratio": _safe_ratio(
@@ -657,19 +734,53 @@ class OrderBookFeatureEngine:
         ].normalize_then_update(float(row["signed_trade_volume"]))
 
         self._emitted[cadence.name] += 1
+        self._windows[cadence.name].reset(nominal_ts)
         return row
+
+    def _due_time_boundaries(self, cadence: Cadence, upto_exclusive: int) -> Iterator[int]:
+        """Grid boundaries strictly before ``upto_exclusive``, in order.
+
+        Strictly before, because a boundary at exactly ``t`` may still receive
+        the event at ``t`` -- ``ts_event <= t`` puts it inside that interval.
+        """
+        boundary = self._next_boundary[cadence.name]
+        if boundary is None:
+            return
+        while boundary < upto_exclusive:
+            yield boundary
+            boundary += cadence.interval
+        self._next_boundary[cadence.name] = boundary
+
+    def _flush_time_grid(self, upto_exclusive: int) -> Iterator[dict[str, Any]]:
+        """Emit every grid boundary that is now final."""
+        if self._completed is None:
+            return
+        for cadence in self.cadences:
+            if cadence.kind != "time":
+                continue
+            for boundary in self._due_time_boundaries(cadence, upto_exclusive):
+                # An interval with no events still emits: the last known book
+                # state with zero new window flow. A quiet second is an
+                # observation, not a gap to skip.
+                yield self._snapshot(
+                    cadence, self._completed, nominal_ts=boundary, grid_ts=boundary
+                )
 
     # -- driver ------------------------------------------------------------
 
     def process(self, events: Iterable[MboEvent]) -> Iterator[dict[str, Any]]:
         """Yield snapshots as the stream is consumed. Never materializes it."""
+        last_ts: int | None = None
         for event in events:
+            # Everything strictly before this event's timestamp is now final.
+            yield from self._flush_time_grid(event.ts_event)
+
             self._records += 1
-            before = self._observe_pre_state()
+            before = self._touch()
             self.book.apply(event)
-            after = self._observe_pre_state()
+            after = self._touch()
             self._accumulate(event, before, after)
-            self._touch = after
+            last_ts = event.ts_event
 
             if not (event.flags & F_LAST):
                 continue
@@ -686,19 +797,32 @@ class OrderBookFeatureEngine:
                 window.touch_depth_sum += (after.bid_size + after.ask_size) / 2
                 window.touch_depth_samples += 1
 
+            self._completed = self._capture(event)
+
+            # Absolute UTC grid: the first boundary at or after the first
+            # completed event. Identical for every symbol, so two files are
+            # comparable at the same instant.
             for cadence in self.cadences:
-                if self._due(cadence, event):
-                    yield self._snapshot(cadence, event)
-                    self._windows[cadence.name].reset(event.ts_event)
-                    if cadence.kind == "time":
-                        boundary = self._next_time_boundary[cadence.name]
-                        assert boundary is not None
-                        # Step to the first boundary strictly after this event,
-                        # so a gap in the stream skips grid points instead of
-                        # emitting a burst of empty windows.
-                        while boundary <= event.ts_event:
-                            boundary += cadence.interval
-                        self._next_time_boundary[cadence.name] = boundary
+                if cadence.kind == "time" and self._next_boundary[cadence.name] is None:
+                    interval = cadence.interval
+                    self._next_boundary[cadence.name] = (
+                        (event.ts_event + interval - 1) // interval
+                    ) * interval
+
+            for cadence in self.cadences:
+                if cadence.kind == "events" and (
+                    self._windows[cadence.name].flast_events >= cadence.interval
+                ):
+                    yield self._snapshot(
+                        cadence,
+                        self._completed,
+                        nominal_ts=event.ts_event,
+                        grid_ts=None,
+                    )
+
+        # Close the grid: boundaries at or before the final event are final.
+        if last_ts is not None:
+            yield from self._flush_time_grid(last_ts + 1)
 
 
 def _midpoint(state: _TouchState) -> float | None:
@@ -744,6 +868,9 @@ def feature_definitions() -> dict[str, Any]:
         "feature_engine_version": FEATURE_ENGINE_VERSION,
         "validator_version": MBO_VALIDATOR_VERSION,
         "feature_vocabulary_hash": FEATURE_VOCABULARY_HASH,
+        "snapshot_schema_hash": SNAPSHOT_SCHEMA_HASH,
+        "feature_semantics_hash": FEATURE_SEMANTICS_HASH,
+        "superseded_engine_versions": [dict(entry) for entry in SUPERSEDED_ENGINE_VERSIONS],
         "feature_count": len(FEATURE_VOCABULARY),
         "groups": {
             "book_state": list(BOOK_STATE_FEATURES),
@@ -761,10 +888,41 @@ def feature_definitions() -> dict[str, Any]:
         "depth_levels": list(DEPTH_LEVELS),
         "min_prior_observations": MIN_PRIOR_OBSERVATIONS,
         "price_scale": FIXED_PRICE_SCALE,
+        "aggressive_flow_attribution": {
+            "trade_records": [
+                "trade_count",
+                "trade_volume",
+                "buy_aggressor_volume",
+                "sell_aggressor_volume",
+                "signed_trade_volume",
+                "aggressor_imbalance",
+                "unclassified_trade_volume",
+            ],
+            "fill_records": [
+                "execution_count",
+                "execution_volume",
+                "executions_without_price_move",
+                "execution_volume_without_price_move",
+                "absorption_ratio",
+                "refill_after_execution_volume",
+            ],
+            "note": (
+                "XNAS normalizes one displayed execution as T -> F -> C. Fills never "
+                "contribute to aggressor volume; the accompanying trade already "
+                "carries it."
+            ),
+        },
+        "time_grid": (
+            "Absolute UTC multiples of the interval, identical across symbols. A "
+            "boundary t uses only the last completed F_LAST with ts_event <= t; an "
+            "event at t+1ns belongs to the next interval. Intervals with no events "
+            "emit the last known state with zero window flow."
+        ),
         "causality": (
-            "Every snapshot is emitted at a completed F_LAST boundary and uses only "
-            "events at or before it. Windowed features cover (previous snapshot of "
-            "the same cadence, now]. Normalization is prior-only and session-local."
+            "Every snapshot uses only events at or before its instant. Windowed "
+            "features cover (previous snapshot of the same cadence, now]. "
+            "Normalization is prior-only and session-local. "
+            "feature_available_ts_recv never precedes any input record."
         ),
         "contains_forward_information": False,
     }
