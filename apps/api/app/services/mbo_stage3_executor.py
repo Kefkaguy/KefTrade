@@ -65,7 +65,7 @@ from app.services.mbo_stage3_plan import (
 STAGE3_EXECUTOR_VERSION = "tier1_stage3_executor_v2"
 
 EXPECTED_PLAN_DESIGN_HASH = (
-    "874292555a9e136294f36c45a69c402a8448213652cdf9a1aa867638b5529ff3"
+    "e5266ef3e115a416bbd541bdc2412ef7c0f616b80b25d14f9fa585253330d18a"
 )
 EXPECTED_SURVIVOR_HASH = (
     "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -86,6 +86,13 @@ NO_TRADE_RESOLVED_BEFORE_ENTRY = "horizon_resolved_before_entry"
 # than repaired.
 NO_TRADE_UNCERTIFIABLE_TIMING = "uncertifiable_timing_bad_ts_recv"
 NO_TRADE_UNRESOLVED_TARGET = "stage2_target_did_not_resolve"
+
+# Verdicts. The distinction between the last two is the whole point: one says
+# the strategy loses money, the other says it could not be executed often enough
+# to find out. Collapsing them would be the most flattering possible error.
+VERDICT_POSITIVE = "survivor_economically_positive_at_250ms"
+VERDICT_NEGATIVE = "no_economically_viable_survivor"
+VERDICT_INSUFFICIENT = "not_authorized_insufficient_executable_sample"
 
 
 # ---------------------------------------------------------------------------
@@ -666,6 +673,18 @@ def assemble_report(
         and (r.get("clustered_t") or 0) >= ECONOMIC_GATES["t_hurdle"]
     ]
 
+    # A cell that never reached the declared minima did not lose money; it was
+    # never executable enough to be measured. That is a separate verdict, and it
+    # still fails to authorize Stage 4 or paper deployment.
+    insufficient = [r["cell"] for r in primary if not r.get("reached_inference")]
+
+    if survivors_positive:
+        verdict = VERDICT_POSITIVE
+    elif insufficient and len(insufficient) == len(primary):
+        verdict = VERDICT_INSUFFICIENT
+    else:
+        verdict = VERDICT_NEGATIVE
+
     return {
         "stage3_executor_version": STAGE3_EXECUTOR_VERSION,
         "stage3_plan_version": STAGE3_PLAN_VERSION,
@@ -687,11 +706,16 @@ def assemble_report(
             "benjamini_hochberg": bh,
         },
         "economically_positive_at_primary": survivors_positive,
-        "verdict": (
-            "no_economically_viable_survivor"
-            if not survivors_positive
-            else "survivor_economically_positive_at_250ms"
-        ),
+        "insufficient_executable_sample": insufficient,
+        "minimum_trades_for_inference": ECONOMIC_GATES["minimum_trades_for_inference"],
+        "minimum_session_dates": ECONOMIC_GATES["minimum_session_dates"],
+        "verdict": verdict,
+        "verdict_meaning": {
+            VERDICT_POSITIVE: "at least one survivor is positive after costs at 250 ms",
+            VERDICT_NEGATIVE: "no survivor is positive after costs at 250 ms",
+            VERDICT_INSUFFICIENT: ECONOMIC_GATES["insufficient_sample_meaning"],
+        }[verdict],
+        "authorizes_stage4_or_paper": verdict == VERDICT_POSITIVE,
         "cells": results,
         "authorizes": ECONOMIC_GATES["what_a_pass_authorizes"],
     }
@@ -707,50 +731,110 @@ def write_report(report: dict[str, Any], path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def reconstruct_confirmation_beta(
+def reconstruct_confirmation_fit(
     per_date_grams: dict[str, Any],
     training_dates: Sequence[str],
+    confirmation_dates: Sequence[str],
     alpha: float,
     *,
-    recorded_delta_r2: float | None = None,
-    confirmation_dates: Sequence[str] = (),
+    recorded_confirmation_delta_r2: float | None = None,
+    recorded_per_date_delta_r2: Sequence[float] | None = None,
     tolerance: float = 1e-9,
-) -> Any:
-    """Rebuild the exact coefficients Stage 2 used for confirmation.
+) -> dict[str, Any]:
+    """Rebuild the exact coefficients Stage 2 used, and prove it did.
 
     This is reproduction, not refitting. Stage 2 recorded which alpha it chose
-    and which dates it trained on, and the Gram matrices are stored, so the
-    normal equations have exactly one solution and it is the same one Stage 2
-    solved. Nothing is re-selected and nothing is re-tuned.
+    and which dates it trained on, and the per-date Grams are stored, so the
+    normal equations have exactly one solution and it is the one Stage 2 solved.
+    The fit is performed **once**, from the discovery+validation dates.
 
-    Because "reproduction" is easy to claim and easy to get wrong, it is checked:
-    the rebuilt coefficients are scored on the confirmation dates and the
-    resulting ``delta_R2`` must reproduce the value Stage 2 recorded. If it does
-    not, the artefacts do not belong together and Stage 3 refuses rather than
-    trading a model it cannot account for.
+    The proof has to match how Stage 2 actually scored confirmation, which is
+    *not* one ``delta_R2`` over an aggregated confirmation Gram. Stage 2 scored
+    each confirmation date separately against the same training Gram and took
+    the arithmetic mean of those per-date values -- ``_gate`` sets
+    ``delta_r2 = mean(per_date_delta_r2)``. Those two quantities are different
+    numbers: the aggregate is notional-weighted across dates, the mean is not.
+    Comparing against the aggregate, as an earlier draft did, would have failed
+    on a correct reproduction and passed on some incorrect ones.
+
+    So the check is:
+
+    * score each confirmation date individually against the single training fit;
+    * compare the ordered per-date values with Stage 2's recorded
+      ``per_date_delta_r2`` where that is available;
+    * compare their arithmetic mean with the recorded confirmation ``delta_r2``.
+
+    Any mismatch is a refusal. Stage 3 does not trade a model whose provenance
+    it cannot demonstrate.
     """
-    from app.services.mbo_stage2_executor import DESIGN_WIDTH, delta_r2, fit, sum_grams
+    from app.services.mbo_stage2_executor import (
+        DESIGN_WIDTH,
+        PRICE_ONLY_WIDTH,
+        _slice,
+        delta_r2,
+        fit,
+        sum_grams,
+    )
 
     train = sum_grams(
         (per_date_grams[d] for d in training_dates if d in per_date_grams), DESIGN_WIDTH
     )
-    beta = fit(train, alpha)
-    if beta is None:
+    beta_l3 = fit(train, alpha)
+    beta_base = fit(_slice(train, PRICE_ONLY_WIDTH), 0.0)
+    if beta_l3 is None or beta_base is None:
         raise ValueError("the frozen Stage-2 training Gram is singular; cannot reproduce")
 
-    if recorded_delta_r2 is not None and confirmation_dates:
-        test = sum_grams(
-            (per_date_grams[d] for d in confirmation_dates if d in per_date_grams),
-            DESIGN_WIDTH,
-        )
-        rebuilt = delta_r2(train, test, alpha)
-        if rebuilt is None or abs(rebuilt - recorded_delta_r2) > tolerance:
+    scored_dates: list[str] = []
+    per_date: list[float] = []
+    for date in confirmation_dates:
+        if date not in per_date_grams:
+            continue
+        value = delta_r2(train, per_date_grams[date], alpha)
+        if value is None:
+            continue
+        scored_dates.append(date)
+        per_date.append(float(value))
+
+    if not per_date:
+        raise ValueError("no confirmation date could be scored; cannot reproduce")
+
+    mean_delta_r2 = float(np.mean(per_date))
+
+    if recorded_per_date_delta_r2 is not None:
+        recorded = [float(v) for v in recorded_per_date_delta_r2]
+        if len(recorded) != len(per_date):
             raise ValueError(
-                "the reconstructed Stage-2 fit does not reproduce the recorded "
-                f"confirmation delta_R2 ({rebuilt} vs {recorded_delta_r2}); the "
-                "Grams and the results file do not belong to the same run"
+                f"Stage 2 recorded {len(recorded)} confirmation dates, "
+                f"reproduction scored {len(per_date)}"
             )
-    return beta
+        for index, (rebuilt, original) in enumerate(zip(per_date, recorded, strict=True)):
+            if abs(rebuilt - original) > tolerance:
+                raise ValueError(
+                    "the reconstructed Stage-2 fit does not reproduce the "
+                    f"recorded per-date confirmation delta_R2 at position {index} "
+                    f"({scored_dates[index]}): {rebuilt} vs {original}"
+                )
+
+    if recorded_confirmation_delta_r2 is not None and (
+        abs(mean_delta_r2 - recorded_confirmation_delta_r2) > tolerance
+    ):
+        raise ValueError(
+            "the mean of the reconstructed per-date confirmation delta_R2 does "
+            f"not reproduce the recorded value ({mean_delta_r2} vs "
+            f"{recorded_confirmation_delta_r2}); the Grams and the results file "
+            "do not belong to the same run"
+        )
+
+    return {
+        "beta": beta_l3,
+        "beta_baseline": beta_base,
+        "alpha": alpha,
+        "training_dates": [d for d in training_dates if d in per_date_grams],
+        "confirmation_dates": scored_dates,
+        "per_date_delta_r2": per_date,
+        "mean_delta_r2": mean_delta_r2,
+        "reproduction_verified": True,
+    }
 
 
 # ---------------------------------------------------------------------------

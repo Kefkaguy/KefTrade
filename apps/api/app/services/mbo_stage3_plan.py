@@ -52,9 +52,28 @@ from app.services.mbo_stage2_plan import (
     PRIOR_EFFECTIVE_TRIALS as STAGE2_PRIOR_EFFECTIVE_TRIALS,
 )
 
-STAGE3_PLAN_VERSION = "tier1_stage3_economics_v2"
+STAGE3_PLAN_VERSION = "tier1_stage3_economics_v3"
 
 SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_stage3_economics_v2",
+        "plan_design_hash": (
+            "874292555a9e136294f36c45a69c402a8448213652cdf9a1aa867638b5529ff3"
+        ),
+        "superseded_before_any_economic_outcome": "true",
+        "reason": (
+            "froze a 2026-dated fee schedule for research sessions that are June "
+            "2025, which would have priced twenty 2025 sessions against rates "
+            "that did not yet exist and charged a non-zero Section 31 fee through "
+            "a period in which that rate was $0.00 per million. It also silently "
+            "set retail CAT pass-through to zero without a June-2025 customer fee "
+            "schedule to support it, and verified the reconstructed Stage-2 fit "
+            "against delta_R2 over one aggregated confirmation Gram when Stage 2 "
+            "had actually recorded the arithmetic mean of per-date values -- a "
+            "different number, so the check could fail on a correct reproduction "
+            "and pass on some incorrect ones."
+        ),
+    },
     {
         "version": "tier1_stage3_economics_v1",
         "plan_design_hash": (
@@ -141,82 +160,140 @@ TRADE_SIZE_SHARES = 100
 MAX_BOOK_LEVELS_WALKED = 10
 
 # ---------------------------------------------------------------------------
-# Fee schedules -- two of them, versioned and dated
+# Fee schedules -- the rates actually in force over the session window
 # ---------------------------------------------------------------------------
 #
-# The v1 mistake was to freeze one schedule that charged a Nasdaq $0.0030/share
-# remove fee straight to the account. A commission-free retail brokerage does not
-# pass exchange access fees through per trade; assuming it does would overstate
-# costs, and assuming the reverse for a direct member would understate them. So
-# there are two, they are reported side by side, and neither is silently the
-# "real" one.
+# The research sessions are **June 2025**. An earlier draft froze 2026-dated
+# constants, which would have priced twenty 2025 session dates against a
+# schedule that did not exist yet. Worse, it carried a non-zero Section 31 rate
+# through a period in which that rate was zero.
 
-FEE_SCHEDULE_VERSION = "2026-08-18"
-FEE_SCHEDULE_EFFECTIVE_FROM = "2026-01-01"
+FEE_SCHEDULE_VERSION = "june-2025-historical-v1"
+SESSION_WINDOW_FROM = "2025-06-01"
+SESSION_WINDOW_TO = "2025-06-30"
 
-# Rates that move. These are DECLARED VALUES for this run, not asserted current
-# truth: Section 31 is reset by SEC order, TAF and CAT are amended by rule
-# filing. The executor refuses to price a session date outside the schedule's
-# effective window, and every artefact carries the version and date so a re-run
-# on different rates is visible rather than silent.
+# SEC Section 31: set to $0.00 per million effective 2025-05-14, and therefore
+# zero for every June 2025 session. This is a rate that was actually in force,
+# not a simplification.
+SECTION_31_USD_PER_MILLION = 0.00
+SECTION_31_EFFECTIVE_FROM = "2025-05-14"
+
+# FINRA Trading Activity Fee, sale leg only.
+FINRA_TAF_USD_PER_SHARE_SOLD = 0.000166
+FINRA_TAF_CAP_USD_PER_TRADE = 8.30
+FINRA_TAF_EFFECTIVE_FROM = "2025-01-01"
+
+# CAT: a declared value for the stress cases, requiring verification. It is NOT
+# used in the primary schedule, and the primary schedule does not claim it was
+# zero -- it records that the treatment is unverified. See below.
+CAT_USD_PER_SHARE_DECLARED = 0.000022
+
 RATE_VERIFICATION_REQUIRED = True
 
+_VERIFICATION_NOTE = (
+    "rates must be confirmed against the schedules in force on each evaluated "
+    "June 2025 session date before any result is relied on"
+)
+
 PRIMARY_FEE_SCHEDULE: dict[str, Any] = {
-    "name": "intended_broker_retail_customer",
+    "name": "retail_june_2025",
     "role": "primary",
     "broker": "Alpaca (commission-free US equities)",
     "schedule_version": FEE_SCHEDULE_VERSION,
-    "effective_from": FEE_SCHEDULE_EFFECTIVE_FROM,
+    "effective_from": SESSION_WINDOW_FROM,
+    "effective_to": SESSION_WINDOW_TO,
     "commission_usd_per_share": 0.0,
     "exchange_take_fee_usd_per_share": 0.0,
     "why_no_exchange_fee": (
         "a commission-free retail account is not billed the venue's per-share "
-        "remove fee; the broker absorbs it in its routing economics. Charging it "
-        "to the customer would overstate the cost of this strategy. If the "
-        "brokerage fee schedule ever says otherwise, this line changes and the "
-        "schedule version changes with it."
+        "remove fee; the broker absorbs it in its routing economics"
     ),
-    "sec_section_31_usd_per_million_sold": 27.80,
-    "finra_taf_usd_per_share_sold": 0.000166,
-    "finra_taf_cap_usd_per_trade": 8.30,
+    "sec_section_31_usd_per_million_sold": SECTION_31_USD_PER_MILLION,
+    "sec_section_31_effective_from": SECTION_31_EFFECTIVE_FROM,
+    "sec_section_31_note": (
+        "zero for the whole June 2025 window because the Section 31 rate was set "
+        "to $0.00 per million effective 2025-05-14"
+    ),
+    "finra_taf_usd_per_share_sold": FINRA_TAF_USD_PER_SHARE_SOLD,
+    "finra_taf_cap_usd_per_trade": FINRA_TAF_CAP_USD_PER_TRADE,
+    "finra_taf_effective_from": FINRA_TAF_EFFECTIVE_FROM,
     "cat_usd_per_share": 0.0,
-    "why_no_cat": (
-        "CAT funding fees are assessed on industry members, not itemized to "
-        "retail customers per execution"
+    "cat_treatment_verified": False,
+    "cat_note": (
+        "EXCLUDED, NOT PROVEN ZERO. No June-2025 Alpaca customer fee schedule "
+        "was available to establish whether CAT was passed through to retail "
+        "accounts at that time. Rather than assume the convenient answer, this "
+        "schedule excludes CAT and a separately named CAT-inclusive retail "
+        "stress case is reported alongside it. If the primary and the CAT stress "
+        "disagree about viability, the honest reading is that the question turns "
+        "on an unverified fact and must be settled before deployment."
     ),
     "clearing_usd_per_share": 0.0,
     "rates_require_verification": RATE_VERIFICATION_REQUIRED,
-    "verification_note": (
-        "Section 31, TAF and CAT rates must be confirmed against the schedules "
-        "in force on each evaluated session date before any result is relied on"
+    "verification_note": _VERIFICATION_NOTE,
+}
+
+RETAIL_CAT_STRESS_FEE_SCHEDULE: dict[str, Any] = {
+    **PRIMARY_FEE_SCHEDULE,
+    "name": "retail_june_2025_with_cat_passthrough",
+    "role": "retail_cat_stress",
+    "cat_usd_per_share": CAT_USD_PER_SHARE_DECLARED,
+    "cat_treatment_verified": False,
+    "cat_note": (
+        "the same retail account, priced as though CAT had been passed through "
+        "per share. This exists because the June-2025 customer treatment could "
+        "not be verified, and it is reported separately rather than blended."
     ),
 }
 
 CONSERVATIVE_FEE_SCHEDULE: dict[str, Any] = {
-    "name": "direct_exchange_member_stress",
+    "name": "direct_member_june_2025_stress",
     "role": "conservative_stress",
     "schedule_version": FEE_SCHEDULE_VERSION,
-    "effective_from": FEE_SCHEDULE_EFFECTIVE_FROM,
+    "effective_from": SESSION_WINDOW_FROM,
+    "effective_to": SESSION_WINDOW_TO,
     "commission_usd_per_share": 0.0,
     "exchange_take_fee_usd_per_share": 0.0030,
     "why_exchange_fee": (
         "a direct member taking liquidity on XNAS pays the standard remove fee; "
         "this is the stress case, not the intended account"
     ),
-    "sec_section_31_usd_per_million_sold": 27.80,
-    "finra_taf_usd_per_share_sold": 0.000166,
-    "finra_taf_cap_usd_per_trade": 8.30,
-    "cat_usd_per_share": 0.000022,
+    "sec_section_31_usd_per_million_sold": SECTION_31_USD_PER_MILLION,
+    "sec_section_31_effective_from": SECTION_31_EFFECTIVE_FROM,
+    "finra_taf_usd_per_share_sold": FINRA_TAF_USD_PER_SHARE_SOLD,
+    "finra_taf_cap_usd_per_trade": FINRA_TAF_CAP_USD_PER_TRADE,
+    "finra_taf_effective_from": FINRA_TAF_EFFECTIVE_FROM,
+    "cat_usd_per_share": CAT_USD_PER_SHARE_DECLARED,
+    "cat_treatment_verified": False,
     "clearing_usd_per_share": 0.0002,
     "rates_require_verification": RATE_VERIFICATION_REQUIRED,
-    "verification_note": PRIMARY_FEE_SCHEDULE["verification_note"],
+    "verification_note": _VERIFICATION_NOTE,
 }
 
 FEE_SCHEDULES: dict[str, dict[str, Any]] = {
     PRIMARY_FEE_SCHEDULE["name"]: PRIMARY_FEE_SCHEDULE,
+    RETAIL_CAT_STRESS_FEE_SCHEDULE["name"]: RETAIL_CAT_STRESS_FEE_SCHEDULE,
     CONSERVATIVE_FEE_SCHEDULE["name"]: CONSERVATIVE_FEE_SCHEDULE,
 }
 PRIMARY_FEE_SCHEDULE_NAME = PRIMARY_FEE_SCHEDULE["name"]
+
+
+def assert_session_dates_covered(session_dates) -> None:
+    """Refuse to price a session the frozen schedule does not cover.
+
+    A fee schedule is only meaningful over the window it was in force. Pricing a
+    2026 session against June-2025 rates, or the reverse, is the same class of
+    error as using tomorrow's book to fill today's order.
+    """
+    outside = sorted(
+        d for d in session_dates if not SESSION_WINDOW_FROM <= d <= SESSION_WINDOW_TO
+    )
+    if outside:
+        raise ValueError(
+            f"session dates outside the frozen fee window "
+            f"{SESSION_WINDOW_FROM}..{SESSION_WINDOW_TO}: {outside}"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Flagged receive timestamps
@@ -267,12 +344,26 @@ ECONOMIC_GATES: dict[str, Any] = {
         "fee schedule -- four tests"
     ),
     "secondary_families": (
-        "the 50 ms and 1 s rungs, the discovery-decile rule, and the "
-        "direct-exchange stress schedule; reported in full, corrected "
-        "separately, never promoted to the primary answer"
+        "the 50 ms and 1 s rungs, the discovery-decile rule, the CAT-passthrough "
+        "retail stress and the direct-member stress schedule; reported in full, "
+        "corrected separately, never promoted to the primary answer"
     ),
     "minimum_trades_for_inference": 100,
     "minimum_session_dates": 4,
+    "insufficient_sample_verdict": "not_authorized_insufficient_executable_sample",
+    "insufficient_sample_meaning": (
+        "fewer than 100 trades or fewer than 4 session dates at the 250 ms "
+        "primary rung. This is NOT a negative-return finding and must never be "
+        "reported as one: it means the strategy could not be executed often "
+        "enough to be measured. It nonetheless fails to authorize Stage 4 or a "
+        "paper deployment, because an edge that cannot be executed enough to be "
+        "tested cannot be deployed on the strength of that test."
+    ),
+    "minima_are_frozen": (
+        "these minima were declared before any economic outcome and may never be "
+        "lowered afterwards; doing so would convert an unmeasurable result into "
+        "an authorized one by redefinition"
+    ),
     "what_a_pass_authorizes": (
         "a paper-trading deployment proposal for review. It authorizes no live "
         "order, no capital, and no real money."
@@ -329,12 +420,25 @@ PLAN_DESIGN_ELEMENTS: tuple[str, ...] = (
     "exit=event_horizon_resolution_available_ts_recv+latency",
     "no_clock_horizon=true",
     f"fee_schedule_version={FEE_SCHEDULE_VERSION}",
+    f"session_window={SESSION_WINDOW_FROM}..{SESSION_WINDOW_TO}",
     f"primary_fee_schedule={PRIMARY_FEE_SCHEDULE_NAME}",
-    "conservative_fee_schedule=direct_exchange_member_stress",
+    f"sec_section_31={SECTION_31_USD_PER_MILLION}@{SECTION_31_EFFECTIVE_FROM}",
+    (
+        f"finra_taf={FINRA_TAF_USD_PER_SHARE_SOLD}"
+        f"/cap{FINRA_TAF_CAP_USD_PER_TRADE}@{FINRA_TAF_EFFECTIVE_FROM}"
+    ),
+    "retail_commission=0.0",
+    "retail_exchange_take_fee=0.0",
+    f"cat_declared={CAT_USD_PER_SHARE_DECLARED}",
+    "retail_cat_treatment=unverified_excluded_with_named_stress",
+    "retail_cat_stress_schedule=retail_june_2025_with_cat_passthrough",
+    "conservative_fee_schedule=direct_member_june_2025_stress",
     "bad_ts_recv=exclude_uncertifiable",
     "t_hurdle=3.0",
     "fdr=0.10",
     "min_trades=100",
+    "min_session_dates=4",
+    "insufficient=not_authorized_insufficient_executable_sample",
     f"prior_effective_trials={PRIOR_EFFECTIVE_TRIALS}",
     "authorizes=paper_proposal_only;not=live;not=capital",
 )

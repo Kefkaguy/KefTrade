@@ -1,14 +1,14 @@
-# Stage 3 — Economic viability design, for review (v2)
+# Stage 3 — Economic viability design, for review (v3)
 
 **Status: design and implementation corrected. No economic outcome computed. No
 order placed of any kind.**
 
 | | |
 |---|---|
-| Stage-3 plan | `tier1_stage3_economics_v2` |
-| `PLAN_DESIGN_HASH` | `874292555a9e136294f36c45a69c402a8448213652cdf9a1aa867638b5529ff3` |
+| Stage-3 plan | `tier1_stage3_economics_v3` |
+| `PLAN_DESIGN_HASH` | `e5266ef3e115a416bbd541bdc2412ef7c0f616b80b25d14f9fa585253330d18a` |
 | `SURVIVOR_HASH` | `bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00` |
-| Superseded | `tier1_stage3_economics_v1` (`f6878f66…`), before any economic outcome |
+| Superseded | `v1` (`f6878f66…`) and `v2` (`87429255…`), both before any economic outcome |
 
 ---
 
@@ -149,41 +149,45 @@ with its own fill-probability model.
 
 ---
 
-## 4. Fee model — two schedules, versioned and dated
+## 4. Fee model — June 2025 rates, three schedules
 
-The v1 module froze a single schedule that billed a Nasdaq **$0.0030/share
-remove fee straight to the account**. That is wrong for the intended broker: a
-commission-free retail account is not charged the venue's per-share access fee,
-and assuming it is would overstate the cost of this strategy. Assuming the
-reverse for a direct member would understate it. So there are two, they are
-reported side by side, and neither is silently "the real one".
+The research sessions are **June 2025**. The v2 module froze 2026-dated
+constants, which would have priced twenty 2025 sessions against rates that did
+not yet exist — and worse, charged a non-zero Section 31 fee through a period in
+which that rate was **zero**.
 
-`FEE_SCHEDULE_VERSION = 2026-08-18`, `effective_from = 2026-01-01`, and both
-carry `rates_require_verification: true`.
+`FEE_SCHEDULE_VERSION = june-2025-historical-v1`, window `2025-06-01 … 2025-06-30`.
+`assert_session_dates_covered()` refuses any date outside it, in either
+direction.
 
-| Component | Primary — intended broker (retail) | Conservative — direct exchange member (stress) |
-|---|---|---|
-| Commission | $0 | $0 |
-| Exchange take fee | **$0** (absorbed by the broker) | $0.0030 / share, both legs |
-| SEC Section 31 | passed through, sale leg | passed through, sale leg |
-| FINRA TAF | passed through, sale leg, capped | passed through, sale leg, capped |
-| CAT | **$0** — assessed on industry members, not itemised per retail execution | $0.000022 / share |
-| Clearing | $0 | $0.0002 / share |
+| Component | Primary `retail_june_2025` | `…_with_cat_passthrough` | `direct_member_june_2025_stress` |
+|---|---|---|---|
+| Commission | $0 | $0 | $0 |
+| Exchange take fee | $0 | $0 | $0.0030/share |
+| **SEC Section 31** | **$0.00/M** (eff. 2025-05-14) | $0.00/M | $0.00/M |
+| FINRA TAF (sale leg) | $0.000166/share, cap $8.30 | same | same |
+| CAT | excluded, **unverified** | $0.000022/share | $0.000022/share |
+| Clearing | $0 | $0 | $0.0002/share |
 
-**The primary question is answered on the retail schedule.** The direct-exchange
-schedule is a stress case and a secondary family: a cell positive only under the
-stress schedule cannot answer the primary question, and one negative there cannot
-veto it. Tested both ways.
+Section 31 being zero across the whole window is a rate that was actually in
+force, not a simplification.
 
-### On the rate values themselves
+### CAT is excluded, not proven zero
 
-Section 31 is reset by SEC order and TAF/CAT are amended by rule filing, so the
-numbers in the module are **declared values for this run, not asserted current
-truth**. Every artefact carries the schedule version and effective date, and the
-verification note requires the rates in force on each evaluated session date to
-be confirmed before any result is relied on. I would rather the artefact say
-"this is the rate I used, check it" than quietly imply I verified something I did
-not.
+I could not obtain a June-2025 Alpaca *customer* fee schedule establishing
+whether CAT was passed through to retail accounts at that time. So the primary
+schedule excludes it and records `cat_treatment_verified: false` with a note
+saying **"EXCLUDED, NOT PROVEN ZERO"** — and a separately named CAT-inclusive
+retail stress case is reported alongside it.
+
+If the primary and the CAT stress disagree about viability, the honest reading
+is that the answer turns on an unverified fact that must be settled before
+deployment, not that one of them is the real number.
+
+The direct-member schedule remains a secondary stress only.
+
+Effective dates and rates are bound into `PLAN_DESIGN_HASH`, so changing any of
+them moves the hash — asserted by a test.
 
 ---
 
@@ -209,21 +213,40 @@ rather than approximate.
 
 ---
 
-## 5. Reconstructing the frozen Stage-2 fit
+## 5. Reconstructing the frozen Stage-2 fit — and proving it correctly
 
-A gap I hit while building this: **`stage2_results.json` records `chosen_alpha`
-but not the coefficients.** Stage 3 needs them to produce a prediction.
+`stage2_results.json` records `chosen_alpha` but not the coefficients, so Stage 3
+rebuilds them from the stored Grams. That is reproduction, not refitting: the
+alpha and the training dates are recorded, so the normal equations have exactly
+one solution and it is the one Stage 2 solved. The fit is performed **once**,
+from the sixteen discovery+validation dates.
 
-The resolution is reproduction, not refitting. Stage 2 recorded which alpha it
-chose and which dates it trained on, and the per-date Grams are stored, so the
-normal equations have exactly one solution and it is the same one Stage 2
-solved. Nothing is re-selected, nothing is re-tuned.
+**The v2 proof was wrong.** It compared the rebuilt fit against
+`delta_r2(train, aggregate_confirmation_gram, alpha)`. But Stage 2 never
+computed that. Reading `_gate` in the Stage-2 executor:
 
-Because "it reproduces" is easy to claim and easy to get wrong, it is checked:
-the rebuilt coefficients are scored on the confirmation dates and the resulting
-`delta_R2` must reproduce the recorded value. If it does not, the Grams and the
-results file do not belong to the same run, and Stage 3 **refuses** rather than
-trading a model it cannot account for.
+```python
+gate["delta_r2"] = float(np.mean(values))   # values = per-date delta_R2
+```
+
+Stage 2 scored **each confirmation date separately** against the same training
+Gram and took the arithmetic **mean**. The aggregate-Gram value is a different
+number — it is notional-weighted across dates, the mean is not — so the old
+check would have failed on a correct reproduction and passed on some incorrect
+ones. A test now constructs confirmation dates with deliberately unequal row
+counts and asserts the two quantities differ by more than 1e-6, so the
+distinction cannot silently collapse.
+
+The corrected proof:
+
+1. score each confirmation date individually against the single training fit;
+2. compare the **ordered** per-date values against Stage 2's recorded
+   `per_date_delta_r2`;
+3. compare their arithmetic mean against the recorded confirmation `delta_r2`.
+
+Any mismatch — a per-date value, the mean, or even a differing count of
+confirmation dates — is a refusal. Stage 3 does not trade a model whose
+provenance it cannot demonstrate.
 
 ---
 
@@ -256,8 +279,18 @@ beta 1 and zero alpha; a flat 4 bps/day shows beta 0 and alpha 4.
 - Pass requires: mean net bps **> 0**, session-clustered t ≥ 3.0 (one
   observation per session date), and survival of Benjamini-Hochberg at FDR 0.10
   over the frozen survivor count.
-- Minimum 100 trades and 4 session dates, or inference is withheld rather than
-  reported thin.
+- Minimum **100 trades and 4 session dates** at the primary rung. Below either,
+  the verdict is `not_authorized_insufficient_executable_sample`.
+
+  This is a **third verdict, not a negative one**. "Could not be executed often
+  enough to measure" and "loses money" are different findings, and collapsing
+  them would be the most flattering error available. It nonetheless **fails to
+  authorize** Stage 4 or paper deployment: an edge that cannot be executed
+  enough to be tested cannot be deployed on the strength of that test.
+
+  The minima were declared before any economic outcome and **may never be
+  lowered afterwards** — doing so would convert an unmeasurable result into an
+  authorized one by redefinition. Asserted in the plan and the tests.
 - 50 ms and 1 s, and the discovery-decile rule, are **secondary** — reported in
   full, corrected separately, never promoted. A test asserts that a cell
   positive at 50 ms but negative at 250 ms yields
@@ -272,7 +305,7 @@ capital, no real money.
 
 ---
 
-## 8. Tests — 56 cases
+## 8. Tests — 74 cases
 
 | Area | What is pinned |
 |---|---|
@@ -288,11 +321,15 @@ capital, no real money.
 | No clock horizon | `evaluate_candidate` has no `horizon_ns` parameter — asserted by signature inspection |
 | Missed opportunity | resolution at or before entry arrival yields `horizon_resolved_before_entry`; the same candidate is tradable at 50 ms and not at 250 ms / 1 s |
 | Fee schedules | retail charges no exchange remove fee, no commission, no CAT; stress is strictly more expensive; both versioned, dated and flagged for verification; the primary family is the retail schedule only |
-| Bad timestamps | a flagged instant inside the window makes it uncertifiable — boundary-exact, including a window ending one nanosecond before and starting one after |
+| Bad timestamps | a flagged instant inside the window makes it uncertifiable — boundary-exact, including a window ending one nanosecond before and starting one after; no reorder buffer exists |
+| June-2025 fees | Section 31 is $0.00/M across all three schedules with effective date 2025-05-14; the window refuses 2025-05-30 and 2026-06-02 alike; rates and dates are bound into the design hash |
+| CAT | excluded but flagged unverified, never claimed proven zero; a named CAT-inclusive retail stress exists and is strictly more expensive |
+| Fit reproduction | per-date values reproduce in order; their mean reproduces the recorded confirmation `delta_r2`; the mean and the aggregate-Gram value are proved to differ; mismatched value, mismatched date count, and mismatched mean each refuse |
+| Insufficient sample | an unmeasurable family yields `not_authorized_insufficient_executable_sample`, not a negative finding; a measured loss still yields the negative verdict; a mixed family is not called insufficient; neither authorizes Stage 4 |
 | Refusals | no results file; no survivors; survivor count ≠ declared; reconstructed fit disagreeing with the record |
 | Family | primary is 250 ms only; a negative mean cannot pass; BH denominator is the frozen survivor count |
 
-**410 passed, 3 skipped** across the whole MBO suite; ruff clean.
+**428 passed, 3 skipped** across the whole MBO suite; ruff clean.
 
 ---
 
@@ -304,21 +341,22 @@ brief said to stop after producing the design and implementation for review, so
 the components exist and are tested individually but are not joined into a
 one-command economic pass until you approve the design.
 
-**Open questions for your review.**
+**Resolved since v2.**
 
-1. The replay clocks on `ts_recv`, since that is when a participant could know a
-   record. It requires `ts_recv` to be non-decreasing through the file and
-   refuses otherwise. If the certified files turn out to be ordered by `ts_event`,
-   the replay needs a bounded reorder buffer — I would rather add that
-   deliberately than have it discovered by a silent wrong answer.
-2. The Section 31 / TAF / CAT values are declared, not verified. Before any
-   result is relied on, they need confirming against the schedules in force
-   across the twenty evaluated session dates.
-3. At `next_change` horizons, `horizon_resolved_before_entry` may consume most
-   candidates at 250 ms. That is a real finding rather than a defect, but it
-   means the primary family could fail the 100-trade minimum and return
-   "inference withheld" rather than a verdict. Worth deciding now whether that
-   outcome is acceptable as an answer.
+1. **`ts_recv` ordering.** No reorder buffer, per your direction: Databento
+   guarantees per-symbol `ts_recv` monotonicity, so a violation means a corrupt
+   file rather than an ordering convention to accommodate. The hard refusal
+   stays, and a test asserts no reorder logic exists. `F_BAD_TS_RECV` exclusion
+   stays; timestamps are never repaired.
+2. **Fee rates.** Now June-2025 historical, with Section 31 at $0.00/M and the
+   effective dates bound into the plan hash.
+3. **Thin samples at 250 ms.** Now a named verdict rather than an open question.
+
+**Still open, and genuinely uncertain:** whether retail CAT was passed through
+in June 2025. The primary schedule excludes it without claiming it was zero, and
+the CAT-inclusive retail stress is reported alongside. If those two disagree
+about viability, that unverified fact has to be settled before anything is
+deployed.
 
 ---
 
@@ -332,4 +370,6 @@ one-command economic pass until you approve the design.
   through which one could be.
 - No receive timestamp flagged `F_BAD_TS_RECV` trusted.
 - No live or paper order. No broker client is importable from this code.
+- Fee rates are declared for the June-2025 window and flagged for verification;
+  retail CAT treatment is explicitly unverified rather than assumed.
 - No economic result exists yet.

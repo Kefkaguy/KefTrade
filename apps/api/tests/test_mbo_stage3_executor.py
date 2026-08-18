@@ -41,9 +41,12 @@ from app.services.mbo_stage3_plan import (
     PRIMARY_FEE_SCHEDULE,
     PRIMARY_LATENCY,
     PRIMARY_RULE,
+    RETAIL_CAT_STRESS_FEE_SCHEDULE,
     SECONDARY_RULE,
+    SECTION_31_USD_PER_MILLION,
     SURVIVOR_HASH,
     TRADE_SIZE_SHARES,
+    assert_session_dates_covered,
     statistical_plan,
 )
 
@@ -77,7 +80,7 @@ def static_book_at(bid: float, ask: float, **kwargs):
 def test_the_plan_and_survivor_hashes_are_frozen():
     assert_frozen_plan()
     assert PLAN_DESIGN_HASH == (
-        "874292555a9e136294f36c45a69c402a8448213652cdf9a1aa867638b5529ff3"
+        "e5266ef3e115a416bbd541bdc2412ef7c0f616b80b25d14f9fa585253330d18a"
     )
     assert SURVIVOR_HASH == (
         "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -112,13 +115,25 @@ def test_the_four_survivors_are_the_confirmed_ones_and_are_all_event_clocked():
         assert horizon in ("next_change", "next_2_changes"), horizon
 
 
-def test_the_superseded_v1_plan_is_recorded_with_its_reason():
+def test_every_superseded_plan_is_recorded_with_its_reason():
     plan = statistical_plan()
-    v1 = plan["superseded_plan_versions"][0]
-    assert v1["version"] == "tier1_stage3_economics_v1"
-    assert v1["superseded_before_any_economic_outcome"] == "true"
+    by_version = {e["version"]: e for e in plan["superseded_plan_versions"]}
+    assert set(by_version) == {
+        "tier1_stage3_economics_v1",
+        "tier1_stage3_economics_v2",
+    }
+    for entry in by_version.values():
+        assert entry["superseded_before_any_economic_outcome"] == "true"
+        assert entry["plan_design_hash"]
+
+    v1 = by_version["tier1_stage3_economics_v1"]
     assert "declared_before_survivors_were_known" in v1["reason"]
     assert "horizon_ns" in v1["reason"]
+
+    v2 = by_version["tier1_stage3_economics_v2"]
+    assert "June 2025" in v2["reason"]          # the wrong-year fee schedule
+    assert "aggregated confirmation Gram" in v2["reason"]  # the wrong proof
+    assert "CAT" in v2["reason"]
 
 
 def test_survivors_are_taken_from_confirmation_not_re_judged():
@@ -460,16 +475,18 @@ def test_fees_match_the_frozen_schedule_by_hand():
     assert trade.fees_bps(SCALE, PRIMARY_FEE_SCHEDULE) == pytest.approx(expected)
 
 
-def test_section_31_and_taf_are_charged_on_the_sale_leg_only():
-    """A long sells at exit, a short sells at entry. With different prices on
-    the two legs the fee must follow the sale, not the entry."""
+def test_section_31_follows_the_sale_leg_when_the_rate_is_non_zero():
+    """A long sells at exit, a short sells at entry. The rate is zero over the
+    June-2025 window, so this is checked against the stress schedule's structure
+    using a non-zero rate rather than asserted vacuously."""
+    schedule = {**CONSERVATIVE_FEE_SCHEDULE, "sec_section_31_usd_per_million_sold": 27.80}
     long_trade = _round_trip(100.0, 110.0, direction=1)
     short_trade = _round_trip(110.0, 100.0, direction=-1)
-    # Both sell $11,000 of notional, so their Section 31 charge in dollars is
-    # equal even though their entry notionals differ.
-    long_fees_usd = long_trade.fees_bps(SCALE, PRIMARY_FEE_SCHEDULE) / 10_000 * 10_000
-    short_fees_usd = short_trade.fees_bps(SCALE, PRIMARY_FEE_SCHEDULE) / 10_000 * 11_000
-    assert long_fees_usd == pytest.approx(short_fees_usd)
+    # Both sell $11,000 of notional, so the Section 31 charge in dollars is the
+    # same even though their entry notionals differ.
+    long_usd = long_trade.fees_bps(SCALE, schedule) / 10_000 * 10_000
+    short_usd = short_trade.fees_bps(SCALE, schedule) / 10_000 * 11_000
+    assert long_usd == pytest.approx(short_usd)
 
 
 def test_a_round_trip_at_an_unchanged_price_loses_exactly_the_fees():
@@ -664,39 +681,6 @@ def test_an_instant_after_the_final_record_sees_the_final_book():
     assert answers[10**12].two_sided
 
 
-def test_reconstructing_the_frozen_fit_refuses_when_the_artefacts_disagree():
-    """The integrity check that stops Stage 3 trading a model it cannot account
-    for."""
-    import numpy as np
-    from app.services.mbo_stage2_executor import DESIGN_WIDTH, Gram
-    from app.services.mbo_stage3_executor import reconstruct_confirmation_beta
-
-    def gram(seed):
-        rng = np.random.default_rng(seed)
-        x = rng.standard_normal((400, DESIGN_WIDTH))
-        x[:, 0] = 1.0
-        y = 0.3 * x[:, 1] + rng.standard_normal(400)
-        g = Gram.zeros(DESIGN_WIDTH)
-        g.add_rows(x, y)
-        return g
-
-    grams = {f"d{i}": gram(i) for i in range(8)}
-    train = [f"d{i}" for i in range(6)]
-    confirm = [f"d{i}" for i in range(6, 8)]
-
-    # No recorded value to check against: reproduction proceeds.
-    beta = reconstruct_confirmation_beta(grams, train, 1.0)
-    assert beta.shape == (DESIGN_WIDTH,)
-
-    # A recorded value that does not match: refuse.
-    with pytest.raises(ValueError, match="does not reproduce the recorded"):
-        reconstruct_confirmation_beta(
-            grams, train, 1.0,
-            recorded_delta_r2=0.42,
-            confirmation_dates=confirm,
-        )
-
-
 # ---------------------------------------------------------------------------
 # Event-time horizons: the exit comes from the frozen Stage-2 target, never a
 # fabricated clock
@@ -833,9 +817,10 @@ def test_the_retail_schedule_does_not_charge_an_exchange_remove_fee():
     assert PRIMARY_FEE_SCHEDULE["exchange_take_fee_usd_per_share"] == 0.0
     assert PRIMARY_FEE_SCHEDULE["commission_usd_per_share"] == 0.0
     assert PRIMARY_FEE_SCHEDULE["cat_usd_per_share"] == 0.0
-    # Regulatory pass-throughs still apply on the sale.
-    assert PRIMARY_FEE_SCHEDULE["sec_section_31_usd_per_million_sold"] > 0
-    assert PRIMARY_FEE_SCHEDULE["finra_taf_usd_per_share_sold"] > 0
+    # Section 31 was $0.00 per million for the whole June-2025 window.
+    assert PRIMARY_FEE_SCHEDULE["sec_section_31_usd_per_million_sold"] == 0.0
+    # TAF still applies on the sale leg.
+    assert PRIMARY_FEE_SCHEDULE["finra_taf_usd_per_share_sold"] == 0.000166
 
 
 def test_the_stress_schedule_is_strictly_more_expensive():
@@ -945,3 +930,293 @@ def test_the_bad_ts_rule_is_frozen_and_says_exclude():
     assert "excluded" in BAD_TS_RECV_RULE["decision"]
     assert BAD_TS_RECV_RULE["excluded_candidates_are_counted"] is True
     assert BAD_TS_RECV_RULE["never_silently_dropped"] is True
+
+
+# ---------------------------------------------------------------------------
+# The June-2025 historical fee schedule
+# ---------------------------------------------------------------------------
+
+
+def test_section_31_is_zero_for_every_june_2025_session():
+    """The rate was set to $0.00 per million effective 2025-05-14, so it is zero
+    across the whole research window. A 2026-dated constant would have invented
+    a cost that did not exist."""
+    assert SECTION_31_USD_PER_MILLION == 0.0
+    for schedule in (
+        PRIMARY_FEE_SCHEDULE,
+        RETAIL_CAT_STRESS_FEE_SCHEDULE,
+        CONSERVATIVE_FEE_SCHEDULE,
+    ):
+        assert schedule["sec_section_31_usd_per_million_sold"] == 0.0
+        assert schedule["sec_section_31_effective_from"] == "2025-05-14"
+
+
+def test_the_schedule_window_covers_june_2025_and_refuses_anything_else():
+    assert_session_dates_covered(["2025-06-02", "2025-06-16", "2025-06-30"])
+    with pytest.raises(ValueError, match="outside the frozen fee window"):
+        assert_session_dates_covered(["2025-06-02", "2026-06-02"])
+    with pytest.raises(ValueError, match="outside the frozen fee window"):
+        assert_session_dates_covered(["2025-05-30"])
+
+
+def test_the_retail_schedule_charges_no_commission_and_no_exchange_take_fee():
+    assert PRIMARY_FEE_SCHEDULE["commission_usd_per_share"] == 0.0
+    assert PRIMARY_FEE_SCHEDULE["exchange_take_fee_usd_per_share"] == 0.0
+
+
+def test_retail_cat_is_excluded_but_never_claimed_to_be_proven_zero():
+    """The distinction the correction turns on: excluding an unverified charge is
+    honest, asserting it was zero is not."""
+    assert PRIMARY_FEE_SCHEDULE["cat_usd_per_share"] == 0.0
+    assert PRIMARY_FEE_SCHEDULE["cat_treatment_verified"] is False
+    assert "NOT PROVEN ZERO" in PRIMARY_FEE_SCHEDULE["cat_note"]
+
+
+def test_a_named_cat_inclusive_retail_stress_case_exists():
+    assert RETAIL_CAT_STRESS_FEE_SCHEDULE["name"] == (
+        "retail_june_2025_with_cat_passthrough"
+    )
+    assert RETAIL_CAT_STRESS_FEE_SCHEDULE["cat_usd_per_share"] > 0
+    # Same account, same rates, differing only in the unverified CAT treatment.
+    assert (
+        RETAIL_CAT_STRESS_FEE_SCHEDULE["exchange_take_fee_usd_per_share"]
+        == PRIMARY_FEE_SCHEDULE["exchange_take_fee_usd_per_share"]
+    )
+    retail = _round_trip(100.0, 100.0).fees_bps(SCALE, PRIMARY_FEE_SCHEDULE)
+    with_cat = _round_trip(100.0, 100.0).fees_bps(SCALE, RETAIL_CAT_STRESS_FEE_SCHEDULE)
+    assert with_cat > retail
+
+
+def test_the_direct_member_case_remains_a_secondary_stress_only():
+    assert CONSERVATIVE_FEE_SCHEDULE["role"] == "conservative_stress"
+    assert CONSERVATIVE_FEE_SCHEDULE["exchange_take_fee_usd_per_share"] == 0.0030
+    assert CONSERVATIVE_FEE_SCHEDULE["clearing_usd_per_share"] > 0
+    assert PRIMARY_FEE_SCHEDULE["role"] == "primary"
+
+
+def test_the_effective_dates_and_rates_are_bound_into_the_plan_hash():
+    """Changing a rate or an effective date must move the design hash, or the
+    schedule is not really frozen."""
+    import hashlib
+
+    from app.services.mbo_stage3_plan import PLAN_DESIGN_ELEMENTS
+
+    joined = "\n".join(PLAN_DESIGN_ELEMENTS)
+    assert "sec_section_31=0.0@2025-05-14" in joined
+    assert "finra_taf=0.000166/cap8.3@2025-01-01" in joined
+    assert "session_window=2025-06-01..2025-06-30" in joined
+    assert "retail_cat_treatment=unverified_excluded_with_named_stress" in joined
+    assert hashlib.sha256(joined.encode()).hexdigest() == PLAN_DESIGN_HASH
+
+
+# ---------------------------------------------------------------------------
+# Coefficient reproduction, against Stage 2's real per-date semantics
+# ---------------------------------------------------------------------------
+
+
+def _stage2_world(seed: int = 5):
+    """Grams plus the numbers Stage 2 would have recorded for them."""
+    import numpy as np
+    from app.services.mbo_stage2_executor import DESIGN_WIDTH, Gram, delta_r2, sum_grams
+
+    def gram(i, rows):
+        rng = np.random.default_rng(seed + i)
+        x = rng.standard_normal((rows, DESIGN_WIDTH))
+        x[:, 0] = 1.0
+        y = 0.3 * x[:, 1] + 0.4 * x[:, 11] + rng.standard_normal(rows)
+        g = Gram.zeros(DESIGN_WIDTH)
+        g.add_rows(x, y)
+        return g
+
+    # Deliberately unequal row counts, so the mean of per-date values and the
+    # aggregate-Gram value are genuinely different numbers.
+    train_dates = [f"t{i}" for i in range(16)]
+    conf_dates = ["c0", "c1", "c2", "c3"]
+    grams = {d: gram(i, 400) for i, d in enumerate(train_dates)}
+    for i, d in enumerate(conf_dates):
+        grams[d] = gram(100 + i, 200 + i * 900)
+
+    alpha = 1.0
+    train = sum_grams((grams[d] for d in train_dates), DESIGN_WIDTH)
+    per_date = [float(delta_r2(train, grams[d], alpha)) for d in conf_dates]
+    return grams, train_dates, conf_dates, alpha, per_date
+
+
+def test_reproduction_matches_the_mean_of_per_date_confirmation_values():
+    import numpy as np
+    from app.services.mbo_stage3_executor import reconstruct_confirmation_fit
+
+    grams, train_dates, conf_dates, alpha, per_date = _stage2_world()
+    result = reconstruct_confirmation_fit(
+        grams, train_dates, conf_dates, alpha,
+        recorded_confirmation_delta_r2=float(np.mean(per_date)),
+        recorded_per_date_delta_r2=per_date,
+    )
+    assert result["reproduction_verified"] is True
+    assert result["per_date_delta_r2"] == pytest.approx(per_date)
+    assert result["mean_delta_r2"] == pytest.approx(float(np.mean(per_date)))
+    assert result["confirmation_dates"] == conf_dates
+
+
+def test_the_mean_and_the_aggregate_gram_are_genuinely_different_numbers():
+    """If they were the same, the old check would have been harmless. They are
+    not: the aggregate is notional-weighted across dates and the mean is not."""
+    import numpy as np
+    from app.services.mbo_stage2_executor import (
+        DESIGN_WIDTH,
+        delta_r2,
+        sum_grams,
+    )
+
+    grams, train_dates, conf_dates, alpha, per_date = _stage2_world()
+    train = sum_grams((grams[d] for d in train_dates), DESIGN_WIDTH)
+    aggregate = sum_grams((grams[d] for d in conf_dates), DESIGN_WIDTH)
+    aggregate_value = float(delta_r2(train, aggregate, alpha))
+    assert abs(float(np.mean(per_date)) - aggregate_value) > 1e-6
+
+
+def test_reproduction_refuses_a_mismatched_mean():
+    from app.services.mbo_stage3_executor import reconstruct_confirmation_fit
+
+    grams, train_dates, conf_dates, alpha, _ = _stage2_world()
+    with pytest.raises(ValueError, match="does not reproduce the recorded value"):
+        reconstruct_confirmation_fit(
+            grams, train_dates, conf_dates, alpha,
+            recorded_confirmation_delta_r2=0.42,
+        )
+
+
+def test_reproduction_refuses_a_mismatched_per_date_value():
+    from app.services.mbo_stage3_executor import reconstruct_confirmation_fit
+
+    grams, train_dates, conf_dates, alpha, per_date = _stage2_world()
+    tampered = list(per_date)
+    tampered[2] += 1e-6
+    with pytest.raises(ValueError, match="per-date confirmation delta_R2 at position 2"):
+        reconstruct_confirmation_fit(
+            grams, train_dates, conf_dates, alpha,
+            recorded_per_date_delta_r2=tampered,
+        )
+
+
+def test_reproduction_refuses_a_different_number_of_confirmation_dates():
+    from app.services.mbo_stage3_executor import reconstruct_confirmation_fit
+
+    grams, train_dates, conf_dates, alpha, per_date = _stage2_world()
+    with pytest.raises(ValueError, match="recorded 3 confirmation dates"):
+        reconstruct_confirmation_fit(
+            grams, train_dates, conf_dates, alpha,
+            recorded_per_date_delta_r2=per_date[:3],
+        )
+
+
+def test_the_fit_is_performed_once_from_discovery_plus_validation():
+    from app.services.mbo_stage3_executor import reconstruct_confirmation_fit
+
+    grams, train_dates, conf_dates, alpha, _ = _stage2_world()
+    result = reconstruct_confirmation_fit(grams, train_dates, conf_dates, alpha)
+    assert result["training_dates"] == train_dates
+    assert result["alpha"] == alpha
+    # No confirmation date may enter the training set.
+    assert not set(result["training_dates"]) & set(conf_dates)
+
+
+# ---------------------------------------------------------------------------
+# Insufficient executable sample
+# ---------------------------------------------------------------------------
+
+
+def test_an_unmeasurable_cell_is_not_reported_as_a_negative_finding():
+    """The most flattering possible error would be to collapse 'could not be
+    executed enough to measure' into 'loses money'. They are separate verdicts."""
+    from app.services.mbo_stage3_executor import VERDICT_INSUFFICIENT
+
+    results = [
+        {"cell": cell, "latency": PRIMARY_LATENCY, "rule": PRIMARY_RULE,
+         "fee_schedule": PRIMARY_FEE_SCHEDULE["name"], "reached_inference": False,
+         "trade_count": 12, "p_value": None, "net_return_bps": None}
+        for cell in FROZEN_SURVIVORS
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["verdict"] == VERDICT_INSUFFICIENT
+    assert report["insufficient_executable_sample"] == list(FROZEN_SURVIVORS)
+    assert report["economically_positive_at_primary"] == []
+    # It still fails to authorize anything.
+    assert report["authorizes_stage4_or_paper"] is False
+    assert "NOT a negative-return finding" in report["verdict_meaning"]
+
+
+def test_a_measured_loss_is_still_reported_as_a_negative_finding():
+    from app.services.mbo_stage3_executor import VERDICT_NEGATIVE
+
+    results = [
+        {"cell": cell, "latency": PRIMARY_LATENCY, "rule": PRIMARY_RULE,
+         "fee_schedule": PRIMARY_FEE_SCHEDULE["name"], "reached_inference": True,
+         "p_value": 1e-6, "net_return_bps": -2.0, "clustered_t": -7.0}
+        for cell in FROZEN_SURVIVORS
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["verdict"] == VERDICT_NEGATIVE
+    assert report["insufficient_executable_sample"] == []
+    assert report["authorizes_stage4_or_paper"] is False
+
+
+def test_a_mixed_family_is_not_called_insufficient():
+    """One cell measurable and losing, three unmeasurable: the family was
+    measured, so the verdict is the negative one."""
+    from app.services.mbo_stage3_executor import VERDICT_NEGATIVE
+
+    results = [
+        {"cell": FROZEN_SURVIVORS[0], "latency": PRIMARY_LATENCY, "rule": PRIMARY_RULE,
+         "fee_schedule": PRIMARY_FEE_SCHEDULE["name"], "reached_inference": True,
+         "p_value": 0.9, "net_return_bps": -1.0, "clustered_t": -0.5},
+        *[
+            {"cell": cell, "latency": PRIMARY_LATENCY, "rule": PRIMARY_RULE,
+             "fee_schedule": PRIMARY_FEE_SCHEDULE["name"], "reached_inference": False,
+             "p_value": None, "net_return_bps": None}
+            for cell in FROZEN_SURVIVORS[1:]
+        ],
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["verdict"] == VERDICT_NEGATIVE
+    assert len(report["insufficient_executable_sample"]) == 3
+
+
+def test_the_declared_minima_are_recorded_in_the_report():
+    results = [
+        {"cell": cell, "latency": PRIMARY_LATENCY, "rule": PRIMARY_RULE,
+         "fee_schedule": PRIMARY_FEE_SCHEDULE["name"], "reached_inference": False,
+         "p_value": None, "net_return_bps": None}
+        for cell in FROZEN_SURVIVORS
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["minimum_trades_for_inference"] == 100
+    assert report["minimum_session_dates"] == 4
+
+
+def test_the_minima_are_declared_unlowerable():
+    from app.services.mbo_stage3_plan import ECONOMIC_GATES
+
+    assert ECONOMIC_GATES["minimum_trades_for_inference"] == 100
+    assert ECONOMIC_GATES["minimum_session_dates"] == 4
+    assert "may never be" in ECONOMIC_GATES["minima_are_frozen"]
+    assert ECONOMIC_GATES["insufficient_sample_verdict"] == (
+        "not_authorized_insufficient_executable_sample"
+    )
+
+
+# ---------------------------------------------------------------------------
+# ts_recv: hard refusal, no reorder buffer
+# ---------------------------------------------------------------------------
+
+
+def test_there_is_no_reorder_buffer():
+    """Databento guarantees per-symbol ts_recv monotonicity, so a violation is a
+    corrupt file and must stay a refusal rather than being papered over."""
+    import inspect
+
+    from app.services.mbo_stage3_executor import BookReplay
+
+    source = inspect.getsource(BookReplay)
+    assert "reorder" not in source.lower()
+    assert "ts_recv went backwards" in source
