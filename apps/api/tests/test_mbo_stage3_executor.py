@@ -80,7 +80,7 @@ def static_book_at(bid: float, ask: float, **kwargs):
 def test_the_plan_and_survivor_hashes_are_frozen():
     assert_frozen_plan()
     assert PLAN_DESIGN_HASH == (
-        "a780b24164aa930ed8d7f939defed97d2d0a19256496b9c1177caab8dc6ae8c4"
+        "055c3d83108ea6223c12bd541d824843ace071a110e3bd5e1292e1f0665186f4"
     )
     assert SURVIVOR_HASH == (
         "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -122,6 +122,7 @@ def test_every_superseded_plan_is_recorded_with_its_reason():
         "tier1_stage3_economics_v1",
         "tier1_stage3_economics_v2",
         "tier1_stage3_economics_v3",
+        "tier1_stage3_economics_v4",
     }
     for entry in by_version.values():
         assert entry["superseded_before_any_economic_outcome"] == "true"
@@ -139,6 +140,11 @@ def test_every_superseded_plan_is_recorded_with_its_reason():
     v3 = by_version["tier1_stage3_economics_v3"]
     assert "unmeasured survivors" in v3["reason"]
     assert "CAT" in v3["reason"]
+
+    v4 = by_version["tier1_stage3_economics_v4"]
+    assert "in sample" in v4["reason"]
+    assert "guessing filenames" in v4["reason"]
+    assert "nullable" in v4["reason"]
 
 
 def test_survivors_are_taken_from_confirmation_not_re_judged():
@@ -1469,8 +1475,411 @@ def test_the_run_command_is_still_gated():
     args = argparse.Namespace(
         i_have_reviewed_the_design=False,
         stage2_results="x.json", grams_dir="g", features_dir="f",
-        labels_dir="l", raw_dir="r", expect_survivors=0, output_dir="o",
-        limit=0, quiet=True,
+        labels_dir="l", raw_dir="r", output_dir="o",
     )
     with pytest.raises(ValueError, match="not authorized yet"):
         run(args)
+
+
+# ---------------------------------------------------------------------------
+# Out-of-sample only
+# ---------------------------------------------------------------------------
+
+
+def test_the_authorized_run_takes_no_subset_limit():
+    """An option to run a subset is an option to peek at part of the answer."""
+    from app.cli.mbo_stage3 import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "run", "--stage2-results", "r.json", "--grams-dir", "g",
+            "--features-dir", "f", "--labels-dir", "l", "--raw-dir", "raw",
+            "--limit", "1",
+        ])
+
+
+def test_the_diagnostic_command_cannot_produce_an_economic_result():
+    """It exists so a subset run has somewhere to live that is incapable of
+    answering the primary question."""
+    import inspect
+
+    from app.cli.mbo_stage3 import diagnose
+
+    source = inspect.getsource(diagnose)
+    assert '"contains_economic_result": False' in source
+    # Inspect the executable body, not the prose explaining why it is absent.
+    body = source.split('"""')[2]
+    for forbidden in ("assemble_report", "net_return_bps", "verdict", "win_rate"):
+        assert forbidden not in body, forbidden
+
+
+def test_only_confirmation_dates_are_evaluated():
+    """The fit is trained on the first sixteen dates; scoring economics there
+    would put 16/20 of the report in sample."""
+    import inspect
+
+    from app.cli.mbo_stage3 import run
+
+    source = inspect.getsource(run)
+    assert 'context["confirmation"]' in source
+    assert 'context["training"]' not in source.split("_evaluate_block")[1].split(")")[0]
+
+
+def test_no_discovery_or_validation_date_can_enter_an_accumulator(monkeypatch, tmp_path):
+    """The decisive test: whatever dates exist, the economic block is the four
+    confirmation dates and nothing else."""
+    from app.services.mbo_stage2_executor import split_dates
+
+    dates = [f"2025-06-{d:02d}" for d in range(2, 22)]
+    blocks = split_dates(dates)
+    evaluated: list[str] = []
+
+    import app.cli.mbo_stage3 as cli
+
+    context = {
+        "frozen": {"survivors": list(FROZEN_SURVIVORS)},
+        "fits": {},
+        "deciles": {},
+        "blocks": blocks,
+        "confirmation": blocks["confirmation"],
+        "training": blocks["discovery"] + blocks["validation"],
+        "by_date": {d: [] for d in dates},
+        "features_dir": tmp_path,
+        "labels_dir": tmp_path,
+        "raw_dir": tmp_path,
+        "economic": True,
+    }
+
+    def fake_prepare(args, *, economic):
+        return context
+
+    def fake_evaluate(ctx, session_dates, *, verify_hash=True):
+        evaluated.extend(session_dates)
+        return {}, [], {}
+
+    monkeypatch.setattr(cli, "_prepare", fake_prepare)
+    monkeypatch.setattr(cli, "_evaluate_block", fake_evaluate)
+    monkeypatch.setattr(
+        cli, "assemble_report", lambda *a, **k: {}, raising=False
+    )
+
+    import argparse
+
+    args = argparse.Namespace(
+        i_have_reviewed_the_design=True, output_dir=str(tmp_path),
+        stage2_results="x", grams_dir="g", features_dir=str(tmp_path),
+        labels_dir=str(tmp_path), raw_dir=str(tmp_path),
+    )
+    cli.run(args)
+
+    assert evaluated == blocks["confirmation"]
+    assert len(evaluated) == 4
+    for date in blocks["discovery"] + blocks["validation"]:
+        assert date not in evaluated
+
+
+# ---------------------------------------------------------------------------
+# Raw input resolved and hashed through Stage-1 provenance
+# ---------------------------------------------------------------------------
+
+
+def _write_raw(directory, name, payload=b"certified-bytes"):
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / name
+    path.write_bytes(payload)
+    return path
+
+
+def _manifest_for(path):
+    from app.services.mbo_stage3_executor import sha256_file
+
+    return {
+        "source": {
+            "filename": path.name,
+            "bytes": path.stat().st_size,
+            "sha256": sha256_file(path),
+        }
+    }
+
+
+def test_the_raw_file_comes_from_the_manifest_not_from_the_stem(tmp_path):
+    """Stage-1 recorded what it opened; Stage 3 must not guess a convention."""
+    from app.services.mbo_stage3_executor import resolve_raw_source
+
+    raw = tmp_path / "raw"
+    # A realistic Databento name, which no stem-based rule would reproduce.
+    actual = _write_raw(raw, "xnas-itch-20250602.mbo.dbn.zst")
+    _write_raw(raw, "AAPL_2025-06-02.mbo.dbn.zst", b"the-wrong-file")
+
+    resolved = resolve_raw_source(
+        _manifest_for(actual), raw, stem="AAPL_2025-06-02"
+    )
+    assert resolved == actual
+
+
+def test_a_missing_raw_source_is_refused(tmp_path):
+    from app.services.mbo_stage3_executor import resolve_raw_source
+
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    manifest = {"source": {"filename": "absent.dbn.zst", "bytes": 1, "sha256": "x"}}
+    with pytest.raises(ValueError, match="not found under"):
+        resolve_raw_source(manifest, raw, stem="AAPL_2025-06-02")
+
+
+def test_an_ambiguous_raw_source_is_refused(tmp_path):
+    from app.services.mbo_stage3_executor import resolve_raw_source
+
+    raw = tmp_path / "raw"
+    first = _write_raw(raw / "a", "xnas-itch-20250602.mbo.dbn.zst")
+    _write_raw(raw / "b", "xnas-itch-20250602.mbo.dbn.zst")
+    with pytest.raises(ValueError, match="ambiguous"):
+        resolve_raw_source(_manifest_for(first), raw, stem="AAPL_2025-06-02")
+
+
+def test_a_size_mismatch_is_refused(tmp_path):
+    from app.services.mbo_stage3_executor import resolve_raw_source
+
+    raw = tmp_path / "raw"
+    path = _write_raw(raw, "xnas-itch-20250602.mbo.dbn.zst")
+    manifest = _manifest_for(path)
+    manifest["source"]["bytes"] += 1
+    with pytest.raises(ValueError, match="bytes, Stage 1 recorded"):
+        resolve_raw_source(manifest, raw, stem="AAPL_2025-06-02")
+
+
+def test_a_sha256_mismatch_is_refused(tmp_path):
+    """Same name, same size, different bytes -- the case a size check misses."""
+    from app.services.mbo_stage3_executor import resolve_raw_source
+
+    raw = tmp_path / "raw"
+    path = _write_raw(raw, "xnas-itch-20250602.mbo.dbn.zst", b"AAAAAAAA")
+    manifest = _manifest_for(path)
+    path.write_bytes(b"BBBBBBBB")  # identical length
+    with pytest.raises(ValueError, match="does not match the Stage-1 SHA-256"):
+        resolve_raw_source(manifest, raw, stem="AAPL_2025-06-02")
+
+
+def test_a_manifest_with_no_source_is_refused(tmp_path):
+    from app.services.mbo_stage3_executor import resolve_raw_source
+
+    with pytest.raises(ValueError, match="will not guess"):
+        resolve_raw_source({}, tmp_path, stem="AAPL_2025-06-02")
+
+
+# ---------------------------------------------------------------------------
+# Feature / label re-certification
+# ---------------------------------------------------------------------------
+
+
+def _frozen_batch_manifest():
+    from app.services.mbo_feature_engine import (
+        FEATURE_ENGINE_VERSION,
+        FEATURE_SEMANTICS_HASH,
+        FEATURE_VOCABULARY_HASH,
+    )
+
+    return {
+        "definitions": {
+            "feature_engine_version": FEATURE_ENGINE_VERSION,
+            "feature_semantics_hash": FEATURE_SEMANTICS_HASH,
+            "feature_vocabulary_hash": FEATURE_VOCABULARY_HASH,
+        },
+        "feature_semantics_consistent": True,
+    }
+
+
+def test_a_frozen_feature_batch_is_accepted():
+    from app.services.mbo_stage3_executor import assert_feature_batch_is_frozen
+
+    assert_feature_batch_is_frozen(_frozen_batch_manifest())
+
+
+@pytest.mark.parametrize(
+    "key", ["feature_engine_version", "feature_semantics_hash", "feature_vocabulary_hash"]
+)
+def test_a_stale_feature_batch_is_refused(key):
+    from app.services.mbo_stage3_executor import assert_feature_batch_is_frozen
+
+    manifest = _frozen_batch_manifest()
+    manifest["definitions"][key] = "stale"
+    with pytest.raises(ValueError, match=key):
+        assert_feature_batch_is_frozen(manifest)
+
+
+def test_an_inconsistent_feature_batch_is_refused():
+    from app.services.mbo_stage3_executor import assert_feature_batch_is_frozen
+
+    manifest = _frozen_batch_manifest()
+    manifest["feature_semantics_consistent"] = False
+    with pytest.raises(ValueError, match="not semantics-consistent"):
+        assert_feature_batch_is_frozen(manifest)
+
+
+def test_misaligned_labels_are_refused():
+    import numpy as np
+    from app.services.mbo_stage3_executor import assert_labels_align
+
+    features = np.arange(10, dtype=np.int64)
+    assert_labels_align("AAPL_2025-06-02", "50ev", features, features.copy())
+    with pytest.raises(ValueError, match="do not align one-for-one"):
+        assert_labels_align("AAPL_2025-06-02", "50ev", features, features[:-1])
+    shuffled = features.copy()
+    shuffled[3], shuffled[4] = shuffled[4], shuffled[3]
+    with pytest.raises(ValueError, match="do not align one-for-one"):
+        assert_labels_align("AAPL_2025-06-02", "50ev", features, shuffled)
+
+
+# ---------------------------------------------------------------------------
+# Nullable event-horizon availability
+# ---------------------------------------------------------------------------
+
+
+def test_null_availability_on_non_ok_labels_stays_none():
+    """The bug a wholesale int64 cast would introduce: a null becomes a real
+    timestamp, arithmetically valid and silently wrong."""
+    import numpy as np
+    import pyarrow as pa
+    from app.services.mbo_stage3_executor import event_horizon_availability
+
+    status = np.array(["ok", "session_end_before_horizon", "ok", "no_further_midpoint_change"])
+    column = pa.array([1_000, None, 2_000, None], pa.int64())
+    assert event_horizon_availability(status, column) == [1_000, None, 2_000, None]
+
+
+def test_a_non_null_value_on_a_non_ok_row_is_still_discarded():
+    """Status governs. A stale value under a non-OK status is not a resolution."""
+    import numpy as np
+    import pyarrow as pa
+    from app.services.mbo_stage3_executor import event_horizon_availability
+
+    status = np.array(["ok", "session_end_before_horizon"])
+    column = pa.array([1_000, 9_999], pa.int64())
+    assert event_horizon_availability(status, column) == [1_000, None]
+
+
+def test_a_null_availability_yields_no_trade_rather_than_a_fabricated_exit():
+    trade, reason = evaluate_candidate(
+        predicted_bps=500.0,
+        decision_ts=1_000_000_000,
+        exit_resolution_ts=None,
+        latency_ns=LATENCY["250ms"],
+        book_at=static_book_at(100.00, 100.02),
+        price_scale=SCALE,
+        schedule=PRIMARY_FEE_SCHEDULE,
+    )
+    assert trade is None and reason == NO_TRADE_UNRESOLVED_TARGET
+
+
+# ---------------------------------------------------------------------------
+# The discovery decile, wired
+# ---------------------------------------------------------------------------
+
+
+def test_the_decile_threshold_is_the_frozen_quantile_of_absolute_predictions():
+    import numpy as np
+    from app.services.mbo_stage3_executor import discovery_decile_threshold
+    from app.services.mbo_stage3_plan import DISCOVERY_DECILE_QUANTILE
+
+    values = list(np.arange(1.0, 101.0))
+    threshold = discovery_decile_threshold(values)
+    assert threshold == pytest.approx(np.quantile(values, DISCOVERY_DECILE_QUANTILE))
+
+
+def test_the_decile_ignores_non_finite_predictions():
+    import numpy as np
+    from app.services.mbo_stage3_executor import discovery_decile_threshold
+
+    assert discovery_decile_threshold([np.nan, np.inf, 1.0, 2.0]) is not None
+    assert discovery_decile_threshold([np.nan, np.inf]) is None
+    assert discovery_decile_threshold([]) is None
+
+
+def test_a_wired_decile_threshold_actually_admits_trades():
+    """With the threshold unwired the secondary rule took zero trades, which
+    would have reported it as producing nothing rather than as never running."""
+    common = {
+        "decision_ts": 1_000_000_000,
+        "exit_resolution_ts": 1_000_000_000 + 5 * SCALE,
+        "latency_ns": LATENCY["250ms"],
+        "book_at": static_book_at(100.00, 100.02),
+        "price_scale": SCALE,
+        "schedule": PRIMARY_FEE_SCHEDULE,
+        "rule": SECONDARY_RULE,
+    }
+    unwired, reason = evaluate_candidate(
+        predicted_bps=9.0, decile_threshold_bps=None, **common
+    )
+    assert unwired is None and reason == NO_TRADE_BELOW_HURDLE
+    wired, reason = evaluate_candidate(
+        predicted_bps=9.0, decile_threshold_bps=5.0, **common
+    )
+    assert reason is None and wired is not None
+
+
+def test_the_decile_is_calibrated_on_discovery_only():
+    from app.services.mbo_stage3_plan import DECILE_CALIBRATION_RULES
+
+    assert DECILE_CALIBRATION_RULES["block"] == "discovery"
+    assert DECILE_CALIBRATION_RULES["uses_outcomes"] is False
+
+
+# ---------------------------------------------------------------------------
+# The common factor, wired
+# ---------------------------------------------------------------------------
+
+
+def test_the_common_factor_is_equal_weighted_across_symbols():
+    from app.services.mbo_stage3_executor import common_factor_by_date
+
+    factor = common_factor_by_date([
+        ("2025-06-18", "AAAA", 10.0),
+        ("2025-06-18", "BBBB", 20.0),
+        ("2025-06-18", "CCCC", 30.0),
+        ("2025-06-19", "AAAA", -4.0),
+    ])
+    assert factor["2025-06-18"] == pytest.approx(20.0)
+    assert factor["2025-06-19"] == pytest.approx(-4.0)
+
+
+def test_a_symbol_day_with_no_usable_midpoints_is_omitted_not_zeroed():
+    """A missing observation is not a flat one; averaging it in as zero would
+    drag the factor toward the mean."""
+    import numpy as np
+    from app.services.mbo_stage3_executor import (
+        common_factor_by_date,
+        session_return_bps,
+    )
+
+    assert session_return_bps(np.array([np.nan, np.nan])) is None
+    factor = common_factor_by_date([
+        ("2025-06-18", "AAAA", 10.0),
+        ("2025-06-18", "BBBB", None),
+    ])
+    assert factor["2025-06-18"] == pytest.approx(10.0)
+
+
+def test_session_return_is_first_to_last_midpoint_in_bps():
+    import numpy as np
+    from app.services.mbo_stage3_executor import session_return_bps
+
+    assert session_return_bps(np.array([100.0, 999.0, 101.0])) == pytest.approx(100.0)
+    assert session_return_bps(np.array([100.0])) is None
+
+
+def test_the_common_factor_definition_is_frozen():
+    from app.services.mbo_stage3_plan import COMMON_FACTOR
+
+    assert COMMON_FACTOR["name"] == "equal_weighted_cross_symbol_session_return_bps"
+    assert COMMON_FACTOR["cadence"] == "50ev"
+    assert COMMON_FACTOR["declared_before_any_economic_outcome"] == "true"
+
+
+def test_the_run_passes_the_factor_into_the_summaries():
+    """factor_beta existed but was never fed; the promise was unkept."""
+    import inspect
+
+    from app.cli.mbo_stage3 import run
+
+    assert "summarize(sinks, market)" in inspect.getsource(run)

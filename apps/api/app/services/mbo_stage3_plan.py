@@ -52,9 +52,28 @@ from app.services.mbo_stage2_plan import (
     PRIOR_EFFECTIVE_TRIALS as STAGE2_PRIOR_EFFECTIVE_TRIALS,
 )
 
-STAGE3_PLAN_VERSION = "tier1_stage3_economics_v4"
+STAGE3_PLAN_VERSION = "tier1_stage3_economics_v5"
 
 SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_stage3_economics_v4",
+        "plan_design_hash": (
+            "a780b24164aa930ed8d7f939defed97d2d0a19256496b9c1177caab8dc6ae8c4"
+        ),
+        "superseded_before_any_economic_outcome": "true",
+        "reason": (
+            "applied the confirmation fit -- trained on the first sixteen dates "
+            "-- to all twenty, so sixteen twentieths of the economics would have "
+            "been scored in sample. It also resolved raw DBN files by guessing "
+            "filenames from the symbol-day stem instead of reading the Stage-1 "
+            "manifest, never re-certified that the supplied feature and label "
+            "directories belonged to the supplied Grams, cast a nullable "
+            "availability column wholesale to int64, left the declared "
+            "discovery-decile rule unwired so it took zero trades, never "
+            "populated the common-factor regressor it promised to report, and "
+            "allowed --limit on the authorized economic run."
+        ),
+    },
     {
         "version": "tier1_stage3_economics_v3",
         "plan_design_hash": (
@@ -393,6 +412,73 @@ ECONOMIC_GATES: dict[str, Any] = {
 }
 
 # ---------------------------------------------------------------------------
+# Where economics may be measured
+# ---------------------------------------------------------------------------
+#
+# The Stage-2 confirmation fit is trained on discovery + validation: the first
+# sixteen session dates. Scoring economics on those dates would be scoring a
+# model on its own training data, and at 16/20 of the sample it would have
+# dominated every number in the report.
+
+PRIMARY_EVALUATION_BLOCK = "confirmation"
+PRIMARY_EVALUATION_RULES: dict[str, Any] = {
+    "block": PRIMARY_EVALUATION_BLOCK,
+    "session_dates": 4,
+    "fit_trained_on": "discovery + validation (the first 16 session dates)",
+    "scored_on": "the final 4 confirmation dates only",
+    "why": (
+        "a fit may not be economically scored on the dates it was trained on. "
+        "The four confirmation dates are the only out-of-sample dates this fit "
+        "has, and they are the only dates Stage-3 primary economics may use."
+    ),
+    "may_not_add_training_dates_for_sample_size": (
+        "if fewer than the frozen 4 session dates or 100 trades remain "
+        "executable, the answer is not_authorized_insufficient_executable_sample. "
+        "Enlarging the sample by re-admitting training dates would convert an "
+        "unmeasurable result into an in-sample one, which is worse than no answer."
+    ),
+}
+
+# The decile threshold is calibrated on DISCOVERY predictions only. Predictions,
+# not outcomes: no economic result and no realized return enters it, and the
+# discovery block is never economically scored.
+DECILE_CALIBRATION_BLOCK = "discovery"
+DECILE_CALIBRATION_RULES: dict[str, Any] = {
+    "block": DECILE_CALIBRATION_BLOCK,
+    "statistic": (
+        f"the {DISCOVERY_DECILE_QUANTILE:.0%} quantile of |predicted bps|, pooled "
+        "across symbols within a cell"
+    ),
+    "uses_outcomes": False,
+    "note": (
+        "discovery-date features are read to compute this quantile and for "
+        "nothing else. No book is replayed there and no economics are accumulated."
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# The common factor, defined before any economic outcome
+# ---------------------------------------------------------------------------
+
+COMMON_FACTOR: dict[str, Any] = {
+    "name": "equal_weighted_cross_symbol_session_return_bps",
+    "definition": (
+        "for each session date, the equal-weighted mean across symbols of that "
+        "symbol-day's midpoint return in basis points, measured from the first "
+        "to the last snapshot midpoint of the 50ev cadence"
+    ),
+    "cadence": "50ev",
+    "units": "basis points",
+    "weighting": "equal across symbols; a symbol-day with no usable midpoints is omitted",
+    "why": (
+        "a strategy whose profit is really a directional bet on the tape is not "
+        "a microstructure edge. Regressing per-date net return on this factor "
+        "separates the two, and the residual intercept is what survives."
+    ),
+    "declared_before_any_economic_outcome": "true",
+}
+
+# ---------------------------------------------------------------------------
 # Authorization -- separate from the scientific verdict
 # ---------------------------------------------------------------------------
 #
@@ -515,6 +601,13 @@ PLAN_DESIGN_ELEMENTS: tuple[str, ...] = (
     "authorization=requires_cat_robustness",
     "cat_blocker=unverified_historical_cat_treatment",
     "direct_member_stress=descriptive_only",
+    f"primary_evaluation_block={PRIMARY_EVALUATION_BLOCK}",
+    "economics_never_scored_on_training_dates=true",
+    f"decile_calibration_block={DECILE_CALIBRATION_BLOCK}",
+    "common_factor=equal_weighted_cross_symbol_session_return_bps@50ev",
+    "raw_input=resolved_and_hashed_via_stage1_manifest",
+    "feature_label_binding=recertified_before_economics",
+    "no_subset_limit_on_authorized_run=true",
     f"prior_effective_trials={PRIOR_EFFECTIVE_TRIALS}",
     "authorizes=paper_proposal_only;not=live;not=capital",
 )
@@ -572,6 +665,9 @@ def statistical_plan() -> dict[str, Any]:
         "bad_ts_recv_rule": dict(BAD_TS_RECV_RULE),
         "gates": dict(ECONOMIC_GATES),
         "authorization_rules": dict(AUTHORIZATION_RULES),
+        "primary_evaluation": dict(PRIMARY_EVALUATION_RULES),
+        "decile_calibration": dict(DECILE_CALIBRATION_RULES),
+        "common_factor": dict(COMMON_FACTOR),
         "measurements": list(MEASUREMENTS),
         "report_breakdowns": list(REPORT_BREAKDOWNS),
         "multiplicity": {

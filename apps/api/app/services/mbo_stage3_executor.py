@@ -47,6 +47,7 @@ import numpy as np
 from app.services.mbo_stage2_executor import _student_t_sf, benjamini_hochberg
 from app.services.mbo_stage2_plan import PLAN_DESIGN_HASH as STAGE2_PLAN_DESIGN_HASH
 from app.services.mbo_stage3_plan import (
+    DISCOVERY_DECILE_QUANTILE,
     ECONOMIC_GATES,
     F_BAD_TS_RECV,
     FEE_SCHEDULES,
@@ -67,7 +68,7 @@ from app.services.mbo_stage3_plan import (
 STAGE3_EXECUTOR_VERSION = "tier1_stage3_executor_v2"
 
 EXPECTED_PLAN_DESIGN_HASH = (
-    "a780b24164aa930ed8d7f939defed97d2d0a19256496b9c1177caab8dc6ae8c4"
+    "055c3d83108ea6223c12bd541d824843ace071a110e3bd5e1292e1f0665186f4"
 )
 EXPECTED_SURVIVOR_HASH = (
     "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -1079,3 +1080,182 @@ def summarize(
     market_by_date: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     return [sink.summary(market_by_date) for sink in sinks.values()]
+
+
+# ---------------------------------------------------------------------------
+# Binding Stage 3 to the exact bytes that produced Stage 1
+# ---------------------------------------------------------------------------
+
+
+def sha256_file(path: Path, *, chunk_size: int = 1 << 20) -> str:
+    """Hash a source file without reading it into memory."""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def resolve_raw_source(
+    manifest: dict[str, Any], raw_dir: Path, *, stem: str, verify_hash: bool = True
+) -> Path:
+    """Find the raw file Stage 1 actually read, and prove it is that file.
+
+    The filename is taken from the Stage-1 manifest rather than reconstructed
+    from the symbol-day stem. Reconstructing it guesses at a naming convention;
+    the manifest records what was opened. Size and SHA-256 are then checked
+    against the same manifest, so Stage 3 replays the exact bytes that produced
+    the features it is predicting from -- not merely a file with a plausible name.
+    """
+    source = manifest.get("source")
+    if not source or not source.get("filename"):
+        raise ValueError(
+            f"the Stage-1 manifest for {stem} records no source file; Stage 3 "
+            "will not guess which raw input produced these features"
+        )
+    name = source["filename"]
+    matches = [p for p in raw_dir.rglob(name) if p.is_file()]
+    if not matches:
+        raise ValueError(f"raw source {name!r} for {stem} not found under {raw_dir}")
+    if len(matches) > 1:
+        raise ValueError(
+            f"raw source {name!r} for {stem} is ambiguous: {[str(m) for m in matches]}"
+        )
+    path = matches[0]
+
+    expected_bytes = source.get("bytes")
+    if expected_bytes is not None and path.stat().st_size != expected_bytes:
+        raise ValueError(
+            f"raw source {name!r} for {stem} is {path.stat().st_size} bytes, "
+            f"Stage 1 recorded {expected_bytes}"
+        )
+    expected_sha = source.get("sha256")
+    if verify_hash and expected_sha:
+        observed = sha256_file(path)
+        if observed != expected_sha:
+            raise ValueError(
+                f"raw source {name!r} for {stem} does not match the Stage-1 "
+                f"SHA-256 ({observed} vs {expected_sha}); these are not the bytes "
+                "that produced the features"
+            )
+    return path
+
+
+def assert_feature_batch_is_frozen(batch_manifest: dict[str, Any]) -> None:
+    """The supplied features must be the frozen v4 engine's own output.
+
+    Stage-2 Grams being correct says nothing about whichever --features-dir was
+    handed to Stage 3.
+    """
+    from app.services.mbo_feature_engine import (
+        FEATURE_ENGINE_VERSION,
+        FEATURE_SEMANTICS_HASH,
+        FEATURE_VOCABULARY_HASH,
+    )
+
+    definitions = batch_manifest.get("definitions", {})
+    checks = (
+        ("feature_engine_version", FEATURE_ENGINE_VERSION),
+        ("feature_semantics_hash", FEATURE_SEMANTICS_HASH),
+        ("feature_vocabulary_hash", FEATURE_VOCABULARY_HASH),
+    )
+    for key, expected in checks:
+        observed = definitions.get(key)
+        if observed != expected:
+            raise ValueError(
+                f"the supplied feature batch declares {key}={observed!r}, not the "
+                f"frozen {expected!r}"
+            )
+    if not batch_manifest.get("feature_semantics_consistent", True):
+        raise ValueError("the supplied feature extraction is not semantics-consistent")
+
+
+def assert_labels_align(
+    stem: str,
+    cadence: str,
+    feature_sequence: np.ndarray,
+    label_sequence: np.ndarray,
+) -> None:
+    """Labels must be this feature file's labels, row for row.
+
+    The same check Stage-2 `grams` performs. Repeating it here is the point:
+    Stage 3 is handed its own --features-dir and --labels-dir and may not assume
+    they are the pair the Grams were built from.
+    """
+    if len(label_sequence) != len(feature_sequence) or not np.array_equal(
+        label_sequence, feature_sequence
+    ):
+        raise ValueError(
+            f"label rows for {stem} {cadence} do not align one-for-one with the "
+            "feature snapshots; refusing to join on assumption"
+        )
+
+
+def event_horizon_availability(
+    status: np.ndarray, available: Any
+) -> list[int | None]:
+    """Availability instants, with nulls handled rather than cast through.
+
+    A non-OK label legitimately has no resolution instant, and the column is
+    nullable. Casting the whole column to int64 turns those nulls into whatever
+    the null sentinel happens to be -- a real timestamp, arithmetically valid,
+    silently wrong. So the value is produced only where the status is OK, and is
+    ``None`` everywhere else.
+    """
+    from app.services.mbo_label_engine import LABEL_OK
+
+    values = available.to_pylist() if hasattr(available, "to_pylist") else list(available)
+    resolved: list[int | None] = []
+    for index, raw in enumerate(values):
+        if index >= len(status) or status[index] != LABEL_OK or raw is None:
+            resolved.append(None)
+            continue
+        try:
+            resolved.append(int(raw))
+        except (TypeError, ValueError):
+            resolved.append(None)
+    return resolved
+
+
+# ---------------------------------------------------------------------------
+# The discovery decile, and the common factor
+# ---------------------------------------------------------------------------
+
+
+def discovery_decile_threshold(absolute_predictions: Sequence[float]) -> float | None:
+    """The frozen quantile of |prediction| over discovery dates.
+
+    Predictions, not outcomes. No realized return, no economic result and no
+    confirmation-date row enters this number.
+    """
+    clean = [
+        float(v) for v in absolute_predictions if v is not None and np.isfinite(v)
+    ]
+    if not clean:
+        return None
+    return float(np.quantile(clean, DISCOVERY_DECILE_QUANTILE))
+
+
+def session_return_bps(midpoints: np.ndarray) -> float | None:
+    """First-to-last midpoint return of one symbol-day, in basis points."""
+    finite = midpoints[np.isfinite(midpoints) & (midpoints > 0)]
+    if finite.size < 2:
+        return None
+    return float((finite[-1] - finite[0]) / finite[0] * BPS)
+
+
+def common_factor_by_date(
+    per_symbol_day: Sequence[tuple[str, str, float]],
+) -> dict[str, float]:
+    """The frozen factor: equal-weighted cross-symbol session return per date.
+
+    ``per_symbol_day`` is ``(session_date, symbol, session_return_bps)``. A
+    symbol-day with no usable midpoints is omitted rather than counted as zero,
+    because a missing observation is not a flat one.
+    """
+    grouped: dict[str, list[float]] = {}
+    for session_date, _symbol, value in per_symbol_day:
+        if value is None or not np.isfinite(value):
+            continue
+        grouped.setdefault(session_date, []).append(float(value))
+    return {date: float(np.mean(values)) for date, values in sorted(grouped.items())}

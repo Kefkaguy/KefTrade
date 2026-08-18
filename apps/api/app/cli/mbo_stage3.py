@@ -96,53 +96,115 @@ def _stage2_cell_record(results: dict[str, Any], cell: str) -> dict[str, Any]:
     raise ValueError(f"no Stage-2 record for survivor {cell!r}")
 
 
-def run(args: argparse.Namespace) -> dict[str, Any]:
-    """The economic pass.
+def _symbol_day_stems(features_dir: Path) -> list[str]:
+    return sorted({p.name.split(".")[0] for p in features_dir.rglob("*.parquet")})
 
-    Gated: Stage 3 was specified to stop after the design and implementation were
-    produced for review. --i-have-reviewed-the-design is the reviewer's
-    acknowledgement, not a default.
+
+def _read_cell_inputs(
+    *, features_dir: Path, labels_dir: Path, stem: str, cell: str, beta
+):
+    """Design, predictions, decision instants and exit resolutions for one cell.
+
+    The design matrix is built by the Stage-2 loader itself, so the features
+    Stage 3 predicts on are the same objects Stage 2 fitted on rather than a
+    re-implementation that could drift apart.
     """
     import numpy as np
     import pyarrow.parquet as pq
 
     from app.cli.mbo_stage2 import FEATURE_NAMES, _symbol_day_matrix
-    from app.services.mbo_book_validator import MboBook, iter_dbn_events
-    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
     from app.services.mbo_label_engine import LABEL_OK
+    from app.services.mbo_stage3_executor import (
+        assert_labels_align,
+        cell_prefix,
+        event_horizon_availability,
+        predict,
+        session_return_bps,
+    )
+
+    cadence, horizon = cell.split("|")
+    path = features_dir / cadence / f"{stem}.{cadence}.parquet"
+    if not path.is_file():
+        return None
+
+    table = pq.read_table(
+        path,
+        columns=["sequence_index", "feature_available_ts_recv", *FEATURE_NAMES],
+    )
+    design, sequence = _symbol_day_matrix(table, FEATURE_NAMES)
+    decision = np.asarray(
+        table.column("feature_available_ts_recv").to_numpy(zero_copy_only=False),
+        np.int64,
+    )
+    midpoints = np.asarray(
+        table.column("midpoint").to_numpy(zero_copy_only=False), float
+    )
+
+    prefix = cell_prefix(horizon)
+    labels = pq.read_table(
+        labels_dir / f"{stem}.labels.parquet",
+        columns=[
+            "cadence",
+            "sequence_index",
+            f"{prefix}_status",
+            f"{prefix}_available_ts_recv",
+        ],
+    )
+    mask = np.asarray(labels.column("cadence").to_numpy(zero_copy_only=False)) == cadence
+    label_sequence = np.asarray(
+        labels.column("sequence_index").to_numpy(zero_copy_only=False), np.int64
+    )[mask]
+    assert_labels_align(stem, cadence, sequence, label_sequence)
+
+    status = np.asarray(
+        labels.column(f"{prefix}_status").to_numpy(zero_copy_only=False)
+    )[mask]
+    # Nullable by design: a non-OK label has no resolution instant.
+    availability = event_horizon_availability(
+        status, labels.column(f"{prefix}_available_ts_recv").filter(mask)
+    )
+
+    finite = np.isfinite(design).all(axis=1)
+    usable = (status == LABEL_OK) & finite
+    predictions = predict(np.nan_to_num(design, nan=0.0), beta)
+    return {
+        "design": design,
+        "predictions": predictions,
+        "decision": decision,
+        "availability": availability,
+        "usable": usable,
+        "session_return_bps": session_return_bps(midpoints),
+    }
+
+
+def _prepare(args: argparse.Namespace, *, economic: bool) -> dict[str, Any]:
+    """Everything both `run` and `diagnose` need, with every gate applied."""
+    import numpy as np
+
     from app.services.mbo_stage2_executor import split_dates
     from app.services.mbo_stage3_executor import (
-        BookReplay,
-        assemble_report,
-        cell_prefix,
-        evaluate_symbol_day,
-        make_sinks,
-        predict,
-        query_instants,
+        assert_feature_batch_is_frozen,
+        discovery_decile_threshold,
         reconstruct_confirmation_fit,
-        summarize,
-        write_report,
     )
     from app.services.mbo_stage3_plan import assert_session_dates_covered
 
     assert_frozen_plan()
-    if not args.i_have_reviewed_the_design:
-        raise ValueError(
-            "the Stage-3 economic pass is not authorized yet. The design and "
-            "implementation were to be reviewed first; re-run with "
-            "--i-have-reviewed-the-design once that review has happened."
-        )
+    features_dir = Path(args.features_dir)
+    labels_dir = Path(args.labels_dir)
+
+    # (3) The supplied features must be the frozen engine's own output. Correct
+    # Grams say nothing about whichever directory was passed in here.
+    assert_feature_batch_is_frozen(
+        json.loads((features_dir / "batch_manifest.json").read_text(encoding="utf-8"))
+    )
 
     stage2 = json.loads(Path(args.stage2_results).read_text(encoding="utf-8"))
     frozen = load_frozen_survivors(
-        Path(args.stage2_results), expected_count=args.expect_survivors or SURVIVOR_COUNT
+        Path(args.stage2_results), expected_count=SURVIVOR_COUNT
     )
     grams = _load_grams(Path(args.grams_dir))
-    features_dir = Path(args.features_dir)
-    labels_dir = Path(args.labels_dir)
-    raw_dir = Path(args.raw_dir)
 
-    # Reconstruct each survivor's frozen fit once, and prove it reproduces.
     session_dates = sorted({d for by_date in grams.values() for d in by_date})
     assert_session_dates_covered(session_dates)
     blocks = split_dates(session_dates)
@@ -152,71 +214,110 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     fits: dict[str, Any] = {}
     for cell in frozen["survivors"]:
         record = _stage2_cell_record(stage2, cell)
+        confirm_block = record.get("confirmation") or {}
         fits[cell] = reconstruct_confirmation_fit(
             grams[cell],
             training,
             confirmation,
             record["chosen_alpha"],
-            recorded_confirmation_delta_r2=(record.get("confirmation") or {}).get("delta_r2"),
-            recorded_per_date_delta_r2=(record.get("confirmation") or {}).get(
-                "per_date_delta_r2"
-            ),
+            recorded_confirmation_delta_r2=confirm_block.get("delta_r2"),
+            recorded_per_date_delta_r2=confirm_block.get("per_date_delta_r2"),
         )
 
+    stems = _symbol_day_stems(features_dir)
+    by_date: dict[str, list[str]] = {}
+    for stem in stems:
+        _symbol, _, session_date = stem.rpartition("_")
+        by_date.setdefault(session_date, []).append(stem)
+
+    # (5) Calibrate the secondary rule's threshold on DISCOVERY predictions only.
+    # Predictions, not outcomes; no book is replayed and no economics accumulated.
+    deciles: dict[str, float | None] = {}
+    for cell in frozen["survivors"]:
+        pooled: list[float] = []
+        for session_date in blocks["discovery"]:
+            for stem in by_date.get(session_date, []):
+                inputs = _read_cell_inputs(
+                    features_dir=features_dir, labels_dir=labels_dir,
+                    stem=stem, cell=cell, beta=fits[cell]["beta"],
+                )
+                if inputs is None:
+                    continue
+                pooled.extend(
+                    np.abs(inputs["predictions"][inputs["usable"]]).tolist()
+                )
+        deciles[cell] = discovery_decile_threshold(pooled)
+
+    return {
+        "frozen": frozen,
+        "fits": fits,
+        "deciles": deciles,
+        "blocks": blocks,
+        "confirmation": confirmation,
+        "training": training,
+        "by_date": by_date,
+        "features_dir": features_dir,
+        "labels_dir": labels_dir,
+        "raw_dir": Path(args.raw_dir),
+        "economic": economic,
+    }
+
+
+def _evaluate_block(
+    context: dict[str, Any], session_dates: list[str], *, verify_hash: bool = True
+):
+    """Replay and evaluate every symbol-day in the given block."""
+
+    from app.services.mbo_book_validator import MboBook, iter_dbn_events
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+    from app.services.mbo_stage3_executor import (
+        BookReplay,
+        common_factor_by_date,
+        evaluate_symbol_day,
+        make_sinks,
+        query_instants,
+        resolve_raw_source,
+    )
+
+    features_dir = context["features_dir"]
     sinks = make_sinks(float(FIXED_PRICE_SCALE))
     symbol_days: list[dict[str, Any]] = []
+    factor_inputs: list[tuple[str, str, float]] = []
 
-    stems = sorted({p.name.split(".")[0] for p in features_dir.rglob("*.parquet")})
-    if args.limit:
-        stems = stems[: args.limit]
-
-    for index, stem in enumerate(stems, start=1):
+    stems = [s for d in session_dates for s in context["by_date"].get(d, [])]
+    for index, stem in enumerate(sorted(stems), start=1):
         symbol, _, session_date = stem.rpartition("_")
-        raw_path = raw_dir / f"{stem}.mbo.dbn.zst"
-        if not raw_path.is_file():
-            candidates = list(raw_dir.glob(f"{stem}*.dbn.zst"))
-            if not candidates:
-                raise ValueError(f"no certified MBO file for {stem}")
-            raw_path = candidates[0]
-        if not args.quiet:
-            print(f"[{index}/{len(stems)}] {stem}", flush=True)
 
-        label_table = pq.read_table(labels_dir / f"{stem}.labels.parquet")
-        label_cadence = np.asarray(
-            label_table.column("cadence").to_numpy(zero_copy_only=False)
+        # (2) The raw file is the one Stage 1 recorded, verified byte-for-byte.
+        manifest_path = features_dir / "manifests" / f"{stem}.manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError(f"no Stage-1 manifest for {stem}; cannot bind raw input")
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        raw_path = resolve_raw_source(
+            manifest, context["raw_dir"], stem=stem, verify_hash=verify_hash
         )
+
+        print(f"[{index}/{len(stems)}] {stem}", flush=True)
 
         per_cell = []
         instants: set[int] = set()
-        for cell in frozen["survivors"]:
-            cadence, horizon = cell.split("|")
-            path = features_dir / cadence / f"{stem}.{cadence}.parquet"
-            if not path.is_file():
+        for cell in context["frozen"]["survivors"]:
+            inputs = _read_cell_inputs(
+                features_dir=features_dir, labels_dir=context["labels_dir"],
+                stem=stem, cell=cell, beta=context["fits"][cell]["beta"],
+            )
+            if inputs is None:
                 continue
-            table = pq.read_table(
-                path,
-                columns=["sequence_index", "feature_available_ts_recv", *FEATURE_NAMES],
+            per_cell.append((cell, inputs))
+            instants.update(
+                query_instants(
+                    inputs["decision"], inputs["availability"], inputs["usable"]
+                )
             )
-            design, _ = _symbol_day_matrix(table, FEATURE_NAMES)
-            decision = np.asarray(
-                table.column("feature_available_ts_recv").to_numpy(zero_copy_only=False),
-                np.int64,
-            )
-            mask = label_cadence == cadence
-            prefix = cell_prefix(horizon)
-            status = np.asarray(
-                label_table.column(f"{prefix}_status").to_numpy(zero_copy_only=False)
-            )[mask]
-            available = np.asarray(
-                label_table.column(f"{prefix}_available_ts_recv").to_numpy(
-                    zero_copy_only=False
-                ),
-                np.int64,
-            )[mask]
-            usable = (status == LABEL_OK) & np.isfinite(design).all(axis=1)
-            predictions = predict(np.nan_to_num(design, nan=0.0), fits[cell]["beta"])
-            per_cell.append((cell, design, predictions, decision, available, usable))
-            instants.update(query_instants(decision, available, usable))
+            if inputs["session_return_bps"] is not None and cell.startswith("50ev|"):
+                factor_inputs.append(
+                    (session_date, symbol, inputs["session_return_bps"])
+                )
 
         if not per_cell:
             continue
@@ -224,44 +325,132 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         replay = BookReplay(MboBook)
         books = replay.run(iter_dbn_events(str(raw_path)), sorted(instants))
 
-        for cell, _design, predictions, decision, available, usable in per_cell:
+        for cell, inputs in per_cell:
             evaluate_symbol_day(
                 symbol=symbol,
                 session_date=session_date,
-                design=_design,
-                predictions=predictions,
-                decision_ts=decision,
-                exit_resolution_ts=available,
-                usable=usable,
+                design=inputs["design"],
+                predictions=inputs["predictions"],
+                decision_ts=inputs["decision"],
+                exit_resolution_ts=inputs["availability"],
+                usable=inputs["usable"],
                 cell=cell,
                 replay=replay,
                 books=books,
                 price_scale=float(FIXED_PRICE_SCALE),
                 sinks=sinks,
+                decile_threshold_bps=context["deciles"].get(cell),
             )
         symbol_days.append(
             {
                 "symbol": symbol,
                 "session_date": session_date,
-                "candidates": int(sum(int(u.sum()) for *_, u in per_cell)),
+                "raw_source": raw_path.name,
+                "candidates": int(sum(int(i["usable"].sum()) for _c, i in per_cell)),
                 "bad_ts_recv_instants": len(replay.bad_recv_instants),
             }
         )
         del books, replay, per_cell
 
-    report = assemble_report(summarize(sinks), frozen)
+    # Dedupe: one session return per (date, symbol).
+    unique = {(d, s): v for d, s, v in factor_inputs}
+    market = common_factor_by_date([(d, s, v) for (d, s), v in unique.items()])
+    return sinks, symbol_days, market
+
+
+def run(args: argparse.Namespace) -> dict[str, Any]:
+    """The economic pass, on the confirmation dates only.
+
+    Gated: --i-have-reviewed-the-design is the reviewer's acknowledgement, not a
+    default. There is no --limit here; a subset cannot produce a Stage-3
+    economic result.
+    """
+    from app.services.mbo_stage3_executor import (
+        assemble_report,
+        summarize,
+        write_report,
+    )
+
+    if not args.i_have_reviewed_the_design:
+        raise ValueError(
+            "the Stage-3 economic pass is not authorized yet. The design and "
+            "implementation were to be reviewed first; re-run with "
+            "--i-have-reviewed-the-design once that review has happened."
+        )
+    context = _prepare(args, economic=True)
+
+    # (1) The fit was trained on discovery + validation. Economics are scored on
+    # the confirmation dates and nowhere else.
+    sinks, symbol_days, market = _evaluate_block(context, context["confirmation"])
+
+    report = assemble_report(summarize(sinks, market), context["frozen"])
+    report["evaluation"] = {
+        "block": "confirmation",
+        "session_dates": context["confirmation"],
+        "fit_trained_on": context["training"],
+        "economics_scored_on_training_dates": False,
+    }
+    report["discovery_decile_thresholds_bps"] = context["deciles"]
+    report["common_factor_by_date"] = market
     report["reproduction"] = {
         cell: {
             "alpha": fit["alpha"],
             "mean_delta_r2": fit["mean_delta_r2"],
             "reproduction_verified": fit["reproduction_verified"],
         }
-        for cell, fit in fits.items()
+        for cell, fit in context["fits"].items()
     }
     report["symbol_days"] = symbol_days
-    output_dir = Path(args.output_dir)
-    write_report(report, output_dir / "stage3_results.json")
+    write_report(report, Path(args.output_dir) / "stage3_results.json")
     return {k: v for k, v in report.items() if k not in ("cells", "symbol_days")}
+
+
+def diagnose(args: argparse.Namespace) -> dict[str, Any]:
+    """Feasibility only. Produces no economic result, by construction.
+
+    A subset run cannot answer the primary question, so this command reports
+    what the pipeline *found* -- provenance, candidate counts, why candidates
+    did not become trades -- and never a return, a win rate or a verdict.
+    """
+    context = _prepare(args, economic=False)
+    dates = context["confirmation"]
+    if args.limit:
+        dates = dates[: args.limit]
+    sinks, symbol_days, _market = _evaluate_block(
+        context, dates, verify_hash=not args.skip_hash_check
+    )
+
+    payload = {
+        "stage3_plan_version": STAGE3_PLAN_VERSION,
+        "stage3_plan_design_hash": PLAN_DESIGN_HASH,
+        "diagnostic_only": True,
+        "contains_economic_result": False,
+        "why_no_result": (
+            "a subset of the confirmation block cannot answer the primary "
+            "question; this command reports feasibility and provenance only"
+        ),
+        "session_dates_examined": dates,
+        "symbol_days": symbol_days,
+        "discovery_decile_thresholds_bps": context["deciles"],
+        "candidates_by_cell": {
+            key[0]: sum(
+                s.trades.__len__() + sum(s.no_trade_reasons.values())
+                for k, s in sinks.items()
+                if k[0] == key[0]
+            )
+            for key in sinks
+        },
+        "no_trade_reasons": {
+            "|".join(key): dict(sorted(sink.no_trade_reasons.items()))
+            for key, sink in sinks.items()
+            if sink.no_trade_reasons
+        },
+        "trades_taken": {
+            "|".join(key): len(sink.trades) for key, sink in sinks.items() if sink.trades
+        },
+    }
+    _write(Path(args.output_dir) / "stage3_diagnostic.json", payload)
+    return {k: v for k, v in payload.items() if k != "symbol_days"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -282,17 +471,28 @@ def build_parser() -> argparse.ArgumentParser:
     freeze_cmd.add_argument("--expect-survivors", type=int, default=0)
     freeze_cmd.set_defaults(handler=freeze)
 
+    def add_inputs(cmd):
+        cmd.add_argument("--stage2-results", required=True)
+        cmd.add_argument("--grams-dir", required=True)
+        cmd.add_argument("--features-dir", required=True)
+        cmd.add_argument("--labels-dir", required=True)
+        cmd.add_argument("--raw-dir", required=True)
+
     run_cmd = subparsers.add_parser("run", help="The economic pass (gated).")
-    run_cmd.add_argument("--stage2-results", required=True)
-    run_cmd.add_argument("--grams-dir", required=True)
-    run_cmd.add_argument("--features-dir", required=True)
-    run_cmd.add_argument("--labels-dir", required=True)
-    run_cmd.add_argument("--raw-dir", required=True)
-    run_cmd.add_argument("--limit", type=int, default=0)
-    run_cmd.add_argument("--quiet", action="store_true")
-    run_cmd.add_argument("--expect-survivors", type=int, default=0)
+    add_inputs(run_cmd)
+    # No --limit. A subset cannot produce a Stage-3 economic result, and an
+    # option to try is an option to peek.
     run_cmd.add_argument("--i-have-reviewed-the-design", action="store_true")
     run_cmd.set_defaults(handler=run)
+
+    diagnose_cmd = subparsers.add_parser(
+        "diagnose",
+        help="Feasibility and provenance only; produces no economic result.",
+    )
+    add_inputs(diagnose_cmd)
+    diagnose_cmd.add_argument("--limit", type=int, default=0)
+    diagnose_cmd.add_argument("--skip-hash-check", action="store_true")
+    diagnose_cmd.set_defaults(handler=diagnose)
     return parser
 
 

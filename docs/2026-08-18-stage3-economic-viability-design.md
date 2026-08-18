@@ -1,14 +1,14 @@
-# Stage 3 — Economic viability design, for final review (v4)
+# Stage 3 — Economic viability design, for final review (v5)
 
 **Status: complete and wired. No economic outcome computed. No order placed of
 any kind. The run remains gated behind an explicit reviewer flag.**
 
 | | |
 |---|---|
-| Stage-3 plan | `tier1_stage3_economics_v4` |
-| `PLAN_DESIGN_HASH` | `a780b24164aa930ed8d7f939defed97d2d0a19256496b9c1177caab8dc6ae8c4` |
+| Stage-3 plan | `tier1_stage3_economics_v5` |
+| `PLAN_DESIGN_HASH` | `055c3d83108ea6223c12bd541d824843ace071a110e3bd5e1292e1f0665186f4` |
 | `SURVIVOR_HASH` | `bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00` |
-| Superseded | `v1` (`f6878f66…`), `v2` (`87429255…`), `v3` (`e5266ef3…`) — all pre-outcome |
+| Superseded | `v1` `f6878f66…`, `v2` `87429255…`, `v3` `e5266ef3…`, `v4` `a780b241…` — all pre-outcome |
 
 ---
 
@@ -359,7 +359,85 @@ an unverified fact.
 It is wired and it is still gated: without `--i-have-reviewed-the-design` it
 refuses, and a test asserts that.
 
-## 8. Tests — 88 cases
+## 7d. Out-of-sample only — the correction that mattered most
+
+v4 reconstructed the confirmation fit from discovery + validation (the first
+**16** dates) and then applied it to **all 20**. Sixteen twentieths of the
+economics would have been scored on the fit's own training data, and at that
+ratio it would have dominated every number in the report.
+
+`run` now evaluates the **four confirmation dates and nothing else** — the only
+out-of-sample dates this fit has. A test drives `run` with a stubbed evaluator
+and asserts the block passed to it is exactly `blocks["confirmation"]`, and that
+no discovery or validation date appears.
+
+**Training dates are not added to rescue sample size.** If fewer than 4 session
+dates or 100 trades remain executable, the answer is
+`not_authorized_insufficient_executable_sample`. Enlarging the sample by
+re-admitting training dates would convert an unmeasurable result into an
+in-sample one, which is worse than no answer.
+
+## 7e. Raw input bound to the exact Stage-1 bytes
+
+v4 guessed DBN filenames from the symbol-day stem. Stage 1 already records what
+it opened, in `features/manifests/<symbol>_<date>.manifest.json` under
+`source.filename` / `bytes` / `sha256`.
+
+`resolve_raw_source` now reads that manifest, locates the file under
+`--raw-dir`, and verifies **size and SHA-256** before replay. Missing,
+ambiguous, size-mismatched and hash-mismatched inputs are all refused. The
+SHA-256 check is not redundant with the size check: the test that matters uses
+same-name, same-length, different-bytes, which a size check passes.
+
+This binds Stage 3 to the exact bytes that produced Stage 1 rather than to a
+file with a plausible name.
+
+## 7f. Feature/label re-certification
+
+Correct Grams say nothing about whichever `--features-dir` and `--labels-dir`
+were handed to Stage 3. Before any economics:
+
+- the feature batch manifest must declare the frozen v4 engine version,
+  semantics hash and vocabulary hash, and be semantics-consistent;
+- labels must align **one-for-one by cadence and sequence index** with the
+  feature rows — the same check Stage-2 `grams` performs, repeated because the
+  inputs are supplied separately.
+
+## 7g. Nullable availability
+
+A non-OK label legitimately has no resolution instant, and
+`<prefix>_available_ts_recv` is nullable. Casting the column wholesale to
+`int64` turns those nulls into whatever the null sentinel happens to be — a real
+timestamp, arithmetically valid, silently wrong.
+
+`event_horizon_availability` produces a value **only where the status is
+`ok`**, and `None` everywhere else. Status governs: a stale non-null value under
+a non-OK status is discarded too. A `None` resolution yields
+`stage2_target_did_not_resolve`, never a fabricated exit.
+
+## 7h. The two rules that were declared but not wired
+
+- **Discovery decile.** The threshold is the frozen 90th percentile of
+  `|prediction|` pooled across symbols within a cell, computed on **discovery
+  dates only**. Predictions, not outcomes — no realized return and no
+  confirmation row enters it, no book is replayed there, and no economics
+  accumulate. Previously `decile_threshold_bps=None` meant the rule silently
+  took **zero** trades, which would have been reported as "produced nothing"
+  rather than "never ran".
+- **Common factor.** Frozen definition: the equal-weighted mean across symbols,
+  per session date, of each symbol-day's first-to-last midpoint return on the
+  `50ev` cadence, in basis points. A symbol-day with no usable midpoints is
+  omitted rather than counted as zero — a missing observation is not a flat one.
+  It is now actually passed into `summarize`.
+
+## 7i. No subset peeking
+
+`--limit` is removed from `run`. A separate `diagnose` command takes it and
+reports **provenance, candidate counts and no-trade reasons only** — no return,
+no win rate, no verdict, and it never calls `assemble_report`. A test inspects
+the executable body to enforce that.
+
+## 8. Tests — 116 cases
 
 | Area | What is pinned |
 |---|---|
@@ -382,10 +460,17 @@ refuses, and a test asserts that.
 | Insufficient sample | an unmeasurable family yields `not_authorized_insufficient_executable_sample`; **a mixed family with any unmeasured survivor is insufficient, not negative**; only all-four-measured-and-losing is negative; a missing primary row counts as unmeasured; a pass still beats an unmeasured sibling |
 | Authorization | a primary-positive set that dies under CAT keeps its verdict but sets `deployment_blocker`; a CAT-robust survivor authorizes for itself only; the direct-member stress cannot block a CAT-robust positive; no positive verdict authorizes nothing |
 | Wiring | the grid is 72 accumulators; query instants cover every rung and nothing else; unusable rows contribute none; `predict` applies beta without rescaling; `run` is still gated |
+| Out-of-sample | `run` evaluates exactly `blocks["confirmation"]`; no discovery or validation date reaches an accumulator; `run` rejects `--limit` |
+| Raw provenance | the file comes from the manifest, not the stem (a realistic `xnas-itch-20250602.mbo.dbn.zst` beside a decoy `AAPL_2025-06-02…`); missing, ambiguous, size-mismatched and same-size-different-bytes inputs each refuse |
+| Re-certification | a stale engine version, semantics hash or vocabulary hash each refuse; inconsistent extraction refuses; short and shuffled label sequences refuse |
+| Nullable labels | nulls stay `None`; a non-null value under a non-OK status is discarded; a `None` resolution yields no trade |
+| Decile | matches the frozen quantile; ignores non-finite; unwired takes zero trades and wired admits them; calibration block is discovery and uses no outcomes |
+| Common factor | equal-weighted across symbols; a symbol-day with no midpoints is omitted not zeroed; first-to-last in bps; the run passes it into `summarize` |
+| Diagnostic | its body contains no `assemble_report`, `net_return_bps`, `verdict` or `win_rate` |
 | Refusals | no results file; no survivors; survivor count ≠ declared; reconstructed fit disagreeing with the record |
 | Family | primary is 250 ms only; a negative mean cannot pass; BH denominator is the frozen survivor count |
 
-**442 passed, 3 skipped** across the whole MBO suite; ruff clean.
+**470 passed, 3 skipped** across the whole MBO suite; ruff clean.
 
 ---
 
