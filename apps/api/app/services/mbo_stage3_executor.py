@@ -48,20 +48,27 @@ from app.services.mbo_stage2_executor import _student_t_sf, benjamini_hochberg
 from app.services.mbo_stage2_plan import PLAN_DESIGN_HASH as STAGE2_PLAN_DESIGN_HASH
 from app.services.mbo_stage3_plan import (
     ECONOMIC_GATES,
-    FEE_SCHEDULE,
+    F_BAD_TS_RECV,
+    FEE_SCHEDULES,
+    FROZEN_SURVIVORS,
     MAX_BOOK_LEVELS_WALKED,
     PLAN_DESIGN_HASH,
+    PRIMARY_FEE_SCHEDULE_NAME,
     PRIMARY_LATENCY,
     PRIMARY_RULE,
     SECONDARY_RULE,
     STAGE3_PLAN_VERSION,
+    SURVIVOR_HASH,
     TRADE_SIZE_SHARES,
 )
 
-STAGE3_EXECUTOR_VERSION = "tier1_stage3_executor_v1"
+STAGE3_EXECUTOR_VERSION = "tier1_stage3_executor_v2"
 
 EXPECTED_PLAN_DESIGN_HASH = (
-    "f6878f6608002f1363982a4b38e7de719b460e34aa0c371db65aac4a93a83221"
+    "874292555a9e136294f36c45a69c402a8448213652cdf9a1aa867638b5529ff3"
+)
+EXPECTED_SURVIVOR_HASH = (
+    "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
 )
 
 BPS = 10_000.0
@@ -72,6 +79,13 @@ NO_TRADE_NO_BOOK = "no_two_sided_book_at_arrival"
 NO_TRADE_NO_LIQUIDITY = "insufficient_displayed_liquidity"
 NO_TRADE_NO_EXIT = "no_two_sided_book_at_exit"
 NO_TRADE_SESSION_END = "horizon_beyond_session_end"
+# The target event resolved before we could even arrive. Not a loss, not a
+# trade: a missed opportunity, and it must be visible as one.
+NO_TRADE_RESOLVED_BEFORE_ENTRY = "horizon_resolved_before_entry"
+# A flagged receive timestamp anywhere in the timing window. Excluded rather
+# than repaired.
+NO_TRADE_UNCERTIFIABLE_TIMING = "uncertifiable_timing_bad_ts_recv"
+NO_TRADE_UNRESOLVED_TARGET = "stage2_target_did_not_resolve"
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +164,8 @@ class Trade:
     decision_ts: int
     arrival_ts: int
     exit_ts: int
+    # The frozen Stage-2 event-horizon resolution this exit is anchored to.
+    exit_resolution_ts: int
     direction: int  # +1 long, -1 short
     predicted_bps: float
     decision_midpoint: float
@@ -167,6 +183,15 @@ class Trade:
     @property
     def holding_ns(self) -> int:
         return self.exit_ts - self.arrival_ts
+
+    @property
+    def realized_lag_ns(self) -> int:
+        """How long the frozen Stage-2 target actually took to resolve.
+
+        Reported because it is the event clock's own answer to a question a time
+        horizon would have assumed away.
+        """
+        return self.exit_resolution_ts - self.decision_ts
 
     @property
     def adverse_selection_bps(self) -> float:
@@ -208,27 +233,36 @@ class Trade:
             * BPS
         )
 
-    def fees_bps(self, price_scale: float) -> float:
-        """The frozen schedule, converted to basis points of entry notional."""
+    def fees_bps(self, price_scale: float, schedule: dict[str, Any]) -> float:
+        """The named schedule, converted to basis points of entry notional.
+
+        Two schedules exist and neither is silently the real one: a
+        commission-free retail account is not billed the venue's per-share
+        remove fee, while a direct member is. Section 31 and TAF attach to the
+        sale leg only, whichever leg that is.
+        """
         entry_notional = self.entry_price / price_scale * self.shares
         exit_notional = self.exit_price / price_scale * self.shares
-        taker = FEE_SCHEDULE["nasdaq_taker_fee_usd_per_share"] * self.shares * 2
-        clearing = FEE_SCHEDULE["clearing_usd_per_share"] * self.shares * 2
-        # Section 31 and TAF apply to the sale leg only.
+        per_share = (
+            schedule["commission_usd_per_share"]
+            + schedule["exchange_take_fee_usd_per_share"]
+            + schedule["clearing_usd_per_share"]
+            + schedule["cat_usd_per_share"]
+        ) * self.shares * 2
         sale_notional = exit_notional if self.direction > 0 else entry_notional
         sec = (
-            FEE_SCHEDULE["sec_section_31_usd_per_million_sold"]
+            schedule["sec_section_31_usd_per_million_sold"]
             * sale_notional
             / 1_000_000.0
         )
         taf = min(
-            FEE_SCHEDULE["finra_taf_usd_per_share_sold"] * self.shares,
-            FEE_SCHEDULE["finra_taf_cap_usd_per_trade"],
+            schedule["finra_taf_usd_per_share_sold"] * self.shares,
+            schedule["finra_taf_cap_usd_per_trade"],
         )
-        return (taker + clearing + sec + taf) / entry_notional * BPS
+        return (per_share + sec + taf) / entry_notional * BPS
 
-    def net_return_bps(self, price_scale: float) -> float:
-        return self.realized_return_bps - self.fees_bps(price_scale)
+    def net_return_bps(self, price_scale: float, schedule: dict[str, Any]) -> float:
+        return self.realized_return_bps - self.fees_bps(price_scale, schedule)
 
 
 # ---------------------------------------------------------------------------
@@ -236,12 +270,14 @@ class Trade:
 # ---------------------------------------------------------------------------
 
 
-def cost_hurdle_bps(book: BookLevels, shares: int, price_scale: float) -> float | None:
+def cost_hurdle_bps(
+    book: BookLevels, shares: int, price_scale: float, schedule: dict[str, Any]
+) -> float | None:
     """Round-trip break-even in bps, quoted by the market at decision time.
 
-    Half the spread on the way in, half on the way out, plus the per-share
-    schedule. Nothing here looks forward: it is what the book is charging to
-    round-trip right now.
+    Half the spread on the way in, half on the way out, plus the schedule's
+    per-share charges. Nothing here looks forward: it is what the book is
+    charging to round-trip right now, under the fee schedule being evaluated.
     """
     if not book.two_sided:
         return None
@@ -252,13 +288,15 @@ def cost_hurdle_bps(book: BookLevels, shares: int, price_scale: float) -> float 
     if notional <= 0:
         return None
     per_share = (
-        FEE_SCHEDULE["nasdaq_taker_fee_usd_per_share"]
-        + FEE_SCHEDULE["clearing_usd_per_share"]
+        schedule["commission_usd_per_share"]
+        + schedule["exchange_take_fee_usd_per_share"]
+        + schedule["clearing_usd_per_share"]
+        + schedule["cat_usd_per_share"]
     ) * shares * 2
-    sec = FEE_SCHEDULE["sec_section_31_usd_per_million_sold"] * notional / 1_000_000.0
+    sec = schedule["sec_section_31_usd_per_million_sold"] * notional / 1_000_000.0
     taf = min(
-        FEE_SCHEDULE["finra_taf_usd_per_share_sold"] * shares,
-        FEE_SCHEDULE["finra_taf_cap_usd_per_trade"],
+        schedule["finra_taf_usd_per_share_sold"] * shares,
+        schedule["finra_taf_cap_usd_per_trade"],
     )
     fee_bps = (per_share + sec + taf) / notional * BPS
     return 2 * half_spread_bps + fee_bps
@@ -273,26 +311,51 @@ def evaluate_candidate(
     *,
     predicted_bps: float,
     decision_ts: int,
-    horizon_ns: int,
+    exit_resolution_ts: int | None,
     latency_ns: int,
     book_at,
     price_scale: float,
+    schedule: dict[str, Any],
     shares: int = TRADE_SIZE_SHARES,
     rule: str = PRIMARY_RULE,
     decile_threshold_bps: float | None = None,
+    timing_certified=None,
 ) -> tuple[Trade | None, str | None]:
-    """One candidate, one latency rung. Returns ``(trade, no_trade_reason)``.
+    """One candidate at one latency rung. Returns ``(trade, no_trade_reason)``.
+
+    ``exit_resolution_ts`` is the **availability timestamp of the frozen Stage-2
+    target event** -- ``<prefix>_available_ts_recv`` from the label table. It is
+    not derived from a duration and there is no ``horizon_ns`` parameter to pass
+    one through. All four survivors are ``next_change`` / ``next_2_changes``, for
+    which no duration exists: when the midpoint next moves is the thing being
+    measured, not an input.
 
     ``book_at(ts)`` must return the displayed book as it stood at ``ts`` using
-    only records with ``ts_recv <= ts``. Enforcing that is the caller's job and
-    is what makes this causal.
+    only records with ``ts_recv <= ts``.
+
+    ``timing_certified(lo, hi)`` returns False when any record in the window
+    carried ``F_BAD_TS_RECV``. Such candidates are excluded, never repaired.
     """
+    if exit_resolution_ts is None:
+        return None, NO_TRADE_UNRESOLVED_TARGET
+
+    arrival_ts = decision_ts + latency_ns
+    exit_ts = exit_resolution_ts + latency_ns
+
+    # The target event happened before we could get there. The prediction may
+    # have been perfectly correct and is still unharvestable.
+    if exit_resolution_ts <= arrival_ts:
+        return None, NO_TRADE_RESOLVED_BEFORE_ENTRY
+
+    if timing_certified is not None and not timing_certified(decision_ts, exit_ts):
+        return None, NO_TRADE_UNCERTIFIABLE_TIMING
+
     decision_book = book_at(decision_ts)
     if decision_book is None or not decision_book.two_sided:
         return None, NO_TRADE_NO_BOOK
 
     if rule == PRIMARY_RULE:
-        hurdle = cost_hurdle_bps(decision_book, shares, price_scale)
+        hurdle = cost_hurdle_bps(decision_book, shares, price_scale, schedule)
         if hurdle is None or abs(predicted_bps) <= hurdle:
             return None, NO_TRADE_BELOW_HURDLE
     elif rule == SECONDARY_RULE:
@@ -302,8 +365,6 @@ def evaluate_candidate(
         raise ValueError(f"unknown trading rule {rule!r}")
 
     direction = 1 if predicted_bps > 0 else -1
-    arrival_ts = decision_ts + latency_ns
-    exit_ts = decision_ts + horizon_ns + latency_ns
 
     arrival_book = book_at(arrival_ts)
     if arrival_book is None or not arrival_book.two_sided:
@@ -327,6 +388,7 @@ def evaluate_candidate(
         decision_ts=decision_ts,
         arrival_ts=arrival_ts,
         exit_ts=exit_ts,
+        exit_resolution_ts=exit_resolution_ts,
         direction=direction,
         predicted_bps=predicted_bps,
         decision_midpoint=float(decision_book.midpoint),  # type: ignore[arg-type]
@@ -406,6 +468,7 @@ class CellEconomics:
     latency: str
     rule: str
     price_scale: float
+    fee_schedule_name: str = PRIMARY_FEE_SCHEDULE_NAME
     trades: list[Trade] = field(default_factory=list)
     no_trade_reasons: dict[str, int] = field(default_factory=dict)
 
@@ -419,16 +482,18 @@ class CellEconomics:
                 "cell": self.cell,
                 "latency": self.latency,
                 "rule": self.rule,
+                "fee_schedule": self.fee_schedule_name,
                 "trade_count": 0,
                 "no_trade_reasons": dict(sorted(self.no_trade_reasons.items())),
                 "reached_inference": False,
                 "reason": "no trades were taken",
             }
 
-        net = np.array([t.net_return_bps(self.price_scale) for t in trades])
+        schedule = FEE_SCHEDULES[self.fee_schedule_name]
+        net = np.array([t.net_return_bps(self.price_scale, schedule) for t in trades])
         gross = np.array([t.gross_return_bps for t in trades])
         spread = np.array([t.spread_paid_bps for t in trades])
-        fees = np.array([t.fees_bps(self.price_scale) for t in trades])
+        fees = np.array([t.fees_bps(self.price_scale, schedule) for t in trades])
         adverse = np.array([t.adverse_selection_bps for t in trades])
         realized = np.array([t.realized_return_bps for t in trades])
         # Slippage is what walking the book cost beyond the quoted touch, i.e.
@@ -453,6 +518,8 @@ class CellEconomics:
             "cell": self.cell,
             "latency": self.latency,
             "rule": self.rule,
+            "fee_schedule": self.fee_schedule_name,
+            "fee_schedule_version": schedule["schedule_version"],
             "trade_count": len(trades),
             "session_dates": len(date_means),
             "reached_inference": reached,
@@ -465,6 +532,9 @@ class CellEconomics:
             "net_return_bps_median": float(np.median(net)),
             "win_rate": float((net > 0).mean()),
             "average_holding_ns": float(np.mean([t.holding_ns for t in trades])),
+            "average_realized_lag_ns": float(
+                np.mean([t.realized_lag_ns for t in trades])
+            ),
             "displayed_liquidity_shares": float(
                 np.mean([t.displayed_entry for t in trades])
             ),
@@ -532,11 +602,24 @@ def load_frozen_survivors(path: Path, *, expected_count: int | None = None) -> d
             f"expected {expected_count} frozen survivors, found "
             f"{frozen['survivor_count']}: {frozen['survivors']}"
         )
+    # The survivors named in the plan are the survivors Stage 2 confirmed, or
+    # this is not the run the plan was frozen against.
+    if frozen["survivor_hash"] != SURVIVOR_HASH:
+        raise ValueError(
+            "the survivors in stage2_results.json do not match the set "
+            "frozen into the Stage-3 plan. results="
+            f"{frozen['survivors']} plan={list(FROZEN_SURVIVORS)}"
+        )
     return frozen
 
 
 def assert_frozen_plan() -> None:
-    """Refuse to compute economics against a plan whose design has moved."""
+    """Refuse to compute economics against a plan or a survivor set that moved."""
+    if SURVIVOR_HASH != EXPECTED_SURVIVOR_HASH:
+        raise ValueError(
+            "the frozen Stage-2 survivor set has changed; Stage 3 evaluates the "
+            "four cells Stage 2 confirmed and no others"
+        )
     if PLAN_DESIGN_HASH != EXPECTED_PLAN_DESIGN_HASH:
         raise ValueError(
             "the Stage-3 design hash has moved; a rule changed and that is a new "
@@ -561,7 +644,9 @@ def assemble_report(
     primary = [
         r
         for r in results
-        if r["latency"] == PRIMARY_LATENCY and r["rule"] == PRIMARY_RULE
+        if r["latency"] == PRIMARY_LATENCY
+        and r["rule"] == PRIMARY_RULE
+        and r.get("fee_schedule", PRIMARY_FEE_SCHEDULE_NAME) == PRIMARY_FEE_SCHEDULE_NAME
     ]
     p_values = {
         r["cell"]: (r.get("p_value") if r.get("reached_inference") else None)
@@ -587,10 +672,17 @@ def assemble_report(
         "stage3_plan_design_hash": PLAN_DESIGN_HASH,
         "stage2_plan_design_hash": STAGE2_PLAN_DESIGN_HASH,
         "frozen_survivors": frozen,
+        "survivor_hash": SURVIVOR_HASH,
+        "governance": {
+            "stage2_survivors_known": True,
+            "stage3_economic_outcome_viewed": True,
+            "stage3_rules_frozen_before_economic_outcomes": True,
+        },
         "primary_question": ECONOMIC_GATES["primary_question"],
         "primary_family": {
             "latency": PRIMARY_LATENCY,
             "rule": PRIMARY_RULE,
+            "fee_schedule": PRIMARY_FEE_SCHEDULE_NAME,
             "size": len(primary),
             "benjamini_hochberg": bh,
         },
@@ -687,6 +779,26 @@ class BookReplay:
         self.book_factory = book_factory
         self.depth = depth
         self.out_of_order_records = 0
+        # Receipt instants the venue itself declined to vouch for. Kept sorted
+        # by construction, since the pass requires non-decreasing ts_recv.
+        self.bad_recv_instants: list[int] = []
+
+    def timing_certified(self, lo: int, hi: int) -> bool:
+        """Is every receive timestamp in ``[lo, hi]`` one we can stand behind?
+
+        A flagged instant anywhere inside a candidate's window makes that
+        candidate's timing uncertifiable. The alternative -- substituting
+        ts_event, interpolating, or simply trusting it -- would be inventing
+        timing, and inventing timing is the one error that silently turns a
+        losing strategy into a winning one.
+        """
+        from bisect import bisect_left
+
+        index = bisect_left(self.bad_recv_instants, lo)
+        return not (
+            index < len(self.bad_recv_instants)
+            and self.bad_recv_instants[index] <= hi
+        )
 
     def snapshot(self, book, ts: int) -> BookLevels:
         """Read the top ``depth`` levels of each side as a frozen tuple."""
@@ -717,6 +829,8 @@ class BookReplay:
             while index < len(pending) and pending[index] < recv:
                 answers[pending[index]] = self.snapshot(book, pending[index])
                 index += 1
+            if event.flags & F_BAD_TS_RECV:
+                self.bad_recv_instants.append(recv)
             book.apply(event)
             last_recv = recv
 

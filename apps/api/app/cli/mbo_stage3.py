@@ -29,6 +29,8 @@ from app.services.mbo_stage3_executor import (
 from app.services.mbo_stage3_plan import (
     PLAN_DESIGN_HASH,
     STAGE3_PLAN_VERSION,
+    SURVIVOR_COUNT,
+    SURVIVOR_HASH,
     statistical_plan,
 )
 
@@ -52,9 +54,15 @@ def freeze(args: argparse.Namespace) -> dict[str, Any]:
     assert_frozen_plan()
     frozen = load_frozen_survivors(
         Path(args.stage2_results),
-        expected_count=args.expect_survivors or None,
+        expected_count=args.expect_survivors or SURVIVOR_COUNT,
     )
     frozen["stage3_plan_design_hash"] = PLAN_DESIGN_HASH
+    frozen["stage3_survivor_hash"] = SURVIVOR_HASH
+    frozen["governance"] = {
+        "stage2_survivors_known": True,
+        "stage3_economic_outcome_viewed": False,
+        "stage3_rules_frozen_before_economic_outcomes": True,
+    }
     frozen["contains_economic_result"] = False
     _write(Path(args.output_dir) / "stage3_frozen_survivors.json", frozen)
     return frozen
@@ -75,7 +83,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "--i-have-reviewed-the-design once that review has happened."
         )
     frozen = load_frozen_survivors(
-        Path(args.stage2_results), expected_count=args.expect_survivors or None
+        Path(args.stage2_results), expected_count=args.expect_survivors or SURVIVOR_COUNT
     )
     raise NotImplementedError(
         "the economic pass is implemented as reviewable components "
