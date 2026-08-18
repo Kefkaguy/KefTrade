@@ -1,14 +1,14 @@
-# Stage 3 — Economic viability design, for review (v3)
+# Stage 3 — Economic viability design, for final review (v4)
 
-**Status: design and implementation corrected. No economic outcome computed. No
-order placed of any kind.**
+**Status: complete and wired. No economic outcome computed. No order placed of
+any kind. The run remains gated behind an explicit reviewer flag.**
 
 | | |
 |---|---|
-| Stage-3 plan | `tier1_stage3_economics_v3` |
-| `PLAN_DESIGN_HASH` | `e5266ef3e115a416bbd541bdc2412ef7c0f616b80b25d14f9fa585253330d18a` |
+| Stage-3 plan | `tier1_stage3_economics_v4` |
+| `PLAN_DESIGN_HASH` | `a780b24164aa930ed8d7f939defed97d2d0a19256496b9c1177caab8dc6ae8c4` |
 | `SURVIVOR_HASH` | `bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00` |
-| Superseded | `v1` (`f6878f66…`) and `v2` (`87429255…`), both before any economic outcome |
+| Superseded | `v1` (`f6878f66…`), `v2` (`87429255…`), `v3` (`e5266ef3…`) — all pre-outcome |
 
 ---
 
@@ -305,7 +305,61 @@ capital, no real money.
 
 ---
 
-## 8. Tests — 74 cases
+## 7a. Verdict precedence, and what it refuses to say
+
+v3 called the family economically negative whenever any single primary cell
+reached inference and none passed — which would have labelled three unmeasured
+survivors as losers on the strength of one that was measured. Frozen precedence:
+
+1. **≥1 survivor passes primary economics** → `survivor_economically_positive_at_250ms`
+2. **else ≥1 frozen survivor fails the executable-sample minima** →
+   `not_authorized_insufficient_executable_sample`
+3. **else** → `no_economically_viable_survivor`
+
+**An unmeasured survivor is never called economically negative.** A survivor
+with no primary row at all counts as unmeasured, not as measured-and-flat.
+
+## 7b. Authorization is not the verdict
+
+The verdict answers *is it positive after costs*. Authorization answers *may it
+proceed to paper*. The unverified June-2025 retail CAT treatment is exactly
+where those come apart: a result can be scientifically positive on the primary
+schedule and still not be safe to deploy, because the primary schedule excludes
+a charge nobody could confirm was absent.
+
+| | |
+|---|---|
+| Scientific verdict | primary family only. Neither stress may redefine or veto it. |
+| Deployment | a primary-positive survivor is deployable only if it is **also** viable under the CAT-inclusive retail stress, by the same positivity and t-hurdle test |
+| If none is CAT-robust | `authorizes_stage4_or_paper = false`, `deployment_blocker = "unverified_historical_cat_treatment"` |
+| If ≥1 is CAT-robust | authorization proceeds **for those survivors only**, not the whole positive set |
+| Direct-member stress | descriptive; controls no authorization |
+
+Settling the June-2025 Alpaca customer fee schedule removes that blocker.
+Nothing else does — and a positive result does not buy the convenient reading of
+an unverified fact.
+
+## 7c. The run, wired
+
+`mbo_stage3 run` now performs the complete pass:
+
+1. freeze the four survivors and verify the survivor hash;
+2. reconstruct each survivor's frozen Stage-2 fit **once**, proving it against
+   the recorded per-date confirmation values;
+3. assert every session date falls inside the June-2025 fee window;
+4. per symbol-day, build the design matrix **through the Stage-2 loader itself**
+   (`_symbol_day_matrix`), so the features Stage 3 predicts on are the same
+   objects Stage 2 fitted on, not a re-implementation that could drift;
+5. read each survivor's own `<prefix>_available_ts_recv` for the exit instant;
+6. collect every query instant and replay the certified file **once**;
+7. evaluate the full grid — 4 cells × 3 rungs × 2 rules × 3 fee schedules = 72
+   accumulators;
+8. assemble the report, apply the precedence, then apply the CAT gate.
+
+It is wired and it is still gated: without `--i-have-reviewed-the-design` it
+refuses, and a test asserts that.
+
+## 8. Tests — 88 cases
 
 | Area | What is pinned |
 |---|---|
@@ -325,11 +379,13 @@ capital, no real money.
 | June-2025 fees | Section 31 is $0.00/M across all three schedules with effective date 2025-05-14; the window refuses 2025-05-30 and 2026-06-02 alike; rates and dates are bound into the design hash |
 | CAT | excluded but flagged unverified, never claimed proven zero; a named CAT-inclusive retail stress exists and is strictly more expensive |
 | Fit reproduction | per-date values reproduce in order; their mean reproduces the recorded confirmation `delta_r2`; the mean and the aggregate-Gram value are proved to differ; mismatched value, mismatched date count, and mismatched mean each refuse |
-| Insufficient sample | an unmeasurable family yields `not_authorized_insufficient_executable_sample`, not a negative finding; a measured loss still yields the negative verdict; a mixed family is not called insufficient; neither authorizes Stage 4 |
+| Insufficient sample | an unmeasurable family yields `not_authorized_insufficient_executable_sample`; **a mixed family with any unmeasured survivor is insufficient, not negative**; only all-four-measured-and-losing is negative; a missing primary row counts as unmeasured; a pass still beats an unmeasured sibling |
+| Authorization | a primary-positive set that dies under CAT keeps its verdict but sets `deployment_blocker`; a CAT-robust survivor authorizes for itself only; the direct-member stress cannot block a CAT-robust positive; no positive verdict authorizes nothing |
+| Wiring | the grid is 72 accumulators; query instants cover every rung and nothing else; unusable rows contribute none; `predict` applies beta without rescaling; `run` is still gated |
 | Refusals | no results file; no survivors; survivor count ≠ declared; reconstructed fit disagreeing with the record |
 | Family | primary is 250 ms only; a negative mean cannot pass; BH denominator is the frozen survivor count |
 
-**428 passed, 3 skipped** across the whole MBO suite; ruff clean.
+**442 passed, 3 skipped** across the whole MBO suite; ruff clean.
 
 ---
 

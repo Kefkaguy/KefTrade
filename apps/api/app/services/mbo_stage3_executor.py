@@ -51,11 +51,13 @@ from app.services.mbo_stage3_plan import (
     F_BAD_TS_RECV,
     FEE_SCHEDULES,
     FROZEN_SURVIVORS,
+    LATENCY_RUNGS,
     MAX_BOOK_LEVELS_WALKED,
     PLAN_DESIGN_HASH,
     PRIMARY_FEE_SCHEDULE_NAME,
     PRIMARY_LATENCY,
     PRIMARY_RULE,
+    RETAIL_CAT_STRESS_FEE_SCHEDULE,
     SECONDARY_RULE,
     STAGE3_PLAN_VERSION,
     SURVIVOR_HASH,
@@ -65,7 +67,7 @@ from app.services.mbo_stage3_plan import (
 STAGE3_EXECUTOR_VERSION = "tier1_stage3_executor_v2"
 
 EXPECTED_PLAN_DESIGN_HASH = (
-    "e5266ef3e115a416bbd541bdc2412ef7c0f616b80b25d14f9fa585253330d18a"
+    "a780b24164aa930ed8d7f939defed97d2d0a19256496b9c1177caab8dc6ae8c4"
 )
 EXPECTED_SURVIVOR_HASH = (
     "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -639,22 +641,43 @@ def assert_frozen_plan() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _passes_economics(row: dict[str, Any]) -> bool:
+    """Measured, positive, and past the frozen t hurdle."""
+    return bool(
+        row.get("reached_inference")
+        and (row.get("net_return_bps") or 0) > 0
+        and (row.get("clustered_t") or 0) >= ECONOMIC_GATES["t_hurdle"]
+    )
+
+
 def assemble_report(
     cell_results: Iterable[dict[str, Any]], frozen: dict[str, Any]
 ) -> dict[str, Any]:
-    """The primary family is the 250 ms rung under the primary rule, and only that.
+    """The primary family is the 250 ms rung, primary rule, retail schedule.
 
-    Every other rung and rule is reported in full and corrected separately. A
-    secondary result may inform, and may never answer the primary question.
+    Two things are decided here and they are deliberately separate. The
+    **verdict** is the scientific answer and comes from the primary family
+    alone. **Authorization** is whether paper trading may proceed, and it
+    additionally requires surviving the CAT-inclusive retail stress -- because
+    the primary schedule excludes a charge whose June-2025 customer treatment
+    could not be verified, and deploying on the convenient reading of an
+    unverified fact is not something a positive result should buy.
     """
     results = list(cell_results)
-    primary = [
-        r
-        for r in results
-        if r["latency"] == PRIMARY_LATENCY
-        and r["rule"] == PRIMARY_RULE
-        and r.get("fee_schedule", PRIMARY_FEE_SCHEDULE_NAME) == PRIMARY_FEE_SCHEDULE_NAME
-    ]
+    survivor_names = list(frozen.get("survivors") or FROZEN_SURVIVORS)
+
+    def family(schedule: str) -> list[dict[str, Any]]:
+        return [
+            r
+            for r in results
+            if r["latency"] == PRIMARY_LATENCY
+            and r["rule"] == PRIMARY_RULE
+            and r.get("fee_schedule", PRIMARY_FEE_SCHEDULE_NAME) == schedule
+        ]
+
+    primary = family(PRIMARY_FEE_SCHEDULE_NAME)
+    cat_stress = family(RETAIL_CAT_STRESS_FEE_SCHEDULE["name"])
+
     p_values = {
         r["cell"]: (r.get("p_value") if r.get("reached_inference") else None)
         for r in primary
@@ -669,21 +692,31 @@ def assemble_report(
     survivors_positive = [
         r["cell"]
         for r in primary
-        if bh.get(r["cell"], {}).get("survives_bh")
-        and (r.get("clustered_t") or 0) >= ECONOMIC_GATES["t_hurdle"]
+        if bh.get(r["cell"], {}).get("survives_bh") and _passes_economics(r)
     ]
 
-    # A cell that never reached the declared minima did not lose money; it was
-    # never executable enough to be measured. That is a separate verdict, and it
-    # still fails to authorize Stage 4 or paper deployment.
-    insufficient = [r["cell"] for r in primary if not r.get("reached_inference")]
+    # A survivor with no primary row at all was never measured either.
+    measured = {r["cell"] for r in primary if r.get("reached_inference")}
+    insufficient = [c for c in survivor_names if c not in measured]
 
+    # Frozen precedence. An unmeasured survivor is never called economically
+    # negative: if ANY frozen survivor could not be measured and none passed,
+    # the family's answer is that it could not be established, not that it lost.
     if survivors_positive:
         verdict = VERDICT_POSITIVE
-    elif insufficient and len(insufficient) == len(primary):
+    elif insufficient:
         verdict = VERDICT_INSUFFICIENT
     else:
         verdict = VERDICT_NEGATIVE
+
+    # --- authorization, which the verdict alone does not settle --------------
+    cat_viable = {r["cell"] for r in cat_stress if _passes_economics(r)}
+    cat_robust = [c for c in survivors_positive if c in cat_viable]
+
+    authorizes = verdict == VERDICT_POSITIVE and bool(cat_robust)
+    deployment_blocker = None
+    if verdict == VERDICT_POSITIVE and not cat_robust:
+        deployment_blocker = "unverified_historical_cat_treatment"
 
     return {
         "stage3_executor_version": STAGE3_EXECUTOR_VERSION,
@@ -715,7 +748,16 @@ def assemble_report(
             VERDICT_NEGATIVE: "no survivor is positive after costs at 250 ms",
             VERDICT_INSUFFICIENT: ECONOMIC_GATES["insufficient_sample_meaning"],
         }[verdict],
-        "authorizes_stage4_or_paper": verdict == VERDICT_POSITIVE,
+        "cat_stress": {
+            "fee_schedule": RETAIL_CAT_STRESS_FEE_SCHEDULE["name"],
+            "role": "secondary; cannot redefine or veto the scientific verdict",
+            "viable_cells": sorted(cat_viable),
+            "controls": "deployment authorization only",
+        },
+        "cat_robust_survivors": cat_robust,
+        "authorizes_stage4_or_paper": authorizes,
+        "authorized_survivors": cat_robust if authorizes else [],
+        "deployment_blocker": deployment_blocker,
         "cells": results,
         "authorizes": ECONOMIC_GATES["what_a_pass_authorizes"],
     }
@@ -922,3 +964,118 @@ class BookReplay:
             answers[pending[index]] = self.snapshot(book, pending[index])
             index += 1
         return answers
+
+
+# ---------------------------------------------------------------------------
+# The complete run
+# ---------------------------------------------------------------------------
+
+
+def cell_prefix(horizon: str) -> str:
+    from app.services.mbo_label_engine import HORIZONS_BY_NAME
+
+    return HORIZONS_BY_NAME[horizon].prefix
+
+
+def predict(design: np.ndarray, beta: np.ndarray) -> np.ndarray:
+    """The frozen Stage-2 fit applied. No refitting, no rescaling, no clipping."""
+    return design @ beta
+
+
+def evaluate_symbol_day(
+    *,
+    symbol: str,
+    session_date: str,
+    design: np.ndarray,
+    predictions: np.ndarray,
+    decision_ts: np.ndarray,
+    exit_resolution_ts: np.ndarray,
+    usable: np.ndarray,
+    cell: str,
+    replay: BookReplay,
+    books: dict[int, BookLevels],
+    price_scale: float,
+    sinks: dict[tuple[str, str, str, str], CellEconomics],
+    decile_threshold_bps: float | None = None,
+) -> None:
+    """Evaluate one symbol-day of one cell across the whole grid.
+
+    The grid is (latency rung x trading rule x fee schedule). Every combination
+    is measured; which of them may answer the primary question is decided later
+    and elsewhere, by ``assemble_report``.
+    """
+    def book_at(ts: int) -> BookLevels | None:
+        return books.get(ts)
+
+    for row in range(len(predictions)):
+        if not usable[row]:
+            continue
+        decision = int(decision_ts[row])
+        resolution = exit_resolution_ts[row]
+        resolution = None if resolution is None or resolution < 0 else int(resolution)
+        predicted = float(predictions[row])
+
+        for latency_name, latency_ns in LATENCY_RUNGS:
+            for rule in (PRIMARY_RULE, SECONDARY_RULE):
+                for schedule_name, schedule in FEE_SCHEDULES.items():
+                    trade, reason = evaluate_candidate(
+                        predicted_bps=predicted,
+                        decision_ts=decision,
+                        exit_resolution_ts=resolution,
+                        latency_ns=latency_ns,
+                        book_at=book_at,
+                        price_scale=price_scale,
+                        schedule=schedule,
+                        rule=rule,
+                        decile_threshold_bps=decile_threshold_bps,
+                        timing_certified=replay.timing_certified,
+                    )
+                    sink = sinks[(cell, latency_name, rule, schedule_name)]
+                    if trade is None:
+                        sink.record_no_trade(reason or "unknown")
+                        continue
+                    trade.symbol = symbol
+                    trade.session_date = session_date
+                    sink.trades.append(trade)
+
+
+def query_instants(
+    decision_ts: np.ndarray, exit_resolution_ts: np.ndarray, usable: np.ndarray
+) -> list[int]:
+    """Every instant the fill model will ask about, for a single replay pass."""
+    instants: set[int] = set()
+    for row in range(len(decision_ts)):
+        if not usable[row]:
+            continue
+        decision = int(decision_ts[row])
+        resolution = exit_resolution_ts[row]
+        instants.add(decision)
+        for _, latency in LATENCY_RUNGS:
+            instants.add(decision + latency)
+            if resolution is not None and resolution >= 0:
+                instants.add(int(resolution) + latency)
+    return sorted(instants)
+
+
+def make_sinks(price_scale: float) -> dict[tuple[str, str, str, str], CellEconomics]:
+    """One accumulator per (cell, latency, rule, fee schedule)."""
+    return {
+        (cell, latency, rule, schedule): CellEconomics(
+            cell=cell,
+            latency=latency,
+            rule=rule,
+            price_scale=price_scale,
+            fee_schedule_name=schedule,
+        )
+        for cell in FROZEN_SURVIVORS
+        for latency, _ in LATENCY_RUNGS
+        for rule in (PRIMARY_RULE, SECONDARY_RULE)
+        for schedule in FEE_SCHEDULES
+    }
+
+
+def summarize(
+    sinks: dict[tuple[str, str, str, str], CellEconomics],
+    market_by_date: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    return [sink.summary(market_by_date) for sink in sinks.values()]

@@ -80,7 +80,7 @@ def static_book_at(bid: float, ask: float, **kwargs):
 def test_the_plan_and_survivor_hashes_are_frozen():
     assert_frozen_plan()
     assert PLAN_DESIGN_HASH == (
-        "e5266ef3e115a416bbd541bdc2412ef7c0f616b80b25d14f9fa585253330d18a"
+        "a780b24164aa930ed8d7f939defed97d2d0a19256496b9c1177caab8dc6ae8c4"
     )
     assert SURVIVOR_HASH == (
         "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -121,6 +121,7 @@ def test_every_superseded_plan_is_recorded_with_its_reason():
     assert set(by_version) == {
         "tier1_stage3_economics_v1",
         "tier1_stage3_economics_v2",
+        "tier1_stage3_economics_v3",
     }
     for entry in by_version.values():
         assert entry["superseded_before_any_economic_outcome"] == "true"
@@ -134,6 +135,10 @@ def test_every_superseded_plan_is_recorded_with_its_reason():
     assert "June 2025" in v2["reason"]          # the wrong-year fee schedule
     assert "aggregated confirmation Gram" in v2["reason"]  # the wrong proof
     assert "CAT" in v2["reason"]
+
+    v3 = by_version["tier1_stage3_economics_v3"]
+    assert "unmeasured survivors" in v3["reason"]
+    assert "CAT" in v3["reason"]
 
 
 def test_survivors_are_taken_from_confirmation_not_re_judged():
@@ -1161,10 +1166,15 @@ def test_a_measured_loss_is_still_reported_as_a_negative_finding():
     assert report["authorizes_stage4_or_paper"] is False
 
 
-def test_a_mixed_family_is_not_called_insufficient():
-    """One cell measurable and losing, three unmeasurable: the family was
-    measured, so the verdict is the negative one."""
-    from app.services.mbo_stage3_executor import VERDICT_NEGATIVE
+def test_a_mixed_family_is_insufficient_not_negative():
+    """One cell measurable and losing, three unmeasurable.
+
+    v3 called this negative, which labelled three unmeasured survivors as
+    losers on the strength of one that was measured. The frozen precedence now
+    says: nothing passed, something was unmeasurable, so the answer is that it
+    could not be established.
+    """
+    from app.services.mbo_stage3_executor import VERDICT_INSUFFICIENT
 
     results = [
         {"cell": FROZEN_SURVIVORS[0], "latency": PRIMARY_LATENCY, "rule": PRIMARY_RULE,
@@ -1178,8 +1188,9 @@ def test_a_mixed_family_is_not_called_insufficient():
         ],
     ]
     report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
-    assert report["verdict"] == VERDICT_NEGATIVE
+    assert report["verdict"] == VERDICT_INSUFFICIENT
     assert len(report["insufficient_executable_sample"]) == 3
+    assert report["authorizes_stage4_or_paper"] is False
 
 
 def test_the_declared_minima_are_recorded_in_the_report():
@@ -1220,3 +1231,246 @@ def test_there_is_no_reorder_buffer():
     source = inspect.getsource(BookReplay)
     assert "reorder" not in source.lower()
     assert "ts_recv went backwards" in source
+
+
+# ---------------------------------------------------------------------------
+# Verdict precedence: an unmeasured survivor is never called negative
+# ---------------------------------------------------------------------------
+
+
+def _primary_row(cell, *, net=None, t=None, p=None, measured=True, schedule=None):
+    return {
+        "cell": cell,
+        "latency": PRIMARY_LATENCY,
+        "rule": PRIMARY_RULE,
+        "fee_schedule": schedule or PRIMARY_FEE_SCHEDULE["name"],
+        "reached_inference": measured,
+        "p_value": p,
+        "net_return_bps": net,
+        "clustered_t": t,
+    }
+
+
+def test_one_measured_loser_and_three_unmeasured_is_insufficient():
+    from app.services.mbo_stage3_executor import VERDICT_INSUFFICIENT
+
+    results = [
+        _primary_row(FROZEN_SURVIVORS[0], net=-1.0, t=-0.5, p=0.9),
+        *[_primary_row(c, measured=False) for c in FROZEN_SURVIVORS[1:]],
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["verdict"] == VERDICT_INSUFFICIENT
+    assert set(report["insufficient_executable_sample"]) == set(FROZEN_SURVIVORS[1:])
+
+
+def test_all_four_measured_and_losing_is_negative():
+    from app.services.mbo_stage3_executor import VERDICT_NEGATIVE
+
+    results = [_primary_row(c, net=-2.0, t=-7.0, p=1e-6) for c in FROZEN_SURVIVORS]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["verdict"] == VERDICT_NEGATIVE
+    assert report["insufficient_executable_sample"] == []
+
+
+def test_a_survivor_with_no_primary_row_at_all_counts_as_unmeasured():
+    """Missing entirely is not the same as measured-and-flat."""
+    from app.services.mbo_stage3_executor import VERDICT_INSUFFICIENT
+
+    results = [_primary_row(FROZEN_SURVIVORS[0], net=-1.0, t=-1.0, p=0.5)]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["verdict"] == VERDICT_INSUFFICIENT
+    assert set(report["insufficient_executable_sample"]) == set(FROZEN_SURVIVORS[1:])
+
+
+def test_a_pass_beats_an_unmeasured_sibling():
+    """Precedence is positive first: one genuine pass is still a pass even if
+    another survivor could not be measured."""
+    from app.services.mbo_stage3_executor import VERDICT_POSITIVE
+
+    results = [
+        _primary_row(FROZEN_SURVIVORS[0], net=3.0, t=6.0, p=1e-5),
+        *[_primary_row(c, measured=False) for c in FROZEN_SURVIVORS[1:]],
+        # CAT-robust, so authorization is not blocked here.
+        _primary_row(
+            FROZEN_SURVIVORS[0], net=2.0, t=5.0, p=1e-5,
+            schedule=RETAIL_CAT_STRESS_FEE_SCHEDULE["name"],
+        ),
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["verdict"] == VERDICT_POSITIVE
+    assert report["economically_positive_at_primary"] == [FROZEN_SURVIVORS[0]]
+
+
+# ---------------------------------------------------------------------------
+# Authorization under unverified historical CAT
+# ---------------------------------------------------------------------------
+
+
+def test_a_primary_positive_that_dies_under_cat_does_not_authorize():
+    """The scientific verdict stands; deployment does not follow from it."""
+    from app.services.mbo_stage3_executor import VERDICT_POSITIVE
+
+    results = [
+        _primary_row(c, net=1.0, t=5.0, p=1e-5) for c in FROZEN_SURVIVORS
+    ] + [
+        _primary_row(
+            c, net=-0.5, t=-2.0, p=0.2,
+            schedule=RETAIL_CAT_STRESS_FEE_SCHEDULE["name"],
+        )
+        for c in FROZEN_SURVIVORS
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    # The CAT stress does not redefine or veto the scientific result ...
+    assert report["verdict"] == VERDICT_POSITIVE
+    assert report["economically_positive_at_primary"] == list(FROZEN_SURVIVORS)
+    # ... but it does block deployment.
+    assert report["authorizes_stage4_or_paper"] is False
+    assert report["deployment_blocker"] == "unverified_historical_cat_treatment"
+    assert report["authorized_survivors"] == []
+
+
+def test_a_cat_robust_survivor_authorizes_for_itself_only():
+    from app.services.mbo_stage3_executor import VERDICT_POSITIVE
+
+    robust, fragile = FROZEN_SURVIVORS[0], FROZEN_SURVIVORS[1]
+    results = [
+        _primary_row(robust, net=4.0, t=8.0, p=1e-6),
+        _primary_row(fragile, net=1.0, t=4.0, p=1e-4),
+        *[_primary_row(c, measured=False) for c in FROZEN_SURVIVORS[2:]],
+        _primary_row(
+            robust, net=2.5, t=6.0, p=1e-5,
+            schedule=RETAIL_CAT_STRESS_FEE_SCHEDULE["name"],
+        ),
+        _primary_row(
+            fragile, net=-0.2, t=-1.0, p=0.4,
+            schedule=RETAIL_CAT_STRESS_FEE_SCHEDULE["name"],
+        ),
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["verdict"] == VERDICT_POSITIVE
+    assert set(report["economically_positive_at_primary"]) == {robust, fragile}
+    assert report["cat_robust_survivors"] == [robust]
+    assert report["authorizes_stage4_or_paper"] is True
+    # Authorization is for the robust survivor only, not the whole positive set.
+    assert report["authorized_survivors"] == [robust]
+    assert report["deployment_blocker"] is None
+
+
+def test_the_direct_member_stress_controls_no_authorization():
+    """Descriptive only: a catastrophic direct-member result cannot block paper
+    authorization for a CAT-robust retail positive."""
+    cell = FROZEN_SURVIVORS[0]
+    results = [
+        _primary_row(cell, net=4.0, t=8.0, p=1e-6),
+        _primary_row(
+            cell, net=3.0, t=7.0, p=1e-6,
+            schedule=RETAIL_CAT_STRESS_FEE_SCHEDULE["name"],
+        ),
+        _primary_row(
+            cell, net=-50.0, t=-30.0, p=1e-12,
+            schedule=CONSERVATIVE_FEE_SCHEDULE["name"],
+        ),
+        *[_primary_row(c, measured=False) for c in FROZEN_SURVIVORS[1:]],
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["authorizes_stage4_or_paper"] is True
+    assert report["authorized_survivors"] == [cell]
+    assert report["cat_stress"]["controls"] == "deployment authorization only"
+
+
+def test_no_authorization_without_a_positive_verdict():
+    """A CAT-viable cell that never passed the primary family authorizes
+    nothing."""
+    cell = FROZEN_SURVIVORS[0]
+    results = [
+        _primary_row(cell, net=-1.0, t=-3.0, p=0.01),
+        *[_primary_row(c, measured=False) for c in FROZEN_SURVIVORS[1:]],
+        _primary_row(
+            cell, net=9.0, t=9.0, p=1e-9,
+            schedule=RETAIL_CAT_STRESS_FEE_SCHEDULE["name"],
+        ),
+    ]
+    report = assemble_report(results, {"survivors": list(FROZEN_SURVIVORS)})
+    assert report["authorizes_stage4_or_paper"] is False
+    assert report["cat_robust_survivors"] == []
+    # Not a CAT blocker -- there was simply nothing positive to deploy.
+    assert report["deployment_blocker"] is None
+
+
+def test_the_authorization_rules_are_frozen_in_the_plan():
+    from app.services.mbo_stage3_plan import AUTHORIZATION_RULES, ECONOMIC_GATES
+
+    assert "may redefine or veto" in AUTHORIZATION_RULES["scientific_verdict_source"]
+    assert AUTHORIZATION_RULES["if_no_primary_positive_survivor_is_cat_robust"][
+        "deployment_blocker"
+    ] == "unverified_historical_cat_treatment"
+    assert AUTHORIZATION_RULES["if_at_least_one_is_cat_robust"][
+        "authorizes_stage4_or_paper"
+    ] is True
+    assert "descriptive only" in AUTHORIZATION_RULES["direct_member_stress_role"]
+    assert "never called" in ECONOMIC_GATES["verdict_precedence"]
+
+
+# ---------------------------------------------------------------------------
+# The wired run
+# ---------------------------------------------------------------------------
+
+
+def test_the_grid_covers_every_cell_latency_rule_and_schedule():
+    from app.services.mbo_stage3_executor import make_sinks
+
+    sinks = make_sinks(SCALE)
+    assert len(sinks) == 4 * 3 * 2 * 3
+    cells = {key[0] for key in sinks}
+    assert cells == set(FROZEN_SURVIVORS)
+
+
+def test_query_instants_cover_every_rung_and_nothing_else():
+    import numpy as np
+    from app.services.mbo_stage3_executor import query_instants
+
+    decision = np.array([1_000_000_000], dtype=np.int64)
+    resolution = np.array([1_000_000_000 + 5 * SCALE], dtype=np.int64)
+    usable = np.array([True])
+    instants = query_instants(decision, resolution, usable)
+    expected = {int(decision[0])}
+    for _, latency in LATENCY_RUNGS:
+        expected.add(int(decision[0]) + latency)
+        expected.add(int(resolution[0]) + latency)
+    assert set(instants) == expected
+    assert instants == sorted(instants)
+
+
+def test_unusable_rows_contribute_no_query_instants():
+    import numpy as np
+    from app.services.mbo_stage3_executor import query_instants
+
+    decision = np.array([1, 2], dtype=np.int64)
+    resolution = np.array([100, 200], dtype=np.int64)
+    instants = query_instants(decision, resolution, np.array([False, False]))
+    assert instants == []
+
+
+def test_predict_applies_the_frozen_beta_without_rescaling():
+    import numpy as np
+    from app.services.mbo_stage3_executor import predict
+
+    design = np.array([[1.0, 2.0, 3.0], [1.0, 0.0, -1.0]])
+    beta = np.array([0.5, 1.0, -2.0])
+    np.testing.assert_allclose(predict(design, beta), design @ beta)
+
+
+def test_the_run_command_is_still_gated():
+    """Wired is not the same as authorized."""
+    import argparse
+
+    from app.cli.mbo_stage3 import run
+
+    args = argparse.Namespace(
+        i_have_reviewed_the_design=False,
+        stage2_results="x.json", grams_dir="g", features_dir="f",
+        labels_dir="l", raw_dir="r", expect_survivors=0, output_dir="o",
+        limit=0, quiet=True,
+    )
+    with pytest.raises(ValueError, match="not authorized yet"):
+        run(args)

@@ -52,9 +52,24 @@ from app.services.mbo_stage2_plan import (
     PRIOR_EFFECTIVE_TRIALS as STAGE2_PRIOR_EFFECTIVE_TRIALS,
 )
 
-STAGE3_PLAN_VERSION = "tier1_stage3_economics_v3"
+STAGE3_PLAN_VERSION = "tier1_stage3_economics_v4"
 
 SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_stage3_economics_v3",
+        "plan_design_hash": (
+            "e5266ef3e115a416bbd541bdc2412ef7c0f616b80b25d14f9fa585253330d18a"
+        ),
+        "superseded_before_any_economic_outcome": "true",
+        "reason": (
+            "called the whole family economically negative whenever any single "
+            "primary cell reached inference and none passed, which would have "
+            "labelled unmeasured survivors as losers. It also had no rule for "
+            "what the unverified historical CAT treatment does to deployment "
+            "authorization, leaving a primary-positive result able to authorize "
+            "paper trading on a cost assumption that could not be checked."
+        ),
+    },
     {
         "version": "tier1_stage3_economics_v2",
         "plan_design_hash": (
@@ -368,6 +383,62 @@ ECONOMIC_GATES: dict[str, Any] = {
         "a paper-trading deployment proposal for review. It authorizes no live "
         "order, no capital, and no real money."
     ),
+    "verdict_precedence": (
+        "1. if at least one survivor passes primary economics -> positive; "
+        "2. else if at least one frozen survivor fails the executable-sample "
+        "minima at the primary rung -> insufficient; "
+        "3. else -> negative. An unmeasured survivor is never called "
+        "economically negative."
+    ),
+}
+
+# ---------------------------------------------------------------------------
+# Authorization -- separate from the scientific verdict
+# ---------------------------------------------------------------------------
+#
+# The verdict answers "is it positive after costs". Authorization answers "may
+# it proceed to paper". They are not the same question, and the unverified
+# June-2025 retail CAT treatment is exactly where they come apart: a result can
+# be scientifically positive on the primary schedule and still not be safe to
+# deploy, because the primary schedule excludes a charge nobody could confirm
+# was absent.
+
+AUTHORIZATION_RULES: dict[str, Any] = {
+    "scientific_verdict_source": (
+        "the primary family only -- 250 ms, primary rule, retail_june_2025. "
+        "Neither the CAT stress nor the direct-member stress may redefine or "
+        "veto the primary scientific result."
+    ),
+    "robustness_requirement": (
+        "a primary-positive survivor is deployable only if it is ALSO viable "
+        "under the CAT-inclusive retail stress, using the same positivity and "
+        "t-hurdle test"
+    ),
+    "cat_viability_test": (
+        "reached_inference, mean net bps > 0, and session-clustered t >= the "
+        "frozen t hurdle, evaluated on retail_june_2025_with_cat_passthrough"
+    ),
+    "if_no_primary_positive_survivor_is_cat_robust": {
+        "authorizes_stage4_or_paper": False,
+        "deployment_blocker": "unverified_historical_cat_treatment",
+        "why": (
+            "the only positives depend on excluding a charge whose historical "
+            "customer treatment could not be verified. Authorizing on that basis "
+            "would be deploying on an assumption chosen because it was "
+            "convenient. Settling the June-2025 Alpaca customer fee schedule "
+            "removes the blocker; nothing else does."
+        ),
+    },
+    "if_at_least_one_is_cat_robust": {
+        "authorizes_stage4_or_paper": True,
+        "scope": (
+            "paper authorization proceeds for the CAT-robust survivors only, not "
+            "for the whole primary-positive set"
+        ),
+    },
+    "direct_member_stress_role": (
+        "descriptive only; it is reported in full and controls no authorization"
+    ),
 }
 
 PRIOR_EFFECTIVE_TRIALS = STAGE2_PRIOR_EFFECTIVE_TRIALS + 14
@@ -439,6 +510,11 @@ PLAN_DESIGN_ELEMENTS: tuple[str, ...] = (
     "min_trades=100",
     "min_session_dates=4",
     "insufficient=not_authorized_insufficient_executable_sample",
+    "verdict_precedence=positive>insufficient>negative",
+    "unmeasured_is_never_negative=true",
+    "authorization=requires_cat_robustness",
+    "cat_blocker=unverified_historical_cat_treatment",
+    "direct_member_stress=descriptive_only",
     f"prior_effective_trials={PRIOR_EFFECTIVE_TRIALS}",
     "authorizes=paper_proposal_only;not=live;not=capital",
 )
@@ -495,6 +571,7 @@ def statistical_plan() -> dict[str, Any]:
         "fee_schedules": {name: dict(s) for name, s in FEE_SCHEDULES.items()},
         "bad_ts_recv_rule": dict(BAD_TS_RECV_RULE),
         "gates": dict(ECONOMIC_GATES),
+        "authorization_rules": dict(AUTHORIZATION_RULES),
         "measurements": list(MEASUREMENTS),
         "report_breakdowns": list(REPORT_BREAKDOWNS),
         "multiplicity": {
