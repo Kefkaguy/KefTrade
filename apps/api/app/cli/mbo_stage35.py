@@ -107,6 +107,33 @@ def chronology(args: argparse.Namespace) -> dict[str, Any]:
     return payload
 
 
+def _load_grams(grams_dir: Path):
+    import numpy as np
+
+    from app.services.mbo_stage2_executor import Gram
+
+    archive = np.load(grams_dir / "stage2_grams.npz")
+    cells: dict[str, dict[str, Gram]] = {}
+    for key in archive.files:
+        if not key.endswith("||xtx"):
+            continue
+        cell, session_date, _ = key.split("||")
+        base = f"{cell}||{session_date}"
+        yty, n, ysum = archive[f"{base}||scalars"]
+        cells.setdefault(cell, {})[session_date] = Gram(
+            archive[f"{base}||xtx"], archive[f"{base}||xty"], float(yty), int(n), float(ysum)
+        )
+    return cells
+
+
+def _stage2_cell_record(results: dict[str, Any], cell: str) -> dict[str, Any]:
+    cadence, horizon = cell.split("|")
+    for record in results.get("cells", []):
+        if record["cadence"] == cadence and record["horizon"] == horizon:
+            return record
+    raise ValueError(f"no Stage-2 record for cell {cell!r}")
+
+
 def _prepare(args: argparse.Namespace) -> dict[str, Any]:
     """Every Stage-3 provenance gate, unchanged, plus the Stage-3.5 chronology."""
     from app.services.mbo_stage3_executor import (
@@ -155,6 +182,118 @@ def _prepare(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _build_fits(context: dict[str, Any]) -> dict[str, Any]:
+    """Per-date betas for every cell, each proved to be Stage 2's own fit."""
+    from app.services.mbo_stage35_executor import (
+        per_date_betas,
+        recorded_stage2_per_date,
+        reproduce_stage2_delta_r2,
+    )
+
+    grams = _load_grams(context["grams_dir"])
+    fits: dict[str, Any] = {}
+    reproduction: dict[str, Any] = {}
+    for cell in context["frozen"]["survivors"]:
+        record = _stage2_cell_record(context["stage2"], cell)
+        alpha = record["chosen_alpha"]
+        betas = per_date_betas(grams[cell], context["blocks"], alpha)
+        recorded = recorded_stage2_per_date(record, context["blocks"])
+        reproduction[cell] = reproduce_stage2_delta_r2(
+            cell, grams[cell], betas, alpha, recorded
+        )
+        reproduction[cell]["alpha"] = alpha
+        fits[cell] = betas
+    return {"fits": fits, "reproduction": reproduction}
+
+
+def _read_cell_inputs(
+    *, features_dir: Path, labels_dir: Path, stem: str, cell: str, beta
+):
+    """Design, predictions, decision instants and target resolutions for one cell.
+
+    The design matrix is built by the Stage-2 loader itself, so the features
+    Stage 3.5 predicts on are the same objects Stage 2 fitted on rather than a
+    re-implementation that could drift apart.
+    """
+    import numpy as np
+    import pyarrow.parquet as pq
+
+    from app.cli.mbo_stage2 import FEATURE_NAMES, _symbol_day_matrix
+    from app.services.mbo_label_engine import LABEL_OK
+    from app.services.mbo_stage3_executor import (
+        certify_spine,
+        event_horizon_availability,
+        predict,
+    )
+    from app.services.mbo_stage35_executor import cell_prefix
+
+    cadence, horizon = cell.split("|")
+    path = features_dir / cadence / f"{stem}.{cadence}.parquet"
+    if not path.is_file():
+        return None
+
+    table = pq.read_table(
+        path,
+        columns=["sequence_index", "ts_event", "feature_available_ts_recv", *FEATURE_NAMES],
+    )
+    design, sequence = _symbol_day_matrix(table, FEATURE_NAMES)
+    decision = np.asarray(
+        table.column("feature_available_ts_recv").to_numpy(zero_copy_only=False), np.int64
+    )
+
+    prefix = cell_prefix(horizon)
+    labels = pq.read_table(
+        labels_dir / f"{stem}.labels.parquet",
+        columns=[
+            "cadence",
+            "sequence_index",
+            "source_ts_event",
+            "source_midpoint",
+            f"{prefix}_status",
+            f"{prefix}_available_ts_recv",
+        ],
+    )
+    mask = np.asarray(labels.column("cadence").to_numpy(zero_copy_only=False)) == cadence
+
+    certify_spine(
+        stem,
+        cadence,
+        feature_sequence=sequence,
+        feature_ts_event=np.asarray(
+            table.column("ts_event").to_numpy(zero_copy_only=False), np.int64
+        ),
+        feature_midpoint=np.asarray(
+            table.column("midpoint").to_numpy(zero_copy_only=False), float
+        ),
+        label_sequence=np.asarray(
+            labels.column("sequence_index").to_numpy(zero_copy_only=False), np.int64
+        )[mask],
+        label_ts_event=np.asarray(
+            labels.column("source_ts_event").to_numpy(zero_copy_only=False), np.int64
+        )[mask],
+        label_midpoint=np.asarray(
+            labels.column("source_midpoint").to_numpy(zero_copy_only=False), float
+        )[mask],
+    )
+
+    status = np.asarray(
+        labels.column(f"{prefix}_status").to_numpy(zero_copy_only=False)
+    )[mask]
+    availability = event_horizon_availability(
+        status, labels.column(f"{prefix}_available_ts_recv").filter(mask)
+    )
+    finite = np.isfinite(design).all(axis=1)
+    # The target only has to have resolved for the trigger to fire; an
+    # unresolved one sends at the deadline, which is still a valid observation.
+    usable = (status == LABEL_OK) & finite
+    return {
+        "predictions": predict(np.nan_to_num(design, nan=0.0), beta),
+        "decision": decision,
+        "availability": availability,
+        "usable": usable,
+    }
+
+
 def diagnose(args: argparse.Namespace) -> dict[str, Any]:
     """Provenance and counts only.
 
@@ -187,10 +326,22 @@ def diagnose(args: argparse.Namespace) -> dict[str, Any]:
 def run(args: argparse.Namespace) -> dict[str, Any]:
     """The execution-timing pass.
 
-    Gated. Stage 3.5 was specified to stop after the design and implementation
-    were produced for review, so the reviewer flag is an acknowledgement rather
-    than a default.
+    Gated: the reviewer flag is an acknowledgement, not a default.
     """
+
+    from app.services.mbo_book_validator import MboBook, iter_dbn_events
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+    from app.services.mbo_stage3_executor import BookReplay, resolve_raw_source
+    from app.services.mbo_stage3_plan import PRIMARY_FEE_SCHEDULE
+    from app.services.mbo_stage35_executor import (
+        CellTiming,
+        CoverageTracker,
+        assemble_report,
+        evaluate_pair,
+        query_instants,
+        write_report,
+    )
+
     assert_frozen_plan()
     if not args.i_have_reviewed_the_design:
         raise ValueError(
@@ -198,13 +349,113 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "design and implementation were to be reviewed first; re-run with "
             "--i-have-reviewed-the-design once that review has happened."
         )
+
     context = _prepare(args)
-    raise NotImplementedError(
-        "the execution-timing pass is implemented as reviewable components "
-        "(training_dates_for, evaluate_pair, CellTiming, assemble_report) and is "
-        "deliberately not joined into a single command until the design is "
-        f"approved. Cells: {context['frozen']['survivors']}"
+    built = _build_fits(context)
+    fits, reproduction = built["fits"], built["reproduction"]
+    price_scale = float(FIXED_PRICE_SCALE)
+
+    sinks = {
+        cell: CellTiming(cell=cell, price_scale=price_scale)
+        for cell in context["frozen"]["survivors"]
+    }
+    features_dir = context["features_dir"]
+    stems = sorted({p.name.split(".")[0] for p in features_dir.rglob("*.parquet")})
+    symbol_days: list[dict[str, Any]] = []
+
+    for index, stem in enumerate(stems, start=1):
+        symbol, _, session_date = stem.rpartition("_")
+        manifest_path = features_dir / "manifests" / f"{stem}.manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError(f"no Stage-1 manifest for {stem}; cannot bind raw input")
+        raw_path = resolve_raw_source(
+            json.loads(manifest_path.read_text(encoding="utf-8")),
+            context["raw_dir"],
+            stem=stem,
+        )
+        print(f"[{index}/{len(stems)}] {stem}", flush=True)
+
+        per_cell = []
+        instants: set[int] = set()
+        for cell in context["frozen"]["survivors"]:
+            entry = fits[cell].get(session_date)
+            if entry is None:
+                continue
+            inputs = _read_cell_inputs(
+                features_dir=features_dir,
+                labels_dir=context["labels_dir"],
+                stem=stem,
+                cell=cell,
+                beta=entry["beta"],
+            )
+            if inputs is None:
+                continue
+            per_cell.append((cell, entry["block"], inputs))
+            instants.update(
+                query_instants(
+                    inputs["decision"], inputs["availability"],
+                    inputs["usable"], inputs["predictions"],
+                )
+            )
+
+        if not per_cell:
+            continue
+
+        coverage = CoverageTracker()
+        replay = BookReplay(MboBook)
+        books = replay.run(
+            coverage.wrap(iter_dbn_events(str(raw_path))), sorted(instants)
+        )
+
+        # Bound by value, not captured by name: `books` is released at the end
+        # of each iteration, and a closure over the name would go stale.
+        def book_at(ts: int, _books=books):
+            return _books.get(ts)
+
+        for cell, block, inputs in per_cell:
+            sink = sinks[cell]
+            usable = inputs["usable"]
+            for row in range(len(inputs["predictions"])):
+                if not usable[row]:
+                    continue
+                pair, reason = evaluate_pair(
+                    cell=cell,
+                    symbol=symbol,
+                    session_date=session_date,
+                    block=block,
+                    predicted_bps=float(inputs["predictions"][row]),
+                    decision_ts=int(inputs["decision"][row]),
+                    target_available_ts_recv=inputs["availability"][row],
+                    book_at=book_at,
+                    price_scale=price_scale,
+                    timing_certified=replay.timing_certified,
+                    within_coverage=coverage.covers,
+                )
+                if pair is None:
+                    sink.record_not_comparable(reason or "unknown")
+                else:
+                    sink.pairs.append(pair)
+
+        symbol_days.append(
+            {
+                "symbol": symbol,
+                "session_date": session_date,
+                "raw_source": raw_path.name,
+                "coverage": coverage.as_dict(),
+                "bad_ts_recv_instants": len(replay.bad_recv_instants),
+            }
+        )
+        del books, replay, per_cell, book_at
+
+    report = assemble_report(
+        [sink.summary(PRIMARY_FEE_SCHEDULE) for sink in sinks.values()],
+        chronology=context["chronology"],
     )
+    report["stage2_fit_reproduction"] = reproduction
+    report["batch_completeness"] = context["batch_completeness"]
+    report["symbol_days"] = symbol_days
+    write_report(report, Path(args.output_dir) / "stage35_results.json")
+    return {k: v for k, v in report.items() if k not in ("cells", "symbol_days")}
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -11,14 +11,31 @@ fill model quietly rewritten in its favour.
 For a required parent order, both of these are evaluated on the same book:
 
     baseline_arrival = decision + 250ms                     send now
-    timed_send       = min(target_available_ts_recv,
-                           decision + 750ms)                wait, briefly
+    timed_send       = min(max(target_available_ts_recv,
+                               decision), decision + 750ms) wait, briefly
     timed_arrival    = timed_send + 250ms                   -> at most decision + 1s
+
+The clamp to ``decision`` is not cosmetic. A target whose availability
+timestamp precedes the decision instant would otherwise produce a *delayed*
+order sent before the prediction existed -- a policy nobody could run, quietly
+scoring as though they had.
 
 The trigger is the *arrival* of the frozen Stage-2 target event, not its
 outcome. A participant can observe "the midpoint has moved" in real time; they
 cannot observe what the move was worth. Nothing here reads a label return, and
 the deadline guarantees the wait terminates whether or not the event ever comes.
+
+## Only the delayed side needs a future fill
+
+Exactly one parent side delays. The other executes at the baseline instant under
+both policies, so its future liquidity is a market state the policy never
+touches. Requiring it would exclude observations for a reason the mechanism does
+not depend on -- and the excluded ones would not be a random sample, because
+future thinness correlates with exactly the book dynamics being studied.
+
+So the non-delayed side's "policy" execution literally *is* its baseline
+execution: the same numbers, reused, which makes its savings exactly zero as an
+arithmetic fact rather than as a special case.
 
 ## The decomposition identity
 
@@ -35,7 +52,7 @@ those have very different implications for whether the mechanism is real.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -60,10 +77,10 @@ from app.services.mbo_stage35_plan import (
     T_HURDLE,
 )
 
-STAGE35_EXECUTOR_VERSION = "tier1_stage35_executor_v1"
+STAGE35_EXECUTOR_VERSION = "tier1_stage35_executor_v2"
 
 EXPECTED_PLAN_DESIGN_HASH = (
-    "ab0d42679cbedf6ac6b23706766ad16896e7d86413162b8f66e42cd3153c9fa7"
+    "ab7393d01de1d4d3c9cb37b0142be33fa24f99336facca87827633255e094d9d"
 )
 EXPECTED_CELL_HASH = (
     "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -75,16 +92,17 @@ BUY = 1
 SELL = -1
 
 # Why a paired observation could not be evaluated. Counted, never dropped.
-NOT_COMPARABLE_NO_TARGET = "target_did_not_resolve_and_no_deadline_fallback"
 NOT_COMPARABLE_NO_BASELINE_BOOK = "no_two_sided_book_at_baseline_arrival"
 NOT_COMPARABLE_NO_TIMED_BOOK = "no_two_sided_book_at_timed_arrival"
 NOT_COMPARABLE_BASELINE_LIQUIDITY = "baseline_leg_insufficient_displayed_liquidity"
-NOT_COMPARABLE_TIMED_LIQUIDITY = "timed_leg_insufficient_displayed_liquidity"
+NOT_COMPARABLE_TIMED_LIQUIDITY = "delayed_leg_insufficient_displayed_liquidity"
 NOT_COMPARABLE_UNCERTIFIABLE = "uncertifiable_timing_bad_ts_recv"
 NOT_COMPARABLE_NO_DECISION_BOOK = "no_two_sided_book_at_decision"
+NOT_COMPARABLE_OUTSIDE_COVERAGE = "arrival_outside_certified_market_data_coverage"
+# An exact tie. Not a magnitude threshold: the model expressed no direction, so
+# the policy expresses no timing preference.
+ZERO_PREDICTION = "no_direction_zero_prediction"
 
-# Asymmetric failures get their own names, because "only one leg filled" is
-# exactly the case that would bias the result if it were silently discarded.
 ASYMMETRIC_FAILURES = (
     NOT_COMPARABLE_BASELINE_LIQUIDITY,
     NOT_COMPARABLE_TIMED_LIQUIDITY,
@@ -94,6 +112,7 @@ ASYMMETRIC_FAILURES = (
 
 TRIGGER_TARGET = "target"
 TRIGGER_DEADLINE = "deadline"
+TRIGGER_NONE = "none_zero_prediction"
 
 
 def assert_frozen_plan() -> None:
@@ -127,10 +146,6 @@ def training_dates_for(
     * discovery: leave-one-discovery-date-out over the other 9;
     * validation: the 10 discovery dates;
     * confirmation: the 16 discovery + validation dates.
-
-    Stage 3 only needed the confirmation block. Stage 3.5 wants prediction rows
-    on all twenty dates, and leave-one-out inside discovery is the cheapest
-    construction that keeps them all without any date training on itself.
     """
     discovery = list(blocks["discovery"])
     validation = list(blocks["validation"])
@@ -147,8 +162,8 @@ def training_dates_for(
 
 def chronology_map(blocks: dict[str, Sequence[str]]) -> dict[str, dict[str, Any]]:
     """The exact training set behind every date, recorded for the artefact."""
-    ordered = list(blocks["discovery"]) + list(blocks["validation"]) + list(
-        blocks["confirmation"]
+    ordered = (
+        list(blocks["discovery"]) + list(blocks["validation"]) + list(blocks["confirmation"])
     )
     mapping: dict[str, dict[str, Any]] = {}
     for session_date in ordered:
@@ -171,9 +186,75 @@ def assert_chronology_is_clean(mapping: dict[str, dict[str, Any]]) -> None:
         ahead = [d for d in entry["training_dates"] if d > session_date]
         if entry["block"] != "discovery" and ahead:
             raise ValueError(
-                f"{session_date} ({entry['block']}) would train on later dates: "
-                f"{ahead}"
+                f"{session_date} ({entry['block']}) would train on later dates: {ahead}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Certified market-data coverage
+# ---------------------------------------------------------------------------
+
+
+class CoverageTracker:
+    """Records the receive-time span the certified file actually covers.
+
+    ``BookReplay`` answers any pending instant past the last record by
+    snapshotting the final book. That is correct for its own purpose and wrong
+    for this one: a delayed order arriving after the stream ends would fill
+    against a book that no longer exists, and the fill would look perfectly
+    ordinary. So the span is tracked as events stream past, and any arrival
+    outside it is refused rather than served from a stale final state.
+    """
+
+    def __init__(self) -> None:
+        self.first_ts_recv: int | None = None
+        self.last_ts_recv: int | None = None
+        self.records = 0
+
+    def wrap(self, events: Iterable[Any]) -> Iterator[Any]:
+        for event in events:
+            recv = event.ts_recv
+            if self.first_ts_recv is None:
+                self.first_ts_recv = recv
+            self.last_ts_recv = recv
+            self.records += 1
+            yield event
+
+    def covers(self, lo: int, hi: int) -> bool:
+        if self.first_ts_recv is None or self.last_ts_recv is None:
+            return False
+        return self.first_ts_recv <= lo and hi <= self.last_ts_recv
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "first_ts_recv": self.first_ts_recv,
+            "last_ts_recv": self.last_ts_recv,
+            "records": self.records,
+        }
+
+
+# ---------------------------------------------------------------------------
+# Timing
+# ---------------------------------------------------------------------------
+
+
+def timed_send_instant(
+    decision_ts: int, target_available_ts_recv: int | None
+) -> tuple[int, str]:
+    """When the delayed order is released, and what released it.
+
+    Clamped at both ends. The deadline bounds the wait, so the policy terminates
+    whether or not the event arrives. The floor at ``decision_ts`` bounds it the
+    other way: a target timestamp earlier than the decision would otherwise send
+    a "delayed" order *before* the prediction was available, which is not a
+    delay and not executable.
+    """
+    deadline = decision_ts + DELAY_DEADLINE_NS
+    if target_available_ts_recv is None:
+        return deadline, TRIGGER_DEADLINE
+    clamped = min(max(int(target_available_ts_recv), decision_ts), deadline)
+    trigger = TRIGGER_DEADLINE if clamped == deadline else TRIGGER_TARGET
+    return clamped, trigger
 
 
 # ---------------------------------------------------------------------------
@@ -192,41 +273,31 @@ class PairedExecution:
     decision_ts: int
     decision_midpoint: float
     predicted_bps: float
+    price_scale: float
     baseline_arrival_ts: int
     timed_send_ts: int
     timed_arrival_ts: int
     trigger: str
-    # Per side: fill price, arrival midpoint, displayed size, levels walked.
+    delayed_side: int | None
     buy: dict[str, float] = field(default_factory=dict)
     sell: dict[str, float] = field(default_factory=dict)
 
-    @property
-    def predicted_up(self) -> bool:
-        return self.predicted_bps > 0
-
-    @property
-    def delayed_side(self) -> int:
-        """Predicted up delays the SELL; predicted down delays the BUY."""
-        return SELL if self.predicted_up else BUY
+    def leg(self, side: int) -> dict[str, float]:
+        return self.buy if side == BUY else self.sell
 
     def savings_bps(self, side: int) -> float:
         """Positive means the timing decision improved this required order.
 
-        The non-delayed side executes immediately under both policies, so its
-        savings are exactly zero -- not approximately, and not a small number
-        that happens to average out.
+        The non-delayed side reuses its baseline fill verbatim, so this is
+        exactly zero for it by arithmetic rather than by special case.
         """
-        if side != self.delayed_side:
-            return 0.0
-        leg = self.buy if side == BUY else self.sell
+        leg = self.leg(side)
         baseline, timed = leg["baseline_fill"], leg["timed_fill"]
         raw = (baseline - timed) if side == BUY else (timed - baseline)
         return raw / self.decision_midpoint * BPS
 
     def midpoint_benefit_bps(self, side: int) -> float:
-        if side != self.delayed_side:
-            return 0.0
-        leg = self.buy if side == BUY else self.sell
+        leg = self.leg(side)
         raw = (
             leg["baseline_midpoint"] - leg["timed_midpoint"]
             if side == BUY
@@ -235,14 +306,8 @@ class PairedExecution:
         return raw / self.decision_midpoint * BPS
 
     def book_walk_benefit_bps(self, side: int) -> float:
-        """What crossing the book cost, baseline minus timed.
-
-        ``e`` is the cost in the direction that hurts, so a positive value means
-        the delayed order crossed a cheaper book.
-        """
-        if side != self.delayed_side:
-            return 0.0
-        leg = self.buy if side == BUY else self.sell
+        """What crossing the book cost, baseline minus timed."""
+        leg = self.leg(side)
         sign = 1.0 if side == BUY else -1.0
         baseline_cost = sign * (leg["baseline_fill"] - leg["baseline_midpoint"])
         timed_cost = sign * (leg["timed_fill"] - leg["timed_midpoint"])
@@ -250,44 +315,39 @@ class PairedExecution:
 
     @property
     def delayed_savings_bps(self) -> float:
+        if self.delayed_side is None:
+            return 0.0
         return self.savings_bps(self.delayed_side)
 
     @property
     def balanced_savings_bps(self) -> float:
         """The mean over the required BUY and the required SELL.
 
-        Exactly one side delays, so this is always half the delayed side. It is
-        computed as the mean anyway rather than by halving, so that the identity
-        is a property of the arithmetic rather than an assumption baked into it.
+        At most one side delays, so this is the delayed side halved -- computed
+        as the mean anyway, so the relationship is a property of the arithmetic
+        rather than an assumption baked into it.
         """
         return (self.savings_bps(BUY) + self.savings_bps(SELL)) / 2.0
 
     def dollar_savings_per_100(self, side: int) -> float:
-        if side != self.delayed_side:
-            return 0.0
-        leg = self.buy if side == BUY else self.sell
+        """Real dollars, not fixed-point units.
+
+        ``walk_book`` returns prices in the MBO fixed-point scale, so the raw
+        difference must be divided by ``price_scale`` before it means money.
+        """
+        leg = self.leg(side)
         raw = (
             leg["baseline_fill"] - leg["timed_fill"]
             if side == BUY
             else leg["timed_fill"] - leg["baseline_fill"]
         )
-        return raw * TRADE_SIZE_SHARES
+        return raw / self.price_scale * TRADE_SIZE_SHARES
 
-
-def timed_send_instant(
-    decision_ts: int, target_available_ts_recv: int | None
-) -> tuple[int, str]:
-    """When the delayed order is released, and what released it.
-
-    The deadline is not a fallback bolted on afterwards; it is what makes the
-    wait bounded and therefore executable. A desk cannot wait indefinitely for an
-    event that may never arrive, and a study that let it would be measuring a
-    policy nobody could run.
-    """
-    deadline = decision_ts + DELAY_DEADLINE_NS
-    if target_available_ts_recv is None or target_available_ts_recv >= deadline:
-        return deadline, TRIGGER_DEADLINE
-    return int(target_available_ts_recv), TRIGGER_TARGET
+    @property
+    def delayed_dollar_savings(self) -> float:
+        if self.delayed_side is None:
+            return 0.0
+        return self.dollar_savings_per_100(self.delayed_side)
 
 
 def evaluate_pair(
@@ -300,23 +360,35 @@ def evaluate_pair(
     decision_ts: int,
     target_available_ts_recv: int | None,
     book_at,
+    price_scale: float,
     timing_certified=None,
+    within_coverage=None,
     shares: int = TRADE_SIZE_SHARES,
 ) -> tuple[PairedExecution | None, str | None]:
     """Both required counterfactuals at one prediction, or a named refusal.
 
-    A pair is comparable only when every leg it needs can be evaluated under the
-    frozen rules. Returning a half-evaluated pair would select on execution
-    difficulty, which is correlated with exactly the book states this mechanism
-    claims to exploit.
+    Baseline fills are required for **both** sides, because both parent orders
+    exist. A timed fill is required only for the side the sign policy actually
+    delays; the other reuses its baseline execution verbatim, since that is
+    literally what it does under both policies.
     """
     baseline_arrival = decision_ts + LATENCY_NS
-    timed_send, trigger = timed_send_instant(decision_ts, target_available_ts_recv)
-    timed_arrival = timed_send + LATENCY_NS
 
-    if timing_certified is not None and not timing_certified(
-        decision_ts, timed_arrival
-    ):
+    # An exact tie expresses no direction, so the policy expresses no timing
+    # preference and neither side delays.
+    if predicted_bps == 0.0:
+        delayed_side: int | None = None
+        timed_send, trigger = decision_ts, TRIGGER_NONE
+        timed_arrival = baseline_arrival
+    else:
+        delayed_side = SELL if predicted_bps > 0 else BUY
+        timed_send, trigger = timed_send_instant(decision_ts, target_available_ts_recv)
+        timed_arrival = timed_send + LATENCY_NS
+
+    span_end = max(baseline_arrival, timed_arrival)
+    if within_coverage is not None and not within_coverage(decision_ts, span_end):
+        return None, NOT_COMPARABLE_OUTSIDE_COVERAGE
+    if timing_certified is not None and not timing_certified(decision_ts, span_end):
         return None, NOT_COMPARABLE_UNCERTIFIABLE
 
     decision_book = book_at(decision_ts)
@@ -325,9 +397,6 @@ def evaluate_pair(
     baseline_book = book_at(baseline_arrival)
     if baseline_book is None or not baseline_book.two_sided:
         return None, NOT_COMPARABLE_NO_BASELINE_BOOK
-    timed_book = book_at(timed_arrival)
-    if timed_book is None or not timed_book.two_sided:
-        return None, NOT_COMPARABLE_NO_TIMED_BOOK
 
     legs: dict[int, dict[str, float]] = {}
     for side in (BUY, SELL):
@@ -335,19 +404,34 @@ def evaluate_pair(
         baseline_fill = walk_book(baseline_book, action, shares)
         if baseline_fill is None:
             return None, NOT_COMPARABLE_BASELINE_LIQUIDITY
-        timed_fill = walk_book(timed_book, action, shares)
-        if timed_fill is None:
-            return None, NOT_COMPARABLE_TIMED_LIQUIDITY
         legs[side] = {
             "baseline_fill": baseline_fill[0],
             "baseline_levels": float(baseline_fill[1]),
             "baseline_midpoint": float(baseline_book.midpoint),  # type: ignore[arg-type]
             "baseline_displayed": float(baseline_book.displayed(action)),
-            "timed_fill": timed_fill[0],
-            "timed_levels": float(timed_fill[1]),
-            "timed_midpoint": float(timed_book.midpoint),  # type: ignore[arg-type]
-            "timed_displayed": float(timed_book.displayed(action)),
+            # Provisional: the non-delayed side keeps these verbatim.
+            "timed_fill": baseline_fill[0],
+            "timed_levels": float(baseline_fill[1]),
+            "timed_midpoint": float(baseline_book.midpoint),  # type: ignore[arg-type]
+            "timed_displayed": float(baseline_book.displayed(action)),
         }
+
+    if delayed_side is not None:
+        timed_book = book_at(timed_arrival)
+        if timed_book is None or not timed_book.two_sided:
+            return None, NOT_COMPARABLE_NO_TIMED_BOOK
+        action = "buy" if delayed_side == BUY else "sell"
+        timed_fill = walk_book(timed_book, action, shares)
+        if timed_fill is None:
+            return None, NOT_COMPARABLE_TIMED_LIQUIDITY
+        legs[delayed_side].update(
+            {
+                "timed_fill": timed_fill[0],
+                "timed_levels": float(timed_fill[1]),
+                "timed_midpoint": float(timed_book.midpoint),  # type: ignore[arg-type]
+                "timed_displayed": float(timed_book.displayed(action)),
+            }
+        )
 
     return (
         PairedExecution(
@@ -358,10 +442,12 @@ def evaluate_pair(
             decision_ts=decision_ts,
             decision_midpoint=float(decision_book.midpoint),  # type: ignore[arg-type]
             predicted_bps=predicted_bps,
+            price_scale=float(price_scale),
             baseline_arrival_ts=baseline_arrival,
             timed_send_ts=timed_send,
             timed_arrival_ts=timed_arrival,
             trigger=trigger,
+            delayed_side=delayed_side,
             buy=legs[BUY],
             sell=legs[SELL],
         ),
@@ -377,21 +463,20 @@ def evaluate_pair(
 def price_dependent_fee_difference_usd(
     pair: PairedExecution, schedule: dict[str, Any], *, shares: int = TRADE_SIZE_SHARES
 ) -> float:
-    """Whatever the two policies differ by in fees, which should be nothing.
+    """Whatever the two policies differ by in fees, in real dollars.
 
     The parent order executes under both policies, so every per-share charge is
     identical and cancels. Only a per-dollar charge could differ, and Section 31
-    was $0.00 per million across the whole June-2025 window. This is computed
-    rather than asserted, because an expectation is not a measurement.
+    was $0.00 per million across the whole June-2025 window. Computed rather
+    than asserted, because an expectation is not a measurement -- and converted
+    out of fixed point, because a notional in raw price units is not money.
     """
     rate = schedule["sec_section_31_usd_per_million_sold"]
     if not rate:
         return 0.0
-    # The sale leg is the SELL side's fill under either policy.
-    baseline_notional = pair.sell["baseline_fill"] * shares
-    timed_notional = (
-        pair.sell["timed_fill"] if pair.delayed_side == SELL else pair.sell["baseline_fill"]
-    ) * shares
+    sell = pair.sell
+    baseline_notional = sell["baseline_fill"] / pair.price_scale * shares
+    timed_notional = sell["timed_fill"] / pair.price_scale * shares
     return (baseline_notional - timed_notional) * rate / 1_000_000.0
 
 
@@ -405,6 +490,7 @@ class CellTiming:
     """Everything measured for one frozen cell."""
 
     cell: str
+    price_scale: float = 1.0
     pairs: list[PairedExecution] = field(default_factory=list)
     not_comparable: dict[str, int] = field(default_factory=dict)
 
@@ -426,13 +512,16 @@ class CellTiming:
         if not pairs:
             return {**base, "reached_screen": False, "reason": "no comparable pairs"}
 
+        directional = [p for p in pairs if p.delayed_side is not None]
         balanced = np.array([p.balanced_savings_bps for p in pairs])
-        delayed = np.array([p.delayed_savings_bps for p in pairs])
+        delayed = np.array([p.delayed_savings_bps for p in directional]) if directional else np.array([])
         midpoint = np.array(
-            [p.midpoint_benefit_bps(p.delayed_side) for p in pairs]
-        )
-        book = np.array([p.book_walk_benefit_bps(p.delayed_side) for p in pairs])
-        dollars = np.array([p.dollar_savings_per_100(p.delayed_side) for p in pairs])
+            [p.midpoint_benefit_bps(p.delayed_side) for p in directional]
+        ) if directional else np.array([])
+        book = np.array(
+            [p.book_walk_benefit_bps(p.delayed_side) for p in directional]
+        ) if directional else np.array([])
+        dollars = np.array([p.delayed_dollar_savings for p in directional]) if directional else np.array([])
 
         by_date: dict[str, list[float]] = {}
         by_symbol: dict[str, list[float]] = {}
@@ -443,60 +532,62 @@ class CellTiming:
             by_symbol.setdefault(pair.symbol, []).append(float(value))
             if pair.delayed_side == BUY:
                 buy_savings.append(pair.savings_bps(BUY))
-            else:
+            elif pair.delayed_side == SELL:
                 sell_savings.append(pair.savings_bps(SELL))
 
         date_means = {d: float(np.mean(v)) for d, v in sorted(by_date.items())}
         statistic, p_value = clustered_t(list(date_means.values()))
         reached = (
-            len(pairs) >= MIN_COMPARABLE_PAIRS
-            and len(date_means) >= MIN_SESSION_DATES
+            len(pairs) >= MIN_COMPARABLE_PAIRS and len(date_means) >= MIN_SESSION_DATES
         )
         fee_difference = (
-            float(
-                np.mean(
-                    [price_dependent_fee_difference_usd(p, schedule) for p in pairs]
-                )
-            )
+            float(np.mean([price_dependent_fee_difference_usd(p, schedule) for p in pairs]))
             if schedule
             else None
         )
+        zero_predictions = len(pairs) - len(directional)
+
+        def mean_or_none(values):
+            return float(values.mean()) if len(values) else None
 
         return {
             **base,
             "reached_screen": reached,
             "session_dates": len(date_means),
             "balanced_parent_flow_savings_bps": float(balanced.mean()),
-            "delayed_side_savings_bps": float(delayed.mean()),
-            "midpoint_timing_benefit_bps": float(midpoint.mean()),
-            "book_walk_benefit_bps": float(book.mean()),
-            "dollar_savings_per_100_shares": float(dollars.mean()),
+            "delayed_side_savings_bps": mean_or_none(delayed),
+            "midpoint_timing_benefit_bps": mean_or_none(midpoint),
+            "book_walk_benefit_bps": mean_or_none(book),
+            "dollar_savings_per_100_shares": mean_or_none(dollars),
             "buy_savings_bps": float(np.mean(buy_savings)) if buy_savings else None,
             "sell_savings_bps": float(np.mean(sell_savings)) if sell_savings else None,
             "delayed_buy_pairs": len(buy_savings),
             "delayed_sell_pairs": len(sell_savings),
-            "delayed_fraction": 1.0,  # exactly one side delays in every pair
+            "zero_prediction_pairs": zero_predictions,
+            # Every directional pair contains a delay, but it contains TWO parent
+            # orders and only one of them delays. Calling that 1.0 would overstate
+            # how much of the flow the mechanism actually touches.
+            "pairs_with_a_delay_fraction": (
+                len(directional) / len(pairs) if pairs else 0.0
+            ),
+            "parent_orders_delayed_fraction": (
+                len(directional) / (2 * len(pairs)) if pairs else 0.0
+            ),
             "target_triggered_delays": sum(
-                1 for p in pairs if p.trigger == TRIGGER_TARGET
+                1 for p in directional if p.trigger == TRIGGER_TARGET
             ),
             "deadline_triggered_delays": sum(
-                1 for p in pairs if p.trigger == TRIGGER_DEADLINE
+                1 for p in directional if p.trigger == TRIGGER_DEADLINE
             ),
-            "mean_displayed_liquidity_shares": float(
-                np.mean(
-                    [
-                        (p.buy if p.delayed_side == BUY else p.sell)["timed_displayed"]
-                        for p in pairs
-                    ]
-                )
+            "mean_displayed_liquidity_shares": (
+                float(np.mean([p.leg(p.delayed_side)["timed_displayed"] for p in directional]))
+                if directional
+                else None
             ),
-            "mean_levels_walked": float(
-                np.mean(
-                    [
-                        (p.buy if p.delayed_side == BUY else p.sell)["timed_levels"]
-                        for p in pairs
-                    ]
-                )
+            "mean_levels_walked": (
+                float(np.mean([p.leg(p.delayed_side)["timed_levels"] for p in directional]))
+                if directional
+                else None
             ),
             "price_dependent_fee_difference_usd": fee_difference,
             "clustered_t": statistic,
@@ -528,9 +619,7 @@ def assemble_report(
         p_values[row["cell"]] = row.get("p_value") if eligible else None
 
     bh = benjamini_hochberg(p_values, fdr=BH_FALSE_DISCOVERY_RATE)
-    passing = [
-        row["cell"] for row in results if bh.get(row["cell"], {}).get("survives_bh")
-    ]
+    passing = [row["cell"] for row in results if bh.get(row["cell"], {}).get("survives_bh")]
 
     return {
         "stage35_executor_version": STAGE35_EXECUTOR_VERSION,
@@ -569,3 +658,149 @@ def assemble_report(
 def write_report(report: dict[str, Any], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(report, default=str, indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Per-date fits, and proving they are Stage 2's own
+# ---------------------------------------------------------------------------
+
+
+def per_date_betas(
+    per_date_grams: dict[str, Any],
+    blocks: dict[str, Sequence[str]],
+    alpha: float,
+) -> dict[str, dict[str, Any]]:
+    """One beta per evaluation date, from Stage 2's own ``fit``.
+
+    Ridge is *not* reimplemented here. Stage 2's ``fit`` penalizes only the 59
+    L3 columns and leaves the intercept and the ten price-only columns
+    unpenalized; a local reimplementation would be a second definition of the
+    model, and the two would eventually disagree.
+    """
+    from app.services.mbo_stage2_executor import DESIGN_WIDTH, fit, sum_grams
+
+    betas: dict[str, dict[str, Any]] = {}
+    ordered = (
+        list(blocks["discovery"]) + list(blocks["validation"]) + list(blocks["confirmation"])
+    )
+    for session_date in ordered:
+        block, training = training_dates_for(session_date, blocks)
+        usable = [d for d in training if d in per_date_grams]
+        if len(usable) < 2:
+            continue
+        train = sum_grams((per_date_grams[d] for d in usable), DESIGN_WIDTH)
+        beta = fit(train, alpha)
+        if beta is None:
+            continue
+        betas[session_date] = {
+            "beta": beta,
+            "block": block,
+            "training_dates": usable,
+            "train_gram": train,
+        }
+    return betas
+
+
+def reproduce_stage2_delta_r2(
+    cell: str,
+    per_date_grams: dict[str, Any],
+    betas: dict[str, dict[str, Any]],
+    alpha: float,
+    recorded: dict[str, dict[str, float]],
+    *,
+    tolerance: float = 1e-9,
+) -> dict[str, Any]:
+    """Prove the Stage-3.5 chronology yields Stage 2's own out-of-sample numbers.
+
+    Stage 2 recorded, per block, the per-date ``delta_R2`` it obtained from a
+    training Gram built exactly this way. If the Stage-3.5 reconstruction
+    reproduces those values on every date where Stage 2 recorded one, the models
+    feeding this experiment are demonstrably the same out-of-sample models --
+    not merely models built by a procedure described in the same words.
+
+    Any mismatch is a refusal. A near-match is a mismatch: these are
+    deterministic linear solves over identical sufficient statistics, so they
+    agree to floating-point noise or they are not the same fit.
+    """
+    from app.services.mbo_stage2_executor import delta_r2
+
+    checked: dict[str, dict[str, float]] = {}
+    mismatches: list[str] = []
+    for session_date, entry in sorted(betas.items()):
+        block = entry["block"]
+        expected = (recorded.get(block) or {}).get(session_date)
+        if expected is None or session_date not in per_date_grams:
+            continue
+        rebuilt = delta_r2(entry["train_gram"], per_date_grams[session_date], alpha)
+        if rebuilt is None:
+            mismatches.append(f"{session_date}: could not be scored")
+            continue
+        checked[session_date] = {"stage2": float(expected), "stage35": float(rebuilt)}
+        if abs(rebuilt - expected) > tolerance:
+            mismatches.append(
+                f"{session_date} ({block}): {rebuilt} vs Stage-2 {expected}"
+            )
+
+    if mismatches:
+        raise ValueError(
+            f"the Stage-3.5 per-date fits for {cell} do not reproduce Stage 2's "
+            "recorded delta_R2, so they are not the same out-of-sample models:"
+            + "".join(f"\n  - {m}" for m in mismatches)
+        )
+
+    return {
+        "dates_checked": len(checked),
+        "per_date": checked,
+        "reproduction_verified": True,
+        "tolerance": tolerance,
+    }
+
+
+def recorded_stage2_per_date(record: dict[str, Any], blocks: dict[str, Sequence[str]]):
+    """Stage 2's per-date delta_R2, keyed by block and then by date.
+
+    Stage 2 stored ``per_date_delta_r2`` as an ordered list alongside the dates
+    it scored, so the reconstruction has to pair them back up in the same order
+    Stage 2 used.
+    """
+    out: dict[str, dict[str, float]] = {}
+    for block in ("discovery", "validation", "confirmation"):
+        entry = record.get(block) or {}
+        values = entry.get("per_date_delta_r2")
+        if not values:
+            continue
+        dates = list(blocks[block])
+        if len(values) != len(dates):
+            # Stage 2 drops dates it could not score; without the identities we
+            # cannot align them, so this block is skipped rather than guessed at.
+            continue
+        out[block] = {d: float(v) for d, v in zip(dates, values, strict=True)}
+    return out
+
+
+def cell_prefix(horizon: str) -> str:
+    from app.services.mbo_label_engine import HORIZONS_BY_NAME
+
+    return HORIZONS_BY_NAME[horizon].prefix
+
+
+def query_instants(
+    decision_ts, availability, usable, predictions
+) -> list[int]:
+    """Every instant the paired evaluation will ask about, for one replay pass.
+
+    The non-delayed side never queries a future instant, so its arrival is not
+    collected -- the same asymmetry the comparability rule relies on.
+    """
+    instants: set[int] = set()
+    for row in range(len(decision_ts)):
+        if not usable[row]:
+            continue
+        decision = int(decision_ts[row])
+        instants.add(decision)
+        instants.add(decision + LATENCY_NS)
+        if float(predictions[row]) == 0.0:
+            continue
+        send, _ = timed_send_instant(decision, availability[row])
+        instants.add(send + LATENCY_NS)
+    return sorted(instants)

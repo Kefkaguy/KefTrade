@@ -62,7 +62,32 @@ from app.services.mbo_stage3_plan import (
     PRIOR_EFFECTIVE_TRIALS as STAGE3_PRIOR_EFFECTIVE_TRIALS,
 )
 
-STAGE35_PLAN_VERSION = "tier1_stage35_execution_timing_v1"
+STAGE35_PLAN_VERSION = "tier1_stage35_execution_timing_v2"
+
+SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_stage35_execution_timing_v1",
+        "plan_design_hash": (
+            "ab0d42679cbedf6ac6b23706766ad16896e7d86413162b8f66e42cd3153c9fa7"
+        ),
+        "superseded_before_any_execution_outcome": "true",
+        "reason": (
+            "measurement defects, all pre-outcome. The send instant was not "
+            "clamped to the decision, so a target timestamp earlier than the "
+            "prediction would have sent a 'delayed' order before the prediction "
+            "existed. Comparability required a timed fill for BOTH sides when "
+            "only one side delays, so observations could be excluded on future "
+            "liquidity the policy never uses -- and that exclusion is not random, "
+            "because future thinness correlates with the dynamics being studied. "
+            "Dollar savings and the Section-31 notional multiplied fixed-point "
+            "price units by share counts without dividing by the price scale. "
+            "delayed_fraction reported 1.0 for a mechanism that delays one of the "
+            "two parent orders in each pair. The exact-zero prediction had no "
+            "declared rule. Arrivals past the end of the certified stream could "
+            "be served from BookReplay's final snapshot as though tradable."
+        ),
+    },
+)
 
 NANOS_PER_MILLISECOND = 1_000_000
 NANOS_PER_SECOND = 1_000_000_000
@@ -141,7 +166,12 @@ TIMING: dict[str, Any] = {
     "decision_instant": "source_feature_available_ts_recv",
     "baseline_arrival": "decision + 250ms",
     "delay_deadline_send": "decision + 750ms",
-    "timed_send": "min(target_available_ts_recv, deadline_send)",
+    "timed_send": "min(max(target_available_ts_recv, decision), deadline_send)",
+    "clamped_at_decision": (
+        "a target timestamp earlier than the decision would otherwise send a "
+        "'delayed' order before the prediction existed"
+    ),
+    "invariant": "decision <= timed_send <= decision + 750ms",
     "timed_arrival": "timed_send + 250ms",
     "max_arrival": "decision + 1s",
     "trigger": (
@@ -177,6 +207,47 @@ POLICY: dict[str, Any] = {
 }
 
 # ---------------------------------------------------------------------------
+# The exact tie
+# ---------------------------------------------------------------------------
+#
+# Declared before outcomes, and deliberately not a magnitude threshold: this is
+# what to do when the model expresses no direction at all.
+
+ZERO_PREDICTION_RULE: dict[str, Any] = {
+    "condition": "predicted_bps == 0.0 exactly",
+    "action": "no timing preference; neither parent side delays",
+    "classification": "no_direction_zero_prediction",
+    "counted": True,
+    "why_not_treated_as_down": (
+        "classifying an exact tie as predicted-down would invent a direction the "
+        "model did not express, and would do so asymmetrically -- always in "
+        "favour of delaying the buy"
+    ),
+    "is_a_magnitude_threshold": False,
+}
+
+# ---------------------------------------------------------------------------
+# Certified coverage
+# ---------------------------------------------------------------------------
+
+COVERAGE_RULE: dict[str, Any] = {
+    "requirement": (
+        "every instant a pair queries -- decision, baseline arrival and timed "
+        "arrival -- must lie inside the receive-time span the certified file "
+        "actually covers"
+    ),
+    "outside_coverage": "the pair is refused and counted, never filled",
+    "why": (
+        "the inherited BookReplay answers instants past the last record by "
+        "snapshotting the final book. That is right for its own purpose and "
+        "wrong here: a delayed order arriving after the stream ends would fill "
+        "against a book that no longer exists, and the fill would look "
+        "completely ordinary."
+    ),
+    "not_relied_upon": "BookReplay's post-EOF final snapshot is never a tradable state",
+}
+
+# ---------------------------------------------------------------------------
 # The outcome
 # ---------------------------------------------------------------------------
 
@@ -209,7 +280,8 @@ DECOMPOSITION: tuple[str, ...] = (
     "by_symbol",
     "by_session_date",
     "comparable_pair_count",
-    "delayed_fraction",
+    "pairs_with_a_delay_fraction",
+    "parent_orders_delayed_fraction",
     "target_triggered_delays",
     "deadline_triggered_delays",
     "displayed_liquidity_shares",
@@ -249,9 +321,20 @@ FEES: dict[str, Any] = {
 
 COMPARABILITY: dict[str, Any] = {
     "rule": (
-        "a paired observation is comparable only when BOTH required "
-        "counterfactual executions -- baseline and timed -- can be evaluated "
-        "under the frozen fill rules"
+        "a paired observation is comparable when both baseline executions and "
+        "the TIMED execution OF THE DELAYED SIDE can be evaluated under the "
+        "frozen fill rules"
+    ),
+    "non_delayed_side": (
+        "executes at the baseline instant under both policies, so its policy "
+        "fill literally reuses its baseline fill and its future liquidity is "
+        "never queried"
+    ),
+    "why_not_require_the_unused_leg": (
+        "gating inclusion on a market state the policy never touches would "
+        "exclude observations for an irrelevant reason -- and not at random, "
+        "since future thinness correlates with exactly the book dynamics this "
+        "mechanism claims to exploit"
     ),
     "asymmetric_failures_are_recorded": True,
     "why": (
@@ -346,6 +429,12 @@ PLAN_DESIGN_ELEMENTS: tuple[str, ...] = (
     f"min_comparable_pairs={MIN_COMPARABLE_PAIRS}",
     f"prior_effective_trials={PRIOR_EFFECTIVE_TRIALS}",
     "evidence=exploratory_mechanism_development",
+    "timed_send_clamped_to_decision=true",
+    "comparability=baseline_both_sides+timed_delayed_side_only",
+    "dollar_units=divided_by_price_scale",
+    "delay_reporting=pairs_1.0_parent_orders_0.5",
+    "zero_prediction=no_direction_no_delay",
+    "coverage=arrivals_must_be_inside_certified_receive_span",
     "authorizes=external_confirmation_experiment_only;not=paper;not=live",
 )
 
@@ -379,6 +468,9 @@ def statistical_plan() -> dict[str, Any]:
         "decomposition_identity": DECOMPOSITION_IDENTITY,
         "fees": dict(FEES),
         "comparability": dict(COMPARABILITY),
+        "zero_prediction_rule": dict(ZERO_PREDICTION_RULE),
+        "coverage_rule": dict(COVERAGE_RULE),
+        "superseded_plan_versions": [dict(e) for e in SUPERSEDED_PLAN_VERSIONS],
         "mechanism_screen": dict(MECHANISM_SCREEN),
         "governance": dict(GOVERNANCE),
         "forbidden": list(FORBIDDEN),

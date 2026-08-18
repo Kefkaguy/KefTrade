@@ -15,10 +15,12 @@ from app.services.mbo_stage35_executor import (
     BUY,
     NOT_COMPARABLE_BASELINE_LIQUIDITY,
     NOT_COMPARABLE_NO_TIMED_BOOK,
+    NOT_COMPARABLE_OUTSIDE_COVERAGE,
     NOT_COMPARABLE_TIMED_LIQUIDITY,
     NOT_COMPARABLE_UNCERTIFIABLE,
     SELL,
     TRIGGER_DEADLINE,
+    TRIGGER_NONE,
     TRIGGER_TARGET,
     CellTiming,
     assemble_report,
@@ -83,6 +85,7 @@ def make_pair(predicted_bps, book_at, *, target=None, decision=1_000_000_000, **
         decision_ts=decision,
         target_available_ts_recv=target,
         book_at=book_at,
+        price_scale=SCALE,
         **kw,
     )
 
@@ -95,7 +98,7 @@ def make_pair(predicted_bps, book_at, *, target=None, decision=1_000_000_000, **
 def test_the_plan_and_cell_hashes_are_frozen():
     assert_frozen_plan()
     assert PLAN_DESIGN_HASH == (
-        "ab0d42679cbedf6ac6b23706766ad16896e7d86413162b8f66e42cd3153c9fa7"
+        "ab7393d01de1d4d3c9cb37b0142be33fa24f99336facca87827633255e094d9d"
     )
 
 
@@ -246,14 +249,14 @@ def test_the_two_arrival_instants_are_what_the_plan_declares():
 
 def test_predicted_up_delays_the_sell_and_executes_the_buy_now():
     pair, _ = make_pair(50.0, static_book(100.00, 100.02))
-    assert pair.predicted_up is True
+    assert pair.predicted_bps > 0
     assert pair.delayed_side == SELL
     assert pair.savings_bps(BUY) == 0.0
 
 
 def test_predicted_down_delays_the_buy_and_executes_the_sell_now():
     pair, _ = make_pair(-50.0, static_book(100.00, 100.02))
-    assert pair.predicted_up is False
+    assert pair.predicted_bps < 0
     assert pair.delayed_side == BUY
     assert pair.savings_bps(SELL) == 0.0
 
@@ -661,3 +664,583 @@ def test_the_cli_offers_no_symbol_filter_or_threshold_option():
     }
     for banned in ("--symbol", "--symbols", "--threshold", "--delay", "--latency", "--limit"):
         assert banned not in actions
+
+
+# ---------------------------------------------------------------------------
+# 1. The send instant is clamped to the decision
+# ---------------------------------------------------------------------------
+
+
+def test_a_target_before_the_decision_never_sends_early():
+    """The correction that matters most: a target timestamp preceding the
+    prediction would otherwise send a 'delayed' order before the prediction
+    existed -- a policy nobody could run, scoring as though they had."""
+    decision = 1_000_000_000
+    send, trigger = timed_send_instant(decision, decision - 500 * MS)
+    assert send == decision
+    assert send >= decision
+    assert trigger == TRIGGER_TARGET
+
+
+@pytest.mark.parametrize(
+    "target_offset_ms", [-5_000, -750, -1, 0, 1, 300, 749, 750, 751, 5_000]
+)
+def test_the_send_invariant_holds_for_every_target(target_offset_ms):
+    decision = 1_000_000_000
+    send, _ = timed_send_instant(decision, decision + target_offset_ms * MS)
+    assert decision <= send <= decision + DELAY_DEADLINE_NS
+    arrival = send + LATENCY_NS
+    assert decision + LATENCY_NS <= arrival <= decision + MAX_ARRIVAL_NS
+
+
+def test_an_early_target_still_produces_a_valid_pair():
+    decision = 1_000_000_000
+    pair, reason = make_pair(
+        -50.0, static_book(100.00, 100.02), target=decision - 5 * SCALE, decision=decision
+    )
+    assert reason is None and pair is not None
+    assert pair.timed_send_ts == decision
+    assert pair.timed_arrival_ts == decision + LATENCY_NS
+    assert pair.timed_arrival_ts >= pair.decision_ts
+
+
+# ---------------------------------------------------------------------------
+# 2. Only the delayed side needs a future fill
+# ---------------------------------------------------------------------------
+
+
+def _thin_for(side_action, decision, switch_ts):
+    """A book that becomes unfillable on one side only, after ``switch_ts``."""
+    def book_at(ts):
+        if ts < switch_ts:
+            return book(ts, 100.00, 100.02)
+        if side_action == "buy":
+            return BookLevels(
+                ts=ts,
+                bids=((int(99.99 * SCALE), 5_000),),
+                asks=((int(100.02 * SCALE), 1),),
+            )
+        return BookLevels(
+            ts=ts,
+            bids=((int(100.00 * SCALE), 1),),
+            asks=((int(100.02 * SCALE), 5_000),),
+        )
+
+    return book_at
+
+
+def test_the_non_delayed_sides_future_illiquidity_does_not_break_the_pair():
+    """Decisive. Predicted down delays the BUY. The SELL's future liquidity
+    vanishes -- but the SELL executes at the baseline instant under both
+    policies, so that market state is one the policy never touches."""
+    decision = 1_000_000_000
+    switch = decision + 400 * MS
+
+    def book_at(ts):
+        if ts < switch:
+            return book(ts, 100.00, 100.02)
+        # Asks deep (the delayed BUY can fill), bids gone (a SELL could not).
+        return BookLevels(
+            ts=ts,
+            bids=((int(99.90 * SCALE), 1),),
+            asks=((int(99.92 * SCALE), 5_000),),
+        )
+
+    pair, reason = make_pair(
+        -50.0, book_at, target=decision + 500 * MS, decision=decision
+    )
+    assert reason is None, reason
+    assert pair is not None
+    assert pair.delayed_side == BUY
+
+
+def test_the_delayed_sides_future_illiquidity_does_break_the_pair():
+    """The converse. If the side that actually delays cannot fill, the
+    observation is genuinely unavailable."""
+    decision = 1_000_000_000
+    pair, reason = make_pair(
+        -50.0,
+        _thin_for("buy", decision, decision + 400 * MS),
+        target=decision + 500 * MS,
+        decision=decision,
+    )
+    assert pair is None
+    assert reason == NOT_COMPARABLE_TIMED_LIQUIDITY
+
+
+def test_the_non_delayed_side_reuses_its_baseline_fill_verbatim():
+    decision = 1_000_000_000
+    pair, _ = make_pair(
+        50.0,
+        moving_book(decision, (100.00, 100.02), (101.00, 101.02), decision + 400 * MS),
+        target=decision + 500 * MS,
+        decision=decision,
+    )
+    assert pair.delayed_side == SELL
+    assert pair.buy["timed_fill"] == pair.buy["baseline_fill"]
+    assert pair.buy["timed_midpoint"] == pair.buy["baseline_midpoint"]
+    # Which makes its savings exactly zero as arithmetic, not as a special case.
+    assert pair.savings_bps(BUY) == 0.0
+
+
+def test_a_baseline_failure_on_either_side_still_refuses():
+    """Both parent orders exist, so both baseline fills are genuinely required."""
+    thin = BookLevels(
+        ts=0, bids=((int(99.99 * SCALE), 5),), asks=((int(100.00 * SCALE), 5_000),)
+    )
+    pair, reason = make_pair(-50.0, lambda ts: thin, target=1_000_000_000 + 300 * MS)
+    assert pair is None and reason == NOT_COMPARABLE_BASELINE_LIQUIDITY
+
+
+# ---------------------------------------------------------------------------
+# 3. Fixed-point conversion
+# ---------------------------------------------------------------------------
+
+
+def test_dollar_savings_use_the_real_fixed_point_scale():
+    """A ten-cent improvement on 100 shares is $10, not 1e10."""
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+
+    decision = 1_000_000_000
+    pair, _ = evaluate_pair(
+        cell="50ev|next_change", symbol="AAAA", session_date="2025-06-18",
+        block="confirmation", predicted_bps=-50.0, decision_ts=decision,
+        target_available_ts_recv=decision + 500 * MS,
+        book_at=moving_book(
+            decision, (100.00, 100.10), (99.90, 100.00), decision + 400 * MS
+        ),
+        price_scale=float(FIXED_PRICE_SCALE),
+    )
+    assert pair.delayed_side == BUY
+    # Baseline buys the 100.10 offer, timed buys the 100.00 offer: 10c x 100.
+    assert pair.delayed_dollar_savings == pytest.approx(10.0)
+    assert abs(pair.delayed_dollar_savings) < 1_000  # not fixed-point units
+
+
+def test_dollar_savings_are_negative_when_the_delay_hurts():
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+
+    decision = 1_000_000_000
+    pair, _ = evaluate_pair(
+        cell="50ev|next_change", symbol="AAAA", session_date="2025-06-18",
+        block="confirmation", predicted_bps=-50.0, decision_ts=decision,
+        target_available_ts_recv=decision + 500 * MS,
+        book_at=moving_book(
+            decision, (100.00, 100.02), (100.20, 100.22), decision + 400 * MS
+        ),
+        price_scale=float(FIXED_PRICE_SCALE),
+    )
+    assert pair.delayed_dollar_savings == pytest.approx(-20.0)
+
+
+def test_the_fee_difference_is_real_usd_at_a_non_zero_rate():
+    """The June-2025 rate is zero, so this restores a real historical rate to
+    prove the notional conversion is dimensionally correct."""
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+    from app.services.mbo_stage3_plan import PRIMARY_FEE_SCHEDULE
+
+    decision = 1_000_000_000
+    pair, _ = evaluate_pair(
+        cell="50ev|next_change", symbol="AAAA", session_date="2025-06-18",
+        block="confirmation", predicted_bps=50.0, decision_ts=decision,
+        target_available_ts_recv=decision + 500 * MS,
+        book_at=moving_book(
+            decision, (100.00, 100.02), (110.00, 110.02), decision + 400 * MS
+        ),
+        price_scale=float(FIXED_PRICE_SCALE),
+    )
+    schedule = {**PRIMARY_FEE_SCHEDULE, "sec_section_31_usd_per_million_sold": 27.80}
+    difference = price_dependent_fee_difference_usd(pair, schedule)
+    # Selling 100 shares ~$1,000 lower notional at $27.80/M is fractions of a cent.
+    assert difference != 0.0
+    assert abs(difference) < 1.0
+
+
+def test_the_fee_difference_is_zero_under_the_june_2025_schedule():
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+    from app.services.mbo_stage3_plan import PRIMARY_FEE_SCHEDULE
+
+    decision = 1_000_000_000
+    pair, _ = evaluate_pair(
+        cell="50ev|next_change", symbol="AAAA", session_date="2025-06-18",
+        block="confirmation", predicted_bps=50.0, decision_ts=decision,
+        target_available_ts_recv=decision + 500 * MS,
+        book_at=moving_book(
+            decision, (100.00, 100.02), (110.00, 110.02), decision + 400 * MS
+        ),
+        price_scale=float(FIXED_PRICE_SCALE),
+    )
+    assert price_dependent_fee_difference_usd(pair, PRIMARY_FEE_SCHEDULE) == 0.0
+
+
+# ---------------------------------------------------------------------------
+# 4. Delay reporting
+# ---------------------------------------------------------------------------
+
+
+def _filled_cell(n=1_200, dates=12):
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+
+    cell = CellTiming(cell="50ev|next_change", price_scale=float(FIXED_PRICE_SCALE))
+    decision = 1_000_000_000
+    for i in range(n):
+        pair, reason = evaluate_pair(
+            cell="50ev|next_change", symbol=f"S{i % 4}",
+            session_date=f"2025-06-{2 + i % dates:02d}", block="confirmation",
+            predicted_bps=(-50.0 if i % 2 else 50.0), decision_ts=decision,
+            target_available_ts_recv=decision + 500 * MS,
+            book_at=moving_book(
+                decision, (100.00, 100.02), (99.99, 100.01), decision + 400 * MS
+            ),
+            price_scale=float(FIXED_PRICE_SCALE),
+        )
+        assert reason is None
+        cell.pairs.append(pair)
+    return cell
+
+
+def test_delay_reporting_distinguishes_pairs_from_parent_orders():
+    """Every pair contains a delay, but each pair contains TWO parent orders and
+    only one delays. Calling that 1.0 overstates the reach of the mechanism."""
+    summary = _filled_cell().summary()
+    assert summary["pairs_with_a_delay_fraction"] == 1.0
+    assert summary["parent_orders_delayed_fraction"] == 0.5
+    assert "delayed_fraction" not in summary
+
+
+def test_zero_predictions_lower_both_delay_fractions():
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+
+    cell = _filled_cell(n=100)
+    decision = 1_000_000_000
+    for i in range(100):
+        pair, reason = evaluate_pair(
+            cell="50ev|next_change", symbol="Z", session_date="2025-06-02",
+            block="confirmation", predicted_bps=0.0, decision_ts=decision,
+            target_available_ts_recv=decision + 500 * MS,
+            book_at=static_book(100.00, 100.02),
+            price_scale=float(FIXED_PRICE_SCALE),
+        )
+        assert reason is None
+        cell.pairs.append(pair)
+    summary = cell.summary()
+    assert summary["pairs_with_a_delay_fraction"] == pytest.approx(0.5)
+    assert summary["parent_orders_delayed_fraction"] == pytest.approx(0.25)
+    assert summary["zero_prediction_pairs"] == 100
+
+
+# ---------------------------------------------------------------------------
+# 7. The exact-zero prediction
+# ---------------------------------------------------------------------------
+
+
+def test_an_exact_zero_prediction_delays_neither_side():
+    """An exact tie expresses no direction, so the policy expresses no timing
+    preference. Classifying zero as predicted-down would invent a direction --
+    and always in favour of delaying the buy."""
+    pair, reason = make_pair(0.0, static_book(100.00, 100.02))
+    assert reason is None
+    assert pair.delayed_side is None
+    assert pair.trigger == TRIGGER_NONE
+    assert pair.savings_bps(BUY) == 0.0
+    assert pair.savings_bps(SELL) == 0.0
+    assert pair.balanced_savings_bps == 0.0
+    assert pair.delayed_savings_bps == 0.0
+
+
+def test_a_zero_prediction_queries_no_future_instant():
+    """It never delays, so it never needs a future book -- and a moving market
+    cannot change its (zero) savings."""
+    decision = 1_000_000_000
+    seen: list[int] = []
+
+    def book_at(ts):
+        seen.append(ts)
+        return book(ts, 100.00, 100.02)
+
+    pair, _ = make_pair(0.0, book_at, target=decision + 500 * MS, decision=decision)
+    assert max(seen) == decision + LATENCY_NS
+    assert pair.timed_arrival_ts == pair.baseline_arrival_ts
+
+
+def test_the_zero_rule_is_frozen_and_is_not_a_magnitude_threshold():
+    rule = statistical_plan()["zero_prediction_rule"]
+    assert rule["condition"] == "predicted_bps == 0.0 exactly"
+    assert rule["classification"] == "no_direction_zero_prediction"
+    assert rule["is_a_magnitude_threshold"] is False
+    assert rule["counted"] is True
+
+
+def test_the_smallest_non_zero_prediction_still_takes_a_side():
+    """The zero rule is an exact tie rule, not a threshold: 1e-300 still acts."""
+    up, _ = make_pair(1e-300, static_book(100.00, 100.02))
+    down, _ = make_pair(-1e-300, static_book(100.00, 100.02))
+    assert up.delayed_side == SELL
+    assert down.delayed_side == BUY
+
+
+# ---------------------------------------------------------------------------
+# 6. Certified coverage
+# ---------------------------------------------------------------------------
+
+
+def _mbo_event(ts_recv, action, side, price, size, order_id, seq):
+    from app.services.mbo_book_validator import MboEvent
+
+    return MboEvent(
+        ts_event=ts_recv - 500, action=action, side=side, price=price, size=size,
+        order_id=order_id, flags=128, sequence=seq, ts_recv=ts_recv,
+    )
+
+
+def test_coverage_tracks_the_receive_span_of_the_certified_file():
+    from app.services.mbo_stage35_executor import CoverageTracker
+
+    tracker = CoverageTracker()
+    events = [
+        _mbo_event(1_000, "A", "B", 100 * SCALE, 500, 1, 1),
+        _mbo_event(9_000, "A", "A", 101 * SCALE, 500, 2, 2),
+    ]
+    assert list(tracker.wrap(events)) == events
+    assert tracker.first_ts_recv == 1_000
+    assert tracker.last_ts_recv == 9_000
+    assert tracker.records == 2
+    assert tracker.covers(2_000, 8_000) is True
+    assert tracker.covers(500, 8_000) is False     # before the first record
+    assert tracker.covers(2_000, 9_001) is False   # past the last record
+
+
+def test_an_arrival_past_the_end_of_the_stream_is_refused():
+    """BookReplay would serve it from the final snapshot as though tradable.
+    That fill would look completely ordinary and be entirely fictitious."""
+    decision = 1_000_000_000
+    pair, reason = make_pair(
+        -50.0,
+        static_book(100.00, 100.02),
+        target=decision + 500 * MS,
+        decision=decision,
+        within_coverage=lambda lo, hi: hi <= decision + 600 * MS,
+    )
+    assert pair is None
+    assert reason == NOT_COMPARABLE_OUTSIDE_COVERAGE
+
+
+def test_an_arrival_inside_coverage_is_accepted():
+    decision = 1_000_000_000
+    pair, reason = make_pair(
+        -50.0,
+        static_book(100.00, 100.02),
+        target=decision + 500 * MS,
+        decision=decision,
+        within_coverage=lambda lo, hi: True,
+    )
+    assert reason is None and pair is not None
+
+
+def test_coverage_is_checked_before_any_book_is_queried():
+    """A refusal must not depend on the stale book answering plausibly."""
+    queried: list[int] = []
+
+    def book_at(ts):
+        queried.append(ts)
+        return book(ts, 100.00, 100.02)
+
+    pair, reason = make_pair(
+        -50.0, book_at, target=1_000_000_000 + 500 * MS,
+        within_coverage=lambda lo, hi: False,
+    )
+    assert pair is None and reason == NOT_COMPARABLE_OUTSIDE_COVERAGE
+    assert queried == []
+
+
+# ---------------------------------------------------------------------------
+# 5. The wired run and its Stage-2 reproduction gate
+# ---------------------------------------------------------------------------
+
+
+def _stage2_world(seed: int = 11):
+    """Per-date Grams plus the per-date delta_R2 Stage 2 would have recorded."""
+    import numpy as np
+    from app.services.mbo_stage2_executor import DESIGN_WIDTH, Gram, delta_r2, sum_grams
+
+    def gram(i, rows=400):
+        rng = np.random.default_rng(seed + i)
+        x = rng.standard_normal((rows, DESIGN_WIDTH))
+        x[:, 0] = 1.0
+        y = 0.3 * x[:, 1] + 0.4 * x[:, 11] + rng.standard_normal(rows)
+        g = Gram.zeros(DESIGN_WIDTH)
+        g.add_rows(x, y)
+        return g
+
+    grams = {d: gram(i) for i, d in enumerate(DATES)}
+    alpha = 1.0
+    recorded = {}
+    for block, dates in BLOCKS.items():
+        values = []
+        for date in dates:
+            _, training = training_dates_for(date, BLOCKS)
+            train = sum_grams((grams[d] for d in training), DESIGN_WIDTH)
+            values.append(float(delta_r2(train, grams[date], alpha)))
+        recorded[block] = values
+    return grams, alpha, recorded
+
+
+def test_per_date_betas_use_stage2s_own_fit_and_never_train_on_the_date():
+    from app.services.mbo_stage2_executor import DESIGN_WIDTH
+    from app.services.mbo_stage35_executor import per_date_betas
+
+    grams, alpha, _ = _stage2_world()
+    betas = per_date_betas(grams, BLOCKS, alpha)
+    assert len(betas) == 20
+    for date, entry in betas.items():
+        assert date not in entry["training_dates"]
+        assert entry["beta"].shape == (DESIGN_WIDTH,)
+    assert len(betas[DATES[0]]["training_dates"]) == 9
+    assert len(betas[DATES[12]]["training_dates"]) == 10
+    assert len(betas[DATES[18]]["training_dates"]) == 16
+
+
+def test_the_chronology_reproduces_stage2s_recorded_per_date_delta_r2():
+    """The strong gate: if this passes, the models feeding the experiment are
+    demonstrably the same out-of-sample models Stage 2 used."""
+    from app.services.mbo_stage35_executor import (
+        per_date_betas,
+        recorded_stage2_per_date,
+        reproduce_stage2_delta_r2,
+    )
+
+    grams, alpha, recorded = _stage2_world()
+    record = {
+        block: {"per_date_delta_r2": values} for block, values in recorded.items()
+    }
+    betas = per_date_betas(grams, BLOCKS, alpha)
+    result = reproduce_stage2_delta_r2(
+        "50ev|next_change", grams, betas, alpha,
+        recorded_stage2_per_date(record, BLOCKS),
+    )
+    assert result["reproduction_verified"] is True
+    assert result["dates_checked"] == 20
+
+
+def test_a_chronology_that_does_not_reproduce_stage2_is_refused():
+    from app.services.mbo_stage35_executor import (
+        per_date_betas,
+        recorded_stage2_per_date,
+        reproduce_stage2_delta_r2,
+    )
+
+    grams, alpha, recorded = _stage2_world()
+    tampered = {k: list(v) for k, v in recorded.items()}
+    tampered["confirmation"][1] += 1e-6
+    record = {b: {"per_date_delta_r2": v} for b, v in tampered.items()}
+    betas = per_date_betas(grams, BLOCKS, alpha)
+    with pytest.raises(ValueError, match="do not reproduce Stage 2's recorded"):
+        reproduce_stage2_delta_r2(
+            "50ev|next_change", grams, betas, alpha,
+            recorded_stage2_per_date(record, BLOCKS),
+        )
+
+
+def test_a_wrong_training_window_fails_the_reproduction_gate():
+    """The gate is not decorative: change the chronology and it fires."""
+    from app.services.mbo_stage2_executor import DESIGN_WIDTH, fit, sum_grams
+    from app.services.mbo_stage35_executor import (
+        recorded_stage2_per_date,
+        reproduce_stage2_delta_r2,
+    )
+
+    grams, alpha, recorded = _stage2_world()
+    record = {b: {"per_date_delta_r2": v} for b, v in recorded.items()}
+    # Every date trained on all sixteen -- wrong for discovery and validation.
+    wrong = {}
+    training = BLOCKS["discovery"] + BLOCKS["validation"]
+    train = sum_grams((grams[d] for d in training), DESIGN_WIDTH)
+    for date in DATES:
+        block, _ = training_dates_for(date, BLOCKS)
+        wrong[date] = {
+            "beta": fit(train, alpha), "block": block,
+            "training_dates": training, "train_gram": train,
+        }
+    with pytest.raises(ValueError, match="do not reproduce Stage 2's recorded"):
+        reproduce_stage2_delta_r2(
+            "50ev|next_change", grams, wrong, alpha,
+            recorded_stage2_per_date(record, BLOCKS),
+        )
+
+
+def test_query_instants_omit_the_non_delayed_future_arrival():
+    import numpy as np
+    from app.services.mbo_stage35_executor import query_instants
+
+    decision = np.array([1_000_000_000], dtype=np.int64)
+    availability = [1_000_000_000 + 500 * MS]
+    instants = query_instants(decision, availability, np.array([True]), np.array([50.0]))
+    assert set(instants) == {
+        1_000_000_000,
+        1_000_000_000 + LATENCY_NS,
+        1_000_000_000 + 500 * MS + LATENCY_NS,
+    }
+
+
+def test_a_zero_prediction_adds_no_future_query_instant():
+    import numpy as np
+    from app.services.mbo_stage35_executor import query_instants
+
+    decision = np.array([1_000_000_000], dtype=np.int64)
+    instants = query_instants(
+        decision, [1_000_000_000 + 500 * MS], np.array([True]), np.array([0.0])
+    )
+    assert set(instants) == {1_000_000_000, 1_000_000_000 + LATENCY_NS}
+
+
+def test_the_run_is_wired_but_still_gated():
+    """Wired is not the same as authorized."""
+    import argparse
+    import inspect
+
+    from app.cli.mbo_stage35 import run
+
+    source = inspect.getsource(run)
+    assert "evaluate_pair" in source
+    assert "assemble_report" in source
+    assert "NotImplementedError" not in source
+
+    args = argparse.Namespace(
+        i_have_reviewed_the_design=False, stage2_results="x", grams_dir="g",
+        features_dir="f", labels_dir="l", raw_dir="r", output_dir="o",
+    )
+    with pytest.raises(ValueError, match="not authorized yet"):
+        run(args)
+
+
+def test_the_run_uses_stage2s_fit_rather_than_reimplementing_ridge():
+    import inspect
+
+    from app.services.mbo_stage35_executor import per_date_betas
+
+    source = inspect.getsource(per_date_betas)
+    assert "from app.services.mbo_stage2_executor import" in source
+    assert "fit" in source
+    # No local ridge algebra.
+    for token in ("np.linalg.solve", "np.eye", "penalty"):
+        assert token not in source, token
+
+
+def test_the_run_verifies_reproduction_before_replaying_anything():
+    import inspect
+
+    from app.cli.mbo_stage35 import run
+
+    source = inspect.getsource(run)
+    # Compare call sites, not the import block: the fits (and therefore the
+    # reproduction gate) must be built before any book is replayed.
+    assert source.index("_build_fits(context)") < source.index("BookReplay(MboBook)")
+
+
+def test_the_superseded_v1_plan_is_recorded_with_its_reason():
+    plan = statistical_plan()
+    v1 = plan["superseded_plan_versions"][0]
+    assert v1["version"] == "tier1_stage35_execution_timing_v1"
+    assert v1["superseded_before_any_execution_outcome"] == "true"
+    for token in ("clamped", "price scale", "delayed_fraction", "zero", "final snapshot"):
+        assert token in v1["reason"], token

@@ -1,12 +1,13 @@
-# Stage 3.5 — Execution-timing mechanism study, for review
+# Stage 3.5 — Execution-timing mechanism study, for review (v2)
 
-**Status: design and implementation complete. No execution outcome computed. No
-order placed. The run is gated behind an explicit reviewer flag.**
+**Status: corrected and fully wired. No execution outcome computed. No order
+placed. The run is gated behind an explicit reviewer flag.**
 
 | | |
 |---|---|
-| Plan | `tier1_stage35_execution_timing_v1` |
-| `PLAN_DESIGN_HASH` | `ab0d42679cbedf6ac6b23706766ad16896e7d86413162b8f66e42cd3153c9fa7` |
+| Plan | `tier1_stage35_execution_timing_v2` |
+| `PLAN_DESIGN_HASH` | `ab7393d01de1d4d3c9cb37b0142be33fa24f99336facca87827633255e094d9d` |
+| Superseded | `v1` `ab0d4267...` - before any execution outcome |
 | `CELL_HASH` | `bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00` |
 | Evidence class | **exploratory mechanism development** — not confirmatory |
 | Stage-3 verdict | **closed and unaltered** |
@@ -107,7 +108,7 @@ the flow. Both are reported; the balanced figure is primary.
 ```
 decision          = source_feature_available_ts_recv
 baseline_arrival  = decision + 250ms                        send now
-timed_send        = min(target_available_ts_recv,
+timed_send        = min(max(target_available_ts_recv, decision),
                         decision + 750ms)                   wait, briefly
 timed_arrival     = timed_send + 250ms      ->  at most decision + 1s
 ```
@@ -116,6 +117,10 @@ timed_arrival     = timed_send + 250ms      ->  at most decision + 1s
 `next_2_changes`). **The trigger is the arrival of the event, not its outcome.**
 A participant can observe "the midpoint has moved" in real time; they cannot
 observe what the move was worth. Nothing reads a label return.
+
+The floor at `decision` matters as much as the deadline: a target timestamp
+earlier than the prediction would otherwise send a "delayed" order before the
+prediction existed.
 
 If the target has not resolved by the deadline, the order goes at the deadline.
 That is what makes the wait bounded and therefore executable — a policy that
@@ -169,9 +174,10 @@ spread widening shows up entirely as book-walk with zero midpoint benefit, and a
 pure level shift shows up entirely as midpoint with zero book-walk.
 
 Also reported: dollar savings per 100 shares, BUY and SELL separately, by
-symbol, by session date, comparable pair count, delayed fraction,
-target-triggered vs deadline-triggered counts, displayed liquidity, levels
-walked.
+symbol, by session date, comparable pair count, `pairs_with_a_delay_fraction`
+and `parent_orders_delayed_fraction` (1.0 and 0.5 respectively - each pair
+contains two parent orders and only one delays), target-triggered vs
+deadline-triggered counts, displayed liquidity, levels walked.
 
 ---
 
@@ -270,6 +276,33 @@ diagnostic body never calls `assemble_report` or `evaluate_pair`.
 
 ---
 
+## 12a. The eight pre-outcome corrections (v1 -> v2)
+
+| # | Defect in v1 | Correction |
+|---|---|---|
+| 1 | `timed_send` was not floored at the decision, so a target timestamp *earlier* than the prediction would send a "delayed" order **before the prediction existed** | `min(max(target, decision), decision + 750ms)`; invariants `decision <= timed_send <= decision+750ms` and `decision+250ms <= timed_arrival <= decision+1s` asserted over a parametrized grid including negative offsets |
+| 2 | Comparability required a timed fill for **both** sides, though only one delays - excluding observations on future liquidity the policy never uses, and *not at random*, since future thinness correlates with the dynamics being studied | baseline fills required for both sides; timed fill required **only** for the delayed side; the non-delayed side reuses its baseline fill verbatim |
+| 3 | Dollar savings and the Section-31 notional multiplied **fixed-point** price units by share counts | both divide by `price_scale`; tested against the real `FIXED_PRICE_SCALE` - a 10c improvement on 100 shares is `$10`, not `1e10` |
+| 4 | `delayed_fraction: 1.0` for a mechanism that delays one of the two parent orders in each pair | `pairs_with_a_delay_fraction` and `parent_orders_delayed_fraction` reported separately; the old key is gone |
+| 5 | `run` raised `NotImplementedError` | fully wired, with a Stage-2 delta-R2 reproduction gate before any replay |
+| 6 | Arrivals past the end of the certified stream would be served from `BookReplay`'s final snapshot as though tradable | `CoverageTracker` records the file's receive-time span; arrivals outside it are refused and counted, checked **before any book is queried** |
+| 7 | The exact-zero prediction had no declared rule | `no_direction_zero_prediction`: neither side delays, no future instant is queried, count reported. An exact tie rule, **not** a magnitude threshold - 1e-300 still takes a side |
+| 8 | - | `diagnose` remains incapable of evaluating pairs; `run` remains gated, now tested as *wired but refusing* |
+
+### The reproduction gate (#5)
+
+`per_date_betas` uses **Stage 2's own `fit`** - ridge is not reimplemented,
+because a local reimplementation would be a second definition of the model and
+the two would eventually disagree. A test asserts the function contains no local
+ridge algebra (`np.linalg.solve`, `np.eye`, `penalty`).
+
+Before any replay, `reproduce_stage2_delta_r2` rebuilds each date's delta-R2 from
+the Stage-3.5 chronology and requires it to match Stage 2's recorded per-date
+value to 1e-9. These are deterministic linear solves over identical sufficient
+statistics: they agree to floating-point noise or they are not the same fit. Two
+tests prove the gate bites - a 1e-6 perturbation refuses, and so does a
+chronology that trains every date on all sixteen dates.
+
 ## 12. Leakage and timing audit
 
 | Risk | Control | Test |
@@ -283,10 +316,14 @@ diagnostic body never calls `assemble_report` or `evaluate_pair`.
 | Fill peeks past arrival | Stage-3 book semantics unchanged, `ts_recv <= arrival` | inherited Stage-3 replay tests |
 | Flagged receive timestamps | `F_BAD_TS_RECV` window exclusion | `test_a_flagged_timing_window_is_not_comparable` |
 | Selection on execution difficulty | both legs required; asymmetric failures counted | `test_a_pair_needs_both_legs_to_be_comparable`, `test_asymmetric_failures_are_counted_not_dropped` |
+| Send before the decision | `timed_send` floored at `decision_ts` | `test_a_target_before_the_decision_never_sends_early` |
+| Exclusion on unused liquidity | timed fill required only for the delayed side | `test_the_non_delayed_sides_future_illiquidity_does_not_break_the_pair` |
+| Fictitious post-EOF fill | coverage span checked before any book query | `test_an_arrival_past_the_end_of_the_stream_is_refused` |
+| Model not Stage 2's own | per-date delta-R2 reproduced to 1e-9 before replay | `test_the_chronology_reproduces_stage2s_recorded_per_date_delta_r2` |
 | Threshold/parameter search | sign-only policy; no tunable flags | `test_the_magnitude_of_the_prediction_changes_nothing`, `test_the_cli_offers_no_symbol_filter_or_threshold_option` |
 | Fictitious exit cost | no round trip; only price-dependent fee difference reported | `test_no_round_trip_cost_is_charged`, `test_the_price_dependent_fee_difference_is_zero_under_june_2025` |
 
-**57 Stage-3.5 tests; 558 passed, 3 skipped** across the whole MBO suite; ruff
+**97 Stage-3.5 tests; 598 passed, 3 skipped** across the whole MBO suite; ruff
 clean.
 
 ---
