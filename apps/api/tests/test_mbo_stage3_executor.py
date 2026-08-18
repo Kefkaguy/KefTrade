@@ -80,7 +80,7 @@ def static_book_at(bid: float, ask: float, **kwargs):
 def test_the_plan_and_survivor_hashes_are_frozen():
     assert_frozen_plan()
     assert PLAN_DESIGN_HASH == (
-        "f78f915a69489e71d1c15f785fdbe4dc09653339cc02d006a5b3136763894cde"
+        "6908076a49a9ecf0b274fff9c1f482672abe3b65561f7f3c6d52c7702991d820"
     )
     assert SURVIVOR_HASH == (
         "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -124,6 +124,7 @@ def test_every_superseded_plan_is_recorded_with_its_reason():
         "tier1_stage3_economics_v3",
         "tier1_stage3_economics_v4",
         "tier1_stage3_economics_v5",
+        "tier1_stage3_economics_v6",
     }
     for entry in by_version.values():
         assert entry["superseded_before_any_economic_outcome"] == "true"
@@ -150,6 +151,10 @@ def test_every_superseded_plan_is_recorded_with_its_reason():
     v5 = by_version["tier1_stage3_economics_v5"]
     assert "sequence_index alone" in v5["reason"]
     assert "smaller economic sample" in v5["reason"]
+
+    v6 = by_version["tier1_stage3_economics_v6"]
+    assert "label batch manifest" in v6["reason"]
+    assert "Provenance only" in v6["reason"]
 
 
 def test_survivors_are_taken_from_confirmation_not_re_judged():
@@ -1986,7 +1991,7 @@ SYMBOLS = [f"SYM{i}" for i in range(8)]
 SESSION_DATES = [f"2025-06-{d:02d}" for d in range(2, 22)]
 
 
-def _complete_batch(tmp_path):
+def _complete_batch(tmp_path, *, declared_label_hash: str | None = None):
     """A physically complete 160 symbol-day batch with matching manifests."""
     import json as _json
 
@@ -2034,8 +2039,19 @@ def _complete_batch(tmp_path):
         "provenance": {
             "feature_semantics_hash": FEATURE_SEMANTICS_HASH,
             "label_definition_hash": LABEL_DEFINITION_HASH,
+            "labels_declared_hash": declared_label_hash or LABEL_DEFINITION_HASH,
             "stage2_plan_hash": STAGE2_PLAN_HASH,
         },
+    }))
+    (labels / "label_batch_manifest.json").write_text(_json.dumps({
+        "label_definition_hash": declared_label_hash or LABEL_DEFINITION_HASH,
+        "stage2_plan_hash": STAGE2_PLAN_HASH,
+        "symbol_days_discovered": 160,
+        "symbol_days_completed": 160,
+        "symbol_days_failed": 0,
+        "failures": [],
+        "features_modified": False,
+        "contains_predictive_result": False,
     }))
     stage2_results = {"plan_hash": STAGE2_PLAN_HASH}
     return features, labels, grams, stage2_results
@@ -2206,3 +2222,182 @@ def test_the_frozen_batch_expectations_are_the_declared_ones():
         "missing_files_are_a_refusal"
     ]
     assert "physical files" in BATCH_COMPLETENESS["derivation"]
+
+
+# ---------------------------------------------------------------------------
+# The physical label batch manifest
+# ---------------------------------------------------------------------------
+
+
+def _label_manifest(labels_dir):
+    import json as _json
+
+    return _json.loads((labels_dir / "label_batch_manifest.json").read_text())
+
+
+def _rewrite_label_manifest(labels_dir, **changes):
+    import json as _json
+
+    manifest = _label_manifest(labels_dir)
+    manifest.update(changes)
+    (labels_dir / "label_batch_manifest.json").write_text(_json.dumps(manifest))
+
+
+def test_a_complete_batch_reports_its_label_provenance(tmp_path):
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    summary = assert_batch_complete(
+        features_dir=features, labels_dir=labels, grams_dir=grams,
+        stage2_results=results,
+    )
+    assert summary["label_batch"]["symbol_days_completed"] == 160
+    assert summary["label_batch"]["symbol_days_failed"] == 0
+    assert summary["label_batch"]["matches_grams_declared_hash"] is True
+    assert summary["label_batch"]["reused_under_supersession"] is False
+    assert "label batch manifest" in summary["verified_against"]
+
+
+def test_a_missing_label_batch_manifest_hard_fails(tmp_path):
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    (labels / "label_batch_manifest.json").unlink()
+    with pytest.raises(ValueError, match="no label batch manifest"):
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+
+
+def test_a_mismatched_physical_label_manifest_hash_hard_fails(tmp_path):
+    """(1) The disk says one label definition, the Grams recorded another.
+
+    Reading either alone proves half of it; this is the half v6 never read.
+    """
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    _rewrite_label_manifest(labels, label_definition_hash="f" * 64)
+    with pytest.raises(ValueError) as excinfo:
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+    message = str(excinfo.value)
+    assert "not the labels the Grams were certified against" in message
+    assert "f" * 64 in message
+
+
+@pytest.mark.parametrize(
+    "changes,expected",
+    [
+        ({"symbol_days_discovered": 158}, "symbol_days_discovered"),
+        ({"symbol_days_completed": 159}, "symbol_days_completed"),
+        ({"symbol_days_failed": 1}, "symbol_days_failed"),
+        (
+            {"failures": [{"symbol_day": "SYM0_2025-06-02", "error": "boom"}]},
+            "label failures",
+        ),
+        ({"contains_predictive_result": True}, "contains_predictive_result"),
+    ],
+)
+def test_a_partial_or_failed_label_manifest_hard_fails(tmp_path, changes, expected):
+    """(2) A label build that did not finish, or that admits to carrying a
+    predictive result, cannot underwrite an economic run."""
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    _rewrite_label_manifest(labels, **changes)
+    with pytest.raises(ValueError, match=expected):
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+
+
+def test_a_reused_superseded_label_artifact_is_accepted(tmp_path):
+    """(3) The real reuse case: labels built under the superseded v2->v3 binding.
+
+    They are admissible precisely because that supersession was recorded with
+    label_content_changed='false', and because the hash on disk is exactly the
+    one the Grams recorded.
+    """
+    from app.services.mbo_label_engine import SUPERSEDED_LABEL_DEFINITION_HASHES
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    superseded = next(
+        e for e in SUPERSEDED_LABEL_DEFINITION_HASHES
+        if e["label_content_changed"] == "false"
+    )
+    features, labels, grams, results = _complete_batch(
+        tmp_path, declared_label_hash=superseded["label_definition_hash"]
+    )
+    summary = assert_batch_complete(
+        features_dir=features, labels_dir=labels, grams_dir=grams,
+        stage2_results=results,
+    )
+    assert summary["label_batch"]["label_definition_hash"] == (
+        superseded["label_definition_hash"]
+    )
+    assert summary["label_batch"]["reused_under_supersession"] is True
+    assert summary["label_batch"]["matches_grams_declared_hash"] is True
+
+
+def test_an_unrecognised_label_definition_hard_fails(tmp_path):
+    """Matching the Grams is necessary but not sufficient: the definition must
+    also be one this programme accepts."""
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    stranger = "a" * 64
+    features, labels, grams, results = _complete_batch(
+        tmp_path, declared_label_hash=stranger
+    )
+    with pytest.raises(ValueError) as excinfo:
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+    message = str(excinfo.value)
+    assert "neither the current accepted definition" in message
+    assert "label_content_changed='false'" in message
+
+
+def test_a_label_batch_from_a_foreign_stage2_plan_hard_fails(tmp_path):
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    _rewrite_label_manifest(labels, stage2_plan_hash="b" * 64)
+    with pytest.raises(ValueError, match="neither the current plan nor an accepted"):
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+
+
+def test_a_label_batch_from_a_superseded_stage2_plan_is_accepted(tmp_path):
+    """Superseded Stage-2 plan hashes are explicitly accepted -- the labels were
+    built before the v3/v4 rebindings and their content did not change."""
+    from app.services.mbo_stage2_plan import SUPERSEDED_PLAN_HASHES
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    _rewrite_label_manifest(labels, stage2_plan_hash=SUPERSEDED_PLAN_HASHES[0]["plan_hash"])
+    summary = assert_batch_complete(
+        features_dir=features, labels_dir=labels, grams_dir=grams,
+        stage2_results=results,
+    )
+    assert summary["label_batch"]["symbol_days_completed"] == 160
+
+
+def test_the_label_binding_requirements_are_frozen_in_the_plan():
+    from app.services.mbo_stage3_plan import BATCH_COMPLETENESS
+
+    assert BATCH_COMPLETENESS["label_batch_symbol_days_discovered"] == 160
+    assert BATCH_COMPLETENESS["label_batch_symbol_days_completed"] == 160
+    assert BATCH_COMPLETENESS["label_batch_symbol_days_failed"] == 0
+    assert BATCH_COMPLETENESS["label_batch_failures"] == []
+    assert BATCH_COMPLETENESS["label_batch_contains_predictive_result"] is False
+    assert "labels_declared_hash" in BATCH_COMPLETENESS["label_manifest_binding"]
+    assert "label_content_changed" in BATCH_COMPLETENESS["label_definition_must_be"]
+    assert "superseded" in BATCH_COMPLETENESS["label_plan_hash_must_be"]

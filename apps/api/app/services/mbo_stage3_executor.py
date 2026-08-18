@@ -69,7 +69,7 @@ from app.services.mbo_stage3_plan import (
 STAGE3_EXECUTOR_VERSION = "tier1_stage3_executor_v2"
 
 EXPECTED_PLAN_DESIGN_HASH = (
-    "f78f915a69489e71d1c15f785fdbe4dc09653339cc02d006a5b3136763894cde"
+    "6908076a49a9ecf0b274fff9c1f482672abe3b65561f7f3c6d52c7702991d820"
 )
 EXPECTED_SURVIVOR_HASH = (
     "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -1340,7 +1340,11 @@ def assert_batch_complete(
     saying so.
     """
     from app.services.mbo_feature_engine import CADENCES, FEATURE_SEMANTICS_HASH
-    from app.services.mbo_label_engine import LABEL_DEFINITION_HASH
+    from app.services.mbo_label_engine import (
+        LABEL_DEFINITION_HASH,
+        SUPERSEDED_LABEL_DEFINITION_HASHES,
+    )
+    from app.services.mbo_stage2_plan import SUPERSEDED_PLAN_HASHES
     from app.services.mbo_stage3_plan import (
         EXPECTED_CADENCE_PARQUETS,
         EXPECTED_LABEL_FILES,
@@ -1431,6 +1435,68 @@ def assert_batch_complete(
         EXPECTED_SESSION_DATES,
     )
 
+    # --- the physical label batch manifest -----------------------------------
+    #
+    # The grams manifest records what Stage 2 saw. The label manifest records
+    # what is on disk now. Reading either alone proves half of it; only
+    # comparing them proves they are the same artefact.
+    label_manifest_path = labels_dir / "label_batch_manifest.json"
+    if not label_manifest_path.is_file():
+        raise ValueError(f"no label batch manifest at {label_manifest_path}")
+    label_manifest = json.loads(label_manifest_path.read_text(encoding="utf-8"))
+
+    require(
+        "label symbol_days_discovered",
+        label_manifest.get("symbol_days_discovered"),
+        EXPECTED_SYMBOL_DAYS,
+    )
+    require(
+        "label symbol_days_completed",
+        label_manifest.get("symbol_days_completed"),
+        EXPECTED_SYMBOL_DAYS,
+    )
+    require("label symbol_days_failed", label_manifest.get("symbol_days_failed"), 0)
+    require("label failures", list(label_manifest.get("failures") or []), [])
+    require(
+        "label contains_predictive_result",
+        label_manifest.get("contains_predictive_result"),
+        False,
+    )
+
+    declared_label_hash = label_manifest.get("label_definition_hash")
+    grams_declared = (grams_manifest.get("provenance") or {}).get("labels_declared_hash")
+    if declared_label_hash != grams_declared:
+        problems.append(
+            "the label batch manifest on disk declares "
+            f"label_definition_hash={declared_label_hash!r}, but the Stage-2 grams "
+            f"manifest recorded labels_declared_hash={grams_declared!r}; these are "
+            "not the labels the Grams were certified against"
+        )
+
+    # The declared definition must be one this programme accepts: the current
+    # one, or a superseded one that was explicitly recorded as not having
+    # changed label content.
+    accepted_label_hashes = {LABEL_DEFINITION_HASH}
+    for entry in SUPERSEDED_LABEL_DEFINITION_HASHES:
+        if entry.get("label_content_changed") == "false":
+            accepted_label_hashes.add(entry["label_definition_hash"])
+    if declared_label_hash not in accepted_label_hashes:
+        problems.append(
+            f"label_definition_hash {declared_label_hash!r} is neither the current "
+            "accepted definition nor a superseded one recorded with "
+            "label_content_changed='false'"
+        )
+
+    accepted_plan_hashes = {STAGE2_PLAN_HASH} | {
+        entry["plan_hash"] for entry in SUPERSEDED_PLAN_HASHES
+    }
+    if label_manifest.get("stage2_plan_hash") not in accepted_plan_hashes:
+        problems.append(
+            f"the label batch was built against Stage-2 plan hash "
+            f"{label_manifest.get('stage2_plan_hash')!r}, which is neither the "
+            "current plan nor an accepted superseded one"
+        )
+
     # --- hashes agree with the frozen artefacts ------------------------------
     provenance = grams_manifest.get("provenance") or {}
     require(
@@ -1463,5 +1529,16 @@ def assert_batch_complete(
         "stage2_symbol_day_cadence_files": grams_manifest["symbol_day_cadence_files"],
         "stage2_spine_certified_files": grams_manifest["spine_certified_files"],
         "stage2_spine_verified_every_file": True,
-        "verified_against": "stage1 batch manifest + stage2 grams manifest + disk",
+        "label_batch": {
+            "symbol_days_discovered": label_manifest["symbol_days_discovered"],
+            "symbol_days_completed": label_manifest["symbol_days_completed"],
+            "symbol_days_failed": label_manifest["symbol_days_failed"],
+            "label_definition_hash": declared_label_hash,
+            "matches_grams_declared_hash": True,
+            "reused_under_supersession": declared_label_hash != LABEL_DEFINITION_HASH,
+        },
+        "verified_against": (
+            "stage1 batch manifest + stage2 grams manifest + label batch "
+            "manifest + disk"
+        ),
     }

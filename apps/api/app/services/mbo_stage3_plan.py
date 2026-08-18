@@ -52,9 +52,24 @@ from app.services.mbo_stage2_plan import (
     PRIOR_EFFECTIVE_TRIALS as STAGE2_PRIOR_EFFECTIVE_TRIALS,
 )
 
-STAGE3_PLAN_VERSION = "tier1_stage3_economics_v6"
+STAGE3_PLAN_VERSION = "tier1_stage3_economics_v7"
 
 SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_stage3_economics_v6",
+        "plan_design_hash": (
+            "f78f915a69489e71d1c15f785fdbe4dc09653339cc02d006a5b3136763894cde"
+        ),
+        "superseded_before_any_economic_outcome": "true",
+        "reason": (
+            "verified batch completeness from the Stage-1 batch manifest and the "
+            "Stage-2 grams manifest but never read the physical label batch "
+            "manifest, so a partial or failed label build, or a label set whose "
+            "declared definition differed from the one the Grams recorded, would "
+            "not have been caught. Provenance only; no statistical, economic, "
+            "execution, latency, fee, survivor or authorization rule changed."
+        ),
+    },
     {
         "version": "tier1_stage3_economics_v5",
         "plan_design_hash": (
@@ -455,6 +470,25 @@ BATCH_COMPLETENESS: dict[str, Any] = {
     "stage2_symbol_day_cadence_files": EXPECTED_CADENCE_PARQUETS,
     "stage2_spine_certified_files": EXPECTED_CADENCE_PARQUETS,
     "stage2_spine_verified_every_file": True,
+    "label_batch_symbol_days_discovered": EXPECTED_SYMBOL_DAYS,
+    "label_batch_symbol_days_completed": EXPECTED_SYMBOL_DAYS,
+    "label_batch_symbol_days_failed": 0,
+    "label_batch_failures": [],
+    "label_batch_contains_predictive_result": False,
+    "label_manifest_binding": (
+        "the physical label_batch_manifest.json must declare exactly the "
+        "label_definition_hash that the Stage-2 grams manifest recorded as "
+        "labels_declared_hash. Reading the grams manifest alone proves what "
+        "Stage 2 saw; reading the label manifest alone proves what is on disk "
+        "now. Only comparing them proves they are the same artefact."
+    ),
+    "label_definition_must_be": (
+        "either the current accepted label definition, or an explicitly recorded "
+        "superseded definition whose label_content_changed is 'false'"
+    ),
+    "label_plan_hash_must_be": (
+        "one of the explicitly accepted current or superseded Stage-2 plan hashes"
+    ),
     "derivation": (
         "counts are read from the Stage-1 batch manifest and the Stage-2 grams "
         "manifest, then checked against the physical files on disk. Both halves "
@@ -680,6 +714,9 @@ PLAN_DESIGN_ELEMENTS: tuple[str, ...] = (
     f"batch_symbols_per_date={EXPECTED_SYMBOLS_PER_DATE}",
     "batch_incomplete=refuse_not_shrink",
     "spine_certification=sequence_index+source_ts_event+source_midpoint",
+    "label_batch_manifest=read_from_disk_and_bound_to_grams_declared_hash",
+    f"label_batch_symbol_days={EXPECTED_SYMBOL_DAYS}",
+    "label_batch_failures_allowed=0",
     f"prior_effective_trials={PRIOR_EFFECTIVE_TRIALS}",
     "authorizes=paper_proposal_only;not=live;not=capital",
 )

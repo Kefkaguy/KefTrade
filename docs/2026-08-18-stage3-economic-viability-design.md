@@ -1,14 +1,14 @@
-# Stage 3 — Economic viability design, for final review (v6)
+# Stage 3 — Economic viability design, for final review (v7)
 
 **Status: complete and wired. No economic outcome computed. No order placed of
 any kind. The run remains gated behind an explicit reviewer flag.**
 
 | | |
 |---|---|
-| Stage-3 plan | `tier1_stage3_economics_v6` |
-| `PLAN_DESIGN_HASH` | `f78f915a69489e71d1c15f785fdbe4dc09653339cc02d006a5b3136763894cde` |
+| Stage-3 plan | `tier1_stage3_economics_v7` |
+| `PLAN_DESIGN_HASH` | `6908076a49a9ecf0b274fff9c1f482672abe3b65561f7f3c6d52c7702991d820` |
 | `SURVIVOR_HASH` | `bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00` |
-| Superseded | `v1` `f6878f66…`, `v2` `87429255…`, `v3` `e5266ef3…`, `v4` `a780b241…`, `v5` `055c3d83…` — all pre-outcome |
+| Superseded | `v1` `f6878f66…`, `v2` `87429255…`, `v3` `e5266ef3…`, `v4` `a780b241…`, `v5` `055c3d83…`, `v6` `f78f915a…` — all pre-outcome |
 
 ---
 
@@ -495,7 +495,35 @@ label files, and that date having 7 symbols instead of 8.
 `diagnose` is exempt — it deliberately examines a subset, and by construction
 cannot produce an economic result.
 
-## 8. Tests — 134 cases
+## 7l. The physical label batch manifest
+
+v6 verified completeness from the Stage-1 batch manifest and the Stage-2 grams
+manifest, but never opened `labels/label_batch_manifest.json`. The grams
+manifest records what Stage 2 *saw*; the label manifest records what is on disk
+*now*. Reading either alone proves half of it — only comparing them proves they
+are the same artefact.
+
+`assert_batch_complete` now additionally requires:
+
+| Requirement | |
+|---|---|
+| `symbol_days_discovered == 160` | the label build saw the whole batch |
+| `symbol_days_completed == 160` | and finished it |
+| `symbol_days_failed == 0`, `failures == []` | with nothing left behind |
+| `contains_predictive_result == false` | the artefact does not admit to carrying one |
+| `label_definition_hash` **exactly equals** the grams manifest's `provenance.labels_declared_hash` | the labels on disk are the labels the Grams were certified against |
+| that definition is the current one, **or** a superseded one recorded with `label_content_changed == "false"` | matching the Grams is necessary but not sufficient |
+| `stage2_plan_hash` is the current plan hash or an accepted superseded one | the labels were built under a plan this programme recognises |
+
+The reuse case is real, not hypothetical: labels built under the superseded
+`2e8ada7e…` binding are admissible precisely because that supersession was
+recorded with `label_content_changed: "false"` — and a test exercises exactly
+that artefact rather than a synthetic stand-in.
+
+**Provenance only.** No statistical, economic, execution, latency, fee, survivor
+or authorization rule changed in v7.
+
+## 8. Tests — 147 cases
 
 | Area | What is pinned |
 |---|---|
@@ -522,6 +550,7 @@ cannot produce an economic result.
 | Raw provenance | the file comes from the manifest, not the stem (a realistic `xnas-itch-20250602.mbo.dbn.zst` beside a decoy `AAPL_2025-06-02…`); missing, ambiguous, size-mismatched and same-size-different-bytes inputs each refuse |
 | Re-certification | a stale engine version, semantics hash or vocabulary hash each refuse; inconsistent extraction refuses |
 | Spine certification | matching spine certifies; shuffled sequence, short table, shifted `source_ts_event` and shifted `source_midpoint` each hard-fail; nan-vs-nan certifies while nan-vs-real refuses |
+| Label manifest | a mismatched on-disk `label_definition_hash` hard-fails naming both values; partial (`158`/`159` discovered/completed), failed, and `contains_predictive_result: true` manifests each hard-fail; the genuinely superseded label artefact is accepted when its hash matches what the Grams recorded; an unrecognised definition and a foreign Stage-2 plan hash each refuse; a superseded Stage-2 plan hash is accepted |
 | Batch completeness | a complete 160/640/160/20/8 batch is accepted; a deleted confirmation symbol-day hard-fails naming 159 / 636 / 159 / 7-symbols; a lone missing label file, a Stage-1 failure, shortfalls in `symbol_day_cadence_files` / `spine_certified_files` / `session_date_count`, an uncertified spine, a hash disagreement and a foreign `stage2_results.json` each refuse |
 | Nullable labels | nulls stay `None`; a non-null value under a non-OK status is discarded; a `None` resolution yields no trade |
 | Decile | matches the frozen quantile; ignores non-finite; unwired takes zero trades and wired admits them; calibration block is discovery and uses no outcomes |
@@ -530,7 +559,7 @@ cannot produce an economic result.
 | Refusals | no results file; no survivors; survivor count ≠ declared; reconstructed fit disagreeing with the record |
 | Family | primary is 250 ms only; a negative mean cannot pass; BH denominator is the frozen survivor count |
 
-**488 passed, 3 skipped** across the whole MBO suite; ruff clean.
+**501 passed, 3 skipped** across the whole MBO suite; ruff clean.
 
 ---
 
