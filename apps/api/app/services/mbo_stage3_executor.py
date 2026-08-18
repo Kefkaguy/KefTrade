@@ -46,6 +46,7 @@ from typing import Any
 import numpy as np
 from app.services.mbo_stage2_executor import _student_t_sf, benjamini_hochberg
 from app.services.mbo_stage2_plan import PLAN_DESIGN_HASH as STAGE2_PLAN_DESIGN_HASH
+from app.services.mbo_stage2_plan import PLAN_HASH as STAGE2_PLAN_HASH
 from app.services.mbo_stage3_plan import (
     DISCOVERY_DECILE_QUANTILE,
     ECONOMIC_GATES,
@@ -68,7 +69,7 @@ from app.services.mbo_stage3_plan import (
 STAGE3_EXECUTOR_VERSION = "tier1_stage3_executor_v2"
 
 EXPECTED_PLAN_DESIGN_HASH = (
-    "055c3d83108ea6223c12bd541d824843ace071a110e3bd5e1292e1f0665186f4"
+    "f78f915a69489e71d1c15f785fdbe4dc09653339cc02d006a5b3136763894cde"
 )
 EXPECTED_SURVIVOR_HASH = (
     "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -1259,3 +1260,208 @@ def common_factor_by_date(
             continue
         grouped.setdefault(session_date, []).append(float(value))
     return {date: float(np.mean(values)) for date, values in sorted(grouped.items())}
+
+
+# ---------------------------------------------------------------------------
+# The full Stage-2 spine certification, repeated
+# ---------------------------------------------------------------------------
+
+
+def certify_spine(
+    stem: str,
+    cadence: str,
+    *,
+    feature_sequence: np.ndarray,
+    feature_ts_event: np.ndarray,
+    feature_midpoint: np.ndarray,
+    label_sequence: np.ndarray,
+    label_ts_event: np.ndarray,
+    label_midpoint: np.ndarray,
+) -> None:
+    """Exactly what ``mbo_stage2 grams`` certifies, on exactly the same terms.
+
+    Matching ``sequence_index`` alone is weaker than it looks: two extractions
+    can agree on row *ordering* while disagreeing about which instants and which
+    midpoints those rows describe. The labels carry the spine of the snapshot
+    they were resolved against, so all three columns are compared, and the
+    midpoint comparison is nan-safe in the same way -- ``nan`` is mapped to a
+    sentinel so two missing midpoints compare equal to each other and unequal to
+    any real price.
+
+    Any mismatch is a refusal. These labels would belong to a different
+    extraction.
+    """
+    if len(label_sequence) != len(feature_sequence) or not np.array_equal(
+        label_sequence, feature_sequence
+    ):
+        raise ValueError(
+            f"label rows for {stem} {cadence} do not align one-for-one with the "
+            "feature snapshots; refusing to join on assumption"
+        )
+    if not np.array_equal(label_ts_event, feature_ts_event):
+        raise ValueError(
+            f"spine mismatch for {stem} {cadence}: label source_ts_event does not "
+            "reproduce the feature snapshot timestamps, so these labels belong to "
+            "a different extraction and must be rebuilt"
+        )
+    if not np.array_equal(
+        np.nan_to_num(label_midpoint, nan=np.inf),
+        np.nan_to_num(feature_midpoint, nan=np.inf),
+    ):
+        raise ValueError(
+            f"spine mismatch for {stem} {cadence}: label source_midpoint does not "
+            "reproduce the feature snapshot midpoints, so these labels must be "
+            "rebuilt"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Batch completeness
+# ---------------------------------------------------------------------------
+
+
+def assert_batch_complete(
+    *,
+    features_dir: Path,
+    labels_dir: Path,
+    grams_dir: Path,
+    stage2_results: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind the supplied artefacts to the completed Stage-1 and Stage-2 batches.
+
+    Both halves are required. A manifest alone can describe a batch that is no
+    longer on disk; a file count alone can describe a batch nobody certified. So
+    the declared counts are read from the Stage-1 batch manifest and the Stage-2
+    grams manifest, checked against the frozen expectations, and then checked
+    against the physical files.
+
+    Anything missing is a refusal. Continuing with what happens to be present
+    would change the universe the primary question was asked about without
+    saying so.
+    """
+    from app.services.mbo_feature_engine import CADENCES, FEATURE_SEMANTICS_HASH
+    from app.services.mbo_label_engine import LABEL_DEFINITION_HASH
+    from app.services.mbo_stage3_plan import (
+        EXPECTED_CADENCE_PARQUETS,
+        EXPECTED_LABEL_FILES,
+        EXPECTED_SESSION_DATES,
+        EXPECTED_STAGE1_MANIFESTS,
+        EXPECTED_SYMBOL_DAYS,
+        EXPECTED_SYMBOLS_PER_DATE,
+    )
+
+    problems: list[str] = []
+
+    def require(label: str, observed: Any, expected: Any) -> None:
+        if observed != expected:
+            problems.append(f"{label}: {observed!r}, expected {expected!r}")
+
+    # --- Stage-1 declarations ------------------------------------------------
+    batch_path = features_dir / "batch_manifest.json"
+    if not batch_path.is_file():
+        raise ValueError(f"no Stage-1 batch manifest at {batch_path}")
+    batch = json.loads(batch_path.read_text(encoding="utf-8"))
+    require("stage1 files_completed", batch.get("files_completed"), EXPECTED_SYMBOL_DAYS)
+    require("stage1 files_failed", batch.get("files_failed", 0), 0)
+    if batch.get("failures"):
+        problems.append(f"stage1 recorded {len(batch['failures'])} failures")
+
+    # --- Stage-1 physical files ---------------------------------------------
+    manifests = sorted((features_dir / "manifests").glob("*.manifest.json"))
+    require("stage1 manifests present", len(manifests), EXPECTED_STAGE1_MANIFESTS)
+
+    parquets = [p for c in CADENCES for p in (features_dir / c.name).glob("*.parquet")]
+    require("cadence parquets present", len(parquets), EXPECTED_CADENCE_PARQUETS)
+    for cadence in CADENCES:
+        count = len(list((features_dir / cadence.name).glob("*.parquet")))
+        require(f"{cadence.name} parquets", count, EXPECTED_SYMBOL_DAYS)
+
+    label_files = sorted(labels_dir.glob("*.labels.parquet"))
+    require("label files present", len(label_files), EXPECTED_LABEL_FILES)
+
+    # --- the universe those files describe ----------------------------------
+    stems = sorted({p.name.split(".")[0] for p in manifests})
+    require("symbol-days", len(stems), EXPECTED_SYMBOL_DAYS)
+    by_date: dict[str, set[str]] = {}
+    for stem in stems:
+        symbol, _, session_date = stem.rpartition("_")
+        by_date.setdefault(session_date, set()).add(symbol)
+    require("session dates", len(by_date), EXPECTED_SESSION_DATES)
+    for session_date, symbols in sorted(by_date.items()):
+        if len(symbols) != EXPECTED_SYMBOLS_PER_DATE:
+            problems.append(
+                f"{session_date}: {len(symbols)} symbols, expected "
+                f"{EXPECTED_SYMBOLS_PER_DATE}"
+            )
+
+    # Every declared symbol-day must have its label file and its cadence files.
+    label_stems = {p.name.split(".")[0] for p in label_files}
+    missing_labels = sorted(set(stems) - label_stems)
+    if missing_labels:
+        problems.append(f"symbol-days with no label file: {missing_labels[:5]}")
+    for cadence in CADENCES:
+        present = {p.name.split(".")[0] for p in (features_dir / cadence.name).glob("*.parquet")}
+        missing = sorted(set(stems) - present)
+        if missing:
+            problems.append(f"{cadence.name}: missing symbol-days {missing[:5]}")
+
+    # --- Stage-2 grams declarations -----------------------------------------
+    grams_manifest_path = grams_dir / "stage2_grams_manifest.json"
+    if not grams_manifest_path.is_file():
+        raise ValueError(f"no Stage-2 grams manifest at {grams_manifest_path}")
+    grams_manifest = json.loads(grams_manifest_path.read_text(encoding="utf-8"))
+    require(
+        "stage2 symbol_day_cadence_files",
+        grams_manifest.get("symbol_day_cadence_files"),
+        EXPECTED_CADENCE_PARQUETS,
+    )
+    require(
+        "stage2 spine_certified_files",
+        grams_manifest.get("spine_certified_files"),
+        EXPECTED_CADENCE_PARQUETS,
+    )
+    require(
+        "stage2 spine_verified_every_file",
+        (grams_manifest.get("label_reuse") or {}).get("spine_verified_every_file"),
+        True,
+    )
+    require(
+        "stage2 session_date_count",
+        grams_manifest.get("session_date_count"),
+        EXPECTED_SESSION_DATES,
+    )
+
+    # --- hashes agree with the frozen artefacts ------------------------------
+    provenance = grams_manifest.get("provenance") or {}
+    require(
+        "grams feature_semantics_hash",
+        provenance.get("feature_semantics_hash"),
+        FEATURE_SEMANTICS_HASH,
+    )
+    require(
+        "grams label_definition_hash",
+        provenance.get("label_definition_hash"),
+        LABEL_DEFINITION_HASH,
+    )
+    require("grams stage2_plan_hash", provenance.get("stage2_plan_hash"), STAGE2_PLAN_HASH)
+    require("stage2 results plan_hash", stage2_results.get("plan_hash"), STAGE2_PLAN_HASH)
+
+    if problems:
+        raise ValueError(
+            "the supplied batch is not the completed Stage-1/Stage-2 batch, so "
+            "Stage 3 will not compute economics over a universe nobody declared:"
+            + "".join(f"\n  - {p}" for p in problems)
+        )
+
+    return {
+        "symbol_days": len(stems),
+        "session_dates": len(by_date),
+        "symbols_per_session_date": EXPECTED_SYMBOLS_PER_DATE,
+        "cadence_parquets": len(parquets),
+        "label_files": len(label_files),
+        "stage1_manifests": len(manifests),
+        "stage2_symbol_day_cadence_files": grams_manifest["symbol_day_cadence_files"],
+        "stage2_spine_certified_files": grams_manifest["spine_certified_files"],
+        "stage2_spine_verified_every_file": True,
+        "verified_against": "stage1 batch manifest + stage2 grams manifest + disk",
+    }

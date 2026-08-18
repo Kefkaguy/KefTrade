@@ -52,9 +52,25 @@ from app.services.mbo_stage2_plan import (
     PRIOR_EFFECTIVE_TRIALS as STAGE2_PRIOR_EFFECTIVE_TRIALS,
 )
 
-STAGE3_PLAN_VERSION = "tier1_stage3_economics_v5"
+STAGE3_PLAN_VERSION = "tier1_stage3_economics_v6"
 
 SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_stage3_economics_v5",
+        "plan_design_hash": (
+            "055c3d83108ea6223c12bd541d824843ace071a110e3bd5e1292e1f0665186f4"
+        ),
+        "superseded_before_any_economic_outcome": "true",
+        "reason": (
+            "certified the feature/label join on sequence_index alone, which is "
+            "weaker than the certification mbo_stage2 grams performs -- two "
+            "extractions can agree on row ordering while disagreeing about which "
+            "instants and midpoints those rows describe. It also inferred its "
+            "universe from whichever Parquet files happened to exist, so a "
+            "missing confirmation symbol-day would have quietly produced a "
+            "smaller economic sample instead of a refusal."
+        ),
+    },
     {
         "version": "tier1_stage3_economics_v4",
         "plan_design_hash": (
@@ -412,6 +428,55 @@ ECONOMIC_GATES: dict[str, Any] = {
 }
 
 # ---------------------------------------------------------------------------
+# What a complete batch is
+# ---------------------------------------------------------------------------
+#
+# The authorized run may not infer its universe from whatever Parquets happen to
+# be on disk. A missing confirmation symbol-day is not a smaller sample; it is a
+# reason to refuse, because the alternative is an economic result computed over
+# a universe nobody declared.
+
+EXPECTED_SYMBOL_DAYS = 160
+EXPECTED_SESSION_DATES = 20
+EXPECTED_SYMBOLS_PER_DATE = 8
+EXPECTED_CADENCES = 4
+EXPECTED_CADENCE_PARQUETS = EXPECTED_SYMBOL_DAYS * EXPECTED_CADENCES  # 640
+EXPECTED_LABEL_FILES = EXPECTED_SYMBOL_DAYS
+EXPECTED_STAGE1_MANIFESTS = EXPECTED_SYMBOL_DAYS
+
+BATCH_COMPLETENESS: dict[str, Any] = {
+    "stage1_files_completed": EXPECTED_SYMBOL_DAYS,
+    "stage1_files_failed": 0,
+    "stage1_manifests_present": EXPECTED_STAGE1_MANIFESTS,
+    "cadence_parquets_present": EXPECTED_CADENCE_PARQUETS,
+    "label_files_present": EXPECTED_LABEL_FILES,
+    "session_dates": EXPECTED_SESSION_DATES,
+    "symbols_per_session_date": EXPECTED_SYMBOLS_PER_DATE,
+    "stage2_symbol_day_cadence_files": EXPECTED_CADENCE_PARQUETS,
+    "stage2_spine_certified_files": EXPECTED_CADENCE_PARQUETS,
+    "stage2_spine_verified_every_file": True,
+    "derivation": (
+        "counts are read from the Stage-1 batch manifest and the Stage-2 grams "
+        "manifest, then checked against the physical files on disk. Both halves "
+        "are required: a manifest alone can describe a batch that is no longer "
+        "there, and a file count alone can describe a batch nobody certified."
+    ),
+    "missing_files_are_a_refusal": (
+        "not a smaller economic sample. Silently shrinking the universe would "
+        "change what the primary question was asked about without saying so."
+    ),
+}
+
+# The full certification mbo_stage2 grams performs, repeated here because Stage 3
+# receives its feature and label directories separately and may not assume they
+# are the pair the Grams were built from.
+SPINE_CERTIFICATION_FIELDS: tuple[tuple[str, str], ...] = (
+    ("sequence_index", "sequence_index"),
+    ("source_ts_event", "ts_event"),
+    ("source_midpoint", "midpoint"),
+)
+
+# ---------------------------------------------------------------------------
 # Where economics may be measured
 # ---------------------------------------------------------------------------
 #
@@ -608,6 +673,13 @@ PLAN_DESIGN_ELEMENTS: tuple[str, ...] = (
     "raw_input=resolved_and_hashed_via_stage1_manifest",
     "feature_label_binding=recertified_before_economics",
     "no_subset_limit_on_authorized_run=true",
+    f"batch_symbol_days={EXPECTED_SYMBOL_DAYS}",
+    f"batch_cadence_parquets={EXPECTED_CADENCE_PARQUETS}",
+    f"batch_label_files={EXPECTED_LABEL_FILES}",
+    f"batch_session_dates={EXPECTED_SESSION_DATES}",
+    f"batch_symbols_per_date={EXPECTED_SYMBOLS_PER_DATE}",
+    "batch_incomplete=refuse_not_shrink",
+    "spine_certification=sequence_index+source_ts_event+source_midpoint",
     f"prior_effective_trials={PRIOR_EFFECTIVE_TRIALS}",
     "authorizes=paper_proposal_only;not=live;not=capital",
 )
@@ -668,6 +740,11 @@ def statistical_plan() -> dict[str, Any]:
         "primary_evaluation": dict(PRIMARY_EVALUATION_RULES),
         "decile_calibration": dict(DECILE_CALIBRATION_RULES),
         "common_factor": dict(COMMON_FACTOR),
+        "batch_completeness": dict(BATCH_COMPLETENESS),
+        "spine_certification_fields": [
+            {"label_column": a, "feature_column": b}
+            for a, b in SPINE_CERTIFICATION_FIELDS
+        ],
         "measurements": list(MEASUREMENTS),
         "report_breakdowns": list(REPORT_BREAKDOWNS),
         "multiplicity": {

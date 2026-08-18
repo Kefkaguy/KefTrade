@@ -1,14 +1,14 @@
-# Stage 3 — Economic viability design, for final review (v5)
+# Stage 3 — Economic viability design, for final review (v6)
 
 **Status: complete and wired. No economic outcome computed. No order placed of
 any kind. The run remains gated behind an explicit reviewer flag.**
 
 | | |
 |---|---|
-| Stage-3 plan | `tier1_stage3_economics_v5` |
-| `PLAN_DESIGN_HASH` | `055c3d83108ea6223c12bd541d824843ace071a110e3bd5e1292e1f0665186f4` |
+| Stage-3 plan | `tier1_stage3_economics_v6` |
+| `PLAN_DESIGN_HASH` | `f78f915a69489e71d1c15f785fdbe4dc09653339cc02d006a5b3136763894cde` |
 | `SURVIVOR_HASH` | `bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00` |
-| Superseded | `v1` `f6878f66…`, `v2` `87429255…`, `v3` `e5266ef3…`, `v4` `a780b241…` — all pre-outcome |
+| Superseded | `v1` `f6878f66…`, `v2` `87429255…`, `v3` `e5266ef3…`, `v4` `a780b241…`, `v5` `055c3d83…` — all pre-outcome |
 
 ---
 
@@ -437,7 +437,65 @@ reports **provenance, candidate counts and no-trade reasons only** — no return
 no win rate, no verdict, and it never calls `assemble_report`. A test inspects
 the executable body to enforce that.
 
-## 8. Tests — 116 cases
+## 7j. The full Stage-2 spine certification, repeated
+
+v5 checked only `sequence_index`. That is weaker than it looks: two extractions
+can agree on row *ordering* while disagreeing about which instants and which
+midpoints those rows describe.
+
+`certify_spine` now performs exactly what `mbo_stage2 grams` performs, on the
+same terms:
+
+| Label column | Feature column | Comparison |
+|---|---|---|
+| `sequence_index` | `sequence_index` | exact, and same length |
+| `source_ts_event` | `ts_event` | exact |
+| `source_midpoint` | `midpoint` | exact, **nan-safe** |
+
+The nan-safety is the same trick Stage 2 used: `nan` maps to a sentinel, so two
+missing midpoints compare equal to each other and unequal to any real price.
+Tested both directions — a genuinely-missing pair certifies, a missing-versus-real
+pair refuses.
+
+Any mismatch is a refusal; these labels would belong to a different extraction.
+
+## 7k. Batch completeness before an economic result
+
+The authorized run may not infer its universe from whatever Parquets happen to
+exist. `assert_batch_complete` reads the declared counts from the Stage-1 batch
+manifest and the Stage-2 grams manifest, checks them against the frozen
+expectations, and then checks them against the physical files:
+
+| Requirement | Source |
+|---|---|
+| `files_completed == 160`, `files_failed == 0`, no failures | Stage-1 batch manifest |
+| 160 symbol-day manifests on disk | `features/manifests/*.manifest.json` |
+| 640 cadence Parquets on disk (160 per cadence) | `features/<cadence>/*.parquet` |
+| 160 label files on disk | `labels/*.labels.parquet` |
+| 20 session dates, 8 symbols each | derived from the manifest stems |
+| every declared symbol-day has its labels and all four cadences | set difference |
+| `symbol_day_cadence_files == 640` | Stage-2 grams manifest |
+| `spine_certified_files == 640` | Stage-2 grams manifest |
+| `spine_verified_every_file == true` | Stage-2 grams manifest |
+| `session_date_count == 20` | Stage-2 grams manifest |
+| feature-semantics, label-definition and Stage-2 plan hashes agree | grams provenance + `stage2_results.json` |
+
+**Both halves are required.** A manifest alone can describe a batch that is no
+longer on disk; a file count alone can describe a batch nobody certified. The
+check is not a hard-coded success — the counts are read from the artefacts and
+then reconciled against reality, and every discrepancy is collected and reported
+together rather than failing on the first one.
+
+**Missing files are a refusal, not a smaller sample.** Silently shrinking the
+universe would change what the primary question was asked about without saying
+so. The decisive test deletes one symbol-day of the *final confirmation date*
+and asserts the refusal names all of it: 159 symbol-days, 636 Parquets, 159
+label files, and that date having 7 symbols instead of 8.
+
+`diagnose` is exempt — it deliberately examines a subset, and by construction
+cannot produce an economic result.
+
+## 8. Tests — 134 cases
 
 | Area | What is pinned |
 |---|---|
@@ -462,7 +520,9 @@ the executable body to enforce that.
 | Wiring | the grid is 72 accumulators; query instants cover every rung and nothing else; unusable rows contribute none; `predict` applies beta without rescaling; `run` is still gated |
 | Out-of-sample | `run` evaluates exactly `blocks["confirmation"]`; no discovery or validation date reaches an accumulator; `run` rejects `--limit` |
 | Raw provenance | the file comes from the manifest, not the stem (a realistic `xnas-itch-20250602.mbo.dbn.zst` beside a decoy `AAPL_2025-06-02…`); missing, ambiguous, size-mismatched and same-size-different-bytes inputs each refuse |
-| Re-certification | a stale engine version, semantics hash or vocabulary hash each refuse; inconsistent extraction refuses; short and shuffled label sequences refuse |
+| Re-certification | a stale engine version, semantics hash or vocabulary hash each refuse; inconsistent extraction refuses |
+| Spine certification | matching spine certifies; shuffled sequence, short table, shifted `source_ts_event` and shifted `source_midpoint` each hard-fail; nan-vs-nan certifies while nan-vs-real refuses |
+| Batch completeness | a complete 160/640/160/20/8 batch is accepted; a deleted confirmation symbol-day hard-fails naming 159 / 636 / 159 / 7-symbols; a lone missing label file, a Stage-1 failure, shortfalls in `symbol_day_cadence_files` / `spine_certified_files` / `session_date_count`, an uncertified spine, a hash disagreement and a foreign `stage2_results.json` each refuse |
 | Nullable labels | nulls stay `None`; a non-null value under a non-OK status is discarded; a `None` resolution yields no trade |
 | Decile | matches the frozen quantile; ignores non-finite; unwired takes zero trades and wired admits them; calibration block is discovery and uses no outcomes |
 | Common factor | equal-weighted across symbols; a symbol-day with no midpoints is omitted not zeroed; first-to-last in bps; the run passes it into `summarize` |
@@ -470,7 +530,7 @@ the executable body to enforce that.
 | Refusals | no results file; no survivors; survivor count ≠ declared; reconstructed fit disagreeing with the record |
 | Family | primary is 250 ms only; a negative mean cannot pass; BH denominator is the frozen survivor count |
 
-**470 passed, 3 skipped** across the whole MBO suite; ruff clean.
+**488 passed, 3 skipped** across the whole MBO suite; ruff clean.
 
 ---
 

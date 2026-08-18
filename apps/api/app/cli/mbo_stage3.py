@@ -115,8 +115,8 @@ def _read_cell_inputs(
     from app.cli.mbo_stage2 import FEATURE_NAMES, _symbol_day_matrix
     from app.services.mbo_label_engine import LABEL_OK
     from app.services.mbo_stage3_executor import (
-        assert_labels_align,
         cell_prefix,
+        certify_spine,
         event_horizon_availability,
         predict,
         session_return_bps,
@@ -129,7 +129,12 @@ def _read_cell_inputs(
 
     table = pq.read_table(
         path,
-        columns=["sequence_index", "feature_available_ts_recv", *FEATURE_NAMES],
+        columns=[
+            "sequence_index",
+            "ts_event",
+            "feature_available_ts_recv",
+            *FEATURE_NAMES,
+        ],
     )
     design, sequence = _symbol_day_matrix(table, FEATURE_NAMES)
     decision = np.asarray(
@@ -146,15 +151,36 @@ def _read_cell_inputs(
         columns=[
             "cadence",
             "sequence_index",
+            "source_ts_event",
+            "source_midpoint",
             f"{prefix}_status",
             f"{prefix}_available_ts_recv",
         ],
     )
     mask = np.asarray(labels.column("cadence").to_numpy(zero_copy_only=False)) == cadence
-    label_sequence = np.asarray(
-        labels.column("sequence_index").to_numpy(zero_copy_only=False), np.int64
-    )[mask]
-    assert_labels_align(stem, cadence, sequence, label_sequence)
+
+    # The full Stage-2 certification, not just row ordering: two extractions can
+    # agree on sequence_index while describing different instants and prices.
+    certify_spine(
+        stem,
+        cadence,
+        feature_sequence=sequence,
+        feature_ts_event=np.asarray(
+            table.column("ts_event").to_numpy(zero_copy_only=False), np.int64
+        ),
+        feature_midpoint=np.asarray(
+            table.column("midpoint").to_numpy(zero_copy_only=False), float
+        ),
+        label_sequence=np.asarray(
+            labels.column("sequence_index").to_numpy(zero_copy_only=False), np.int64
+        )[mask],
+        label_ts_event=np.asarray(
+            labels.column("source_ts_event").to_numpy(zero_copy_only=False), np.int64
+        )[mask],
+        label_midpoint=np.asarray(
+            labels.column("source_midpoint").to_numpy(zero_copy_only=False), float
+        )[mask],
+    )
 
     status = np.asarray(
         labels.column(f"{prefix}_status").to_numpy(zero_copy_only=False)
@@ -183,6 +209,7 @@ def _prepare(args: argparse.Namespace, *, economic: bool) -> dict[str, Any]:
 
     from app.services.mbo_stage2_executor import split_dates
     from app.services.mbo_stage3_executor import (
+        assert_batch_complete,
         assert_feature_batch_is_frozen,
         discovery_decile_threshold,
         reconstruct_confirmation_fit,
@@ -203,6 +230,20 @@ def _prepare(args: argparse.Namespace, *, economic: bool) -> dict[str, Any]:
     frozen = load_frozen_survivors(
         Path(args.stage2_results), expected_count=SURVIVOR_COUNT
     )
+
+    # The authorized run may not infer its universe from whatever Parquets are
+    # present. A missing confirmation symbol-day is a refusal, not a smaller
+    # sample. The diagnostic command deliberately examines a subset, so it is
+    # exempt -- and it cannot produce an economic result.
+    completeness: dict[str, Any] | None = None
+    if economic:
+        completeness = assert_batch_complete(
+            features_dir=features_dir,
+            labels_dir=labels_dir,
+            grams_dir=Path(args.grams_dir),
+            stage2_results=stage2,
+        )
+
     grams = _load_grams(Path(args.grams_dir))
 
     session_dates = sorted({d for by_date in grams.values() for d in by_date})
@@ -260,6 +301,7 @@ def _prepare(args: argparse.Namespace, *, economic: bool) -> dict[str, Any]:
         "labels_dir": labels_dir,
         "raw_dir": Path(args.raw_dir),
         "economic": economic,
+        "batch_completeness": completeness,
     }
 
 
@@ -390,6 +432,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "fit_trained_on": context["training"],
         "economics_scored_on_training_dates": False,
     }
+    report["batch_completeness"] = context["batch_completeness"]
     report["discovery_decile_thresholds_bps"] = context["deciles"]
     report["common_factor_by_date"] = market
     report["reproduction"] = {

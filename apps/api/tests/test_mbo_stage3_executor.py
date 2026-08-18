@@ -80,7 +80,7 @@ def static_book_at(bid: float, ask: float, **kwargs):
 def test_the_plan_and_survivor_hashes_are_frozen():
     assert_frozen_plan()
     assert PLAN_DESIGN_HASH == (
-        "055c3d83108ea6223c12bd541d824843ace071a110e3bd5e1292e1f0665186f4"
+        "f78f915a69489e71d1c15f785fdbe4dc09653339cc02d006a5b3136763894cde"
     )
     assert SURVIVOR_HASH == (
         "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -123,6 +123,7 @@ def test_every_superseded_plan_is_recorded_with_its_reason():
         "tier1_stage3_economics_v2",
         "tier1_stage3_economics_v3",
         "tier1_stage3_economics_v4",
+        "tier1_stage3_economics_v5",
     }
     for entry in by_version.values():
         assert entry["superseded_before_any_economic_outcome"] == "true"
@@ -145,6 +146,10 @@ def test_every_superseded_plan_is_recorded_with_its_reason():
     assert "in sample" in v4["reason"]
     assert "guessing filenames" in v4["reason"]
     assert "nullable" in v4["reason"]
+
+    v5 = by_version["tier1_stage3_economics_v5"]
+    assert "sequence_index alone" in v5["reason"]
+    assert "smaller economic sample" in v5["reason"]
 
 
 def test_survivors_are_taken_from_confirmation_not_re_judged():
@@ -1549,6 +1554,7 @@ def test_no_discovery_or_validation_date_can_enter_an_accumulator(monkeypatch, t
         "labels_dir": tmp_path,
         "raw_dir": tmp_path,
         "economic": True,
+        "batch_completeness": {"symbol_days": 160},
     }
 
     def fake_prepare(args, *, economic):
@@ -1717,20 +1723,6 @@ def test_an_inconsistent_feature_batch_is_refused():
         assert_feature_batch_is_frozen(manifest)
 
 
-def test_misaligned_labels_are_refused():
-    import numpy as np
-    from app.services.mbo_stage3_executor import assert_labels_align
-
-    features = np.arange(10, dtype=np.int64)
-    assert_labels_align("AAPL_2025-06-02", "50ev", features, features.copy())
-    with pytest.raises(ValueError, match="do not align one-for-one"):
-        assert_labels_align("AAPL_2025-06-02", "50ev", features, features[:-1])
-    shuffled = features.copy()
-    shuffled[3], shuffled[4] = shuffled[4], shuffled[3]
-    with pytest.raises(ValueError, match="do not align one-for-one"):
-        assert_labels_align("AAPL_2025-06-02", "50ev", features, shuffled)
-
-
 # ---------------------------------------------------------------------------
 # Nullable event-horizon availability
 # ---------------------------------------------------------------------------
@@ -1883,3 +1875,334 @@ def test_the_run_passes_the_factor_into_the_summaries():
     from app.cli.mbo_stage3 import run
 
     assert "summarize(sinks, market)" in inspect.getsource(run)
+
+
+# ---------------------------------------------------------------------------
+# The full Stage-2 spine certification
+# ---------------------------------------------------------------------------
+
+
+def _spine(rows: int = 8):
+    import numpy as np
+
+    return {
+        "feature_sequence": np.arange(rows, dtype=np.int64),
+        "feature_ts_event": np.arange(1_000, 1_000 + rows, dtype=np.int64),
+        "feature_midpoint": np.linspace(100.0, 101.0, rows),
+    }
+
+
+def _matching_labels(spine):
+    return {
+        "label_sequence": spine["feature_sequence"].copy(),
+        "label_ts_event": spine["feature_ts_event"].copy(),
+        "label_midpoint": spine["feature_midpoint"].copy(),
+    }
+
+
+def test_a_matching_spine_certifies():
+    from app.services.mbo_stage3_executor import certify_spine
+
+    spine = _spine()
+    certify_spine("AAPL_2025-06-18", "50ev", **spine, **_matching_labels(spine))
+
+
+def test_a_sequence_mismatch_is_refused():
+    from app.services.mbo_stage3_executor import certify_spine
+
+    spine = _spine()
+    labels = _matching_labels(spine)
+    labels["label_sequence"][3], labels["label_sequence"][4] = (
+        labels["label_sequence"][4],
+        labels["label_sequence"][3],
+    )
+    with pytest.raises(ValueError, match="do not align one-for-one"):
+        certify_spine("AAPL_2025-06-18", "50ev", **spine, **labels)
+
+
+def test_a_shorter_label_table_is_refused():
+    from app.services.mbo_stage3_executor import certify_spine
+
+    spine = _spine()
+    labels = _matching_labels(spine)
+    labels = {k: v[:-1] for k, v in labels.items()}
+    with pytest.raises(ValueError, match="do not align one-for-one"):
+        certify_spine("AAPL_2025-06-18", "50ev", **spine, **labels)
+
+
+def test_a_timestamp_spine_mismatch_hard_fails():
+    """Row ordering agrees; the instants those rows describe do not. This is
+    exactly what checking sequence_index alone would have missed."""
+    from app.services.mbo_stage3_executor import certify_spine
+
+    spine = _spine()
+    labels = _matching_labels(spine)
+    labels["label_ts_event"][5] += 1
+    with pytest.raises(ValueError, match="label source_ts_event does not reproduce"):
+        certify_spine("AAPL_2025-06-18", "50ev", **spine, **labels)
+
+
+def test_a_midpoint_spine_mismatch_hard_fails():
+    from app.services.mbo_stage3_executor import certify_spine
+
+    spine = _spine()
+    labels = _matching_labels(spine)
+    labels["label_midpoint"][2] += 0.005
+    with pytest.raises(ValueError, match="label source_midpoint does not reproduce"):
+        certify_spine("AAPL_2025-06-18", "50ev", **spine, **labels)
+
+
+def test_the_midpoint_comparison_is_nan_safe():
+    """Two missing midpoints are the same missing midpoint; a missing one and a
+    real one are not."""
+    import numpy as np
+    from app.services.mbo_stage3_executor import certify_spine
+
+    spine = _spine()
+    spine["feature_midpoint"][1] = np.nan
+    labels = _matching_labels(spine)
+    certify_spine("AAPL_2025-06-18", "50ev", **spine, **labels)
+
+    labels["label_midpoint"][1] = 100.5
+    with pytest.raises(ValueError, match="source_midpoint does not reproduce"):
+        certify_spine("AAPL_2025-06-18", "50ev", **spine, **labels)
+
+
+def test_the_certification_fields_are_the_stage2_ones():
+    from app.services.mbo_stage3_plan import SPINE_CERTIFICATION_FIELDS
+
+    assert SPINE_CERTIFICATION_FIELDS == (
+        ("sequence_index", "sequence_index"),
+        ("source_ts_event", "ts_event"),
+        ("source_midpoint", "midpoint"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Batch completeness
+# ---------------------------------------------------------------------------
+
+SYMBOLS = [f"SYM{i}" for i in range(8)]
+SESSION_DATES = [f"2025-06-{d:02d}" for d in range(2, 22)]
+
+
+def _complete_batch(tmp_path):
+    """A physically complete 160 symbol-day batch with matching manifests."""
+    import json as _json
+
+    from app.services.mbo_feature_engine import (
+        CADENCES,
+        FEATURE_ENGINE_VERSION,
+        FEATURE_SEMANTICS_HASH,
+        FEATURE_VOCABULARY_HASH,
+    )
+    from app.services.mbo_label_engine import LABEL_DEFINITION_HASH
+    from app.services.mbo_stage2_plan import PLAN_HASH as STAGE2_PLAN_HASH
+
+    features = tmp_path / "features"
+    labels = tmp_path / "labels"
+    grams = tmp_path / "grams"
+    (features / "manifests").mkdir(parents=True)
+    labels.mkdir(parents=True)
+    grams.mkdir(parents=True)
+
+    stems = [f"{s}_{d}" for d in SESSION_DATES for s in SYMBOLS]
+    for cadence in CADENCES:
+        (features / cadence.name).mkdir(parents=True, exist_ok=True)
+    for stem in stems:
+        (features / "manifests" / f"{stem}.manifest.json").write_text(
+            _json.dumps({"source": {"filename": f"{stem}.dbn.zst", "bytes": 1, "sha256": "x"}})
+        )
+        for cadence in CADENCES:
+            (features / cadence.name / f"{stem}.{cadence.name}.parquet").write_bytes(b"x")
+        (labels / f"{stem}.labels.parquet").write_bytes(b"x")
+
+    (features / "batch_manifest.json").write_text(_json.dumps({
+        "files_completed": 160, "files_failed": 0, "failures": [],
+        "definitions": {
+            "feature_engine_version": FEATURE_ENGINE_VERSION,
+            "feature_semantics_hash": FEATURE_SEMANTICS_HASH,
+            "feature_vocabulary_hash": FEATURE_VOCABULARY_HASH,
+        },
+        "feature_semantics_consistent": True,
+    }))
+    (grams / "stage2_grams_manifest.json").write_text(_json.dumps({
+        "symbol_day_cadence_files": 640,
+        "spine_certified_files": 640,
+        "session_date_count": 20,
+        "label_reuse": {"spine_verified_every_file": True},
+        "provenance": {
+            "feature_semantics_hash": FEATURE_SEMANTICS_HASH,
+            "label_definition_hash": LABEL_DEFINITION_HASH,
+            "stage2_plan_hash": STAGE2_PLAN_HASH,
+        },
+    }))
+    stage2_results = {"plan_hash": STAGE2_PLAN_HASH}
+    return features, labels, grams, stage2_results
+
+
+def test_a_complete_batch_is_accepted(tmp_path):
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    summary = assert_batch_complete(
+        features_dir=features, labels_dir=labels, grams_dir=grams,
+        stage2_results=results,
+    )
+    assert summary["symbol_days"] == 160
+    assert summary["session_dates"] == 20
+    assert summary["cadence_parquets"] == 640
+    assert summary["label_files"] == 160
+    assert summary["stage2_spine_verified_every_file"] is True
+
+
+def test_a_missing_confirmation_symbol_day_hard_fails(tmp_path):
+    """The decisive case: one symbol-day of the final confirmation date is gone.
+
+    v5 would have produced a smaller economic sample. It must refuse.
+    """
+    from app.services.mbo_feature_engine import CADENCES
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    victim = f"{SYMBOLS[0]}_{SESSION_DATES[-1]}"  # a confirmation-block date
+    (features / "manifests" / f"{victim}.manifest.json").unlink()
+    for cadence in CADENCES:
+        (features / cadence.name / f"{victim}.{cadence.name}.parquet").unlink()
+    (labels / f"{victim}.labels.parquet").unlink()
+
+    with pytest.raises(ValueError) as excinfo:
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+    message = str(excinfo.value)
+    assert "universe nobody declared" in message
+    assert "symbol-days: 159" in message
+    assert "cadence parquets present: 636" in message
+    assert "label files present: 159" in message
+    assert f"{SESSION_DATES[-1]}: 7 symbols" in message
+
+
+def test_a_missing_label_file_alone_hard_fails(tmp_path):
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    (labels / f"{SYMBOLS[3]}_{SESSION_DATES[-2]}.labels.parquet").unlink()
+    with pytest.raises(ValueError, match="no label file"):
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+
+
+def test_a_stage1_failure_hard_fails(tmp_path):
+    import json as _json
+
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    manifest = _json.loads((features / "batch_manifest.json").read_text())
+    manifest["files_failed"] = 1
+    manifest["failures"] = [{"symbol_day": "SYM0_2025-06-02", "error": "boom"}]
+    (features / "batch_manifest.json").write_text(_json.dumps(manifest))
+    with pytest.raises(ValueError, match="files_failed"):
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+
+
+@pytest.mark.parametrize(
+    "key,value",
+    [
+        ("symbol_day_cadence_files", 600),
+        ("spine_certified_files", 639),
+        ("session_date_count", 19),
+    ],
+)
+def test_a_stage2_grams_shortfall_hard_fails(tmp_path, key, value):
+    import json as _json
+
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    manifest = _json.loads((grams / "stage2_grams_manifest.json").read_text())
+    manifest[key] = value
+    (grams / "stage2_grams_manifest.json").write_text(_json.dumps(manifest))
+    with pytest.raises(ValueError, match=key.replace("_", "_")):
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+
+
+def test_an_uncertified_spine_hard_fails(tmp_path):
+    import json as _json
+
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    manifest = _json.loads((grams / "stage2_grams_manifest.json").read_text())
+    manifest["label_reuse"]["spine_verified_every_file"] = False
+    (grams / "stage2_grams_manifest.json").write_text(_json.dumps(manifest))
+    with pytest.raises(ValueError, match="spine_verified_every_file"):
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+
+
+def test_a_hash_disagreement_hard_fails(tmp_path):
+    import json as _json
+
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, results = _complete_batch(tmp_path)
+    manifest = _json.loads((grams / "stage2_grams_manifest.json").read_text())
+    manifest["provenance"]["label_definition_hash"] = "0" * 64
+    (grams / "stage2_grams_manifest.json").write_text(_json.dumps(manifest))
+    with pytest.raises(ValueError, match="label_definition_hash"):
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results=results,
+        )
+
+
+def test_stage2_results_from_a_different_plan_hard_fails(tmp_path):
+    from app.services.mbo_stage3_executor import assert_batch_complete
+
+    features, labels, grams, _results = _complete_batch(tmp_path)
+    with pytest.raises(ValueError, match="results plan_hash"):
+        assert_batch_complete(
+            features_dir=features, labels_dir=labels, grams_dir=grams,
+            stage2_results={"plan_hash": "0" * 64},
+        )
+
+
+def test_completeness_is_required_by_the_economic_run_only():
+    """The diagnostic command deliberately examines a subset, and cannot produce
+    an economic result; the authorized run may not."""
+    import inspect
+
+    from app.cli.mbo_stage3 import _prepare
+
+    source = inspect.getsource(_prepare)
+    assert "if economic:" in source
+    assert "assert_batch_complete(" in source
+
+
+def test_the_frozen_batch_expectations_are_the_declared_ones():
+    from app.services.mbo_stage3_plan import BATCH_COMPLETENESS
+
+    assert BATCH_COMPLETENESS["stage1_files_completed"] == 160
+    assert BATCH_COMPLETENESS["stage1_files_failed"] == 0
+    assert BATCH_COMPLETENESS["cadence_parquets_present"] == 640
+    assert BATCH_COMPLETENESS["label_files_present"] == 160
+    assert BATCH_COMPLETENESS["session_dates"] == 20
+    assert BATCH_COMPLETENESS["symbols_per_session_date"] == 8
+    assert BATCH_COMPLETENESS["stage2_spine_verified_every_file"] is True
+    assert "not a smaller economic sample" in BATCH_COMPLETENESS[
+        "missing_files_are_a_refusal"
+    ]
+    assert "physical files" in BATCH_COMPLETENESS["derivation"]
