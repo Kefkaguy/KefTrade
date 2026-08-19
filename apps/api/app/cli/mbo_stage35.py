@@ -219,13 +219,12 @@ def _read_cell_inputs(
     import pyarrow.parquet as pq
 
     from app.cli.mbo_stage2 import FEATURE_NAMES, _symbol_day_matrix
-    from app.services.mbo_label_engine import LABEL_OK
     from app.services.mbo_stage3_executor import (
         certify_spine,
         event_horizon_availability,
         predict,
     )
-    from app.services.mbo_stage35_executor import cell_prefix
+    from app.services.mbo_stage35_executor import cell_prefix, execution_eligibility
 
     cadence, horizon = cell.split("|")
     path = features_dir / cadence / f"{stem}.{cadence}.parquet"
@@ -283,14 +282,16 @@ def _read_cell_inputs(
         status, labels.column(f"{prefix}_available_ts_recv").filter(mask)
     )
     finite = np.isfinite(design).all(axis=1)
-    # The target only has to have resolved for the trigger to fire; an
-    # unresolved one sends at the deadline, which is still a valid observation.
-    usable = (status == LABEL_OK) & finite
+    # A target that never resolves is not a discarded row: it is precisely the
+    # case the frozen policy covers by sending at the deadline. Filtering those
+    # out would remove the quiet periods specifically.
+    usable, status_counts = execution_eligibility(status, finite)
     return {
         "predictions": predict(np.nan_to_num(design, nan=0.0), beta),
         "decision": decision,
         "availability": availability,
         "usable": usable,
+        "label_status_counts": status_counts,
     }
 
 
@@ -359,6 +360,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         cell: CellTiming(cell=cell, price_scale=price_scale)
         for cell in context["frozen"]["survivors"]
     }
+    status_counts: dict[str, dict[str, int]] = {}
     features_dir = context["features_dir"]
     stems = sorted({p.name.split(".")[0] for p in features_dir.rglob("*.parquet")})
     symbol_days: list[dict[str, Any]] = []
@@ -391,6 +393,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             if inputs is None:
                 continue
             per_cell.append((cell, entry["block"], inputs))
+            bucket = status_counts.setdefault(cell, {})
+            for name, count in inputs["label_status_counts"].items():
+                bucket[name] = bucket.get(name, 0) + count
             instants.update(
                 query_instants(
                     inputs["decision"], inputs["availability"],
@@ -451,6 +456,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         [sink.summary(PRIMARY_FEE_SCHEDULE) for sink in sinks.values()],
         chronology=context["chronology"],
     )
+    report["source_label_status_counts"] = status_counts
     report["stage2_fit_reproduction"] = reproduction
     report["batch_completeness"] = context["batch_completeness"]
     report["symbol_days"] = symbol_days

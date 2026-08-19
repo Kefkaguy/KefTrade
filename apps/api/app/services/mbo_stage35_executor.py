@@ -68,6 +68,8 @@ from app.services.mbo_stage35_plan import (
     BH_FALSE_DISCOVERY_RATE,
     CELL_HASH,
     DELAY_DEADLINE_NS,
+    ELIGIBLE_LABEL_STATUSES,
+    EXCLUDED_LABEL_STATUSES,
     FROZEN_CELLS,
     LATENCY_NS,
     MIN_COMPARABLE_PAIRS,
@@ -77,10 +79,10 @@ from app.services.mbo_stage35_plan import (
     T_HURDLE,
 )
 
-STAGE35_EXECUTOR_VERSION = "tier1_stage35_executor_v2"
+STAGE35_EXECUTOR_VERSION = "tier1_stage35_executor_v3"
 
 EXPECTED_PLAN_DESIGN_HASH = (
-    "ab7393d01de1d4d3c9cb37b0142be33fa24f99336facca87827633255e094d9d"
+    "097b5d65dfd49d9c648865df3b31c716b51b0c685c6e8b347c772a3b6992ba94"
 )
 EXPECTED_CELL_HASH = (
     "bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00"
@@ -109,6 +111,14 @@ ASYMMETRIC_FAILURES = (
     NOT_COMPARABLE_NO_BASELINE_BOOK,
     NOT_COMPARABLE_NO_TIMED_BOOK,
 )
+
+# The complete frozen block. Reproduction must cover all of it, per cell.
+EXPECTED_REPRODUCTION_COUNTS: dict[str, int] = {
+    "discovery": 10,
+    "validation": 6,
+    "confirmation": 4,
+}
+EXPECTED_REPRODUCTION_TOTAL = sum(EXPECTED_REPRODUCTION_COUNTS.values())
 
 TRIGGER_TARGET = "target"
 TRIGGER_DEADLINE = "deadline"
@@ -188,6 +198,39 @@ def assert_chronology_is_clean(mapping: dict[str, dict[str, Any]]) -> None:
             raise ValueError(
                 f"{session_date} ({entry['block']}) would train on later dates: {ahead}"
             )
+
+
+# ---------------------------------------------------------------------------
+# Which rows may be executed
+# ---------------------------------------------------------------------------
+
+
+def execution_eligibility(status, finite):
+    """Which rows the frozen policy may act on, and the status counts.
+
+    ``ok`` resolves to a trigger instant. ``no_further_midpoint_change``
+    resolves to nothing -- which is exactly the case the policy already covers,
+    by sending at the deadline. Discarding those rows would make the plan's own
+    unresolved-target rule unreachable, and would do it selectively: a midpoint
+    that never moves again is a quiet period, so excluding them biases the study
+    toward markets that move.
+
+    ``source_midpoint_unavailable`` stays out, because without a decision
+    midpoint there is nothing to measure savings against. A status this plan has
+    not considered is a refusal, not a row to guess about.
+    """
+    unique = {str(v) for v in np.unique(status)}
+    unknown = unique - set(ELIGIBLE_LABEL_STATUSES) - set(EXCLUDED_LABEL_STATUSES)
+    if unknown:
+        raise ValueError(
+            f"unrecognised label statuses {sorted(unknown)}; Stage 3.5 will not "
+            "silently admit or discard a status its plan has not considered"
+        )
+    eligible = np.zeros(len(status), dtype=bool)
+    for value in ELIGIBLE_LABEL_STATUSES:
+        eligible |= status == value
+    counts = {value: int((status == value).sum()) for value in sorted(unique)}
+    return eligible & finite, counts
 
 
 # ---------------------------------------------------------------------------
@@ -685,17 +728,27 @@ def per_date_betas(
     )
     for session_date in ordered:
         block, training = training_dates_for(session_date, blocks)
-        usable = [d for d in training if d in per_date_grams]
-        if len(usable) < 2:
-            continue
-        train = sum_grams((per_date_grams[d] for d in usable), DESIGN_WIDTH)
+        # The certified Stage-2 Gram batch is complete, so a missing training
+        # Gram means the inputs are wrong. Shortening the training set instead
+        # would silently fit a different model from the one Stage 2 fitted.
+        missing = [d for d in training if d not in per_date_grams]
+        if missing:
+            raise ValueError(
+                f"training Grams absent for {session_date} ({block}): {missing}. "
+                "The declared training set must be present in full; Stage 3.5 "
+                "will not shorten it."
+            )
+        train = sum_grams((per_date_grams[d] for d in training), DESIGN_WIDTH)
         beta = fit(train, alpha)
         if beta is None:
-            continue
+            raise ValueError(
+                f"the training Gram for {session_date} ({block}) is singular; "
+                "the frozen Stage-2 fit cannot be reproduced"
+            )
         betas[session_date] = {
             "beta": beta,
             "block": block,
-            "training_dates": usable,
+            "training_dates": list(training),
             "train_gram": train,
         }
     return betas
@@ -725,21 +778,41 @@ def reproduce_stage2_delta_r2(
     from app.services.mbo_stage2_executor import delta_r2
 
     checked: dict[str, dict[str, float]] = {}
+    per_block: dict[str, int] = {"discovery": 0, "validation": 0, "confirmation": 0}
     mismatches: list[str] = []
     for session_date, entry in sorted(betas.items()):
         block = entry["block"]
         expected = (recorded.get(block) or {}).get(session_date)
-        if expected is None or session_date not in per_date_grams:
+        if expected is None:
+            mismatches.append(f"{session_date} ({block}): Stage 2 recorded no value")
+            continue
+        if session_date not in per_date_grams:
+            mismatches.append(f"{session_date} ({block}): no Gram to score against")
             continue
         rebuilt = delta_r2(entry["train_gram"], per_date_grams[session_date], alpha)
         if rebuilt is None:
-            mismatches.append(f"{session_date}: could not be scored")
+            mismatches.append(f"{session_date} ({block}): could not be scored")
             continue
         checked[session_date] = {"stage2": float(expected), "stage35": float(rebuilt)}
+        per_block[block] += 1
         if abs(rebuilt - expected) > tolerance:
             mismatches.append(
                 f"{session_date} ({block}): {rebuilt} vs Stage-2 {expected}"
             )
+
+    # Fail closed. Checking a subset and reporting success would let an
+    # unverified chronology through on the strength of whichever dates happened
+    # to line up.
+    for block, expected_count in EXPECTED_REPRODUCTION_COUNTS.items():
+        if per_block[block] != expected_count:
+            mismatches.append(
+                f"{block}: {per_block[block]} dates reproduced, expected {expected_count}"
+            )
+    if len(checked) != EXPECTED_REPRODUCTION_TOTAL:
+        mismatches.append(
+            f"total: {len(checked)} dates reproduced, expected "
+            f"{EXPECTED_REPRODUCTION_TOTAL}"
+        )
 
     if mismatches:
         raise ValueError(
@@ -750,6 +823,7 @@ def reproduce_stage2_delta_r2(
 
     return {
         "dates_checked": len(checked),
+        "dates_checked_by_block": dict(per_block),
         "per_date": checked,
         "reproduction_verified": True,
         "tolerance": tolerance,
@@ -764,17 +838,30 @@ def recorded_stage2_per_date(record: dict[str, Any], blocks: dict[str, Sequence[
     Stage 2 used.
     """
     out: dict[str, dict[str, float]] = {}
+    problems: list[str] = []
     for block in ("discovery", "validation", "confirmation"):
         entry = record.get(block) or {}
         values = entry.get("per_date_delta_r2")
-        if not values:
-            continue
         dates = list(blocks[block])
+        if not values:
+            problems.append(f"{block}: Stage 2 recorded no per-date values")
+            continue
         if len(values) != len(dates):
-            # Stage 2 drops dates it could not score; without the identities we
-            # cannot align them, so this block is skipped rather than guessed at.
+            # Stage 2 stored these positionally. If the count does not match the
+            # block, the identities are unrecoverable, and guessing at the
+            # alignment would silently compare the wrong dates.
+            problems.append(
+                f"{block}: {len(values)} recorded values for {len(dates)} dates, "
+                "so they cannot be associated unambiguously"
+            )
             continue
         out[block] = {d: float(v) for d, v in zip(dates, values, strict=True)}
+
+    if problems:
+        raise ValueError(
+            "Stage 2's recorded per-date delta_R2 cannot be mapped onto the "
+            "complete frozen date block:" + "".join(f"\n  - {p}" for p in problems)
+        )
     return out
 
 

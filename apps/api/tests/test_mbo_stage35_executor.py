@@ -98,7 +98,7 @@ def make_pair(predicted_bps, book_at, *, target=None, decision=1_000_000_000, **
 def test_the_plan_and_cell_hashes_are_frozen():
     assert_frozen_plan()
     assert PLAN_DESIGN_HASH == (
-        "ab7393d01de1d4d3c9cb37b0142be33fa24f99336facca87827633255e094d9d"
+        "097b5d65dfd49d9c648865df3b31c716b51b0c685c6e8b347c772a3b6992ba94"
     )
 
 
@@ -1239,8 +1239,277 @@ def test_the_run_verifies_reproduction_before_replaying_anything():
 
 def test_the_superseded_v1_plan_is_recorded_with_its_reason():
     plan = statistical_plan()
-    v1 = plan["superseded_plan_versions"][0]
+    versions = {e["version"] for e in plan["superseded_plan_versions"]}
+    assert versions == {
+        "tier1_stage35_execution_timing_v1",
+        "tier1_stage35_execution_timing_v2",
+    }
+    v1 = next(
+        e for e in plan["superseded_plan_versions"]
+        if e["version"] == "tier1_stage35_execution_timing_v1"
+    )
     assert v1["version"] == "tier1_stage35_execution_timing_v1"
     assert v1["superseded_before_any_execution_outcome"] == "true"
     for token in ("clamped", "price scale", "delayed_fraction", "zero", "final snapshot"):
         assert token in v1["reason"], token
+
+
+# ---------------------------------------------------------------------------
+# A. Unresolved event targets are eligible for the deadline policy
+# ---------------------------------------------------------------------------
+
+
+def _eligibility(statuses, finite=None):
+    import numpy as np
+    from app.services.mbo_stage35_executor import execution_eligibility
+
+    status = np.array(statuses)
+    if finite is None:
+        finite = np.ones(len(statuses), dtype=bool)
+    return execution_eligibility(status, np.asarray(finite))
+
+
+def test_no_further_midpoint_change_rows_are_eligible():
+    """The bug: these were discarded before the deadline policy could fire,
+    making the plan's own unresolved-target rule unreachable -- and removing the
+    quiet periods specifically."""
+    mask, counts = _eligibility(["ok", "no_further_midpoint_change"])
+    assert mask.tolist() == [True, True]
+    assert counts["no_further_midpoint_change"] == 1
+
+
+def test_source_midpoint_unavailable_is_never_eligible():
+    mask, _ = _eligibility(["source_midpoint_unavailable", "ok"])
+    assert mask.tolist() == [False, True]
+
+
+def test_session_end_before_horizon_is_excluded_too():
+    mask, _ = _eligibility(["session_end_before_horizon", "ok"])
+    assert mask.tolist() == [False, True]
+
+
+def test_a_non_finite_design_row_is_still_excluded():
+    mask, _ = _eligibility(
+        ["ok", "no_further_midpoint_change"], finite=[False, False]
+    )
+    assert mask.tolist() == [False, False]
+
+
+def test_an_unrecognised_status_is_refused_not_guessed_at():
+    """A status this plan has not considered is a reason to stop."""
+    with pytest.raises(ValueError, match="unrecognised label statuses"):
+        _eligibility(["ok", "some_new_status"])
+
+
+def test_status_counts_are_reported_for_provenance():
+    _, counts = _eligibility(
+        ["ok", "ok", "no_further_midpoint_change", "source_midpoint_unavailable"]
+    )
+    assert counts == {
+        "ok": 2,
+        "no_further_midpoint_change": 1,
+        "source_midpoint_unavailable": 1,
+    }
+
+
+def test_an_unresolved_target_with_coverage_is_evaluated_at_the_deadline():
+    """(1) The whole point of the correction: a row whose midpoint never moves
+    again is a valid observation of the deadline policy."""
+    decision = 1_000_000_000
+    pair, reason = make_pair(
+        -50.0,
+        static_book(100.00, 100.02),
+        target=None,  # no_further_midpoint_change -> availability is None
+        decision=decision,
+        within_coverage=lambda lo, hi: True,
+    )
+    assert reason is None
+    assert pair.trigger == TRIGGER_DEADLINE
+    assert pair.timed_send_ts == decision + DELAY_DEADLINE_NS
+    assert pair.timed_arrival_ts == decision + MAX_ARRIVAL_NS
+
+
+def test_an_unresolved_target_beyond_coverage_is_refused():
+    """(2) Same row, but the deadline arrival runs past the certified stream."""
+    decision = 1_000_000_000
+    pair, reason = make_pair(
+        -50.0,
+        static_book(100.00, 100.02),
+        target=None,
+        decision=decision,
+        within_coverage=lambda lo, hi: hi <= decision + 500 * MS,
+    )
+    assert pair is None
+    assert reason == NOT_COMPARABLE_OUTSIDE_COVERAGE
+
+
+def test_a_resolved_target_after_the_deadline_also_uses_the_deadline():
+    """(4) Resolution exists but arrives too late to act on."""
+    decision = 1_000_000_000
+    pair, reason = make_pair(
+        -50.0,
+        static_book(100.00, 100.02),
+        target=decision + 5 * SCALE,
+        decision=decision,
+    )
+    assert reason is None
+    assert pair.trigger == TRIGGER_DEADLINE
+    assert pair.timed_send_ts == decision + DELAY_DEADLINE_NS
+
+
+def test_the_loader_admits_unresolved_targets():
+    """The eligibility rule the CLI actually applies, not a parallel one."""
+    import inspect
+
+    from app.cli.mbo_stage35 import _read_cell_inputs
+
+    source = inspect.getsource(_read_cell_inputs)
+    assert "execution_eligibility" in source
+    assert "status == LABEL_OK" not in source
+
+
+def test_the_eligible_statuses_are_frozen_in_the_plan():
+    rule = statistical_plan()["label_status_rule"]
+    assert rule["eligible"] == ["ok", "no_further_midpoint_change"]
+    assert "source_midpoint_unavailable" in rule["excluded"]
+    assert "refused" in rule["unknown_statuses"]
+    assert rule["status_counts_reported"] is True
+
+
+# ---------------------------------------------------------------------------
+# B. The reproduction gate fails closed
+# ---------------------------------------------------------------------------
+
+
+def _recorded(recorded):
+    return {b: {"per_date_delta_r2": v} for b, v in recorded.items()}
+
+
+def test_a_missing_training_gram_is_refused_not_silently_shortened():
+    """The certified Gram batch is complete, so an absent training Gram means the
+    inputs are wrong -- not that the training set should quietly shrink."""
+    from app.services.mbo_stage35_executor import per_date_betas
+
+    grams, alpha, _ = _stage2_world()
+    del grams[DATES[3]]
+    with pytest.raises(ValueError, match="training Grams absent"):
+        per_date_betas(grams, BLOCKS, alpha)
+
+
+def test_a_mismatched_recorded_count_is_refused_not_skipped():
+    from app.services.mbo_stage35_executor import recorded_stage2_per_date
+
+    _grams, _alpha, recorded = _stage2_world()
+    truncated = {k: list(v) for k, v in recorded.items()}
+    truncated["discovery"] = truncated["discovery"][:9]
+    with pytest.raises(ValueError, match="cannot be associated unambiguously"):
+        recorded_stage2_per_date(_recorded(truncated), BLOCKS)
+
+
+def test_an_empty_recorded_block_is_refused():
+    from app.services.mbo_stage35_executor import recorded_stage2_per_date
+
+    _grams, _alpha, recorded = _stage2_world()
+    emptied = {k: list(v) for k, v in recorded.items()}
+    emptied["validation"] = []
+    with pytest.raises(ValueError, match="recorded no per-date values"):
+        recorded_stage2_per_date(_recorded(emptied), BLOCKS)
+
+
+def test_a_missing_block_entirely_is_refused():
+    from app.services.mbo_stage35_executor import recorded_stage2_per_date
+
+    _grams, _alpha, recorded = _stage2_world()
+    partial = {b: {"per_date_delta_r2": v} for b, v in recorded.items()}
+    del partial["confirmation"]
+    with pytest.raises(ValueError, match="confirmation: Stage 2 recorded no"):
+        recorded_stage2_per_date(partial, BLOCKS)
+
+
+def test_reproduction_requires_all_twenty_dates():
+    """9/6/4 must refuse even though every checked date matched."""
+    from app.services.mbo_stage35_executor import (
+        per_date_betas,
+        recorded_stage2_per_date,
+        reproduce_stage2_delta_r2,
+    )
+
+    grams, alpha, recorded = _stage2_world()
+    mapped = recorded_stage2_per_date(_recorded(recorded), BLOCKS)
+    betas = per_date_betas(grams, BLOCKS, alpha)
+    # Drop one discovery date from the recorded map: 9/6/4.
+    del mapped["discovery"][DATES[0]]
+    with pytest.raises(ValueError, match="discovery: 9 dates reproduced, expected 10"):
+        reproduce_stage2_delta_r2("50ev|next_change", grams, betas, alpha, mapped)
+
+
+def test_reproduction_requires_the_full_validation_block():
+    """10/5/4 must refuse too."""
+    from app.services.mbo_stage35_executor import (
+        per_date_betas,
+        recorded_stage2_per_date,
+        reproduce_stage2_delta_r2,
+    )
+
+    grams, alpha, recorded = _stage2_world()
+    mapped = recorded_stage2_per_date(_recorded(recorded), BLOCKS)
+    betas = per_date_betas(grams, BLOCKS, alpha)
+    del mapped["validation"][DATES[10]]
+    with pytest.raises(ValueError, match="validation: 5 dates reproduced, expected 6"):
+        reproduce_stage2_delta_r2("50ev|next_change", grams, betas, alpha, mapped)
+
+
+def test_exact_ten_six_four_passes_and_is_reported():
+    from app.services.mbo_stage35_executor import (
+        EXPECTED_REPRODUCTION_TOTAL,
+        per_date_betas,
+        recorded_stage2_per_date,
+        reproduce_stage2_delta_r2,
+    )
+
+    grams, alpha, recorded = _stage2_world()
+    betas = per_date_betas(grams, BLOCKS, alpha)
+    result = reproduce_stage2_delta_r2(
+        "50ev|next_change", grams, betas, alpha,
+        recorded_stage2_per_date(_recorded(recorded), BLOCKS),
+    )
+    assert result["reproduction_verified"] is True
+    assert result["dates_checked"] == EXPECTED_REPRODUCTION_TOTAL == 20
+    assert result["dates_checked_by_block"] == {
+        "discovery": 10, "validation": 6, "confirmation": 4
+    }
+
+
+def test_a_gram_missing_at_scoring_time_is_refused():
+    from app.services.mbo_stage35_executor import (
+        per_date_betas,
+        recorded_stage2_per_date,
+        reproduce_stage2_delta_r2,
+    )
+
+    grams, alpha, recorded = _stage2_world()
+    betas = per_date_betas(grams, BLOCKS, alpha)
+    mapped = recorded_stage2_per_date(_recorded(recorded), BLOCKS)
+    scoring = {k: v for k, v in grams.items() if k != DATES[19]}
+    with pytest.raises(ValueError, match="no Gram to score against"):
+        reproduce_stage2_delta_r2("50ev|next_change", scoring, betas, alpha, mapped)
+
+
+def test_the_reproduction_requirement_is_frozen_in_the_plan():
+    requirement = statistical_plan()["reproduction_requirement"]
+    assert requirement["fails_closed"] is True
+    assert requirement["expected_checked"] == {
+        "discovery": 10, "validation": 6, "confirmation": 4, "total": 20
+    }
+    assert "refusal" in requirement["unmappable_records_refuse"]
+
+
+def test_the_superseded_v2_plan_is_recorded_with_its_reason():
+    plan = statistical_plan()
+    v2 = next(
+        e for e in plan["superseded_plan_versions"]
+        if e["version"] == "tier1_stage35_execution_timing_v2"
+    )
+    assert v2["superseded_before_any_execution_outcome"] == "true"
+    assert "unresolved-target rule unreachable" in v2["reason"]
+    assert "reproduction_verified" in v2["reason"]

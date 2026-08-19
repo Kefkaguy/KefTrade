@@ -1,13 +1,13 @@
-# Stage 3.5 — Execution-timing mechanism study, for review (v2)
+# Stage 3.5 — Execution-timing mechanism study, for review (v3)
 
 **Status: corrected and fully wired. No execution outcome computed. No order
 placed. The run is gated behind an explicit reviewer flag.**
 
 | | |
 |---|---|
-| Plan | `tier1_stage35_execution_timing_v2` |
-| `PLAN_DESIGN_HASH` | `ab7393d01de1d4d3c9cb37b0142be33fa24f99336facca87827633255e094d9d` |
-| Superseded | `v1` `ab0d4267...` - before any execution outcome |
+| Plan | `tier1_stage35_execution_timing_v3` |
+| `PLAN_DESIGN_HASH` | `097b5d65dfd49d9c648865df3b31c716b51b0c685c6e8b347c772a3b6992ba94` |
+| Superseded | `v1` `ab0d4267...`, `v2` `ab7393d0...` - before any execution outcome |
 | `CELL_HASH` | `bea300ba23327075909e37e36864feee6087dc85a5d55108cb53a615c7046f00` |
 | Evidence class | **exploratory mechanism development** — not confirmatory |
 | Stage-3 verdict | **closed and unaltered** |
@@ -303,6 +303,51 @@ statistics: they agree to floating-point noise or they are not the same fit. Two
 tests prove the gate bites - a 1e-6 perturbation refuses, and so does a
 chronology that trains every date on all sixteen dates.
 
+## 12b. Two fail-open defects closed (v2 -> v3)
+
+### A. The unresolved-target rule was unreachable
+
+The frozen policy has always said: if the target has not resolved by the
+deadline, send at the deadline. `timed_send_instant(None)` implements that
+correctly. But the loader filtered rows with
+
+```python
+usable = (status == LABEL_OK) & finite
+```
+
+so a row whose midpoint never moves again was discarded *before*
+`evaluate_pair` ever saw it. The rule could not fire.
+
+Worse, the filtering was not neutral: `no_further_midpoint_change` is exactly a
+quiet period, so excluding those rows biases the study toward markets that move
+- which is the very thing the mechanism is being tested on.
+
+`execution_eligibility()` now admits `ok` and `no_further_midpoint_change`,
+excludes `source_midpoint_unavailable` and `session_end_before_horizon`, and
+**refuses** any status the plan has not considered rather than silently
+admitting or discarding it. Per-cell source label-status counts are reported in
+provenance, with no savings attached.
+
+Coverage still governs: an unresolved target late in the session, whose deadline
+arrival runs past the certified stream, is refused as outside coverage.
+
+### B. The reproduction gate could pass on a subset
+
+`recorded_stage2_per_date()` used to `continue` when the recorded count did not
+match the block, and `reproduce_stage2_delta_r2()` could then return
+`reproduction_verified: True` having checked fewer dates - or none.
+
+All three functions now fail closed:
+
+| Function | Was | Now |
+|---|---|---|
+| `per_date_betas` | silently dropped an absent training Gram | refuses; the declared training set must be present in full |
+| `recorded_stage2_per_date` | skipped a block it could not map | refuses; unmappable records are an error, not a skip |
+| `reproduce_stage2_delta_r2` | verified whatever it happened to check | requires exactly **10 discovery + 6 validation + 4 confirmation = 20** per cell |
+
+Checking a subset and reporting success would have let an unverified chronology
+through on the strength of whichever dates happened to line up.
+
 ## 12. Leakage and timing audit
 
 | Risk | Control | Test |
@@ -320,10 +365,12 @@ chronology that trains every date on all sixteen dates.
 | Exclusion on unused liquidity | timed fill required only for the delayed side | `test_the_non_delayed_sides_future_illiquidity_does_not_break_the_pair` |
 | Fictitious post-EOF fill | coverage span checked before any book query | `test_an_arrival_past_the_end_of_the_stream_is_refused` |
 | Model not Stage 2's own | per-date delta-R2 reproduced to 1e-9 before replay | `test_the_chronology_reproduces_stage2s_recorded_per_date_delta_r2` |
+| Unreachable deadline rule | `no_further_midpoint_change` is eligible; unknown statuses refuse | `test_an_unresolved_target_with_coverage_is_evaluated_at_the_deadline` |
+| Partial reproduction passing | 10/6/4 required per cell; missing Gram refuses | `test_reproduction_requires_all_twenty_dates` |
 | Threshold/parameter search | sign-only policy; no tunable flags | `test_the_magnitude_of_the_prediction_changes_nothing`, `test_the_cli_offers_no_symbol_filter_or_threshold_option` |
 | Fictitious exit cost | no round trip; only price-dependent fee difference reported | `test_no_round_trip_cost_is_charged`, `test_the_price_dependent_fee_difference_is_zero_under_june_2025` |
 
-**97 Stage-3.5 tests; 598 passed, 3 skipped** across the whole MBO suite; ruff
+**118 Stage-3.5 tests; 619 passed, 3 skipped** across the whole MBO suite; ruff
 clean.
 
 ---

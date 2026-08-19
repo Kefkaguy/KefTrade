@@ -62,9 +62,26 @@ from app.services.mbo_stage3_plan import (
     PRIOR_EFFECTIVE_TRIALS as STAGE3_PRIOR_EFFECTIVE_TRIALS,
 )
 
-STAGE35_PLAN_VERSION = "tier1_stage35_execution_timing_v2"
+STAGE35_PLAN_VERSION = "tier1_stage35_execution_timing_v3"
 
 SUPERSEDED_PLAN_VERSIONS: tuple[dict[str, str], ...] = (
+    {
+        "version": "tier1_stage35_execution_timing_v2",
+        "plan_design_hash": (
+            "ab7393d01de1d4d3c9cb37b0142be33fa24f99336facca87827633255e094d9d"
+        ),
+        "superseded_before_any_execution_outcome": "true",
+        "reason": (
+            "two fail-open defects, both pre-outcome. The loader admitted only "
+            "LABEL_OK rows, so a target that never resolved was discarded before "
+            "the deadline policy could fire -- making the plan's own "
+            "unresolved-target rule unreachable and biasing the sample toward "
+            "periods where the book moves often. And the Stage-2 reproduction "
+            "gate could silently check fewer dates than the frozen twenty, or "
+            "none, and still report reproduction_verified; per_date_betas could "
+            "silently shorten a training set when a Gram was absent."
+        ),
+    },
     {
         "version": "tier1_stage35_execution_timing_v1",
         "plan_design_hash": (
@@ -207,6 +224,49 @@ POLICY: dict[str, Any] = {
 }
 
 # ---------------------------------------------------------------------------
+# Which label statuses may be executed
+# ---------------------------------------------------------------------------
+#
+# The policy already says what to do when the target never arrives: send at the
+# deadline. A loader that admits only resolved targets makes that rule
+# unreachable -- and does so selectively, because rows whose midpoint never moves
+# again are exactly the quiet periods. Excluding them would bias the study toward
+# markets that move.
+
+ELIGIBLE_LABEL_STATUSES: tuple[str, ...] = (
+    "ok",
+    "no_further_midpoint_change",
+)
+EXCLUDED_LABEL_STATUSES: tuple[str, ...] = (
+    "source_midpoint_unavailable",
+    "session_end_before_horizon",
+)
+
+LABEL_STATUS_RULE: dict[str, Any] = {
+    "eligible": list(ELIGIBLE_LABEL_STATUSES),
+    "excluded": list(EXCLUDED_LABEL_STATUSES),
+    "ok": "the target resolved; the trigger is its availability instant",
+    "no_further_midpoint_change": (
+        "the target never resolves, so availability is None and the trigger is "
+        "the deadline -- which is precisely the case the frozen policy already "
+        "describes"
+    ),
+    "source_midpoint_unavailable": (
+        "excluded: without a decision midpoint there is nothing to measure "
+        "savings against"
+    ),
+    "unknown_statuses": (
+        "refused, never silently admitted. A status this plan has not considered "
+        "is a reason to stop, not a row to guess about."
+    ),
+    "coverage_still_applies": (
+        "a late-session row whose deadline arrival runs past the certified "
+        "stream is still refused as outside coverage"
+    ),
+    "status_counts_reported": True,
+}
+
+# ---------------------------------------------------------------------------
 # The exact tie
 # ---------------------------------------------------------------------------
 #
@@ -318,6 +378,29 @@ FEES: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 # Comparability
 # ---------------------------------------------------------------------------
+
+REPRODUCTION_REQUIREMENT: dict[str, Any] = {
+    "rule": (
+        "every frozen cell must reproduce Stage 2's recorded per-date delta_R2 "
+        "for all twenty dates: 10 discovery, 6 validation, 4 confirmation"
+    ),
+    "fails_closed": True,
+    "no_partial_credit": (
+        "checking fewer dates and reporting success would let an unverified "
+        "chronology through on the strength of the dates that happened to line "
+        "up"
+    ),
+    "unmappable_records_refuse": (
+        "if Stage 2's recorded values cannot be associated unambiguously with "
+        "the complete frozen date block, that is a refusal rather than a skip"
+    ),
+    "missing_training_gram_refuses": (
+        "the certified Stage-2 Gram batch is complete, so an absent training "
+        "Gram means the inputs are wrong -- not that the training set should be "
+        "quietly shortened"
+    ),
+    "expected_checked": {"discovery": 10, "validation": 6, "confirmation": 4, "total": 20},
+}
 
 COMPARABILITY: dict[str, Any] = {
     "rule": (
@@ -435,6 +518,11 @@ PLAN_DESIGN_ELEMENTS: tuple[str, ...] = (
     "delay_reporting=pairs_1.0_parent_orders_0.5",
     "zero_prediction=no_direction_no_delay",
     "coverage=arrivals_must_be_inside_certified_receive_span",
+    f"eligible_statuses={'+'.join(ELIGIBLE_LABEL_STATUSES)}",
+    f"excluded_statuses={'+'.join(EXCLUDED_LABEL_STATUSES)}",
+    "unknown_status=refuse",
+    "reproduction=all_20_dates_10_6_4_fail_closed",
+    "missing_training_gram=refuse",
     "authorizes=external_confirmation_experiment_only;not=paper;not=live",
 )
 
@@ -470,6 +558,8 @@ def statistical_plan() -> dict[str, Any]:
         "comparability": dict(COMPARABILITY),
         "zero_prediction_rule": dict(ZERO_PREDICTION_RULE),
         "coverage_rule": dict(COVERAGE_RULE),
+        "label_status_rule": dict(LABEL_STATUS_RULE),
+        "reproduction_requirement": dict(REPRODUCTION_REQUIREMENT),
         "superseded_plan_versions": [dict(e) for e in SUPERSEDED_PLAN_VERSIONS],
         "mechanism_screen": dict(MECHANISM_SCREEN),
         "governance": dict(GOVERNANCE),
