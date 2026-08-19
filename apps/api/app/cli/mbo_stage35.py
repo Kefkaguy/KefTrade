@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from app.cli._refusal import run_command
+from app.services.mbo_stage3_executor import resolve_raw_source
 from app.services.mbo_stage35_executor import (
     STAGE35_EXECUTOR_VERSION,
     assert_chronology_is_clean,
@@ -27,6 +28,7 @@ from app.services.mbo_stage35_executor import (
     chronology_map,
 )
 from app.services.mbo_stage35_plan import (
+    EXCLUDED_LABEL_STATUSES,
     PLAN_DESIGN_HASH,
     STAGE35_PLAN_VERSION,
     statistical_plan,
@@ -296,32 +298,127 @@ def _read_cell_inputs(
 
 
 def diagnose(args: argparse.Namespace) -> dict[str, Any]:
-    """Provenance and counts only.
+    """Exercise every integrity gate the run depends on, and compute no outcome.
 
-    The payload is filtered through ``_strip_outcomes`` on the way out, so a
-    field that could carry an execution saving cannot reach the artefact even if
-    someone later adds one upstream.
+    A diagnostic that only checks provenance would report "clean" and then let
+    the real run fail on the two gates that matter most -- the 20-date Stage-2
+    reproduction and the label-status eligibility path. So this walks the same
+    inputs the run walks, through the same functions, and stops short of
+    evaluating a single execution pair.
+
+    What it deliberately does not do: call ``evaluate_pair``, summarise a
+    ``CellTiming``, assemble a report, or replay a book. Raw sources are bound
+    and hashed but never opened for replay. The payload is filtered through
+    ``_strip_outcomes`` on the way out, so a savings-bearing field could not
+    reach the artefact even if one were added upstream.
     """
     context = _prepare(args)
+
+    # Exercises the per-cell 10 + 6 + 4 = 20 date reproduction gate. These are
+    # Stage-2 prediction-reproduction diagnostics, not Stage-3.5 execution
+    # outcomes: they say the models are the ones Stage 2 fitted, nothing about
+    # what timing them would earn.
+    built = _build_fits(context)
+    fits, reproduction = built["fits"], built["reproduction"]
+
+    features_dir = context["features_dir"]
+    stems = sorted({p.name.split(".")[0] for p in features_dir.rglob("*.parquet")})
+
+    label_statuses: dict[str, dict[str, int]] = {}
+    eligible_rows: dict[str, int] = {}
+    excluded_rows: dict[str, dict[str, int]] = {}
+    spine_certified_files = 0
+    raw_sources_verified = 0
+    inspected: list[dict[str, Any]] = []
+
+    for index, stem in enumerate(sorted(stems), start=1):
+        symbol, _, session_date = stem.rpartition("_")
+
+        # Bind the exact Stage-1 bytes -- filename, size and SHA-256 -- without
+        # replaying them. This is the file the run would consume.
+        manifest_path = features_dir / "manifests" / f"{stem}.manifest.json"
+        if not manifest_path.is_file():
+            raise ValueError(f"no Stage-1 manifest for {stem}; cannot bind raw input")
+        raw_path = resolve_raw_source(
+            json.loads(manifest_path.read_text(encoding="utf-8")),
+            context["raw_dir"],
+            stem=stem,
+        )
+        raw_sources_verified += 1
+
+        print(f"[{index}/{len(stems)}] {stem}", flush=True)
+
+        cells_seen = 0
+        for cell in context["frozen"]["survivors"]:
+            entry = fits[cell].get(session_date)
+            if entry is None:
+                continue
+            # The real loader: full spine certification, nullable availability,
+            # and the frozen eligibility rule including unknown-status refusal.
+            inputs = _read_cell_inputs(
+                features_dir=features_dir,
+                labels_dir=context["labels_dir"],
+                stem=stem,
+                cell=cell,
+                beta=entry["beta"],
+            )
+            if inputs is None:
+                continue
+            spine_certified_files += 1
+            cells_seen += 1
+
+            bucket = label_statuses.setdefault(cell, {})
+            for name, count in inputs["label_status_counts"].items():
+                bucket[name] = bucket.get(name, 0) + count
+            eligible = int(inputs["usable"].sum())
+            eligible_rows[cell] = eligible_rows.get(cell, 0) + eligible
+            excluded = excluded_rows.setdefault(cell, {})
+            for name, count in inputs["label_status_counts"].items():
+                if name in EXCLUDED_LABEL_STATUSES:
+                    excluded[name] = excluded.get(name, 0) + count
+            # inputs["predictions"] is deliberately not read, recorded or
+            # returned: a prediction is not an outcome, but it is not a count
+            # either, and this artefact carries counts.
+
+        inspected.append(
+            {
+                "symbol": symbol,
+                "session_date": session_date,
+                "raw_source": raw_path.name,
+                "raw_source_verified": True,
+                "cells_inspected": cells_seen,
+            }
+        )
+
     payload = {
         "stage35_plan_version": STAGE35_PLAN_VERSION,
         "stage35_plan_design_hash": PLAN_DESIGN_HASH,
+        "stage35_executor_version": STAGE35_EXECUTOR_VERSION,
         "diagnostic_only": True,
         "contains_execution_outcome": False,
         "why_no_outcome": (
-            "this command reports provenance and counts; it is filtered so that "
-            "no execution saving can appear in its artefact"
+            "this command exercises the integrity gates the run depends on and "
+            "stops before evaluating a single execution pair"
         ),
         "frozen_cells": context["frozen"]["survivors"],
+        "frozen_cell_count": len(context["frozen"]["survivors"]),
         "batch_completeness": context["batch_completeness"],
+        "symbol_days_inspected": len(inspected),
+        "session_date_count": len(context["session_dates"]),
+        "raw_sources_verified": raw_sources_verified,
+        "spine_certified_cell_files": spine_certified_files,
+        "source_label_status_counts": label_statuses,
+        "eligible_rows_by_cell": eligible_rows,
+        "excluded_rows_by_cell_and_status": excluded_rows,
+        "stage2_reproduction": reproduction,
         "blocks": {k: list(v) for k, v in context["blocks"].items() if k != "unassigned"},
         "per_session_date_training": context["chronology"],
-        "session_date_count": len(context["session_dates"]),
         "no_date_trains_on_itself": True,
+        "symbol_days": inspected,
     }
     clean = _strip_outcomes(payload)
     _write(Path(args.output_dir) / "stage35_diagnostic.json", clean)
-    return clean
+    return {k: v for k, v in clean.items() if k != "symbol_days"}
 
 
 def run(args: argparse.Namespace) -> dict[str, Any]:
@@ -332,7 +429,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
 
     from app.services.mbo_book_validator import MboBook, iter_dbn_events
     from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
-    from app.services.mbo_stage3_executor import BookReplay, resolve_raw_source
+    from app.services.mbo_stage3_executor import BookReplay
     from app.services.mbo_stage3_plan import PRIMARY_FEE_SCHEDULE
     from app.services.mbo_stage35_executor import (
         CellTiming,

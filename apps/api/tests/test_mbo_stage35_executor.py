@@ -609,36 +609,6 @@ def test_the_report_never_claims_to_authorize_deployment():
 # ---------------------------------------------------------------------------
 
 
-def test_the_diagnostic_strips_anything_that_could_be_a_saving():
-    from app.cli.mbo_stage35 import _strip_outcomes
-
-    payload = {
-        "counts": {"pairs": 10},
-        "balanced_parent_flow_savings_bps": 0.9,
-        "midpoint_timing_benefit_bps": 0.4,
-        "nested": {"book_walk_benefit_bps": 0.1, "symbol_days": 160},
-        "cells": [{"cell": "50ev|next_change", "clustered_t": 9.0, "comparable_pairs": 5}],
-        "verdict": "supported",
-    }
-    clean = _strip_outcomes(payload)
-    assert clean == {
-        "counts": {"pairs": 10},
-        "nested": {"symbol_days": 160},
-        "cells": [{"cell": "50ev|next_change", "comparable_pairs": 5}],
-    }
-
-
-def test_the_diagnostic_command_cannot_assemble_a_report():
-    import inspect
-
-    from app.cli.mbo_stage35 import diagnose
-
-    body = inspect.getsource(diagnose).split('"""')[2]
-    for forbidden in ("assemble_report", "evaluate_pair", "savings"):
-        assert forbidden not in body, forbidden
-    assert "_strip_outcomes" in body
-
-
 def test_the_run_command_is_gated():
     import argparse
 
@@ -1513,3 +1483,191 @@ def test_the_superseded_v2_plan_is_recorded_with_its_reason():
     assert v2["superseded_before_any_execution_outcome"] == "true"
     assert "unresolved-target rule unreachable" in v2["reason"]
     assert "reproduction_verified" in v2["reason"]
+
+
+# ---------------------------------------------------------------------------
+# The diagnostic must exercise the gates that matter
+# ---------------------------------------------------------------------------
+
+
+def _diagnose_body() -> str:
+    """The executable body of `diagnose`, without its docstring.
+
+    Inspecting the body rather than the whole source matters: the docstring
+    names the very things it must not do, and matching on those would pass or
+    fail for the wrong reason.
+    """
+    import inspect
+
+    from app.cli.mbo_stage35 import diagnose
+
+    body = inspect.getsource(diagnose).split('"""')[2]
+    # Comments explain what the function deliberately avoids, so matching on
+    # them would pass or fail for the wrong reason.
+    return "\n".join(
+        line for line in body.splitlines() if not line.strip().startswith("#")
+    )
+
+
+def test_the_diagnostic_exercises_the_reproduction_gate():
+    """The bug this closes: a diagnostic that only calls _prepare reports clean,
+    and then the real run fails on the 20-date gate it never touched."""
+    body = _diagnose_body()
+    assert "_prepare(args)" in body
+    assert "_build_fits(context)" in body
+
+
+def test_the_diagnostic_exercises_the_eligibility_path():
+    """It must read the actual feature/label files, so spine certification and
+    the label-status eligibility rule genuinely run."""
+    body = _diagnose_body()
+    assert "_read_cell_inputs(" in body
+    assert "label_status_counts" in body
+
+
+def test_the_diagnostic_binds_and_hashes_every_raw_source():
+    body = _diagnose_body()
+    assert "resolve_raw_source(" in body
+    assert "manifest.json" in body
+
+
+def test_the_diagnostic_never_evaluates_an_execution_pair():
+    """The whole point: it walks the same inputs and stops short of a fill."""
+    body = _diagnose_body()
+    for forbidden in (
+        "evaluate_pair",
+        "assemble_report",
+        "CellTiming",
+        ".summary(",
+        "BookReplay",
+        "CoverageTracker",
+        "query_instants",
+        "savings",
+        "net_return",
+        "walk_book",
+    ):
+        assert forbidden not in body, forbidden
+
+
+def test_the_diagnostic_never_replays_a_book():
+    body = _diagnose_body()
+    for forbidden in ("iter_dbn_events", "replay.run", "book_at"):
+        assert forbidden not in body, forbidden
+
+
+def test_the_diagnostic_does_not_record_predictions():
+    """A prediction is not an outcome, but it is not a count either."""
+    body = _diagnose_body()
+    assert '"predictions"' not in body
+    assert "inputs[\'predictions\']" not in body
+
+
+def test_the_diagnostic_keeps_the_recursive_strip():
+    body = _diagnose_body()
+    assert "_strip_outcomes(payload)" in body
+
+
+def test_the_diagnostic_declares_itself_outcome_free():
+    body = _diagnose_body()
+    assert '"diagnostic_only": True' in body
+    assert '"contains_execution_outcome": False' in body
+
+
+def test_the_diagnostic_reports_the_expected_universe_counts():
+    body = _diagnose_body()
+    for field in (
+        "symbol_days_inspected",
+        "session_date_count",
+        "frozen_cell_count",
+        "raw_sources_verified",
+        "spine_certified_cell_files",
+        "source_label_status_counts",
+        "eligible_rows_by_cell",
+        "excluded_rows_by_cell_and_status",
+        "stage2_reproduction",
+    ):
+        assert field in body, field
+
+
+def test_the_diagnostic_fails_when_the_reproduction_gate_fails(monkeypatch, tmp_path):
+    """A failing 20-date gate must stop the diagnostic, not be reported as a
+    finding alongside a clean bill of health."""
+    import argparse
+
+    import app.cli.mbo_stage35 as cli
+
+    monkeypatch.setattr(cli, "_prepare", lambda args: {"frozen": {"survivors": []}})
+
+    def exploding_build_fits(context):
+        raise ValueError(
+            "the Stage-3.5 per-date fits for 50ev|next_change do not reproduce "
+            "Stage 2's recorded delta_R2 across the complete frozen date block"
+        )
+
+    monkeypatch.setattr(cli, "_build_fits", exploding_build_fits)
+    args = argparse.Namespace(
+        output_dir=str(tmp_path), stage2_results="x", grams_dir="g",
+        features_dir="f", labels_dir="l", raw_dir="r",
+    )
+    with pytest.raises(ValueError, match="do not reproduce Stage 2"):
+        cli.diagnose(args)
+    assert not (tmp_path / "stage35_diagnostic.json").exists()
+
+
+def test_the_diagnostic_fails_when_a_raw_source_cannot_be_bound(monkeypatch, tmp_path):
+    """Binding is not advisory: an unverifiable raw file stops the diagnostic."""
+    import argparse
+
+    import app.cli.mbo_stage35 as cli
+
+    features = tmp_path / "features"
+    (features / "manifests").mkdir(parents=True)
+    (features / "50ev").mkdir(parents=True)
+    (features / "50ev" / "AAAA_2025-06-18.50ev.parquet").write_bytes(b"x")
+
+    monkeypatch.setattr(
+        cli,
+        "_prepare",
+        lambda args: {
+            "frozen": {"survivors": list(FROZEN_CELLS)},
+            "batch_completeness": {},
+            "blocks": BLOCKS,
+            "chronology": {},
+            "session_dates": DATES,
+            "features_dir": features,
+            "labels_dir": tmp_path / "labels",
+            "grams_dir": tmp_path / "grams",
+            "raw_dir": tmp_path / "raw",
+            "stage2": {},
+        },
+    )
+    monkeypatch.setattr(
+        cli, "_build_fits", lambda context: {"fits": {}, "reproduction": {}}
+    )
+    args = argparse.Namespace(
+        output_dir=str(tmp_path), stage2_results="x", grams_dir="g",
+        features_dir=str(features), labels_dir="l", raw_dir="r",
+    )
+    with pytest.raises(ValueError, match="no Stage-1 manifest"):
+        cli.diagnose(args)
+
+
+def test_the_diagnostic_and_the_run_share_the_same_loader():
+    """If they diverged, a clean diagnostic would stop meaning anything about
+    the run."""
+    import inspect
+
+    from app.cli.mbo_stage35 import diagnose, run
+
+    assert "_read_cell_inputs(" in inspect.getsource(diagnose)
+    assert "_read_cell_inputs(" in inspect.getsource(run)
+
+
+def test_the_plan_and_design_hash_did_not_move_for_the_diagnostic_patch():
+    """Wiring the diagnostic is not a mechanism change."""
+    from app.services.mbo_stage35_plan import PLAN_DESIGN_HASH, STAGE35_PLAN_VERSION
+
+    assert STAGE35_PLAN_VERSION == "tier1_stage35_execution_timing_v3"
+    assert PLAN_DESIGN_HASH == (
+        "097b5d65dfd49d9c648865df3b31c716b51b0c685c6e8b347c772a3b6992ba94"
+    )

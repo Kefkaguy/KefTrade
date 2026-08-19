@@ -348,6 +348,50 @@ All three functions now fail closed:
 Checking a subset and reporting success would have let an unverified chronology
 through on the strength of whichever dates happened to line up.
 
+## 12c. The diagnostic exercises the gates it is meant to certify
+
+`diagnose` previously called `_prepare()` only. It therefore checked the frozen
+plan, batch completeness, survivors and chronology - but not the 20-date Stage-2
+reproduction gate, and not the label-status eligibility path, because it never
+read an individual feature or label file.
+
+That is the wrong kind of green light: a clean diagnostic followed by a run that
+fails immediately on the two integrity gates most recently added.
+
+`diagnose` now:
+
+1. calls `_prepare(args)`;
+2. calls `_build_fits(context)`, exercising the per-cell **10 discovery + 6
+   validation + 4 confirmation = 20** reproduction gate, and reporting
+   `reproduction_verified`, `dates_checked`, `dates_checked_by_block` and the
+   frozen alpha per cell - Stage-2 *prediction-reproduction* diagnostics, not
+   Stage-3.5 execution outcomes;
+3. walks all 160 symbol-days and every applicable frozen cell through
+   `_read_cell_inputs()` - the same loader the run uses - so full sequence /
+   timestamp / midpoint spine certification, nullable availability handling and
+   the eligibility rule (including unknown-status refusal) all genuinely run;
+4. binds every raw source through `resolve_raw_source()`, verifying Stage-1's
+   recorded filename, byte size and SHA-256 **without replaying the file**;
+5. reports symbol-days inspected, session-date count, frozen-cell count, raw
+   sources verified, spine-certified cell files, per-cell label-status counts,
+   per-cell eligible-row counts, per-status excluded-row counts and the complete
+   reproduction result, with `diagnostic_only: true` and
+   `contains_execution_outcome: false`.
+
+It still calls no `evaluate_pair`, no `CellTiming.summary`, no
+`assemble_report`, no `BookReplay`, and no `walk_book`; predictions are computed
+by the shared loader but never read, recorded or returned. The recursive
+`_strip_outcomes()` filter remains on the way out.
+
+Those prohibitions are tested by inspecting the **executable body** with
+docstring *and comments* removed - matching on prose that names the forbidden
+calls would pass or fail for the wrong reason. A further test asserts a failing
+reproduction gate stops the diagnostic outright and writes no artefact.
+
+**No mechanism rule changed**, so `tier1_stage35_execution_timing_v3` and
+`PLAN_DESIGN_HASH 097b5d65...` are untouched; only the executor implementation
+version moved, to `tier1_stage35_executor_v4`.
+
 ## 12. Leakage and timing audit
 
 | Risk | Control | Test |
@@ -370,7 +414,7 @@ through on the strength of whichever dates happened to line up.
 | Threshold/parameter search | sign-only policy; no tunable flags | `test_the_magnitude_of_the_prediction_changes_nothing`, `test_the_cli_offers_no_symbol_filter_or_threshold_option` |
 | Fictitious exit cost | no round trip; only price-dependent fee difference reported | `test_no_round_trip_cost_is_charged`, `test_the_price_dependent_fee_difference_is_zero_under_june_2025` |
 
-**118 Stage-3.5 tests; 619 passed, 3 skipped** across the whole MBO suite; ruff
+**129 Stage-3.5 tests; 630 passed, 3 skipped** across the whole MBO suite; ruff
 clean.
 
 ---

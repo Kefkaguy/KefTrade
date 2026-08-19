@@ -79,7 +79,7 @@ from app.services.mbo_stage35_plan import (
     T_HURDLE,
 )
 
-STAGE35_EXECUTOR_VERSION = "tier1_stage35_executor_v3"
+STAGE35_EXECUTOR_VERSION = "tier1_stage35_executor_v4"
 
 EXPECTED_PLAN_DESIGN_HASH = (
     "097b5d65dfd49d9c648865df3b31c716b51b0c685c6e8b347c772a3b6992ba94"
