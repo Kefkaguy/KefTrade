@@ -850,6 +850,7 @@ def test_the_fee_difference_is_zero_under_the_june_2025_schedule():
 
 def _filled_cell(n=1_200, dates=12):
     from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+    from app.services.mbo_stage3_plan import PRIMARY_FEE_SCHEDULE
 
     cell = CellTiming(cell="50ev|next_change", price_scale=float(FIXED_PRICE_SCALE))
     decision = 1_000_000_000
@@ -865,7 +866,7 @@ def _filled_cell(n=1_200, dates=12):
             price_scale=float(FIXED_PRICE_SCALE),
         )
         assert reason is None
-        cell.pairs.append(pair)
+        cell.record_pair(pair, PRIMARY_FEE_SCHEDULE)
     return cell
 
 
@@ -880,6 +881,7 @@ def test_delay_reporting_distinguishes_pairs_from_parent_orders():
 
 def test_zero_predictions_lower_both_delay_fractions():
     from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+    from app.services.mbo_stage3_plan import PRIMARY_FEE_SCHEDULE
 
     cell = _filled_cell(n=100)
     decision = 1_000_000_000
@@ -892,7 +894,7 @@ def test_zero_predictions_lower_both_delay_fractions():
             price_scale=float(FIXED_PRICE_SCALE),
         )
         assert reason is None
-        cell.pairs.append(pair)
+        cell.record_pair(pair, PRIMARY_FEE_SCHEDULE)
     summary = cell.summary()
     assert summary["pairs_with_a_delay_fraction"] == pytest.approx(0.5)
     assert summary["parent_orders_delayed_fraction"] == pytest.approx(0.25)
@@ -1749,3 +1751,306 @@ def test_the_plan_and_design_hash_did_not_move_for_the_diagnostic_patch():
     assert PLAN_DESIGN_HASH == (
         "097b5d65dfd49d9c648865df3b31c716b51b0c685c6e8b347c772a3b6992ba94"
     )
+
+
+# ---------------------------------------------------------------------------
+# Streaming accumulation must reproduce the batch estimand exactly
+# ---------------------------------------------------------------------------
+
+
+def _batch_summary(cell_name, pairs, schedule):
+    """The batch computation the streaming version replaces.
+
+    Kept here, in the tests, as the reference the new implementation is measured
+    against. Deleting it and trusting the replacement would have removed the
+    only thing that can catch a changed estimand.
+    """
+    import numpy as np
+    from app.services.mbo_stage35_executor import (
+        BUY,
+        MIN_COMPARABLE_PAIRS,
+        MIN_SESSION_DATES,
+        TRIGGER_DEADLINE,
+        TRIGGER_TARGET,
+        clustered_t,
+        price_dependent_fee_difference_usd,
+    )
+
+    directional = [p for p in pairs if p.delayed_side is not None]
+    balanced = np.array([p.balanced_savings_bps for p in pairs])
+    delayed = np.array([p.delayed_savings_bps for p in directional])
+    midpoint = np.array([p.midpoint_benefit_bps(p.delayed_side) for p in directional])
+    book = np.array([p.book_walk_benefit_bps(p.delayed_side) for p in directional])
+    dollars = np.array([p.delayed_dollar_savings for p in directional])
+
+    by_date, by_symbol = {}, {}
+    buy_savings, sell_savings = [], []
+    for pair, value in zip(pairs, balanced, strict=True):
+        by_date.setdefault(pair.session_date, []).append(float(value))
+        by_symbol.setdefault(pair.symbol, []).append(float(value))
+        if pair.delayed_side == BUY:
+            buy_savings.append(pair.savings_bps(BUY))
+        elif pair.delayed_side is not None:
+            sell_savings.append(pair.savings_bps(pair.delayed_side))
+
+    date_means = {d: float(np.mean(v)) for d, v in sorted(by_date.items())}
+    statistic, p_value = clustered_t(list(date_means.values()))
+
+    def mean_or_none(values):
+        return float(np.mean(values)) if len(values) else None
+
+    return {
+        "cell": cell_name,
+        "comparable_pairs": len(pairs),
+        "asymmetric_fill_failures": 0,
+        "reached_screen": (
+            len(pairs) >= MIN_COMPARABLE_PAIRS and len(date_means) >= MIN_SESSION_DATES
+        ),
+        "session_dates": len(date_means),
+        "balanced_parent_flow_savings_bps": float(balanced.mean()),
+        "delayed_side_savings_bps": mean_or_none(delayed),
+        "midpoint_timing_benefit_bps": mean_or_none(midpoint),
+        "book_walk_benefit_bps": mean_or_none(book),
+        "dollar_savings_per_100_shares": mean_or_none(dollars),
+        "buy_savings_bps": mean_or_none(buy_savings),
+        "sell_savings_bps": mean_or_none(sell_savings),
+        "delayed_buy_pairs": len(buy_savings),
+        "delayed_sell_pairs": len(sell_savings),
+        "zero_prediction_pairs": len(pairs) - len(directional),
+        "pairs_with_a_delay_fraction": len(directional) / len(pairs),
+        "parent_orders_delayed_fraction": len(directional) / (2 * len(pairs)),
+        "target_triggered_delays": sum(
+            1 for p in directional if p.trigger == TRIGGER_TARGET
+        ),
+        "deadline_triggered_delays": sum(
+            1 for p in directional if p.trigger == TRIGGER_DEADLINE
+        ),
+        "mean_displayed_liquidity_shares": mean_or_none(
+            [p.leg(p.delayed_side)["timed_displayed"] for p in directional]
+        ),
+        "mean_levels_walked": mean_or_none(
+            [p.leg(p.delayed_side)["timed_levels"] for p in directional]
+        ),
+        "price_dependent_fee_difference_usd": mean_or_none(
+            [price_dependent_fee_difference_usd(p, schedule) for p in pairs]
+        ),
+        "clustered_t": statistic,
+        "p_value": p_value,
+        "per_session_date_balanced_bps": date_means,
+        "by_symbol_balanced_bps": {
+            s: float(np.mean(v)) for s, v in sorted(by_symbol.items())
+        },
+    }
+
+
+def _deterministic_pairs(n=240):
+    """A varied but reproducible stream: both directions, zero predictions,
+    both triggers, moving and static books, several dates and symbols."""
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+
+    scale = float(FIXED_PRICE_SCALE)
+    decision = 1_000_000_000
+    pairs = []
+    for i in range(n):
+        if i % 7 == 0:
+            predicted = 0.0
+        elif i % 3 == 0:
+            predicted = -50.0 - i
+        else:
+            predicted = 50.0 + i
+        drift = ((i % 11) - 5) * 0.01
+        target = None if i % 13 == 0 else decision + (50 + (i % 900)) * MS
+        pair, reason = evaluate_pair(
+            cell="50ev|next_change",
+            symbol=f"SYM{i % 5}",
+            session_date=f"2025-06-{2 + (i % 12):02d}",
+            block="confirmation",
+            predicted_bps=predicted,
+            decision_ts=decision,
+            target_available_ts_recv=target,
+            book_at=moving_book(
+                decision,
+                (100.00, 100.02),
+                (100.00 + drift, 100.02 + drift + (i % 3) * 0.01),
+                decision + 300 * MS,
+            ),
+            price_scale=scale,
+        )
+        assert reason is None, reason
+        pairs.append(pair)
+    return pairs
+
+
+def test_streaming_reproduces_the_batch_summary_field_for_field():
+    """The estimand must be identical; only the order of summation changes."""
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+    from app.services.mbo_stage3_plan import PRIMARY_FEE_SCHEDULE
+
+    pairs = _deterministic_pairs()
+    expected = _batch_summary("50ev|next_change", pairs, PRIMARY_FEE_SCHEDULE)
+
+    cell = CellTiming(cell="50ev|next_change", price_scale=float(FIXED_PRICE_SCALE))
+    for pair in pairs:
+        cell.record_pair(pair, PRIMARY_FEE_SCHEDULE)
+    actual = cell.summary()
+
+    exact_fields = (
+        "cell",
+        "comparable_pairs",
+        "session_dates",
+        "reached_screen",
+        "delayed_buy_pairs",
+        "delayed_sell_pairs",
+        "zero_prediction_pairs",
+        "target_triggered_delays",
+        "deadline_triggered_delays",
+        "asymmetric_fill_failures",
+    )
+    for field_name in exact_fields:
+        assert actual[field_name] == expected[field_name], field_name
+
+    float_fields = (
+        "balanced_parent_flow_savings_bps",
+        "delayed_side_savings_bps",
+        "midpoint_timing_benefit_bps",
+        "book_walk_benefit_bps",
+        "dollar_savings_per_100_shares",
+        "buy_savings_bps",
+        "sell_savings_bps",
+        "pairs_with_a_delay_fraction",
+        "parent_orders_delayed_fraction",
+        "mean_displayed_liquidity_shares",
+        "mean_levels_walked",
+        "price_dependent_fee_difference_usd",
+        "clustered_t",
+        "p_value",
+    )
+    for field_name in float_fields:
+        if expected[field_name] is None:
+            assert actual[field_name] is None, field_name
+        else:
+            assert actual[field_name] == pytest.approx(
+                expected[field_name], rel=1e-12, abs=1e-12
+            ), field_name
+
+    assert set(actual["per_session_date_balanced_bps"]) == set(
+        expected["per_session_date_balanced_bps"]
+    )
+    for date, value in expected["per_session_date_balanced_bps"].items():
+        assert actual["per_session_date_balanced_bps"][date] == pytest.approx(
+            value, rel=1e-12, abs=1e-12
+        ), date
+
+    assert set(actual["by_symbol_balanced_bps"]) == set(expected["by_symbol_balanced_bps"])
+    for symbol, value in expected["by_symbol_balanced_bps"].items():
+        assert actual["by_symbol_balanced_bps"][symbol] == pytest.approx(
+            value, rel=1e-12, abs=1e-12
+        ), symbol
+
+
+def test_streaming_parity_holds_for_an_all_zero_prediction_stream():
+    """The degenerate case: no pair delays, so every directional mean is None."""
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+    from app.services.mbo_stage3_plan import PRIMARY_FEE_SCHEDULE
+
+    scale = float(FIXED_PRICE_SCALE)
+    decision = 1_000_000_000
+    pairs = []
+    for i in range(12):
+        pair, reason = evaluate_pair(
+            cell="50ev|next_change", symbol="AAAA",
+            session_date=f"2025-06-{2 + i:02d}", block="confirmation",
+            predicted_bps=0.0, decision_ts=decision,
+            target_available_ts_recv=decision + 400 * MS,
+            book_at=static_book(100.00, 100.02), price_scale=scale,
+        )
+        assert reason is None
+        pairs.append(pair)
+
+    expected = _batch_summary("50ev|next_change", pairs, PRIMARY_FEE_SCHEDULE)
+    cell = CellTiming(cell="50ev|next_change", price_scale=scale)
+    for pair in pairs:
+        cell.record_pair(pair, PRIMARY_FEE_SCHEDULE)
+    actual = cell.summary()
+
+    assert actual["zero_prediction_pairs"] == expected["zero_prediction_pairs"] == 12
+    assert actual["pairs_with_a_delay_fraction"] == 0.0
+    assert actual["parent_orders_delayed_fraction"] == 0.0
+    for field_name in (
+        "delayed_side_savings_bps",
+        "midpoint_timing_benefit_bps",
+        "book_walk_benefit_bps",
+        "buy_savings_bps",
+        "sell_savings_bps",
+        "mean_displayed_liquidity_shares",
+        "mean_levels_walked",
+    ):
+        assert actual[field_name] is None, field_name
+        assert expected[field_name] is None, field_name
+
+
+def test_an_empty_cell_still_reports_why():
+    cell = CellTiming(cell="50ev|next_change")
+    cell.record_not_comparable(NOT_COMPARABLE_TIMED_LIQUIDITY)
+    summary = cell.summary()
+    assert summary["comparable_pairs"] == 0
+    assert summary["reached_screen"] is False
+    assert summary["not_comparable"][NOT_COMPARABLE_TIMED_LIQUIDITY] == 1
+
+
+# ---------------------------------------------------------------------------
+# Retained state must not grow with the number of observations
+# ---------------------------------------------------------------------------
+
+
+def test_cell_timing_holds_no_collection_proportional_to_observations():
+    import dataclasses
+
+    names = {f.name for f in dataclasses.fields(CellTiming)}
+    assert "pairs" not in names
+    cell = CellTiming(cell="50ev|next_change")
+    for name in names:
+        value = getattr(cell, name)
+        assert not isinstance(value, list), name
+
+
+def test_retained_state_is_bounded_by_dates_and_symbols_not_by_row_count():
+    """Ten times the observations, over the same dates and symbols, must leave
+    the same amount of state behind."""
+    from app.services.mbo_feature_engine import FIXED_PRICE_SCALE
+    from app.services.mbo_stage3_plan import PRIMARY_FEE_SCHEDULE
+
+    scale = float(FIXED_PRICE_SCALE)
+    decision = 1_000_000_000
+
+    def stream(n):
+        cell = CellTiming(cell="50ev|next_change", price_scale=scale)
+        for i in range(n):
+            pair, reason = evaluate_pair(
+                cell="50ev|next_change", symbol=f"SYM{i % 5}",
+                session_date=f"2025-06-{2 + (i % 12):02d}", block="confirmation",
+                predicted_bps=(50.0 if i % 2 else -50.0), decision_ts=decision,
+                target_available_ts_recv=decision + 400 * MS,
+                book_at=static_book(100.00, 100.02), price_scale=scale,
+            )
+            assert reason is None
+            cell.record_pair(pair, PRIMARY_FEE_SCHEDULE)
+        return cell
+
+    small, large = stream(200), stream(2_000)
+    assert large.comparable_pairs == 10 * small.comparable_pairs
+    # The only growing structures are the bounded date and symbol maps.
+    assert len(large.by_date) == len(small.by_date) == 12
+    assert len(large.by_symbol) == len(small.by_symbol) == 5
+    assert len(large.not_comparable) == len(small.not_comparable) == 0
+
+
+def test_the_run_folds_pairs_in_rather_than_retaining_them():
+    import inspect
+
+    from app.cli.mbo_stage35 import run
+
+    source = inspect.getsource(run)
+    assert "record_pair(" in source
+    assert "pairs.append(" not in source
+    assert "sink.summary()" in source

@@ -79,7 +79,7 @@ from app.services.mbo_stage35_plan import (
     T_HURDLE,
 )
 
-STAGE35_EXECUTOR_VERSION = "tier1_stage35_executor_v4"
+STAGE35_EXECUTOR_VERSION = "tier1_stage35_executor_v5"
 
 EXPECTED_PLAN_DESIGN_HASH = (
     "097b5d65dfd49d9c648865df3b31c716b51b0c685c6e8b347c772a3b6992ba94"
@@ -528,116 +528,162 @@ def price_dependent_fee_difference_usd(
 # ---------------------------------------------------------------------------
 
 
+@dataclass(slots=True)
+class _Running:
+    """A sum and a count. Enough for every mean this study reports."""
+
+    total: float = 0.0
+    count: int = 0
+
+    def add(self, value: float) -> None:
+        self.total += float(value)
+        self.count += 1
+
+    @property
+    def mean(self) -> float | None:
+        return self.total / self.count if self.count else None
+
+
 @dataclass
 class CellTiming:
-    """Everything measured for one frozen cell."""
+    """Everything measured for one frozen cell, accumulated in constant space.
+
+    The diagnostic counted 11,534,742 eligible cell-rows. Retaining a
+    ``PairedExecution`` per comparable observation -- each carrying two
+    eight-entry dictionaries -- would have cost tens of gigabytes and bought
+    nothing: every statistic this study reports is a mean, and a mean needs a
+    sum and a count, not the observations.
+
+    So each pair is folded in on arrival and discarded. The only state that
+    grows with the data is the per-date and per-symbol bookkeeping, and that is
+    bounded by 20 dates and 8 symbols.
+    """
 
     cell: str
     price_scale: float = 1.0
-    pairs: list[PairedExecution] = field(default_factory=list)
+    fee_schedule_name: str | None = None
+
+    comparable_pairs: int = 0
+    directional_pairs: int = 0
+    zero_prediction_pairs: int = 0
+    target_triggered: int = 0
+    deadline_triggered: int = 0
+
+    balanced: _Running = field(default_factory=_Running)
+    delayed: _Running = field(default_factory=_Running)
+    midpoint: _Running = field(default_factory=_Running)
+    book_walk: _Running = field(default_factory=_Running)
+    dollars: _Running = field(default_factory=_Running)
+    buy_savings: _Running = field(default_factory=_Running)
+    sell_savings: _Running = field(default_factory=_Running)
+    displayed: _Running = field(default_factory=_Running)
+    levels: _Running = field(default_factory=_Running)
+    fees: _Running = field(default_factory=_Running)
+
+    by_date: dict[str, _Running] = field(default_factory=dict)
+    by_symbol: dict[str, _Running] = field(default_factory=dict)
     not_comparable: dict[str, int] = field(default_factory=dict)
 
     def record_not_comparable(self, reason: str) -> None:
         self.not_comparable[reason] = self.not_comparable.get(reason, 0) + 1
 
+    def record_pair(
+        self, pair: PairedExecution, schedule: dict[str, Any] | None = None
+    ) -> None:
+        """Fold one comparable pair into the running statistics and let it go.
+
+        Every quantity below is exactly the one the batch implementation
+        averaged; only the order of summation differs, and the parity tests
+        pin that.
+        """
+        self.comparable_pairs += 1
+        balanced = pair.balanced_savings_bps
+        self.balanced.add(balanced)
+        self.by_date.setdefault(pair.session_date, _Running()).add(balanced)
+        self.by_symbol.setdefault(pair.symbol, _Running()).add(balanced)
+
+        if schedule is not None:
+            if self.fee_schedule_name is None:
+                self.fee_schedule_name = schedule.get("name")
+            self.fees.add(price_dependent_fee_difference_usd(pair, schedule))
+
+        side = pair.delayed_side
+        if side is None:
+            self.zero_prediction_pairs += 1
+            return
+
+        self.directional_pairs += 1
+        self.delayed.add(pair.savings_bps(side))
+        self.midpoint.add(pair.midpoint_benefit_bps(side))
+        self.book_walk.add(pair.book_walk_benefit_bps(side))
+        self.dollars.add(pair.delayed_dollar_savings)
+        (self.buy_savings if side == BUY else self.sell_savings).add(
+            pair.savings_bps(side)
+        )
+        leg = pair.leg(side)
+        self.displayed.add(leg["timed_displayed"])
+        self.levels.add(leg["timed_levels"])
+        if pair.trigger == TRIGGER_TARGET:
+            self.target_triggered += 1
+        elif pair.trigger == TRIGGER_DEADLINE:
+            self.deadline_triggered += 1
+
     @property
     def asymmetric_failures(self) -> int:
         return sum(self.not_comparable.get(r, 0) for r in ASYMMETRIC_FAILURES)
 
-    def summary(self, schedule: dict[str, Any] | None = None) -> dict[str, Any]:
-        pairs = self.pairs
+    def summary(self) -> dict[str, Any]:
         base = {
             "cell": self.cell,
-            "comparable_pairs": len(pairs),
+            "comparable_pairs": self.comparable_pairs,
             "not_comparable": dict(sorted(self.not_comparable.items())),
             "asymmetric_fill_failures": self.asymmetric_failures,
         }
-        if not pairs:
+        if not self.comparable_pairs:
             return {**base, "reached_screen": False, "reason": "no comparable pairs"}
 
-        directional = [p for p in pairs if p.delayed_side is not None]
-        balanced = np.array([p.balanced_savings_bps for p in pairs])
-        delayed = np.array([p.delayed_savings_bps for p in directional]) if directional else np.array([])
-        midpoint = np.array(
-            [p.midpoint_benefit_bps(p.delayed_side) for p in directional]
-        ) if directional else np.array([])
-        book = np.array(
-            [p.book_walk_benefit_bps(p.delayed_side) for p in directional]
-        ) if directional else np.array([])
-        dollars = np.array([p.delayed_dollar_savings for p in directional]) if directional else np.array([])
-
-        by_date: dict[str, list[float]] = {}
-        by_symbol: dict[str, list[float]] = {}
-        buy_savings: list[float] = []
-        sell_savings: list[float] = []
-        for pair, value in zip(pairs, balanced, strict=True):
-            by_date.setdefault(pair.session_date, []).append(float(value))
-            by_symbol.setdefault(pair.symbol, []).append(float(value))
-            if pair.delayed_side == BUY:
-                buy_savings.append(pair.savings_bps(BUY))
-            elif pair.delayed_side == SELL:
-                sell_savings.append(pair.savings_bps(SELL))
-
-        date_means = {d: float(np.mean(v)) for d, v in sorted(by_date.items())}
+        date_means = {
+            date: running.total / running.count
+            for date, running in sorted(self.by_date.items())
+        }
         statistic, p_value = clustered_t(list(date_means.values()))
         reached = (
-            len(pairs) >= MIN_COMPARABLE_PAIRS and len(date_means) >= MIN_SESSION_DATES
+            self.comparable_pairs >= MIN_COMPARABLE_PAIRS
+            and len(date_means) >= MIN_SESSION_DATES
         )
-        fee_difference = (
-            float(np.mean([price_dependent_fee_difference_usd(p, schedule) for p in pairs]))
-            if schedule
-            else None
-        )
-        zero_predictions = len(pairs) - len(directional)
-
-        def mean_or_none(values):
-            return float(values.mean()) if len(values) else None
+        total = self.comparable_pairs
 
         return {
             **base,
             "reached_screen": reached,
             "session_dates": len(date_means),
-            "balanced_parent_flow_savings_bps": float(balanced.mean()),
-            "delayed_side_savings_bps": mean_or_none(delayed),
-            "midpoint_timing_benefit_bps": mean_or_none(midpoint),
-            "book_walk_benefit_bps": mean_or_none(book),
-            "dollar_savings_per_100_shares": mean_or_none(dollars),
-            "buy_savings_bps": float(np.mean(buy_savings)) if buy_savings else None,
-            "sell_savings_bps": float(np.mean(sell_savings)) if sell_savings else None,
-            "delayed_buy_pairs": len(buy_savings),
-            "delayed_sell_pairs": len(sell_savings),
-            "zero_prediction_pairs": zero_predictions,
+            "balanced_parent_flow_savings_bps": self.balanced.mean,
+            "delayed_side_savings_bps": self.delayed.mean,
+            "midpoint_timing_benefit_bps": self.midpoint.mean,
+            "book_walk_benefit_bps": self.book_walk.mean,
+            "dollar_savings_per_100_shares": self.dollars.mean,
+            "buy_savings_bps": self.buy_savings.mean,
+            "sell_savings_bps": self.sell_savings.mean,
+            "delayed_buy_pairs": self.buy_savings.count,
+            "delayed_sell_pairs": self.sell_savings.count,
+            "zero_prediction_pairs": self.zero_prediction_pairs,
             # Every directional pair contains a delay, but it contains TWO parent
             # orders and only one of them delays. Calling that 1.0 would overstate
             # how much of the flow the mechanism actually touches.
-            "pairs_with_a_delay_fraction": (
-                len(directional) / len(pairs) if pairs else 0.0
-            ),
-            "parent_orders_delayed_fraction": (
-                len(directional) / (2 * len(pairs)) if pairs else 0.0
-            ),
-            "target_triggered_delays": sum(
-                1 for p in directional if p.trigger == TRIGGER_TARGET
-            ),
-            "deadline_triggered_delays": sum(
-                1 for p in directional if p.trigger == TRIGGER_DEADLINE
-            ),
-            "mean_displayed_liquidity_shares": (
-                float(np.mean([p.leg(p.delayed_side)["timed_displayed"] for p in directional]))
-                if directional
-                else None
-            ),
-            "mean_levels_walked": (
-                float(np.mean([p.leg(p.delayed_side)["timed_levels"] for p in directional]))
-                if directional
-                else None
-            ),
-            "price_dependent_fee_difference_usd": fee_difference,
+            "pairs_with_a_delay_fraction": self.directional_pairs / total,
+            "parent_orders_delayed_fraction": self.directional_pairs / (2 * total),
+            "target_triggered_delays": self.target_triggered,
+            "deadline_triggered_delays": self.deadline_triggered,
+            "mean_displayed_liquidity_shares": self.displayed.mean,
+            "mean_levels_walked": self.levels.mean,
+            "price_dependent_fee_difference_usd": self.fees.mean,
+            "fee_schedule": self.fee_schedule_name,
             "clustered_t": statistic,
             "p_value": p_value,
             "per_session_date_balanced_bps": date_means,
             "by_symbol_balanced_bps": {
-                s: float(np.mean(v)) for s, v in sorted(by_symbol.items())
+                symbol: running.total / running.count
+                for symbol, running in sorted(self.by_symbol.items())
             },
         }
 

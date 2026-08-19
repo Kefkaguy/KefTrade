@@ -563,7 +563,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 if pair is None:
                     sink.record_not_comparable(reason or "unknown")
                 else:
-                    sink.pairs.append(pair)
+                    # Folded in and discarded: 11.5M retained pairs would cost
+                    # tens of gigabytes and buy nothing a mean does not.
+                    sink.record_pair(pair, PRIMARY_FEE_SCHEDULE)
 
         symbol_days.append(
             {
@@ -577,7 +579,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         del books, replay, per_cell, book_at
 
     report = assemble_report(
-        [sink.summary(PRIMARY_FEE_SCHEDULE) for sink in sinks.values()],
+        [sink.summary() for sink in sinks.values()],
         chronology=context["chronology"],
     )
     report["source_label_status_counts"] = status_counts

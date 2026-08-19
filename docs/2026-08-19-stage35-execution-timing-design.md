@@ -416,6 +416,38 @@ reproduction gate stops the diagnostic outright and writes no artefact.
 `PLAN_DESIGN_HASH 097b5d65...` are untouched; only the executor implementation
 version moved, to `tier1_stage35_executor_v4`.
 
+## 12d. Streaming accumulation, not pair retention
+
+The clean diagnostic counted **11,534,742** eligible cell-rows. `CellTiming`
+retained a `PairedExecution` per comparable observation, each carrying two
+eight-entry dictionaries: measured at ~1,940 bytes, that is **~20.8 GB** of
+retained objects before `summary()` materialised further full arrays on top.
+
+There was never a scientific reason to keep them. Every statistic this study
+reports is a mean, and a mean needs a sum and a count - not the observations.
+`record_pair()` now folds each pair into running sufficient statistics and lets
+it go. Measured retained state per cell after 5,000 pairs: **2,724 bytes**, and
+it does not grow with the row count.
+
+The only structures that grow at all are the per-date and per-symbol maps,
+bounded by 20 dates and 8 symbols - asserted by a test that streams 200 and
+2,000 observations and requires identical map sizes.
+
+### Parity, not trust
+
+The batch computation was **not** deleted and replaced. It was moved into the
+test file as `_batch_summary()` and is now the reference the streaming version
+is measured against, over a deterministic 240-pair fixture spanning both
+directions, zero predictions, both triggers, moving and static books, 12 dates
+and 5 symbols. Every reported field is compared: counts exactly, floats at
+`rel=1e-12`. A second parity test covers the all-zero-prediction stream, where
+every directional mean must be `None`.
+
+Only the order of summation changed. No threshold, latency, delay, cell, policy,
+formula or screen rule moved, so `tier1_stage35_execution_timing_v3` and
+`PLAN_DESIGN_HASH 097b5d65...` are byte-identical; only the executor
+implementation version advanced, to `tier1_stage35_executor_v5`.
+
 ## 12. Leakage and timing audit
 
 | Risk | Control | Test |
@@ -438,7 +470,7 @@ version moved, to `tier1_stage35_executor_v4`.
 | Threshold/parameter search | sign-only policy; no tunable flags | `test_the_magnitude_of_the_prediction_changes_nothing`, `test_the_cli_offers_no_symbol_filter_or_threshold_option` |
 | Fictitious exit cost | no round trip; only price-dependent fee difference reported | `test_no_round_trip_cost_is_charged`, `test_the_price_dependent_fee_difference_is_zero_under_june_2025` |
 
-**133 Stage-3.5 tests; 634 passed, 3 skipped** across the whole MBO suite; ruff
+**139 Stage-3.5 tests; 640 passed, 3 skipped** across the whole MBO suite; ruff
 clean.
 
 ---
