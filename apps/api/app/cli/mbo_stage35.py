@@ -59,6 +59,27 @@ def _write(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, default=str, indent=2), encoding="utf-8")
 
 
+def _status_records(by_cell: dict[str, dict[str, int]]) -> list[dict[str, Any]]:
+    """Per-cell status counts, with the status name as a value.
+
+    ``_strip_outcomes`` removes any key containing an outcome-bearing token, and
+    two of the label statuses contain "midpoint". Renaming the token list to
+    accommodate them would weaken a filter that is deliberately blunt, so the
+    counts are reshaped instead: ``{"status": ..., "count": ...}`` survives the
+    filter intact because neither key is forbidden.
+    """
+    return [
+        {
+            "cell": cell,
+            "statuses": [
+                {"status": status, "count": count}
+                for status, count in sorted(counts.items())
+            ],
+        }
+        for cell, counts in sorted(by_cell.items())
+    ]
+
+
 def _strip_outcomes(payload: dict[str, Any]) -> dict[str, Any]:
     """Remove anything that could be an execution outcome, by name, recursively."""
     clean: dict[str, Any] = {}
@@ -407,9 +428,15 @@ def diagnose(args: argparse.Namespace) -> dict[str, Any]:
         "session_date_count": len(context["session_dates"]),
         "raw_sources_verified": raw_sources_verified,
         "spine_certified_cell_files": spine_certified_files,
-        "source_label_status_counts": label_statuses,
+        # Status names are serialized as VALUES, not as keys. The generic
+        # outcome filter strips any key containing "midpoint", which would
+        # otherwise silently delete the counts for
+        # no_further_midpoint_change and source_midpoint_unavailable -- exactly
+        # the provenance this artefact exists to show. The filter is right to be
+        # blunt; the fix belongs in the serialization.
+        "source_label_status_counts": _status_records(label_statuses),
         "eligible_rows_by_cell": eligible_rows,
-        "excluded_rows_by_cell_and_status": excluded_rows,
+        "excluded_rows_by_cell_and_status": _status_records(excluded_rows),
         "stage2_reproduction": reproduction,
         "blocks": {k: list(v) for k, v in context["blocks"].items() if k != "unassigned"},
         "per_session_date_training": context["chronology"],

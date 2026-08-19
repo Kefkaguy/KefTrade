@@ -1663,6 +1663,84 @@ def test_the_diagnostic_and_the_run_share_the_same_loader():
     assert "_read_cell_inputs(" in inspect.getsource(run)
 
 
+def test_status_counts_survive_the_outcome_filter_while_outcomes_do_not():
+    """The bug this closes: two label statuses contain the word "midpoint", and
+    the generic filter strips any key containing it -- so serializing statuses
+    as keys silently deleted exactly the provenance the diagnostic exists to
+    show. The filter is right to be blunt; the fix belongs in the shape.
+    """
+    from app.cli.mbo_stage35 import _status_records, _strip_outcomes
+
+    payload = {
+        "source_label_status_counts": _status_records(
+            {
+                "50ev|next_change": {
+                    "ok": 123,
+                    "no_further_midpoint_change": 45,
+                    "source_midpoint_unavailable": 2,
+                }
+            }
+        ),
+        "excluded_rows_by_cell_and_status": _status_records(
+            {"200ev|next_change": {"source_midpoint_unavailable": 7}}
+        ),
+        # Genuine outcomes, which must still be removed.
+        "balanced_parent_flow_savings_bps": 0.9,
+        "midpoint_timing_benefit_bps": 0.4,
+        "p_value": 1e-9,
+        "verdict": "supported",
+    }
+    clean = _strip_outcomes(payload)
+
+    assert set(clean) == {
+        "source_label_status_counts",
+        "excluded_rows_by_cell_and_status",
+    }
+    statuses = clean["source_label_status_counts"][0]["statuses"]
+    assert {entry["status"]: entry["count"] for entry in statuses} == {
+        "ok": 123,
+        "no_further_midpoint_change": 45,
+        "source_midpoint_unavailable": 2,
+    }
+    excluded = clean["excluded_rows_by_cell_and_status"][0]
+    assert excluded["cell"] == "200ev|next_change"
+    assert excluded["statuses"] == [
+        {"status": "source_midpoint_unavailable", "count": 7}
+    ]
+
+
+def test_status_counts_as_keys_would_have_been_stripped():
+    """Demonstrates the defect rather than merely asserting the fix, so the
+    reason for the record shape cannot be optimised away later."""
+    from app.cli.mbo_stage35 import _strip_outcomes
+
+    as_keys = {
+        "counts": {
+            "ok": 123,
+            "no_further_midpoint_change": 45,
+            "source_midpoint_unavailable": 2,
+        }
+    }
+    assert _strip_outcomes(as_keys) == {"counts": {"ok": 123}}
+
+
+def test_the_outcome_filter_was_not_weakened():
+    """No token was removed to make the statuses fit."""
+    from app.cli.mbo_stage35 import OUTCOME_BEARING
+
+    for token in (
+        "saving", "savings", "benefit", "fill", "midpoint", "dollar", "bps",
+        "clustered_t", "p_value", "verdict", "passing",
+    ):
+        assert token in OUTCOME_BEARING, token
+
+
+def test_the_diagnostic_serializes_statuses_as_records():
+    body = _diagnose_body()
+    assert "_status_records(label_statuses)" in body
+    assert "_status_records(excluded_rows)" in body
+
+
 def test_the_plan_and_design_hash_did_not_move_for_the_diagnostic_patch():
     """Wiring the diagnostic is not a mechanism change."""
     from app.services.mbo_stage35_plan import PLAN_DESIGN_HASH, STAGE35_PLAN_VERSION

@@ -383,6 +383,30 @@ It still calls no `evaluate_pair`, no `CellTiming.summary`, no
 by the shared loader but never read, recorded or returned. The recursive
 `_strip_outcomes()` filter remains on the way out.
 
+### Status counts are serialized as records
+
+Two label statuses contain the word "midpoint", and `_strip_outcomes()` removes
+any key containing an outcome-bearing token. Serializing statuses as dictionary
+*keys* therefore deleted the counts for `no_further_midpoint_change` and
+`source_midpoint_unavailable` from the written artefact - exactly the provenance
+the diagnostic exists to show.
+
+The filter is right to be blunt, so it was not weakened. The counts are reshaped
+instead:
+
+```json
+[{"cell": "50ev|next_change",
+  "statuses": [{"status": "ok", "count": 123},
+               {"status": "no_further_midpoint_change", "count": 45},
+               {"status": "source_midpoint_unavailable", "count": 2}]}]
+```
+
+Neither `status` nor `count` is a forbidden key, so the records pass through
+intact. A test asserts that; a second test demonstrates the *defect* - the same
+counts as keys collapse to `{"ok": 123}` - so the reason for the record shape
+cannot be optimised away later; and a third asserts no token was removed from
+the filter to make the statuses fit.
+
 Those prohibitions are tested by inspecting the **executable body** with
 docstring *and comments* removed - matching on prose that names the forbidden
 calls would pass or fail for the wrong reason. A further test asserts a failing
@@ -414,7 +438,7 @@ version moved, to `tier1_stage35_executor_v4`.
 | Threshold/parameter search | sign-only policy; no tunable flags | `test_the_magnitude_of_the_prediction_changes_nothing`, `test_the_cli_offers_no_symbol_filter_or_threshold_option` |
 | Fictitious exit cost | no round trip; only price-dependent fee difference reported | `test_no_round_trip_cost_is_charged`, `test_the_price_dependent_fee_difference_is_zero_under_june_2025` |
 
-**129 Stage-3.5 tests; 630 passed, 3 skipped** across the whole MBO suite; ruff
+**133 Stage-3.5 tests; 634 passed, 3 skipped** across the whole MBO suite; ruff
 clean.
 
 ---
