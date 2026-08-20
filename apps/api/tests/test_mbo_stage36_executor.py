@@ -31,6 +31,7 @@ from app.services.mbo_stage36_executor import (
     Candidate,
     ExecutedTrade,
     Stage36Accumulator,
+    _parse_timestamp,
     assert_consensus_is_internally_consistent,
     assert_frozen_counts,
     assert_frozen_plan,
@@ -1459,3 +1460,247 @@ def test_the_consensus_source_survives_the_outcome_filter():
         "runtime_recomputation": {"events_compared": 259, "event_level_match": True},
     }
     assert _strip_outcomes(payload) == payload
+
+
+# ---------------------------------------------------------------------------
+# Nanosecond fidelity
+# ---------------------------------------------------------------------------
+#
+# The frozen census records nine fractional digits. The stdlib resolves to six
+# and truncates the rest *without raising*, so a census instant read back as
+# ...494493000 instead of ...494493570 looked exactly like the four models
+# having drifted. It was arithmetic, not disagreement. These pin the real
+# instants from the VPS diagnostic.
+
+NANOSECOND_CASES = (
+    ("2025-06-02 13:59:45.494493570+00:00", 1_748_872_785_494_493_570),
+    ("2025-06-02 15:01:52.926094073+00:00", 1_748_876_512_926_094_073),
+)
+
+
+@pytest.mark.parametrize(("text", "expected_ns"), NANOSECOND_CASES)
+def test_a_census_timestamp_round_trips_to_the_exact_nanosecond(text, expected_ns):
+    assert _parse_timestamp(text) == expected_ns
+
+
+@pytest.mark.parametrize(("text", "expected_ns"), NANOSECOND_CASES)
+def test_the_final_three_digits_are_not_discarded(text, expected_ns):
+    """The specific failure: truncation to microseconds, silently."""
+    truncated = (expected_ns // 1_000) * 1_000
+    assert expected_ns != truncated, "pick a case that actually has sub-us digits"
+    assert _parse_timestamp(text) != truncated
+    assert _parse_timestamp(text) % 1_000 == expected_ns % 1_000
+
+
+def test_the_stdlib_parser_would_have_lost_those_digits():
+    """Why this needed replacing rather than guarding: the stdlib does not
+    refuse the extra precision, it quietly drops it."""
+    import datetime as stdlib_datetime
+
+    for text, expected_ns in NANOSECOND_CASES:
+        naive = stdlib_datetime.datetime.fromisoformat(text)
+        stdlib_ns = int(naive.timestamp() * 1_000_000) * 1_000
+        assert stdlib_ns != expected_ns
+        assert _parse_timestamp(text) == expected_ns
+
+
+def test_two_instants_differing_below_one_microsecond_are_not_equal():
+    """A single nanosecond apart is apart. No tolerance closes this gap."""
+    earlier = _parse_timestamp("2025-06-02 13:59:45.494493570+00:00")
+    later = _parse_timestamp("2025-06-02 13:59:45.494493571+00:00")
+    assert earlier != later
+    assert later - earlier == 1
+
+    # And a difference that a microsecond-resolution parser would erase.
+    a = _parse_timestamp("2025-06-02 15:01:52.926094073+00:00")
+    b = _parse_timestamp("2025-06-02 15:01:52.926094999+00:00")
+    assert a != b
+    assert b - a == 926
+    assert a // 1_000 == b // 1_000, "same microsecond, different nanosecond"
+
+
+def test_sub_microsecond_drift_still_refuses_reconciliation():
+    """End to end: the guard that caught this bug is still the guard.
+
+    One nanosecond of movement in one cell of one event out of 259 must refuse.
+    """
+    import dataclasses
+
+    from app.services.mbo_stage36_executor import reconcile_with_frozen_census
+
+    runtime, frozen = _identity_pair()
+    index = next(i for i, c in enumerate(runtime) if c.cell_prediction_ts[0] > 0)
+    moved = list(runtime[index].cell_prediction_ts)
+    moved[0] += 1  # one nanosecond
+    runtime[index] = dataclasses.replace(runtime[index], cell_prediction_ts=tuple(moved))
+    with pytest.raises(ValueError, match="prediction instant"):
+        reconcile_with_frozen_census(runtime, frozen)
+
+
+def test_the_real_census_retains_its_sub_microsecond_digits():
+    """Against the actual frozen file, not a constructed string.
+
+    996 of the 998 recorded instants carry non-zero digits below a microsecond.
+    Under the old parser every one of them was zeroed.
+    """
+    import csv
+    import re
+
+    path = (
+        REPO_ROOT
+        / PREOUTCOME_RELATIVE_DIR
+        / CSV_FILENAMES["consensus_census"]
+    )
+    checked = 0
+    with path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            for column, raw in row.items():
+                if "known_at" not in column and "prediction_time" not in column:
+                    continue
+                text = (raw or "").strip()
+                if not text:
+                    continue
+                digits = re.search(r"\.(\d+)", text)
+                if not digits or len(digits.group(1)) <= 6:
+                    continue
+                tail = digits.group(1)[6:9]
+                if not tail.strip("0"):
+                    continue
+                checked += 1
+                assert _parse_timestamp(text) % 1_000 == int(tail), text
+    assert checked == 996, checked
+
+
+def test_every_candidate_timestamp_survives_the_loader_intact():
+    """The precision has to survive ``load_candidates``, not just the parser."""
+    candidates = load_candidates(REPO_ROOT)
+    assert len(candidates) == 259
+
+    instants = [t for c in candidates for t in c.cell_prediction_ts if t > 0]
+    assert len(instants) == 998
+    assert sum(1 for t in instants if t % 1_000) == 996
+
+
+def test_the_decision_window_was_never_affected_by_the_precision_bug():
+    """Which prediction gets selected did not change -- only the comparison.
+
+    ``known_at`` is recorded at whole-second resolution, so ``t0`` and ``td``
+    were always exact and the truncation could not have moved the selection
+    window. What it corrupted was the recorded *instant* of the chosen
+    prediction, which is what the reconciliation compares. Worth pinning: if a
+    future census carried sub-second news timestamps, the window itself would
+    become precision-sensitive and this test should fail loudly rather than let
+    that pass unnoticed.
+    """
+    candidates = load_candidates(REPO_ROOT)
+    assert all(c.known_at_ns % SECOND == 0 for c in candidates)
+    for candidate in candidates:
+        assert candidate.td_ns - candidate.t0_ns == 30 * SECOND
+        assert candidate.td_ns % SECOND == 0
+
+
+# --- refusal semantics are unchanged ---------------------------------------
+
+
+def test_an_empty_timestamp_is_still_refused():
+    with pytest.raises(ValueError, match="empty timestamp"):
+        _parse_timestamp("   ")
+
+
+def test_a_timezone_less_timestamp_is_still_refused():
+    """An instant without an offset is not an instant."""
+    with pytest.raises(ValueError, match="carries no timezone"):
+        _parse_timestamp("2025-06-02 13:59:45.494493570")
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "not-a-timestamp",
+        "2025-13-45 99:99:99+00:00",
+        "!!!",
+    ],
+)
+def test_a_malformed_timestamp_is_still_refused(text):
+    with pytest.raises(ValueError):
+        _parse_timestamp(text)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected_ns"),
+    [
+        ("2025-06-02T13:59:45.494493570Z", 1_748_872_785_494_493_570),
+        ("2025-06-02T13:59:45.494493570+00:00", 1_748_872_785_494_493_570),
+        # A non-UTC offset must convert, not merely be accepted.
+        ("2025-06-02 09:59:45.494493570-04:00", 1_748_872_785_494_493_570),
+    ],
+)
+def test_offset_forms_all_normalise_to_the_same_utc_nanosecond(text, expected_ns):
+    assert _parse_timestamp(text) == expected_ns
+
+
+# --- no tolerance may creep back in ----------------------------------------
+
+
+def test_the_reconciliation_compares_instants_exactly():
+    """Structural: no tolerance, no rounding, no microsecond flooring anywhere
+    in the comparison path."""
+    import ast
+    import inspect
+
+    from app.services import mbo_stage36_executor as executor
+
+    source = textwrap.dedent(inspect.getsource(executor.reconcile_with_frozen_census))
+    tree = ast.parse(source)
+    body = tree.body[0].body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+    ):
+        body.pop(0)  # the docstring may legitimately discuss tolerances
+
+    called = {
+        getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+    }
+    for banned in ("isclose", "allclose", "round", "floor", "approx"):
+        assert banned not in called, banned
+
+    # No divisor that would quantise a nanosecond comparison to microseconds.
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(
+            node.op, (ast.FloorDiv, ast.Div, ast.Mod)
+        ):
+            pytest.fail("instants are compared after arithmetic scaling")
+
+
+def test_the_parser_does_not_use_a_microsecond_resolution_clock():
+    """``datetime`` cannot represent these instants, so it must not appear."""
+    import ast
+    import inspect
+
+    from app.services import mbo_stage36_executor as executor
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(executor._parse_timestamp)))
+    body = tree.body[0].body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+    ):
+        body.pop(0)
+
+    names = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+    attributes = {
+        node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)
+    }
+    for banned in ("datetime", "timedelta", "fromisoformat", "microseconds"):
+        assert banned not in names | attributes, banned
+
+    # The module no longer imports the microsecond-resolution machinery at all.
+    module_tree = ast.parse(inspect.getsource(executor))
+    for node in ast.walk(module_tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "datetime":
+            pytest.fail("the microsecond-resolution clock is importable again")

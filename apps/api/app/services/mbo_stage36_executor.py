@@ -37,7 +37,6 @@ import csv
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -207,26 +206,37 @@ def verify_preoutcome_artifacts(repo_root: Path) -> dict[str, Any]:
 
 
 def _parse_timestamp(text: str) -> int:
-    """A recorded timestamp, in UTC nanoseconds.
+    """A recorded timestamp, in UTC nanoseconds, to the last nanosecond.
 
-    The CSVs carry ISO-8601 with an offset. Anything this cannot parse is a
-    refusal, not a guess: a misread instant would silently move a decision.
+    The CSVs carry ISO-8601 with an offset and nine fractional digits. The
+    stdlib is not usable here: ``datetime`` resolves to microseconds, and
+    ``fromisoformat`` *silently truncates* the final three digits rather than
+    refusing them -- so ``...494493570`` parsed to ``...494493000`` with no
+    error anywhere. Every recomputed prediction instant then disagreed with the
+    census by a few hundred nanoseconds, which reads exactly like a model
+    mismatch and is nothing of the sort.
+
+    ``pandas.Timestamp`` carries epoch nanoseconds natively, so the round trip
+    is exact. Anything unparseable is still a refusal rather than a guess: a
+    misread instant would silently move a decision.
     """
+    import pandas as pd
+
     cleaned = text.strip()
     if not cleaned:
         raise ValueError("empty timestamp")
-    if cleaned.endswith("Z"):
-        cleaned = cleaned[:-1] + "+00:00"
-    # "+00" -> "+00:00"
-    if len(cleaned) >= 3 and cleaned[-3] in "+-" and cleaned[-3:].count(":") == 0:
-        cleaned = cleaned + ":00"
-    moment = datetime.fromisoformat(cleaned)
+    try:
+        moment = pd.Timestamp(cleaned)
+    except Exception as error:  # pandas raises several types for bad input
+        raise ValueError(f"timestamp {text!r} is not a parseable instant: {error}") from error
+    if moment is pd.NaT or pd.isna(moment):
+        raise ValueError(f"timestamp {text!r} is not a valid instant")
     if moment.tzinfo is None:
         raise ValueError(f"timestamp {text!r} carries no timezone")
-    moment = moment.astimezone(UTC)
-    epoch = datetime(1970, 1, 1, tzinfo=UTC)
-    delta: timedelta = moment - epoch
-    return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
+    # ``.value`` is UTC epoch nanoseconds as an exact integer. No rounding, no
+    # truncation, no tolerance: the runtime instant and the frozen instant must
+    # be the same nanosecond or the reconciliation refuses.
+    return int(moment.tz_convert("UTC").value)
 
 
 @dataclass(frozen=True, slots=True)
