@@ -22,6 +22,7 @@ from app.services.stage40_audit import (
     cross_source_overlap,
     event_supply_adequacy,
     inventory_columns,
+    load_l3_coverage,
     mbo_state_feature_feasibility,
     measure_field_certifications,
     measure_news_event_supply,
@@ -40,7 +41,7 @@ from app.services.stage40_audit_plan import (
     EFFECTIVE_TRIALS_BEFORE,
     MISNAMED_OPTION_FEATURES,
     OPTION_FIELD_SEMANTICS,
-    OPTIONS_FORWARD_WINDOW,
+    OPTIONS_COLLECTION_WINDOW,
     OUTCOME_BEARING_TOKENS,
     OUTCOME_TOKEN_EXEMPTIONS,
     REPORT_RELATIVE_DIR,
@@ -49,6 +50,9 @@ from app.services.stage40_audit_plan import (
     statistical_plan,
 )
 
+# parents[4], matching the Stage-3.6 CLI at the same depth: [3] is apps/,
+# which put the frozen census and the default output directory one level
+# too shallow. Same fix as b566b2a, kept with the reason attached.
 REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / REPORT_RELATIVE_DIR
 
@@ -219,8 +223,8 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
                 else None
             )
 
-            l3_sessions = (
-                _certified_sessions() if window is CERTIFIED_L3_WINDOW else []
+            l3_coverage = (
+                _l3_coverage(args, window) if window is CERTIFIED_L3_WINDOW else None
             )
             option_days = _days_between(
                 option_coverage.first_instant, option_coverage.last_instant
@@ -230,7 +234,7 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
                 cursor,
                 window=window,
                 quiet_minutes=quiet_minutes,
-                l3_sessions=l3_sessions,
+                l3_coverage=l3_coverage,
                 option_days=option_days,
             )
             supplies.append(supply)
@@ -242,8 +246,9 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
                 "options_feasibility": options_feasibility(
                     coverage=option_coverage,
                     quality=quality,
-                    overlaps_l3=bool(l3_sessions),
+                    overlaps_l3=bool(l3_coverage and l3_coverage.spans),
                 ),
+                "l3_coverage": l3_coverage.as_dict() if l3_coverage else None,
             }
 
     from app.cli.mbo_stage2 import FEATURE_NAMES
@@ -266,8 +271,8 @@ def audit(args: argparse.Namespace) -> dict[str, Any]:
     # actually express it.
     best_options = per_window[CERTIFIED_L3_WINDOW.name]["options_feasibility"]
     if best_options["verdict"] == "options_data_not_suitable":
-        forward = per_window.get(OPTIONS_FORWARD_WINDOW.name, {})
-        best_options = forward.get("options_feasibility", best_options)
+        collected = per_window.get(OPTIONS_COLLECTION_WINDOW.name, {})
+        best_options = collected.get("options_feasibility", best_options)
 
     adequacy = [entry["event_supply_adequacy"] for entry in per_window.values()]
     recommendation = recommend(
@@ -389,7 +394,10 @@ def _certified_sessions() -> list[str]:
     """The 20 certified L3 sessions, read from the frozen Stage-3.6 census.
 
     Read rather than hard-coded: the census is the artifact that defines which
-    sessions were certified, and a second list here could drift from it.
+    sessions were certified, and a second list here could drift from it. This
+    supplies the *candidate* symbol-days to look for; whether L3 data actually
+    covers a given instant is decided by ``_l3_coverage`` against the frozen
+    feature files, not by this list.
     """
     import csv
 
@@ -403,10 +411,34 @@ def _certified_sessions() -> list[str]:
     if not path.is_file():
         raise ValueError(
             f"the frozen Stage-3.6 census is missing at {path}; Stage 4.0 reads "
-            "it to learn which sessions hold certified L3 coverage"
+            "it to learn which sessions to look for certified L3 coverage in"
         )
     with path.open(encoding="utf-8", newline="") as handle:
         return sorted({row["session_date"] for row in csv.DictReader(handle)})
+
+
+def _l3_coverage(args: argparse.Namespace, window):
+    """Certified L3 availability bounds, per symbol-session.
+
+    A calendar date being a certified session does not mean book state exists at
+    a given instant on it -- news arrives overnight and after the close. The
+    bounds come from the frozen feature files themselves, so an event is counted
+    as L3-covered only if the certified receive clock actually spans it.
+    """
+    features_dir = getattr(args, "features_dir", None)
+    if not features_dir:
+        raise ValueError(
+            "--features-dir is required: Stage 4.0 establishes L3 coverage from "
+            "the frozen Stage-1 feature files, and will not fall back to "
+            "assuming that a certified calendar date implies coverage at every "
+            "instant on it."
+        )
+    directory = Path(features_dir)
+    if not directory.is_dir():
+        raise ValueError(f"the Stage-1 feature directory is missing at {directory}")
+    return load_l3_coverage(
+        directory, symbols=window.symbols, sessions=_certified_sessions()
+    )
 
 
 def _days_between(first: str | None, last: str | None) -> list[str]:
@@ -453,6 +485,10 @@ def build_parser() -> argparse.ArgumentParser:
         "audit", help="The full audit against the database."
     )
     audit_cmd.add_argument("--quiet-minutes", default=DEFAULT_QUIET_MINUTES, type=int)
+    # Required, not optional: without it the certified window has no way to
+    # establish temporal L3 coverage, and the only alternative would be the
+    # calendar-date assumption this argument exists to remove.
+    audit_cmd.add_argument("--features-dir", required=True)
     audit_cmd.set_defaults(handler=audit)
     return parser
 

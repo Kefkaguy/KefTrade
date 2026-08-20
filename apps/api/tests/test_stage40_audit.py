@@ -38,7 +38,7 @@ from app.services.stage40_audit_plan import (
     MIN_EVENTS_FOR_MECHANISM,
     MIN_SESSIONS_FOR_MECHANISM,
     MISNAMED_OPTION_FEATURES,
-    OPTIONS_FORWARD_WINDOW,
+    OPTIONS_COLLECTION_WINDOW,
     OPTIONS_NOT_SUITABLE,
     OPTIONS_SIGNED_FLOW,
     OPTIONS_STATE_ONLY,
@@ -86,14 +86,14 @@ def test_the_plan_declares_its_thresholds_before_any_measurement():
 def test_both_windows_are_declared_separately():
     """The two richest sources live in different years and are not merged."""
     names = [w.name for w in AUDIT_WINDOWS]
-    assert names == ["certified_l3_2025_06", "options_forward_2026"]
+    assert names == ["certified_l3_2025_06", "options_2026_collection_window"]
     assert CERTIFIED_L3_WINDOW.start_date == "2025-06-02"
     assert CERTIFIED_L3_WINDOW.end_date == "2025-06-30"
     assert len(CERTIFIED_L3_WINDOW.symbols) == 8
     # Open-ended on purpose: the collector still runs, so a hard end date here
     # would silently truncate the measurement.
-    assert OPTIONS_FORWARD_WINDOW.end_date is None
-    assert OPTIONS_FORWARD_WINDOW.is_open_ended
+    assert OPTIONS_COLLECTION_WINDOW.end_date is None
+    assert OPTIONS_COLLECTION_WINDOW.is_open_ended
 
 
 # ---------------------------------------------------------------------------
@@ -210,7 +210,7 @@ def test_signed_option_flow_is_blocked_by_the_missing_sequence():
 def test_options_verdict_is_state_only_when_rows_exist():
     coverage = TableCoverage(
         table="intraday_option_chain_snapshots",
-        window="options_forward_2026",
+        window="options_2026_collection_window",
         rows=5_000_000,
         first_instant="2026-08-14T13:30:00+00:00",
         last_instant="2026-08-20T20:00:00+00:00",
@@ -449,7 +449,7 @@ def test_symbols_are_isolated_independently():
     rows = [_story("AAPL", BASE), _story("MSFT", BASE), _story("NVDA", BASE)]
     supply = summarise_event_supply(rows, window="w", quiet_minutes=60)
     assert supply.isolated_events == 3
-    assert supply.distinct_symbols == 3
+    assert supply.raw_distinct_symbols == 3
 
 
 def test_event_counts_are_deterministic():
@@ -473,7 +473,7 @@ def test_coverage_gating_uses_session_membership_not_price():
         rows,
         window="w",
         quiet_minutes=60,
-        l3_sessions=["2025-06-02"],
+        l3_coverage=_coverage_for([("AAPL", "2025-06-02")]),
         option_days=[],
     )
     assert supply.isolated_events == 2
@@ -488,15 +488,21 @@ def test_all_three_sources_requires_both_coverages():
         rows,
         window="w",
         quiet_minutes=60,
-        l3_sessions=["2025-06-02"],
+        l3_coverage=_coverage_for([("AAPL", "2025-06-02")]),
         option_days=["2025-06-02"],
     )
     assert both.with_all_sources == 1
+    assert both.all_source_distinct_sessions == 1
 
     l3_only = summarise_event_supply(
-        rows, window="w", quiet_minutes=60, l3_sessions=["2025-06-02"], option_days=[]
+        rows,
+        window="w",
+        quiet_minutes=60,
+        l3_coverage=_coverage_for([("AAPL", "2025-06-02")]),
+        option_days=[],
     )
     assert l3_only.with_all_sources == 0
+    assert l3_only.all_source_distinct_sessions == 0
 
 
 def test_a_naive_timestamp_fails_closed():
@@ -516,13 +522,15 @@ def test_hour_histogram_is_utc_and_sorted():
     ]
     supply = summarise_event_supply(rows, window="w", quiet_minutes=60)
     assert supply.as_dict()["by_hour_utc"] == {"14": 1, "19": 2}
+    assert supply.as_dict()["raw_distinct_days"] == 1
 
 
 def test_an_empty_population_counts_zero_rather_than_failing():
     supply = summarise_event_supply([], window="w", quiet_minutes=60)
     assert supply.raw_events == 0
     assert supply.isolated_events == 0
-    assert supply.distinct_sessions == 0
+    assert supply.raw_distinct_days == 0
+    assert supply.l3_covered_distinct_sessions == 0
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +539,12 @@ def test_an_empty_population_counts_zero_rather_than_failing():
 
 
 def _supply(events: int, sessions: int, window: str = "w") -> EventSupply:
+    """A supply record whose L3-covered session count is what the gate reads.
+
+    ``raw_distinct_days`` is deliberately set higher than the covered session
+    count: news arrives on weekends and overnight, and the gate must not see
+    those days.
+    """
     return EventSupply(
         window=window,
         raw_events=events * 2,
@@ -538,8 +552,12 @@ def _supply(events: int, sessions: int, window: str = "w") -> EventSupply:
         with_l3_coverage=events,
         with_option_observation=0,
         with_all_sources=0,
-        distinct_symbols=8,
-        distinct_sessions=sessions,
+        raw_distinct_symbols=8,
+        raw_distinct_days=sessions + 9,
+        isolated_distinct_days=sessions + 4,
+        l3_covered_distinct_sessions=sessions,
+        option_covered_distinct_sessions=0,
+        all_source_distinct_sessions=0,
         by_hour_utc={},
     )
 
@@ -940,7 +958,7 @@ def test_an_open_ended_window_has_no_upper_truncation():
         table="intraday_option_chain_snapshots",
         clock="observed_at",
         symbol_column="underlying_symbol",
-        window=OPTIONS_FORWARD_WINDOW,
+        window=OPTIONS_COLLECTION_WINDOW,
     )
     assert coverage.is_empty
     _sql, params = cursor.executed[0]
@@ -1047,3 +1065,424 @@ def test_a_reachable_database_is_returned_unchanged():
 
     sentinel = object()
     assert _open_connection(lambda: sentinel) is sentinel
+
+
+# ---------------------------------------------------------------------------
+# Audit accounting: days, sessions, and temporal L3 coverage
+# ---------------------------------------------------------------------------
+#
+# Three defects fixed here, all of them accounting rather than economics.
+# The certified window reported 29 "sessions" for a 20-session dataset because
+# the counter was fed raw news days; L3 coverage was a calendar-date test that
+# admitted overnight stories; and the options window's own name collided with
+# the outcome filter and deleted its section from the report.
+
+
+def _coverage_for(symbol_days, *, first_hour=13, last_hour=20):
+    """Certified L3 bounds covering one regular session per symbol-day."""
+    from app.services.stage40_audit import L3Coverage
+
+    spans = {}
+    for symbol, day in symbol_days:
+        base = datetime.fromisoformat(day).replace(tzinfo=UTC)
+        first = base.replace(hour=first_hour, minute=30)
+        last = base.replace(hour=last_hour, minute=0)
+        spans[(symbol, day)] = (_ns(first), _ns(last))
+    return L3Coverage(
+        spans=spans,
+        cadences=("50ev", "200ev"),
+        symbol_days_resolved=len(spans),
+        symbol_days_missing=(),
+    )
+
+
+def _ns(moment) -> int:
+    from app.services.stage40_audit import _epoch_nanoseconds
+
+    return _epoch_nanoseconds(moment)
+
+
+def test_raw_news_days_are_counted_separately_from_covered_sessions():
+    """The exact defect: raw news days inflated the reported session count.
+
+    Stories here land on four calendar days, only two of which hold certified
+    L3 coverage, and one of those stories is outside session hours.
+    """
+    rows = [
+        _story("AAPL", datetime(2025, 6, 2, 14, 0, tzinfo=UTC)),  # covered
+        _story("AAPL", datetime(2025, 6, 3, 14, 0, tzinfo=UTC)),  # covered
+        _story("AAPL", datetime(2025, 6, 4, 2, 0, tzinfo=UTC)),  # overnight
+        _story("AAPL", datetime(2025, 6, 7, 15, 0, tzinfo=UTC)),  # weekend
+    ]
+    supply = summarise_event_supply(
+        rows,
+        window="w",
+        quiet_minutes=60,
+        l3_coverage=_coverage_for(
+            [("AAPL", "2025-06-02"), ("AAPL", "2025-06-03"), ("AAPL", "2025-06-04")]
+        ),
+    )
+    assert supply.raw_events == 4
+    assert supply.isolated_events == 4
+    assert supply.raw_distinct_days == 4
+    assert supply.isolated_distinct_days == 4
+    # Only the two in-session events count, on two sessions.
+    assert supply.with_l3_coverage == 2
+    assert supply.l3_covered_distinct_sessions == 2
+    assert supply.l3_covered_distinct_sessions < supply.raw_distinct_days
+
+
+def test_covered_sessions_can_never_exceed_the_frozen_certified_set():
+    """However much news arrives, coverage cannot invent a session.
+
+    Twenty certified symbol-days, and news on forty calendar days including
+    weekends. The covered-session count is bounded by the certified set.
+    """
+    certified_days = [f"2025-06-{day:02d}" for day in range(2, 22)]
+    coverage = _coverage_for([("AAPL", day) for day in certified_days])
+
+    rows = []
+    for day in range(1, 31):
+        moment = datetime(2025, 6, day, 14, 0, tzinfo=UTC)
+        rows.append(_story("AAPL", moment))
+    supply = summarise_event_supply(
+        rows, window="w", quiet_minutes=60, l3_coverage=coverage
+    )
+
+    assert supply.raw_distinct_days == 30
+    assert supply.l3_covered_distinct_sessions <= len(certified_days)
+    assert supply.l3_covered_distinct_sessions == 20
+    assert supply.with_l3_coverage <= supply.isolated_events
+
+
+def test_the_real_certified_session_set_bounds_the_count():
+    """Against the frozen census itself, not a constructed list."""
+    from app.cli.stage40_audit import _certified_sessions
+
+    certified = _certified_sessions()
+    assert len(certified) == 20
+
+    coverage = _coverage_for([("AAPL", day) for day in certified])
+    rows = [
+        _story("AAPL", datetime.fromisoformat(day).replace(hour=14, tzinfo=UTC))
+        for day in certified
+    ]
+    # Plus a story on a date that is not a certified session at all.
+    rows.append(_story("AAPL", datetime(2025, 7, 15, 14, 0, tzinfo=UTC)))
+    rows.sort(key=lambda r: r["known_at"])
+
+    supply = summarise_event_supply(
+        rows, window="w", quiet_minutes=60, l3_coverage=coverage
+    )
+    assert supply.l3_covered_distinct_sessions == 20
+    assert supply.raw_distinct_days == 21
+
+
+@pytest.mark.parametrize(
+    ("hour", "minute", "covered"),
+    [
+        (2, 0, False),  # overnight, before the tape
+        (13, 29, False),  # one minute before first availability
+        (13, 30, True),  # exactly the first certified instant
+        (16, 0, True),  # mid-session
+        (20, 0, True),  # exactly the last certified instant
+        (20, 1, False),  # one minute after the tape stops
+        (23, 30, False),  # after hours
+    ],
+)
+def test_l3_coverage_is_temporal_not_calendar(hour, minute, covered):
+    """A certified date is not a certified instant.
+
+    Every case here falls on the SAME certified session date. Only the ones
+    inside actual availability count.
+    """
+    moment = datetime(2025, 6, 2, hour, minute, tzinfo=UTC)
+    supply = summarise_event_supply(
+        [_story("AAPL", moment)],
+        window="w",
+        quiet_minutes=60,
+        l3_coverage=_coverage_for([("AAPL", "2025-06-02")]),
+    )
+    assert supply.isolated_events == 1
+    assert supply.with_l3_coverage == (1 if covered else 0)
+    assert supply.l3_covered_distinct_sessions == (1 if covered else 0)
+
+
+def test_a_different_symbol_on_a_covered_day_is_not_covered():
+    """Coverage is per symbol-session, not per session."""
+    coverage = _coverage_for([("AAPL", "2025-06-02")])
+    supply = summarise_event_supply(
+        [_story("MSFT", datetime(2025, 6, 2, 14, 0, tzinfo=UTC))],
+        window="w",
+        quiet_minutes=60,
+        l3_coverage=coverage,
+    )
+    assert supply.isolated_events == 1
+    assert supply.with_l3_coverage == 0
+
+
+def test_absent_coverage_fails_closed_to_zero():
+    """No coverage information means no coverage claim."""
+    rows = [_story("AAPL", datetime(2025, 6, 2, 14, 0, tzinfo=UTC))]
+    supply = summarise_event_supply(rows, window="w", quiet_minutes=60)
+    assert supply.isolated_events == 1
+    assert supply.with_l3_coverage == 0
+    assert supply.l3_covered_distinct_sessions == 0
+
+
+def test_the_adequacy_gate_reads_covered_sessions_not_raw_days():
+    """The gate must not be satisfied by weekends and overnight stories."""
+    supply = EventSupply(
+        window="w",
+        raw_events=900,
+        isolated_events=400,
+        with_l3_coverage=168,
+        with_option_observation=0,
+        with_all_sources=0,
+        raw_distinct_symbols=8,
+        raw_distinct_days=29,  # the number that wrongly passed the gate
+        isolated_distinct_days=25,
+        l3_covered_distinct_sessions=12,  # the number that should decide it
+        option_covered_distinct_sessions=0,
+        all_source_distinct_sessions=0,
+        by_hour_utc={},
+    )
+    verdict = event_supply_adequacy(supply)
+    assert verdict["l3_covered_distinct_sessions"] == 12
+    assert verdict["meets_event_floor"] is True
+    assert verdict["meets_session_floor"] is False
+    assert verdict["adequate"] is False
+    # The raw counts are reported, but they do not decide anything.
+    assert verdict["raw_distinct_days"] == 29
+
+
+def test_the_adequacy_gate_passes_on_covered_sessions():
+    supply = EventSupply(
+        window="w",
+        raw_events=900,
+        isolated_events=400,
+        with_l3_coverage=168,
+        with_option_observation=0,
+        with_all_sources=0,
+        raw_distinct_symbols=8,
+        raw_distinct_days=29,
+        isolated_distinct_days=25,
+        l3_covered_distinct_sessions=20,
+        option_covered_distinct_sessions=0,
+        all_source_distinct_sessions=0,
+        by_hour_utc={},
+    )
+    verdict = event_supply_adequacy(supply)
+    assert verdict["meets_session_floor"] is True
+    assert verdict["adequate"] is True
+
+
+def test_the_declared_floors_are_unchanged():
+    """The defect was accounting. The thresholds must not have moved."""
+    assert MIN_EVENTS_FOR_MECHANISM == 100
+    assert MIN_SESSIONS_FOR_MECHANISM == 15
+    from app.cli.stage40_audit import DEFAULT_QUIET_MINUTES
+
+    assert DEFAULT_QUIET_MINUTES == 60
+
+
+# --- coverage loading from the frozen feature files ------------------------
+
+
+def _write_feature_file(root, cadence, stem, instants):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    directory = root / cadence
+    directory.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.table({"feature_available_ts_recv": pa.array(instants, pa.int64())}),
+        directory / f"{stem}.{cadence}.parquet",
+    )
+
+
+def test_coverage_is_read_from_the_frozen_feature_files(tmp_path):
+    from app.services.stage40_audit import load_l3_coverage
+
+    _write_feature_file(tmp_path, "50ev", "AAPL_2025-06-02", [1000, 5000, 9000])
+    _write_feature_file(tmp_path, "200ev", "AAPL_2025-06-02", [2000, 6000, 8000])
+
+    coverage = load_l3_coverage(
+        tmp_path, symbols=["AAPL"], sessions=["2025-06-02"]
+    )
+    # Intersection: the later first instant and the earlier last instant.
+    assert coverage.spans[("AAPL", "2025-06-02")] == (2000, 8000)
+    assert coverage.covers("AAPL", "2025-06-02", 2000) is True
+    assert coverage.covers("AAPL", "2025-06-02", 8000) is True
+    assert coverage.covers("AAPL", "2025-06-02", 1999) is False
+    assert coverage.covers("AAPL", "2025-06-02", 8001) is False
+    assert coverage.symbol_days_resolved == 1
+
+
+def test_a_symbol_day_missing_a_cadence_contributes_no_span(tmp_path):
+    """Fail closed. A guessed bound would admit events into the population."""
+    from app.services.stage40_audit import load_l3_coverage
+
+    _write_feature_file(tmp_path, "50ev", "AAPL_2025-06-02", [1000, 9000])
+    # No 200ev file for this symbol-day.
+    coverage = load_l3_coverage(tmp_path, symbols=["AAPL"], sessions=["2025-06-02"])
+    assert coverage.spans == {}
+    assert coverage.symbol_days_missing == ("AAPL_2025-06-02",)
+    assert coverage.covers("AAPL", "2025-06-02", 5000) is False
+
+
+def test_an_entirely_absent_feature_directory_yields_no_coverage(tmp_path):
+    from app.services.stage40_audit import load_l3_coverage
+
+    coverage = load_l3_coverage(
+        tmp_path / "nothing-here", symbols=["AAPL"], sessions=["2025-06-02"]
+    )
+    assert coverage.spans == {}
+    assert coverage.sessions == set()
+
+
+def test_the_audit_refuses_without_a_feature_directory():
+    """The only alternative would be the calendar assumption this removes."""
+    import argparse as _argparse
+
+    from app.cli.stage40_audit import _l3_coverage
+
+    with pytest.raises(ValueError, match="--features-dir is required"):
+        _l3_coverage(_argparse.Namespace(features_dir=None), CERTIFIED_L3_WINDOW)
+
+    with pytest.raises(ValueError, match="feature directory is missing"):
+        _l3_coverage(
+            _argparse.Namespace(features_dir="/no/such/place"), CERTIFIED_L3_WINDOW
+        )
+
+
+def test_the_features_dir_argument_is_required_by_the_parser():
+    from app.cli.stage40_audit import build_parser
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["audit"])
+    args = parser.parse_args(["audit", "--features-dir", "/tmp/x"])
+    assert args.features_dir == "/tmp/x"
+
+
+def test_epoch_nanoseconds_is_exact_integer_arithmetic():
+    """A float second count cannot represent a nanosecond instant."""
+    from app.services.stage40_audit import _epoch_nanoseconds
+
+    moment = datetime(2025, 6, 2, 13, 59, 45, 494493, tzinfo=UTC)
+    assert _epoch_nanoseconds(moment) == 1_748_872_785_494_493_000
+    assert isinstance(_epoch_nanoseconds(moment), int)
+
+
+# --- the options window must survive output stripping ---------------------
+
+
+def test_the_options_window_name_cannot_collide_with_the_outcome_filter():
+    """The original name contained "forward" and was stripped wholesale."""
+    from app.cli.stage40_audit import _strip_outcomes
+
+    assert OPTIONS_COLLECTION_WINDOW.name == "options_2026_collection_window"
+    assert "forward" not in OPTIONS_COLLECTION_WINDOW.name
+
+    payload = {OPTIONS_COLLECTION_WINDOW.name: {"rows": 5_000_000}}
+    assert _strip_outcomes(payload) == payload
+
+
+def test_options_window_evidence_survives_stripping_end_to_end():
+    """A realistic per-window report section, filtered."""
+    from app.cli.stage40_audit import _strip_outcomes
+
+    report = {
+        "per_window": {
+            "certified_l3_2025_06": {
+                "event_supply": {"l3_covered_distinct_sessions": 20},
+            },
+            "options_2026_collection_window": {
+                "event_supply": {
+                    "raw_events": 4000,
+                    "option_covered_distinct_sessions": 5,
+                },
+                "options_feasibility": {"verdict": "options_cross_market_state_only"},
+                "option_quality": {"crossed_or_locked_rows": 3},
+            },
+        }
+    }
+    clean = _strip_outcomes(report)
+    section = clean["per_window"]["options_2026_collection_window"]
+    assert section["options_feasibility"]["verdict"] == "options_cross_market_state_only"
+    assert section["event_supply"]["option_covered_distinct_sessions"] == 5
+    assert section["option_quality"]["crossed_or_locked_rows"] == 3
+
+
+def test_genuine_forward_return_keys_are_still_stripped():
+    """Renaming the innocent window must not weaken the prohibition."""
+    from app.cli.stage40_audit import _strip_outcomes
+
+    payload = {
+        "forward_return_bps": 8.0,
+        "forward_returns": [1.0, 2.0],
+        "future_price": 100.0,
+        "mean_net_return_bps": -1.37,
+        "realized_pnl": 42.0,
+        "clustered_t": -0.45,
+        "holding_period_minutes": 5,
+        "keep_me": True,
+    }
+    assert _strip_outcomes(payload) == {"keep_me": True}
+
+
+def test_no_broad_forward_exemption_was_added():
+    """Only specific, non-economic names are exempt -- not "forward" itself."""
+    from app.services.stage40_audit_plan import (
+        OUTCOME_BEARING_TOKENS,
+        OUTCOME_TOKEN_EXEMPTIONS,
+    )
+
+    assert "forward" in OUTCOME_BEARING_TOKENS
+    assert "future" in OUTCOME_BEARING_TOKENS
+    for exemption in OUTCOME_TOKEN_EXEMPTIONS:
+        assert exemption not in ("forward", "future", "return", "pnl")
+    # And the window name is not exempted -- it simply no longer collides.
+    assert OPTIONS_COLLECTION_WINDOW.name not in OUTCOME_TOKEN_EXEMPTIONS
+
+
+def test_the_ledger_still_reads_531_both_sides_after_the_fix():
+    from app.cli.stage40_audit import _governance
+
+    block = _governance()
+    assert block["effective_trials_before"] == 531
+    assert block["effective_trials_after"] == 531
+    assert block["contains_strategy_outcome"] is False
+    assert block["contains_post_decision_return"] is False
+    assert block["contains_pnl"] is False
+
+
+def test_the_coverage_loader_reads_no_price_column():
+    """It opens feature files, so it must be explicit about what it reads."""
+    import ast as _ast
+    import inspect as _inspect
+
+    from app.services import stage40_audit as service
+
+    source = _inspect.getsource(service.load_l3_coverage)
+    tree = _ast.parse(_inspect.cleandoc(source).replace("def load_l3_coverage", "def f", 1))
+    literals = {
+        node.value
+        for node in _ast.walk(tree)
+        if isinstance(node, _ast.Constant) and isinstance(node.value, str)
+    }
+    for banned in ("midpoint", "close", "trade_price", "best_bid_price"):
+        assert banned not in literals
+
+
+def test_the_cli_repo_root_points_at_the_repository():
+    """It was one level too shallow, so the frozen census could not be found
+    and the default output directory pointed into apps/."""
+    from app.cli.mbo_stage36 import REPO_ROOT as STAGE36_ROOT
+    from app.cli.stage40_audit import DEFAULT_OUTPUT_DIR, REPO_ROOT
+
+    assert REPO_ROOT == STAGE36_ROOT
+    assert (REPO_ROOT / "reports" / "tier1_stage36_preoutcome" / "v1").is_dir()
+    assert REPO_ROOT.name != "apps"
+    assert DEFAULT_OUTPUT_DIR.parent.parent == REPO_ROOT / "reports"

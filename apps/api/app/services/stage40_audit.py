@@ -17,11 +17,13 @@ from __future__ import annotations
 import json
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from app.services.stage40_audit_plan import (
+    CERTIFIED_L3_CADENCES,
+    L3_AVAILABILITY_COLUMN,
     L3_STATE_COVERAGE,
     L3_STATE_GAPS,
     MIN_EVENTS_FOR_MECHANISM,
@@ -43,7 +45,9 @@ from app.services.stage40_audit_plan import (
     timestamp_semantics,
 )
 
-STAGE40_AUDIT_VERSION = "tier1_stage40_audit_v1"
+STAGE40_AUDIT_VERSION = "tier1_stage40_audit_v2"
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # Tables this audit inventories, with the clock each is indexed by. A table with
 # no declared clock cannot be audited, because "coverage" is meaningless without
@@ -403,9 +407,122 @@ def cross_source_overlap(coverages: Sequence[TableCoverage]) -> dict[str, Any]:
     return report
 
 
+
+# ---------------------------------------------------------------------------
+# Certified L3 coverage
+# ---------------------------------------------------------------------------
+#
+# "This calendar day is a certified session" is not the same claim as "certified
+# book state exists at this instant". A story published at 02:14, or at 21:40
+# after the tape stopped, falls on a certified date and is not covered by
+# anything. Counting it as L3-covered inflates the usable population with events
+# no book could ever have been read for.
+#
+# The bound comes from the frozen feature files themselves -- the min and max of
+# the same ``feature_available_ts_recv`` that Stage 3.5 and 3.6 used as their
+# decision clock. Nothing here reads a price, and nothing reads any instant
+# after the event.
+
+
+@dataclass(frozen=True, slots=True)
+class L3Coverage:
+    """Certified receive-time bounds, per symbol-session."""
+
+    spans: dict[tuple[str, str], tuple[int, int]]
+    cadences: tuple[str, ...]
+    symbol_days_resolved: int
+    symbol_days_missing: tuple[str, ...]
+
+    def covers(self, symbol: str, session_date: str, instant_ns: int) -> bool:
+        """Whether certified L3 data exists for this symbol at this instant."""
+        span = self.spans.get((symbol, session_date))
+        if span is None:
+            return False
+        first, last = span
+        return first <= instant_ns <= last
+
+    @property
+    def sessions(self) -> set[str]:
+        return {day for _symbol, day in self.spans}
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "cadences_intersected": list(self.cadences),
+            "availability_column": L3_AVAILABILITY_COLUMN,
+            "symbol_days_resolved": self.symbol_days_resolved,
+            "symbol_days_missing": list(self.symbol_days_missing),
+            "sessions_with_any_coverage": len(self.sessions),
+            "basis": (
+                "min/max of the certified receive clock inside each frozen "
+                "feature file, intersected across cadences"
+            ),
+        }
+
+
+EMPTY_L3_COVERAGE = L3Coverage(
+    spans={}, cadences=CERTIFIED_L3_CADENCES, symbol_days_resolved=0, symbol_days_missing=()
+)
+
+
+def load_l3_coverage(
+    features_dir: Path,
+    *,
+    symbols: Sequence[str],
+    sessions: Sequence[str],
+    cadences: Sequence[str] = CERTIFIED_L3_CADENCES,
+) -> L3Coverage:
+    """Read certified availability bounds from the frozen feature files.
+
+    Intersected across cadences, so an instant counts as covered only when every
+    certified cadence observed it. A symbol-day whose file is absent contributes
+    no span at all rather than a guessed one -- fail closed, because a guessed
+    bound would silently admit events into the usable population.
+    """
+    import pyarrow.parquet as pq
+
+    spans: dict[tuple[str, str], tuple[int, int]] = {}
+    missing: list[str] = []
+    for symbol in symbols:
+        for session_date in sessions:
+            stem = f"{symbol}_{session_date}"
+            bounds: list[tuple[int, int]] = []
+            for cadence in cadences:
+                path = features_dir / cadence / f"{stem}.{cadence}.parquet"
+                if not path.is_file():
+                    continue
+                column = pq.read_table(
+                    path, columns=[L3_AVAILABILITY_COLUMN]
+                ).column(L3_AVAILABILITY_COLUMN)
+                if not len(column):
+                    continue
+                values = column.to_numpy(zero_copy_only=False)
+                bounds.append((int(values.min()), int(values.max())))
+            if len(bounds) != len(cadences):
+                missing.append(stem)
+                continue
+            spans[(symbol, session_date)] = (
+                max(first for first, _ in bounds),
+                min(last for _, last in bounds),
+            )
+    return L3Coverage(
+        spans=spans,
+        cadences=tuple(cadences),
+        symbol_days_resolved=len(spans),
+        symbol_days_missing=tuple(sorted(missing)),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class EventSupply:
-    """Outcome-blind event counts for one window."""
+    """Outcome-blind event counts for one window.
+
+    Days and sessions are counted separately at each stage of filtering. A
+    single ``distinct_sessions`` field invited exactly the error it produced:
+    news arrives on weekends and outside session hours, so counting raw news
+    days reported 29 "sessions" for a window holding 20 certified ones. The
+    gate needs the count of sessions where certified L3 data actually exists,
+    and that number now has its own name.
+    """
 
     window: str
     raw_events: int
@@ -413,8 +530,12 @@ class EventSupply:
     with_l3_coverage: int
     with_option_observation: int
     with_all_sources: int
-    distinct_symbols: int
-    distinct_sessions: int
+    raw_distinct_symbols: int
+    raw_distinct_days: int
+    isolated_distinct_days: int
+    l3_covered_distinct_sessions: int
+    option_covered_distinct_sessions: int
+    all_source_distinct_sessions: int
     by_hour_utc: dict[str, int]
 
     def as_dict(self) -> dict[str, Any]:
@@ -425,8 +546,12 @@ class EventSupply:
             "with_l3_coverage": self.with_l3_coverage,
             "with_option_observation": self.with_option_observation,
             "with_all_sources": self.with_all_sources,
-            "distinct_symbols": self.distinct_symbols,
-            "distinct_sessions": self.distinct_sessions,
+            "raw_distinct_symbols": self.raw_distinct_symbols,
+            "raw_distinct_days": self.raw_distinct_days,
+            "isolated_distinct_days": self.isolated_distinct_days,
+            "l3_covered_distinct_sessions": self.l3_covered_distinct_sessions,
+            "option_covered_distinct_sessions": self.option_covered_distinct_sessions,
+            "all_source_distinct_sessions": self.all_source_distinct_sessions,
             "by_hour_utc": dict(sorted(self.by_hour_utc.items())),
         }
 
@@ -438,16 +563,23 @@ def event_supply_adequacy(supply: EventSupply) -> dict[str, Any]:
     compares against them.
     """
     usable = supply.with_l3_coverage
+    # Sessions where certified L3 data actually exists -- not raw news days.
+    # Clustering is done by trading session, so a session contributing no
+    # covered event contributes no cluster, and counting it would overstate the
+    # independent evidence available.
+    sessions = supply.l3_covered_distinct_sessions
     return {
         "window": supply.window,
         "usable_events": usable,
-        "distinct_sessions": supply.distinct_sessions,
+        "l3_covered_distinct_sessions": sessions,
+        "raw_distinct_days": supply.raw_distinct_days,
+        "isolated_distinct_days": supply.isolated_distinct_days,
         "min_events_required": MIN_EVENTS_FOR_MECHANISM,
         "min_sessions_required": MIN_SESSIONS_FOR_MECHANISM,
         "meets_event_floor": usable >= MIN_EVENTS_FOR_MECHANISM,
-        "meets_session_floor": supply.distinct_sessions >= MIN_SESSIONS_FOR_MECHANISM,
+        "meets_session_floor": sessions >= MIN_SESSIONS_FOR_MECHANISM,
         "adequate": usable >= MIN_EVENTS_FOR_MECHANISM
-        and supply.distinct_sessions >= MIN_SESSIONS_FOR_MECHANISM,
+        and sessions >= MIN_SESSIONS_FOR_MECHANISM,
     }
 
 
@@ -697,15 +829,17 @@ def measure_news_event_supply(
     *,
     window: AuditWindow,
     quiet_minutes: int,
-    l3_sessions: Sequence[str] = (),
+    l3_coverage: L3Coverage | None = None,
     option_days: Sequence[str] = (),
 ) -> EventSupply:
     """Deterministic, outcome-blind event counts.
 
     Isolation uses the same quiet-period concept Stage 3.6 declared: a story
     counts as isolated when no earlier same-symbol story falls inside the quiet
-    window. Eligibility is decided entirely from timestamps and coverage --
-    nothing about what the price did afterwards enters it.
+    window. Coverage is then a temporal containment test against the certified
+    L3 bounds for that symbol-session. Eligibility is decided entirely from
+    timestamps and coverage -- nothing about what the price did afterwards
+    enters it.
     """
     start, end = _window_bounds(window)
     filters = ["known_at >= %s", "known_at < %s"]
@@ -731,7 +865,7 @@ def measure_news_event_supply(
         rows,
         window=window.name,
         quiet_minutes=quiet_minutes,
-        l3_sessions=l3_sessions,
+        l3_coverage=l3_coverage,
         option_days=option_days,
     )
 
@@ -741,22 +875,32 @@ def summarise_event_supply(
     *,
     window: str,
     quiet_minutes: int,
-    l3_sessions: Sequence[str] = (),
+    l3_coverage: L3Coverage | None = None,
     option_days: Sequence[str] = (),
 ) -> EventSupply:
     """The counting rule itself, separated from the query that feeds it.
 
     Pure, so the isolation logic can be tested against constructed sequences
     rather than only against whatever the database happens to hold.
+
+    L3 coverage is a *temporal* test, not a calendar one. An event counts as
+    covered only when certified book state exists for that symbol at that
+    instant -- so an overnight or after-hours story on a certified date does not
+    qualify, which is exactly the population the earlier date-only check
+    wrongly admitted.
     """
     quiet = timedelta(minutes=quiet_minutes)
-    sessions = set(l3_sessions)
+    coverage = l3_coverage or EMPTY_L3_COVERAGE
     option_dates = set(option_days)
 
     last_seen: dict[str, datetime] = {}
     raw = isolated = with_l3 = with_options = with_all = 0
     symbols: set[str] = set()
-    days: set[str] = set()
+    raw_days: set[str] = set()
+    isolated_days: set[str] = set()
+    l3_sessions: set[str] = set()
+    option_sessions: set[str] = set()
+    all_source_sessions: set[str] = set()
     by_hour: dict[str, int] = {}
 
     for row in rows:
@@ -770,7 +914,7 @@ def summarise_event_supply(
         raw += 1
         symbols.add(symbol)
         day = moment.date().isoformat()
-        days.add(day)
+        raw_days.add(day)
         hour = f"{moment.hour:02d}"
         by_hour[hour] = by_hour.get(hour, 0) + 1
 
@@ -784,14 +928,20 @@ def summarise_event_supply(
             continue
 
         isolated += 1
-        has_l3 = day in sessions
+        isolated_days.add(day)
+
+        instant_ns = _epoch_nanoseconds(moment)
+        has_l3 = coverage.covers(symbol, day, instant_ns)
         has_options = day in option_dates
         if has_l3:
             with_l3 += 1
+            l3_sessions.add(day)
         if has_options:
             with_options += 1
+            option_sessions.add(day)
         if has_l3 and has_options:
             with_all += 1
+            all_source_sessions.add(day)
 
     return EventSupply(
         window=window,
@@ -800,9 +950,27 @@ def summarise_event_supply(
         with_l3_coverage=with_l3,
         with_option_observation=with_options,
         with_all_sources=with_all,
-        distinct_symbols=len(symbols),
-        distinct_sessions=len(days),
+        raw_distinct_symbols=len(symbols),
+        raw_distinct_days=len(raw_days),
+        isolated_distinct_days=len(isolated_days),
+        l3_covered_distinct_sessions=len(l3_sessions),
+        option_covered_distinct_sessions=len(option_sessions),
+        all_source_distinct_sessions=len(all_source_sessions),
         by_hour_utc=by_hour,
+    )
+
+
+def _epoch_nanoseconds(moment: datetime) -> int:
+    """A timezone-aware instant as integer epoch nanoseconds.
+
+    Integer arithmetic throughout: ``timestamp()`` returns a float, and a float
+    second count cannot represent a nanosecond instant exactly. Stage 3.6 lost a
+    day to precisely that class of silent truncation.
+    """
+    delta = moment - _EPOCH
+    return (
+        (delta.days * 86_400 + delta.seconds) * 1_000_000_000
+        + delta.microseconds * 1_000
     )
 
 

@@ -92,8 +92,15 @@ CERTIFIED_L3_WINDOW = AuditWindow(
 # Deliberately open-ended. The collector runs on a loop, so the end of this
 # window is whatever the database says it is on the day the audit runs, and
 # hard-coding a date here would silently truncate the measurement.
-OPTIONS_FORWARD_WINDOW = AuditWindow(
-    name="options_forward_2026",
+#
+# Named "collection window" rather than "forward": the outcome filter strips any
+# key containing "forward", and the original name collided with it, deleting
+# this entire section from the emitted report. The window is a span of wall
+# time, nothing to do with forward returns -- but the filter cannot know that,
+# and weakening the filter to teach it would be the wrong trade. Renaming the
+# innocent party is cheaper and leaves the prohibition intact.
+OPTIONS_COLLECTION_WINDOW = AuditWindow(
+    name="options_2026_collection_window",
     start_date="2026-08-14",
     end_date=None,
     symbols=(),
@@ -105,7 +112,20 @@ OPTIONS_FORWARD_WINDOW = AuditWindow(
     ),
 )
 
-AUDIT_WINDOWS: tuple[AuditWindow, ...] = (CERTIFIED_L3_WINDOW, OPTIONS_FORWARD_WINDOW)
+AUDIT_WINDOWS: tuple[AuditWindow, ...] = (CERTIFIED_L3_WINDOW, OPTIONS_COLLECTION_WINDOW)
+
+
+# The cadences whose feature files define certified L3 availability. These are
+# exactly the cadences behind the four frozen Stage-2 cells, so "L3 data exists
+# here" means the same thing it meant when those cells were fitted.
+#
+# Coverage is the INTERSECTION across them, not the union: an instant covered by
+# one cadence and not the other is not a moment at which the certified book
+# state was fully observable, and counting it would overstate supply.
+CERTIFIED_L3_CADENCES: tuple[str, ...] = ("50ev", "200ev")
+
+# Column carrying the certified receive instant inside each feature file.
+L3_AVAILABILITY_COLUMN = "feature_available_ts_recv"
 
 
 # ---------------------------------------------------------------------------

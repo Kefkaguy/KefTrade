@@ -17,6 +17,19 @@ No economic specification is tested here, so no trial is consumed. Stage 3.6 is
 retired and is not re-run, re-tuned, or re-read: nothing in this stage touches
 its artifacts, and nothing here exposes its outcome.
 
+> **Accounting correction (executor `tier1_stage40_audit_v2`).** The first VPS
+> run was outcome-blind and its verdict logic was sound, but three accounting
+> defects were found in review and are fixed here. Session counts conflated raw
+> news days with certified sessions, reporting 29 sessions for a 20-session
+> window. L3 coverage was tested by calendar date rather than by instant, which
+> admitted overnight and after-hours stories. And the options window's own name
+> collided with the outcome filter, deleting its section from the report.
+>
+> No threshold moved: the 100-event floor, the 15-session floor and the
+> 60-minute quiet period are unchanged, as is every feasibility verdict rule.
+> The plan version stays `v1` for exactly that reason — the declared statistics
+> did not change, only the counting.
+
 ---
 
 ## Why this stage exists
@@ -198,7 +211,7 @@ Measured per window by the audit. Structurally expected:
 | Window | News | Options | SIP quotes | L3 | Join resolution |
 |---|---|---|---|---|---|
 | `certified_l3_2025_06` | yes | **no** | to be measured | yes | 1 s (news-bound) |
-| `options_forward_2026` | yes | yes | yes | **no** | 1 s (news-bound) |
+| `options_2026_collection_window` | yes | yes | yes | **no** | 1 s (news-bound) |
 
 The two richest sources never coexist. Any mechanism found in the 2026 window is
 a *different mechanism* from one found in the certified window, not the same one
@@ -212,6 +225,22 @@ Counted by the `audit` command, outcome-blind, using the Stage-3.6 quiet-period
 rule (60 minutes, counting all prior same-symbol stories — a cluster of five
 yields one isolated event). Eligibility is decided entirely from timestamps and
 coverage; nothing about subsequent price enters it.
+
+Days and sessions are counted separately at each stage of filtering:
+`raw_distinct_days`, `isolated_distinct_days`, `l3_covered_distinct_sessions`,
+`option_covered_distinct_sessions`, `all_source_distinct_sessions`. **The sample
+gate reads `l3_covered_distinct_sessions`** — news arrives on weekends and
+outside session hours, so a single conflated counter reported 29 "sessions" for
+a window holding 20 certified ones.
+
+**L3 coverage is temporal, not calendar.** An event counts as covered only when
+certified book state exists for that *symbol* at that *instant*. The bounds are
+the min and max of `feature_available_ts_recv` inside the frozen feature files,
+intersected across the certified cadences (`50ev`, `200ev`), so an instant
+observed by one cadence and not the other does not qualify. A symbol-day whose
+feature file is missing contributes no span at all — fail closed, because a
+guessed bound would admit events no book could have been read for. Overnight,
+premarket and after-hours stories on certified dates are therefore excluded.
 
 Known ceiling for the certified window: **259 isolated events** across 8 symbols
 and 20 sessions, of which 168 reached strong consensus in Stage 3.6. The declared
@@ -270,8 +299,12 @@ cd /opt/keftrade/apps/api && python -m app.cli.stage40_audit semantics
 The full audit reads production data and writes versioned, hashed artifacts:
 
 ```bash
-cd /opt/keftrade/apps/api && python -m app.cli.stage40_audit --output-dir /opt/keftrade/reports/tier1_stage40_audit/v1 audit
+cd /opt/keftrade/apps/api && python -m app.cli.stage40_audit --output-dir /opt/keftrade/reports/tier1_stage40_audit/v1 audit --features-dir /opt/keftrade/reports/tier1_mbo_features/all160-v4
 ```
+
+`--features-dir` is required. Without it there is no way to establish temporal
+L3 coverage, and the only alternative would be the calendar-date assumption the
+argument exists to remove.
 
 It emits `stage40_audit_report.json`, `stage40_plan.json`,
 `stage40_timestamp_audit.json`, `stage40_semantics.json` and a
