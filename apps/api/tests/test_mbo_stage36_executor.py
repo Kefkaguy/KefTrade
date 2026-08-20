@@ -31,6 +31,7 @@ from app.services.mbo_stage36_executor import (
     Candidate,
     ExecutedTrade,
     Stage36Accumulator,
+    _parse_direction,
     _parse_timestamp,
     assert_consensus_is_internally_consistent,
     assert_frozen_counts,
@@ -1433,7 +1434,9 @@ def test_only_the_loader_reads_the_consensus_direction_column():
             )))) if hasattr(executor, node.name) else ""
             if "consensus_direction" in body:
                 holders.append(node.name)
-    assert holders == ["load_candidates"], holders
+    # Two, now: the boundary parser that normalises the sentinel, and the
+    # loader that calls it. Nothing downstream may reach the raw column.
+    assert holders == ["_parse_direction", "load_candidates"], holders
 
 
 def test_the_diagnostic_reports_the_consensus_source():
@@ -1704,3 +1707,270 @@ def test_the_parser_does_not_use_a_microsecond_resolution_clock():
     for node in ast.walk(module_tree):
         if isinstance(node, ast.ImportFrom) and node.module == "datetime":
             pytest.fail("the microsecond-resolution clock is importable again")
+
+
+# ---------------------------------------------------------------------------
+# The no-trade sentinel
+# ---------------------------------------------------------------------------
+#
+# The census writes a no-trade decision as 0; the runtime rule returns None.
+# They are the same decision. Comparing the two raw made all 91 untraded events
+# look like 91 model disagreements, which is why this is normalised once, at the
+# loader, rather than papered over in the comparison.
+
+
+def test_a_frozen_two_versus_two_row_loads_as_no_direction():
+    """The real 2_vs_2 rows, from the real census file."""
+    candidates = load_candidates(REPO_ROOT)
+    untraded = [c for c in candidates if c.consensus == CONSENSUS_2_VS_2]
+    assert len(untraded) == 81
+    assert all(c.direction is None for c in untraded)
+    assert not any(c.is_strong_consensus for c in untraded)
+
+
+def test_a_frozen_incomplete_row_loads_as_no_direction():
+    candidates = load_candidates(REPO_ROOT)
+    incomplete = [c for c in candidates if c.consensus == CONSENSUS_INCOMPLETE]
+    assert len(incomplete) == 10
+    assert all(c.direction is None for c in incomplete)
+
+
+def test_the_sentinel_is_the_only_no_trade_representation_after_loading():
+    """Past the loader, exactly one thing means "no direction"."""
+    candidates = load_candidates(REPO_ROOT)
+    assert not any(c.direction == 0 for c in candidates)
+    for candidate in candidates:
+        assert candidate.direction in (LONG, SHORT, None)
+        assert (candidate.direction is None) is not candidate.is_strong_consensus
+
+
+def test_the_frozen_census_still_records_the_sentinel_on_disk():
+    """The fix is in the reader, not the file. The frozen artefact is untouched
+    and still writes 0 for every untraded event."""
+    import csv
+
+    path = REPO_ROOT / PREOUTCOME_RELATIVE_DIR / CSV_FILENAMES["consensus_census"]
+    zeros = strong = 0
+    with path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row["consensus"] in (CONSENSUS_2_VS_2, CONSENSUS_INCOMPLETE):
+                assert row["consensus_direction"].strip() == "0", row
+                zeros += 1
+            else:
+                assert row["consensus_direction"].strip() in ("1", "-1"), row
+                strong += 1
+    assert zeros == 91
+    assert strong == 168
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("1", LONG),
+        ("+1", LONG),
+        ("1.0", LONG),
+        ("-1", SHORT),
+        ("-1.0", SHORT),
+        ("0", None),
+        ("0.0", None),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_direction_values_parse_under_the_frozen_semantics(text, expected):
+    assert _parse_direction(text) == expected
+
+
+@pytest.mark.parametrize("text", ["2", "-2", "3", "1.5", "0.5", "long", "NaN", "inf", "-inf", "+"])
+def test_an_unrecognised_direction_value_refuses(text):
+    """Fail closed: only -1, 0 and +1 are directions this experiment can act on."""
+    with pytest.raises(ValueError, match="consensus_direction"):
+        _parse_direction(text)
+
+
+def test_zero_is_never_treated_as_a_trade_direction():
+    """0 is the absence of a decision, not a third kind of trade."""
+    assert _parse_direction("0") is None
+    assert _parse_direction("0") != LONG
+    assert _parse_direction("0") != SHORT
+    # And it must not survive as a falsy integer that later reads as "no trade"
+    # by accident while still being an int.
+    assert not isinstance(_parse_direction("0"), int)
+
+
+# --- non-trade rows may not carry a direction ------------------------------
+
+
+@pytest.mark.parametrize("consensus", [CONSENSUS_2_VS_2, CONSENSUS_INCOMPLETE])
+@pytest.mark.parametrize("direction", [LONG, SHORT])
+def test_a_no_trade_row_carrying_a_direction_fails_internal_consistency(
+    consensus, direction
+):
+    """The gap this closes: the old check examined direction only on strong
+    consensus, so a 2_vs_2 row carrying +1 passed unexamined -- and once the
+    sentinel is normalised away, such a row is indistinguishable from a signal."""
+    signs = (1.0, 1.0, -1.0, -1.0) if consensus == CONSENSUS_2_VS_2 else (
+        1.0,
+        1.0,
+        1.0,
+        float("nan"),
+    )
+    rogue = _candidate(consensus=consensus, direction=direction, cell_signs=signs)
+    with pytest.raises(ValueError, match="no-trade outcome but carries direction"):
+        assert_consensus_is_internally_consistent([rogue])
+
+
+@pytest.mark.parametrize("consensus", [CONSENSUS_2_VS_2, CONSENSUS_INCOMPLETE])
+def test_a_no_trade_row_without_a_direction_is_consistent(consensus):
+    signs = (1.0, 1.0, -1.0, -1.0) if consensus == CONSENSUS_2_VS_2 else (
+        1.0,
+        1.0,
+        1.0,
+        float("nan"),
+    )
+    good = _candidate(consensus=consensus, direction=None, cell_signs=signs)
+    assert assert_consensus_is_internally_consistent([good])["labels_consistent"]
+
+
+def test_the_real_census_passes_the_strengthened_consistency_check():
+    result = assert_consensus_is_internally_consistent(load_candidates(REPO_ROOT))
+    assert result["candidates_rederived"] == 259
+    assert result["labels_consistent"] is True
+
+
+def test_a_tampered_census_with_a_directional_no_trade_row_refuses(tmp_path):
+    """End to end through the loader, against a real file on disk."""
+    import csv
+
+    source = REPO_ROOT / PREOUTCOME_RELATIVE_DIR / CSV_FILENAMES["consensus_census"]
+    target_dir = tmp_path / PREOUTCOME_RELATIVE_DIR
+    target_dir.mkdir(parents=True)
+    with source.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    for row in rows:
+        if row["consensus"] == CONSENSUS_2_VS_2:
+            row["consensus_direction"] = "1"  # a no-trade row claiming a long
+            break
+    with (target_dir / CSV_FILENAMES["consensus_census"]).open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    tampered = load_candidates(tmp_path)
+    with pytest.raises(ValueError, match="no-trade outcome but carries direction"):
+        assert_consensus_is_internally_consistent(tampered)
+
+
+def test_an_out_of_range_direction_refuses_at_load_time(tmp_path):
+    import csv
+
+    source = REPO_ROOT / PREOUTCOME_RELATIVE_DIR / CSV_FILENAMES["consensus_census"]
+    target_dir = tmp_path / PREOUTCOME_RELATIVE_DIR
+    target_dir.mkdir(parents=True)
+    with source.open(encoding="utf-8", newline="") as handle:
+        reader = csv.DictReader(handle)
+        fieldnames = list(reader.fieldnames or [])
+        rows = list(reader)
+    rows[0]["consensus_direction"] = "2"
+    with (target_dir / CSV_FILENAMES["consensus_census"]).open(
+        "w", encoding="utf-8", newline=""
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with pytest.raises(ValueError, match="not a recognised direction"):
+        load_candidates(tmp_path)
+
+
+# --- reconciliation: agreement passes, disagreement still refuses ----------
+
+
+def test_a_runtime_none_reconciles_with_a_frozen_zero():
+    """The whole point. The runtime returns None for 2_vs_2 and incomplete; the
+    census wrote 0. After semantic parsing these agree, on all 91 rows."""
+    from app.services.mbo_stage36_executor import (
+        classify_consensus,
+        reconcile_with_frozen_census,
+    )
+
+    frozen = load_candidates(REPO_ROOT)
+    untraded = [c for c in frozen if not c.is_strong_consensus]
+    assert len(untraded) == 91
+
+    # The runtime rule's own answer for a split vote, independently of the CSV.
+    assert classify_consensus([1.0, 1.0, -1.0, -1.0]) == (CONSENSUS_2_VS_2, None)
+    assert classify_consensus([1.0, 1.0, 1.0, None]) == (CONSENSUS_INCOMPLETE, None)
+    assert all(c.direction is None for c in untraded)
+
+    reconcile_with_frozen_census(list(frozen), frozen)
+
+
+def test_reconciliation_still_refuses_a_real_direction_disagreement():
+    """Normalising the sentinel must not soften the comparison."""
+    import dataclasses
+
+    from app.services.mbo_stage36_executor import reconcile_with_frozen_census
+
+    runtime, frozen = _identity_pair()
+
+    # A genuine flip on a traded event.
+    index = next(i for i, c in enumerate(runtime) if c.direction == LONG)
+    runtime[index] = dataclasses.replace(runtime[index], direction=SHORT)
+    with pytest.raises(ValueError, match="direction recomputed"):
+        reconcile_with_frozen_census(runtime, frozen)
+
+    # A runtime that invents a direction where the census recorded no trade.
+    runtime, frozen = _identity_pair()
+    index = next(i for i, c in enumerate(runtime) if c.direction is None)
+    runtime[index] = dataclasses.replace(runtime[index], direction=LONG)
+    with pytest.raises(ValueError, match="direction recomputed"):
+        reconcile_with_frozen_census(runtime, frozen)
+
+    # And a census that claims a direction the runtime did not produce.
+    runtime, frozen = _identity_pair()
+    index = next(i for i, c in enumerate(frozen) if c.direction is None)
+    frozen[index] = dataclasses.replace(frozen[index], direction=SHORT)
+    with pytest.raises(ValueError, match="direction recomputed"):
+        reconcile_with_frozen_census(runtime, frozen)
+
+
+def test_the_normalisation_did_not_disable_any_comparison():
+    """Structural: direction is still compared, and still without tolerance."""
+    import ast
+    import inspect
+
+    from app.services import mbo_stage36_executor as executor
+
+    source = textwrap.dedent(inspect.getsource(executor.reconcile_with_frozen_census))
+    tree = ast.parse(source)
+    compared = {
+        node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute) and node.attr in {
+            "direction",
+            "consensus",
+            "cell_signs",
+            "cell_prediction_ts",
+        }
+    }
+    assert compared == {"direction", "consensus", "cell_signs", "cell_prediction_ts"}
+
+
+def test_no_trade_candidates_still_produce_no_trade():
+    """Normalising the sentinel must not make an untraded event executable."""
+    from app.services.mbo_stage36_executor import FAIL_NO_CONSENSUS, execute_candidate
+
+    for consensus in (CONSENSUS_2_VS_2, CONSENSUS_INCOMPLETE):
+        untraded = _candidate(consensus=consensus, direction=None)
+        trade, reason = execute_candidate(
+            untraded,
+            book_at=lambda ts: pytest.fail("an untraded event priced a book"),
+            price_scale=1e9,
+        )
+        assert trade is None
+        assert reason == FAIL_NO_CONSENSUS

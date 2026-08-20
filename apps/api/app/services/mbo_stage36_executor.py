@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -239,6 +240,50 @@ def _parse_timestamp(text: str) -> int:
     return int(moment.tz_convert("UTC").value)
 
 
+# The census records a *no-trade* decision as the sentinel 0; the runtime rule
+# expresses the same decision as ``None``. Both mean "this event is not
+# traded", and comparing them raw made 91 identical decisions look like 91
+# disagreements. The sentinel is normalised here, at the boundary, so exactly
+# one representation of "no direction" exists past the loader.
+DIRECTION_SENTINEL_NO_TRADE = 0
+_DIRECTION_BY_VALUE: dict[int, int | None] = {
+    1: LONG,
+    -1: SHORT,
+    DIRECTION_SENTINEL_NO_TRADE: None,
+}
+
+
+def _parse_direction(text: str) -> int | None:
+    """The recorded direction: +1 long, -1 short, 0 or blank no trade.
+
+    Fail closed on anything else. A census direction outside this set is not a
+    direction this experiment knows how to act on, and guessing at one would
+    fabricate a trade the frozen design never authorized.
+    """
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+    try:
+        value = float(cleaned)
+    except ValueError as error:
+        raise ValueError(
+            f"consensus_direction {text!r} is not numeric; only -1, 0 and +1 are "
+            "recognised"
+        ) from error
+    if not math.isfinite(value) or value != int(value):
+        raise ValueError(
+            f"consensus_direction {text!r} is not a whole finite number; only "
+            "-1, 0 and +1 are recognised"
+        )
+    whole = int(value)
+    if whole not in _DIRECTION_BY_VALUE:
+        raise ValueError(
+            f"consensus_direction {text!r} is not a recognised direction; only "
+            "-1 (short), 0 (no trade) and +1 (long) are permitted"
+        )
+    return _DIRECTION_BY_VALUE[whole]
+
+
 @dataclass(frozen=True, slots=True)
 class Candidate:
     """One frozen news event, with its consensus decision already fixed."""
@@ -308,7 +353,7 @@ def load_candidates(repo_root: Path) -> list[Candidate]:
                     story_id=row["story_id"],
                     known_at_ns=_parse_timestamp(row["known_at"]),
                     consensus=row["consensus"],
-                    direction=int(float(raw_direction)) if raw_direction else None,
+                    direction=_parse_direction(raw_direction),
                     abs_shock_bps=float(raw_shock) if raw_shock else None,
                     cell_signs=tuple(signs),
                     cell_prediction_ts=tuple(times),
@@ -438,6 +483,15 @@ def assert_consensus_is_internally_consistent(
                     f"{candidate.symbol} {candidate.story_id[:12]}: recorded "
                     f"direction {candidate.direction}, majority is {majority}"
                 )
+        elif candidate.direction is not None:
+            # A 2_vs_2 or incomplete row has no majority to act on. Checking only
+            # the strong-consensus rows would let a non-trade row carrying +1 or
+            # -1 pass unexamined, and that row would then be indistinguishable
+            # from a real signal once the sentinel is normalised away.
+            problems.append(
+                f"{candidate.symbol} {candidate.story_id[:12]}: {candidate.consensus} "
+                f"is a no-trade outcome but carries direction {candidate.direction}"
+            )
     if problems:
         raise ValueError(
             "the frozen consensus labels do not follow from the frozen signs:"
