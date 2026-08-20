@@ -1,0 +1,43 @@
+{
+  "version": "tier1_stage36_preoutcome_v1",
+  "status": "frozen_before_economic_outcome",
+  "contains_post_decision_economic_outcome": false,
+  "governance": {
+    "prior_effective_trials": 530,
+    "fresh_primary_specifications": 1,
+    "effective_trials_after_outcome": 531,
+    "evidence_class": "exploratory mechanism development",
+    "authorizes_paper_or_live": false
+  },
+  "design": {
+    "path": "/opt/keftrade/docs/2026-08-19-stage36-news-l3-consensus-design.md",
+    "sha256": "9b7ea99ece2b37365d2aaec910b29e2e0f2c74e886099857ae34e2dd38cdf3e4"
+  },
+  "expected_counts": {
+    "news_events": 259,
+    "shock_rows": 259,
+    "consensus_rows": 259,
+    "4_of_4": 147,
+    "3_of_4": 21,
+    "2_vs_2": 81,
+    "incomplete": 10,
+    "strong_consensus": 168
+  },
+  "files": {
+    "news_events": {
+      "path": "/opt/keftrade/reports/tier1_stage36_preoutcome/v1/stage36_news_events.csv",
+      "bytes": 26954,
+      "sha256": "1dddce6aecc3de83eccf441bad0681a4366c2541fa3b1e4ad8a37bbdea59a1b4"
+    },
+    "shock_census": {
+      "path": "/opt/keftrade/reports/tier1_stage36_preoutcome/v1/stage36_30s_shock_census.csv",
+      "bytes": 48949,
+      "sha256": "543011c691a1e38237c4ec57721c3d4de2e1a03479be7f4a5f6792fb10f26c41"
+    },
+    "consensus_census": {
+      "path": "/opt/keftrade/reports/tier1_stage36_preoutcome/v1/stage36_l3_consensus_preoutcome.csv",
+      "bytes": 96109,
+      "sha256": "571eadb42f67e374f35cdcf4f4c9a1898fac44218fdbc158ac88790c0dd6f276"
+    }
+  }
+}
