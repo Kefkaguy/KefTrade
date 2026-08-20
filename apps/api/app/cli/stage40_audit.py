@@ -49,7 +49,7 @@ from app.services.stage40_audit_plan import (
     statistical_plan,
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_OUTPUT_DIR = REPO_ROOT / REPORT_RELATIVE_DIR
 
 # The quiet period Stage 3.6 declared. Reused rather than re-chosen: picking a
