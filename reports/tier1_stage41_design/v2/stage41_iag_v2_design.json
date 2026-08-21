@@ -1,0 +1,294 @@
+{
+  "version": "tier1_stage41_iag_v2_raw_mbo",
+  "class": "frozen_pre_outcome_design",
+  "base_branch": "stage41-iag-v1",
+  "base_commit": "604d5ceed8683dd754ed3dfc251e2bc8230d07bc",
+  "contains_strategy_outcome": false,
+  "contains_post_decision_return": false,
+  "contains_pnl": false,
+  "effective_trials_before": 531,
+  "effective_trials_after": 531,
+  "stage_4_2_reveal_would_move_ledger_to": 532,
+  "authorizes_paper_or_live": false,
+  "iag_v1_retirement": {
+    "verdict": "insufficient_executable_or_statistical_sample",
+    "cause": "feature_resolution_mismatch_insufficient_qualifying_supply",
+    "candidate_events": 502,
+    "primary_eligible_events": 3,
+    "primary_eligible_sessions": 3,
+    "fallback_eligible_events": 3,
+    "fallback_eligible_sessions": 3,
+    "economic_run_authorized": false,
+    "row_support_failures": 292,
+    "median_200ev_rows_in_120s": 8,
+    "required_200ev_rows": 20,
+    "median_50ev_rows_in_120s": 31.5,
+    "required_50ev_rows": 40,
+    "unambiguous_direction": 186,
+    "ambiguity": {
+      "not_persistent": 219,
+      "zero_net_flow": 68,
+      "cadence_disagreement": 29
+    },
+    "baseline_insufficient": 30,
+    "economic_outcome_viewed": false,
+    "bps_result_exists": false,
+    "pnl_result_exists": false,
+    "v2_is_confirmation_of_v1": false,
+    "v2_class": "new_exploratory_measurement_specification"
+  },
+  "raw_semantics_audit": {
+    "book_neutral_actions": [
+      "T",
+      "F",
+      "N"
+    ],
+    "book_mutating_actions": [
+      "A",
+      "C",
+      "M",
+      "R"
+    ],
+    "trade_side_means": "aggressor_side",
+    "trade_side_B": "buy_aggressor",
+    "trade_side_A": "sell_aggressor",
+    "trade_side_N": "unsignable_auction_nondisplayed_implied_offexchange",
+    "fill_side_means": "resting_side_opposite_of_aggressor",
+    "fill_is_signed": false,
+    "xnas_execution_normalization": "T -> F -> C sharing sequence and quantity",
+    "acm_side_means": "resting_order_side",
+    "acm_side_validated": "INVALID_SIDE_FOR_ACTION unless side in {A,B}",
+    "modify_decomposition": {
+      "price_changed": "withdraw old_size at old price; add new_size at new price",
+      "same_price_size_increase": "add (new_size - old_size); loses priority",
+      "same_price_size_decrease": "withdraw (old_size - new_size); keeps priority",
+      "unknown_order": "treated as ADD of new_size"
+    },
+    "safe_book_inspection": "completed F_LAST records only",
+    "certified_initialization": [
+      "formal_snapshot",
+      "known_empty_clear"
+    ],
+    "snapshot_flag": "F_SNAPSHOT marks book state, not order events",
+    "fail_closed_flags": [
+      "F_BAD_TS_RECV",
+      "F_MAYBE_BAD_BOOK"
+    ],
+    "feasible_signed_aggression": true,
+    "feasible_side_specific_liquidity": true,
+    "determination": "raw MBO supports direct IAG measurement; proceed"
+  },
+  "preserved_from_v1": {
+    "news_population": true,
+    "t0": "intraday_news_articles.known_at",
+    "quiet_period_minutes": 60,
+    "observation_seconds": 120,
+    "persistence_quarters": 4,
+    "persistence_quarter_seconds": 30,
+    "min_agreeing_quarters": 3,
+    "baseline_min_tiles": 500,
+    "baseline_tile_seconds": 120,
+    "percentile_levels": [
+      25,
+      75
+    ],
+    "fallback_percentile": 50,
+    "min_events": 100,
+    "min_sessions": 15,
+    "primary_horizon_minutes": 15,
+    "secondary_diagnostic_horizons_minutes": [
+      5,
+      30
+    ],
+    "primary_gross_hurdle_bps": 12.0,
+    "t_hurdle": 3.0,
+    "one_selected_specification_only": true
+  },
+  "removed_from_v1": {
+    "min_rows_200ev": null,
+    "min_rows_50ev": null,
+    "cadence_agreement_requirement": null,
+    "reason": "belonged to the feature-cadence representation and caused the resolution mismatch"
+  },
+  "raw_quality_gates": {
+    "G1_certified_initialization": "formal_snapshot or known_empty_clear",
+    "G2_coverage": "first ts_recv <= t0 and last ts_recv >= t_obs_end",
+    "G3_timing": "no F_BAD_TS_RECV and no F_MAYBE_BAD_BOOK in [t0, t_obs_end]",
+    "G4_reconstruction": "no fatal reconstruction defect for the session",
+    "G5_two_sided_book": "at the t0 anchor state and the t_obs_end state",
+    "G6_coherent_state": "at least one coherent F_LAST inside the window",
+    "minimum_record_or_trade_count_imposed": false,
+    "derived_structural_minimum": "3 signable trades, implied by the 3-of-4 persistence rule, not a separate gate"
+  },
+  "direction": {
+    "signed_records": "ACTION_TRADE only",
+    "signed_formula": "+size if side==B, -size if side==A, 0 if side==N",
+    "fill_never_signed": true,
+    "net_flow": "sum of signed(r) over records with t0 <= ts_recv <= t_obs_end",
+    "D": "sign(NetFlow)",
+    "single_raw_measurement": true,
+    "cadence_agreement_required": false,
+    "persistence": {
+      "quarters": 4,
+      "seconds": 30,
+      "min_agreeing": 3,
+      "boundaries": "first three half-open, last closed on t_obs_end",
+      "zero_quarter_agrees": false
+    },
+    "ambiguity_reasons": [
+      "zero_net_flow",
+      "not_persistent",
+      "no_signable_trade"
+    ],
+    "impacted_side": {
+      "+1": "ASK",
+      "-1": "BID"
+    }
+  },
+  "state_selection_rule": {
+    "S_of_t": "state at the LATEST coherent F_LAST with ts_recv <= t",
+    "nearest_in_time": false,
+    "state_after_t_permitted": false,
+    "mid_native_event_state_permitted": false,
+    "fail_closed_when": [
+      "no coherent state at or before t",
+      "state is not two-sided"
+    ],
+    "binds": [
+      "S(t0)",
+      "S(t_obs_end)",
+      "baseline tile endpoints",
+      "lambda endpoints",
+      "M2 observation",
+      "M3 observations"
+    ],
+    "tile_endpoint": "latest coherent F_LAST INSIDE the tile; tile dropped if none",
+    "tile_lambda_start": "S(tile_start), may come from an earlier tile",
+    "future_midpoint_access": false
+  },
+  "impacted_liquidity": {
+    "depth_definition": "summed displayed size over first 10 price levels of the impacted side",
+    "read_at": "coherent F_LAST states only",
+    "S_of_t": "impacted depth_10 at last coherent F_LAST with ts_recv <= t",
+    "D_ref": "S(t0)",
+    "D_end": "S(t_obs_end)",
+    "D_min": "min over coherent F_LAST with t0 <= ts_recv <= t_obs_end",
+    "depletion_ratio": "D_min / D_ref if D_ref > 0 else undefined",
+    "recovery_ratio": "(D_end - D_min) / (D_ref - D_min) if D_ref > D_min else 1.0",
+    "depletion_ratio_is_a_gate": false,
+    "M2": "percentile(D_end, causal baseline of impacted-side end-of-tile depth) <= 25",
+    "M3": "recovery_ratio <= 0.25",
+    "separate_ask_and_bid_baselines": true
+  },
+  "cancellation_addition": {
+    "side_specific": true,
+    "exclude_execution_driven": "native-event group containing any T or F",
+    "exclude_snapshot": "any record carrying F_SNAPSHOT",
+    "withdrawn": "C size + M same-price size decrease + M price-change old_size",
+    "added": "A size + M same-price size increase + M price-change new_size + M unknown-order new_size",
+    "withdrawal_pressure": "withdrawn / (added + withdrawn) if denominator > 0 else undefined",
+    "replaces_v1_S1_general_regime_variable": true
+  },
+  "replenishment": {
+    "statistic": "added on the impacted side at or after the F_LAST attaining D_min, within the window",
+    "reported_as": "replenished / max(D_ref - D_min, 1)",
+    "directional": true,
+    "forbidden_side_agnostic_sources": [
+      "touch_replenishment_volume",
+      "refill_after_execution_volume"
+    ]
+  },
+  "local_lambda": {
+    "mid_start": "midpoint at last coherent F_LAST with ts_recv <= t0",
+    "mid_end": "midpoint at last coherent F_LAST with ts_recv <= t_obs_end",
+    "numerator_bps": "D * (mid_end - mid_start) / mid_start * 10000",
+    "denominator_shares": "D * NetFlow",
+    "formula": "1000 * numerator / denominator",
+    "units": "bps per 1000 aggressive shares",
+    "min_denominator_shares": 100,
+    "undefined_when": [
+      "null midpoint",
+      "mid_start <= 0",
+      "denominator < 100"
+    ],
+    "on_undefined": "S3 not satisfied; event not disqualified",
+    "winsorization": null,
+    "role": "supporting_only_never_mandatory",
+    "reads_after_t_obs_end": false
+  },
+  "qualification": {
+    "must_have": {
+      "M1": "unambiguous persistent direction",
+      "M2": "percentile(D_end) <= 25",
+      "M3": "recovery_ratio <= 0.25",
+      "M4": "percentile(absorption) < 75"
+    },
+    "supporting": {
+      "S1": "percentile(withdrawal_pressure) >= 75  [now directional]",
+      "S2": "percentile(spread_bps at t_obs_end) >= 75",
+      "S3": "percentile(lambda) >= 75",
+      "S4": "percentile(execution intensity) >= 75"
+    },
+    "min_supporting": 2,
+    "rule": "M1 and M2 and M3 and M4 and (S1+S2+S3+S4 >= 2)"
+  },
+  "baseline": {
+    "construction": "non-overlapping 120s tiles at absolute UTC multiples",
+    "scope": "per symbol",
+    "causality": "prior certified sessions plus current session strictly before t0",
+    "tile_dropped_when": "no coherent F_LAST in the tile",
+    "min_tiles": 500,
+    "percentile_levels": [
+      25,
+      75
+    ],
+    "cutoffs_chosen_from_counts": false
+  },
+  "specifications": {
+    "IAG_v2_PRIMARY": {
+      "M2_percentile": 25,
+      "M3_recovery": 0.25,
+      "min_supporting": 2
+    },
+    "IAG_v2_FALLBACK": {
+      "M2_percentile": 50,
+      "M3_recovery": 0.5,
+      "min_supporting": 2
+    },
+    "ladder": "PRIMARY counts -> if >=100 events and >=15 sessions select PRIMARY; else FALLBACK counts -> if >=100 and >=15 select FALLBACK; else insufficient_sample and no economic run",
+    "selection_inputs": "qualification counts only",
+    "economic_outcomes_computed_for_both": false,
+    "selection_persisted_and_hashed_before_run": true
+  },
+  "architecture": {
+    "replays_per_file": 1,
+    "windows_open_per_symbol_at_any_instant": 1,
+    "why": "60-minute quiet period vs 120-second window guarantees non-overlap",
+    "depth_computed_at": [
+      "tile boundaries",
+      "F_LAST states inside an open window"
+    ],
+    "reused_machinery": [
+      "iter_dbn_events",
+      "MboEvent",
+      "MboBook",
+      "certified initialization",
+      "F_LAST grouping",
+      "BookReplay.timing_certified"
+    ],
+    "competing_reconstruction_created": false,
+    "dataset_copied": false,
+    "raw_records_total": 562000000,
+    "raw_records_per_symbol_day": 3500000,
+    "empirical_anchor": "Stage 1 processed the same 562M records to emit 19.5M feature rows and completed; v2 does strictly less per record",
+    "calibration_required": "timing probe on one symbol-day before the full pass"
+  },
+  "governance": {
+    "economic_outcome_read": false,
+    "horizon_midpoint_read": false,
+    "stage_4_2_run": false,
+    "ledger": 531,
+    "sample_previously_used": true,
+    "evidence_class": "exploratory mechanism development"
+  }
+}
