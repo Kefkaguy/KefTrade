@@ -1,0 +1,268 @@
+{
+  "version": "tier1_stage41_iag_v1",
+  "class": "frozen_pre_outcome_design",
+  "contains_strategy_outcome": false,
+  "contains_post_decision_return": false,
+  "contains_pnl": false,
+  "effective_trials_before": 531,
+  "effective_trials_after": 531,
+  "stage_4_2_reveal_moves_ledger_to": 532,
+  "authorizes_paper_or_live": false,
+  "feature_findings": {
+    "side_agnostic_unusable_for_direction": [
+      "queue_depletion_events",
+      "touch_replenishment_volume",
+      "touch_replenishment_events",
+      "refill_after_execution_volume",
+      "depletion_followed_by_quote_move",
+      "add_count",
+      "add_volume",
+      "cancel_count",
+      "cancel_volume",
+      "cancel_add_ratio",
+      "cancel_volume_ratio",
+      "mean_touch_depth"
+    ],
+    "unusable_identically_zero": [
+      "modify_count"
+    ],
+    "directional": [
+      "buy_aggressor_volume",
+      "sell_aggressor_volume",
+      "signed_trade_volume",
+      "signed_trade_volume_z",
+      "aggressor_imbalance",
+      "bid_depth_5",
+      "ask_depth_5",
+      "bid_depth_10",
+      "ask_depth_10",
+      "bid_size_l1",
+      "ask_size_l1",
+      "bid_levels",
+      "ask_levels"
+    ],
+    "counters_reset_per_window_sum_to_aggregate": [
+      "signed_trade_volume",
+      "execution_volume",
+      "execution_count",
+      "trade_count",
+      "trade_volume",
+      "cancel_volume",
+      "add_volume",
+      "buy_aggressor_volume",
+      "sell_aggressor_volume"
+    ],
+    "snapshots_reduce_by_first_last_min_max": [
+      "midpoint",
+      "spread",
+      "spread_bps",
+      "bid_depth_10",
+      "ask_depth_10",
+      "bid_levels",
+      "ask_levels",
+      "resting_orders"
+    ],
+    "sign_convention": "signed_trade_volume = buy_aggressor_volume - sell_aggressor_volume; positive = buy pressure",
+    "availability_clock": "feature_available_ts_recv = max(window.max_ts_recv, state.ts_recv)"
+  },
+  "population": {
+    "sample": "certified_june_2025_xnas_itch_mbo",
+    "symbols": [
+      "AAPL",
+      "AMD",
+      "CMCSA",
+      "CSCO",
+      "INTC",
+      "MSFT",
+      "NVDA",
+      "TSLA"
+    ],
+    "sessions": 20,
+    "candidate_events": 502,
+    "t0": "intraday_news_articles.known_at",
+    "quiet_period_minutes": 60,
+    "story_identity": "COALESCE(content_hash, article_id)",
+    "post_news_price_shock_threshold": null
+  },
+  "observation_window": {
+    "t_obs_end": "t0 + 120 seconds",
+    "seconds": 120,
+    "row_selection": "t0 <= feature_available_ts_recv <= t_obs_end",
+    "min_rows_200ev": 20,
+    "min_rows_50ev": 40,
+    "below_minimum": "event does not qualify"
+  },
+  "direction": {
+    "statistic": "NetFlow(c) = sum of signed_trade_volume over window rows",
+    "aggregation": "sum",
+    "cadences_required_to_agree": [
+      "50ev",
+      "200ev"
+    ],
+    "zero_handling": "D == 0 on either cadence -> ambiguous -> no qualification",
+    "disagreement_handling": "different signs -> ambiguous -> no qualification",
+    "persistence": {
+      "quarters": 4,
+      "quarter_seconds": 30,
+      "min_agreeing": 3,
+      "cadence": "200ev",
+      "zero_quarter": "does not agree"
+    },
+    "impacted_side": "ask_depth_10 if D=+1 else bid_depth_10"
+  },
+  "baseline": {
+    "construction": "non-overlapping 120s tiles, same reductions as an event window",
+    "scope": "per symbol, per cadence",
+    "causality": "prior certified sessions plus current session strictly before t0",
+    "min_tiles": 500,
+    "below_minimum": "event does not qualify",
+    "quantile_levels": [
+      25,
+      75
+    ]
+  },
+  "local_lambda": {
+    "numerator_bps": "D * (mid_last - mid_first) / mid_first * 10000",
+    "denominator_shares": "D * NetFlow(200ev)",
+    "formula": "1000 * numerator / denominator",
+    "units": "bps per 1000 shares of same-direction net flow",
+    "mid_first": "midpoint at first 200ev row with feature_available_ts_recv >= t0",
+    "mid_last": "midpoint at last 200ev row with feature_available_ts_recv <= t_obs_end",
+    "min_denominator_shares": 100,
+    "zero_flow_handling": "lambda undefined; supporting condition S3 not satisfied; event not disqualified",
+    "winsorization": null,
+    "availability": "feature_available_ts_recv of last row used, <= t_obs_end",
+    "no_price_after_t_obs_end": true,
+    "endpoint_selection": "start = argmin feature_available_ts_recv, end = argmax feature_available_ts_recv, over 200ev rows with t0 <= feature_available_ts_recv <= t_obs_end",
+    "both_endpoints_available_by": "t_obs_end",
+    "fail_closed_when": [
+      "no qualifying row",
+      "null midpoint (one-sided or empty book)",
+      "mid_first <= 0",
+      "denominator < 100 shares"
+    ],
+    "on_fail_closed": "lambda undefined; S3 not satisfied; event not disqualified",
+    "role": "supporting_only_never_mandatory",
+    "why_supporting_only": "conditions on price displacement inside the 120s observation window; making it mandatory would turn IAG-v1 into a momentum filter wearing a liquidity name"
+  },
+  "qualification": {
+    "must_have": {
+      "M1": "unambiguous persistent direction",
+      "M2": "percentile(depth_impacted at t_obs_end) <= 25  [side-separated depth_10 only]",
+      "M3": "recovery <= 0.25",
+      "M4": "percentile(absorption_ratio) < 75"
+    },
+    "recovery_formula": "first = depth_impacted at earliest 200ev row by availability clock; last = depth_impacted at latest 200ev row; trough = min over window; recovery = (last - trough) / (first - trough) if first > trough else 1.0",
+    "supporting": {
+      "S1": "general cancellation / liquidity-withdrawal stress: percentile(cancel_volume_ratio) >= 75",
+      "S2": "percentile(spread_bps at t_obs_end) >= 75",
+      "S3": "percentile(lambda) >= 75",
+      "S4": "percentile(execution_intensity) >= 75"
+    },
+    "min_supporting": 2,
+    "rule": "M1 and M2 and M3 and M4 and (S1+S2+S3+S4 >= 2)",
+    "M2": "percentile(depth_impacted at t_obs_end) <= 25  [side-separated depth_10 only]",
+    "impacted_depth_series": {
+      "D=+1": "ask_depth_10",
+      "D=-1": "bid_depth_10"
+    },
+    "forbidden_as_directional_evidence": [
+      "queue_depletion_events",
+      "touch_replenishment_volume",
+      "touch_replenishment_events",
+      "refill_after_execution_volume",
+      "depletion_followed_by_quote_move",
+      "cancel_add_ratio",
+      "cancel_volume_ratio",
+      "mean_touch_depth"
+    ],
+    "S1_interpretation": "stressed book regime; NOT directional liquidity withdrawal; counters are side-agnostic and must never be described as cancellation pressure consistent with direction"
+  },
+  "specifications": {
+    "IAG_v1_PRIMARY": {
+      "M2_percentile": 25,
+      "M3_recovery": 0.25,
+      "min_supporting": 2
+    },
+    "IAG_v1_FALLBACK": {
+      "M2_percentile": 50,
+      "M3_recovery": 0.5,
+      "min_supporting": 2
+    },
+    "selection_rule": "deterministic ladder: (1) evaluate PRIMARY counts only; (2) if PRIMARY events>=100 and sessions>=15 -> selected_spec=PRIMARY; (3) else evaluate FALLBACK counts; (4) if FALLBACK events>=100 and sessions>=15 -> selected_spec=FALLBACK; (5) else verdict=insufficient_executable_or_statistical_sample and NO economic run occurs",
+    "specifications_economically_evaluated": 1,
+    "selection_inputs": "eligibility counts only; no post-decision return, midpoint past t_obs_end, or P&L",
+    "only_selected_spec_reaches_stage_4_2": true,
+    "economic_outcomes_computed_for_both": false,
+    "selection_persisted_and_hashed_before_run": true,
+    "run_reverifies_selection_hash": true
+  },
+  "economic_test": {
+    "t_decision": "t_obs_end",
+    "primary_horizon_minutes": 15,
+    "secondary_diagnostic_horizons_minutes": [
+      5,
+      30
+    ],
+    "gross_bps": "D * (midpoint(t_horizon) - midpoint(t_decision)) / midpoint(t_decision) * 10000",
+    "is_profit": false,
+    "requires_l3_coverage_through_horizon": true,
+    "primary_outcome_name": "gross_directional_midpoint_displacement_bps",
+    "formula": "D * midpoint_return_bps(t_obs_end -> t_obs_end + 15 minutes)",
+    "abnormal_language_used": false,
+    "benchmark_adjustment_frozen": null,
+    "is_pnl": false,
+    "is_executable_profit": false,
+    "secondary_horizons_may_rescue_primary_failure": false
+  },
+  "hurdle": {
+    "desired_net_bps": 8.0,
+    "execution_allowance_bps": 4.0,
+    "execution_allowance_basis": "Stage 3.6 measured 1.773816 + 0.013895 bps, x2 stress for depleted liquidity, rounded up",
+    "primary_gross_hurdle_bps": 12.0,
+    "stretch_gross_hurdle_bps": 19.0,
+    "is_expectation": false,
+    "label": "predeclared_hurdle",
+    "cash_reference_gross_12bps": {
+      "5000": 6.0,
+      "10000": 12.0,
+      "12000": 14.4
+    },
+    "cash_reference_net_8bps": {
+      "5000": 4.0,
+      "10000": 8.0,
+      "12000": 9.6
+    },
+    "decomposition": "12 bps gross - 4 bps conservative execution allowance = 8 bps eventual net",
+    "is_expected_return": false
+  },
+  "inference": {
+    "clustering": "trading session",
+    "t_hurdle": 3.0,
+    "confidence_interval": "95% clustered, t-distribution with n_sessions-1 df",
+    "min_events": 100,
+    "min_sessions": 15,
+    "per_symbol_and_per_session": "diagnostic_only_may_not_filter_after_outcome"
+  },
+  "verdicts": {
+    "IAG_gross_mechanism_detected": "sample gate passed and mean gross >= 12.0 bps and clustered t >= 3.0",
+    "no_IAG_mechanism": "sample gate passed and either condition fails",
+    "insufficient_executable_or_statistical_sample": "sample gate fails",
+    "passing_authorizes": "stage_4_3_execution_simulation_only"
+  },
+  "amendment": "r1",
+  "amendment_note": "review amendments 1-7 applied 2026-08-21",
+  "governance_approved": {
+    "observation_window_seconds": 120,
+    "primary_horizon_minutes": 15,
+    "percentile_levels": [
+      25,
+      75
+    ],
+    "cadence_agreement": [
+      "50ev",
+      "200ev"
+    ],
+    "persistence_quarters": "3_of_4_30s"
+  }
+}
