@@ -146,3 +146,47 @@ CREATE TABLE IF NOT EXISTS portfolio_rebalance_plans (
 
 CREATE INDEX IF NOT EXISTS portfolio_rebalance_plans_lookup_idx
     ON portfolio_rebalance_plans(strategy, signal_date DESC, provenance);
+
+-- ---------------------------------------------------------------------------
+-- Strategy ownership ledger
+-- ---------------------------------------------------------------------------
+--
+-- Alpaca reports one position book per account. That book answers "does this
+-- account hold AAPL", which is not the question a rebalance asks. The question
+-- is "does MOM_12_1 hold AAPL", and no broker endpoint can answer it, because
+-- the attribution exists only here.
+--
+-- Without this table the only available reading of "held" is the account book,
+-- and a rebalance would liquidate a manual position, another strategy's
+-- position, or a legacy holding, simply because the symbol left the signal.
+-- Absence of a row is therefore not zero-with-confidence -- it is no evidence,
+-- and the bridge blocks rather than assuming either way.
+CREATE TABLE IF NOT EXISTS strategy_owned_positions (
+    id BIGSERIAL PRIMARY KEY,
+    strategy TEXT NOT NULL,
+    strategy_version TEXT NOT NULL,
+    broker_account_id BIGINT NOT NULL REFERENCES broker_accounts(id) ON DELETE RESTRICT,
+    symbol TEXT NOT NULL,
+    -- NUMERIC(20, 9) matches the fractional quantity precision used throughout
+    -- this migration; a share count is never a float.
+    quantity NUMERIC(20, 9) NOT NULL,
+    average_entry_price NUMERIC(20, 9),
+    -- The last time this attribution was established. Read as evidence with a
+    -- timestamp, never as a standing fact.
+    as_of TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- Which reconciliation run last agreed the attribution matches the broker.
+    reconciliation_run_id BIGINT REFERENCES broker_reconciliation_runs(id) ON DELETE SET NULL,
+    source TEXT NOT NULL DEFAULT 'reconciliation',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    -- A negative attribution would be a short by bookkeeping. The whole sell
+    -- path exists to make shorts unreachable, so they are unrepresentable here.
+    CONSTRAINT strategy_owned_positions_non_negative_check CHECK (quantity >= 0),
+    CONSTRAINT strategy_owned_positions_price_check
+        CHECK (average_entry_price IS NULL OR average_entry_price > 0),
+    UNIQUE (strategy, broker_account_id, symbol)
+);
+
+CREATE INDEX IF NOT EXISTS strategy_owned_positions_lookup_idx
+    ON strategy_owned_positions(strategy, broker_account_id)
+    WHERE quantity > 0;

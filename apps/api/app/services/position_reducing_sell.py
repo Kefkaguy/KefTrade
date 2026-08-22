@@ -38,6 +38,10 @@ from app.services.fractional_execution import (
     FractionalExecutionError,
     validate_order_payload,
 )
+from app.services.strategy_ownership import (
+    ReconciliationEvidence,
+    require_clean_reconciliation,
+)
 
 
 def max_position_staleness() -> timedelta:
@@ -94,7 +98,10 @@ class ConfirmedPosition:
     quantity: Decimal
     market_value: Decimal
     observed_at: datetime
-    reconciliation_status: str
+    # Informational only. Reconciliation authority is ReconciliationEvidence,
+    # which carries a run id and a timestamp; a string on a position could be
+    # set to "clean" by whoever constructed it.
+    reconciliation_status: str = "unknown"
 
     @property
     def is_long(self) -> bool:
@@ -154,6 +161,7 @@ def plan_position_reduction(
     position: ConfirmedPosition | None,
     target_dollars: Decimal,
     reference_price: Decimal,
+    reconciliation: ReconciliationEvidence | None,
     now: datetime | None = None,
 ) -> ReductionOrder:
     """Reduce a long position toward ``target_dollars``, or refuse.
@@ -183,11 +191,7 @@ def plan_position_reduction(
             f"{max_position_staleness()}; selling against a remembered position "
             f"is how an account ends up short; {BLOCKER_STALE_POSITION}"
         )
-    if position.reconciliation_status != "clean":
-        raise ShortSellProhibited(
-            f"reconciliation is {position.reconciliation_status!r}, not clean; "
-            f"{BLOCKER_STALE_RECONCILIATION}"
-        )
+    require_clean_reconciliation(reconciliation)
     if reference_price <= 0:
         raise FractionalExecutionError(
             f"reference price for {position.symbol} must be positive"
@@ -214,7 +218,10 @@ def plan_position_reduction(
 
 
 def plan_full_exit(
-    *, position: ConfirmedPosition | None, now: datetime | None = None
+    *,
+    position: ConfirmedPosition | None,
+    reconciliation: ReconciliationEvidence | None,
+    now: datetime | None = None,
 ) -> ReductionOrder:
     """Close a long position exactly, selling the confirmed quantity and no more."""
     if position is None:
@@ -230,11 +237,7 @@ def plan_full_exit(
             f"position snapshot for {position.symbol} is stale; "
             f"{BLOCKER_STALE_POSITION}"
         )
-    if position.reconciliation_status != "clean":
-        raise ShortSellProhibited(
-            f"reconciliation is {position.reconciliation_status!r}; "
-            f"{BLOCKER_STALE_RECONCILIATION}"
-        )
+    require_clean_reconciliation(reconciliation)
     return _build_reduction(position, position.quantity)
 
 
@@ -297,11 +300,6 @@ def assert_sell_is_position_reducing(
         )
     if not position.is_long:
         raise ShortSellProhibited(f"{symbol} is not held long; {BLOCKER_NOT_LONG}")
-    if position.reconciliation_status != "clean":
-        raise ShortSellProhibited(
-            f"reconciliation is {position.reconciliation_status!r} for {symbol}; "
-            f"{BLOCKER_STALE_RECONCILIATION}"
-        )
     quantity = Decimal(str(payload.get("qty")))
     if quantity > position.quantity:
         raise ShortSellProhibited(
@@ -346,7 +344,7 @@ class StalePositionAtSubmit(ShortSellProhibited):
 
 
 def parse_broker_positions(
-    payload: Any, *, observed_at: datetime, reconciliation_status: str = "clean"
+    payload: Any, *, observed_at: datetime, reconciliation_status: str
 ) -> dict[str, ConfirmedPosition]:
     """Normalise a fresh ``/v2/positions`` body into confirmed long positions.
 
@@ -376,8 +374,8 @@ def revalidate_reduction_against_fresh_positions(
     symbol: str,
     requested_qty: Decimal,
     fresh_positions: dict[str, ConfirmedPosition],
-    stored: ConfirmedPosition | None = None,
-    reconciliation_status: str = "clean",
+    stored: ConfirmedPosition | None,
+    reconciliation: ReconciliationEvidence | None,
 ) -> ConfirmedPosition:
     """The final gate. Refuses unless the broker still supports the reduction.
 
@@ -385,11 +383,12 @@ def revalidate_reduction_against_fresh_positions(
     catches the case that staleness cannot: a position that was real, is still
     real, and is now *smaller* than the order assumes.
     """
-    if reconciliation_status != "clean":
+    try:
+        require_clean_reconciliation(reconciliation)
+    except Exception as refusal:
         raise StalePositionAtSubmit(
-            f"reconciliation is {reconciliation_status!r} at the mutation "
-            f"boundary; {BLOCKER_STALE_RECONCILIATION}"
-        )
+            f"reconciliation evidence does not support a mutation: {refusal}"
+        ) from refusal
 
     fresh = fresh_positions.get(symbol)
     if fresh is None:

@@ -98,58 +98,105 @@ def test_paper_order_submission_requires_and_uses_both_flags(monkeypatch: pytest
 
 
 def test_external_adapter_rejects_short_even_when_both_flags_are_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A sell that cannot be shown to reduce a confirmed long position is a
-    short, and is refused with both flags on.
+    """No adapter in this codebase can open a short, with both flags on.
 
-    The adapter now supports position-reducing sells for portfolio rebalancing,
-    so the refusal is no longer "buy orders only" -- but the property this test
-    exists to protect is unchanged and, if anything, sharper: a sell naming no
-    confirmed position, and a sell larger than the position it names, both fail
-    before the network.
+    The property this test protects is unchanged. What changed is that there are
+    now two adapters to prove it about: the frozen 1.0.0 release, which still
+    refuses every sell outright, and the portfolio release, which refuses any
+    sell that cannot be shown to reduce a position the strategy owns.
     """
     from decimal import Decimal
 
+    from app.brokers.alpaca_paper import AlpacaPaperPortfolioAdapter
     from app.services.position_reducing_sell import (
         ConfirmedPosition,
         ShortSellProhibited,
     )
+    from app.services.strategy_ownership import (
+        ReconciliationEvidence,
+        StrategyOwnedPosition,
+        StrategyOwnershipLedger,
+    )
 
     requests: list[httpx.Request] = []
-    adapter = configured_adapter(monkeypatch, lambda request: requests.append(request) or httpx.Response(500))
+    handler = lambda request: requests.append(request) or httpx.Response(500)
+    frozen = configured_adapter(monkeypatch, handler)
     monkeypatch.setattr(settings, "broker_order_submission_enabled", True)
     monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url=settings.alpaca_paper_base_url
+    )
+    portfolio = AlpacaPaperPortfolioAdapter(client=client)
 
+    now = datetime.now(UTC)
     held = ConfirmedPosition(
         symbol="AAPL",
         quantity=Decimal(10),
         market_value=Decimal(1000),
-        observed_at=datetime.now(UTC),
+        observed_at=now,
         reconciliation_status="clean",
     )
+    ledger = StrategyOwnershipLedger(
+        strategy="MOM_12_1",
+        positions={
+            "AAPL": StrategyOwnedPosition(
+                strategy="MOM_12_1", symbol="AAPL", quantity=Decimal(20), as_of=now
+            )
+        },
+        available=True,
+        source="test",
+    )
+    evidence = ReconciliationEvidence(
+        run_id=1, status="clean", completed_at=now, broker_account_id=1
+    )
+
+    def sell(symbol: str, qty: str, side: str = "sell") -> dict[str, object]:
+        return {
+            "symbol": symbol, "qty": qty, "side": side,
+            "type": "market", "time_in_force": "day", "strategy": "MOM_12_1",
+        }
 
     async def run() -> None:
-        # No confirmed book at all: cannot be shown safe, so refused.
+        # The frozen release has no sell path at all.
+        with pytest.raises(BrokerMutationDisabled, match="buy orders only"):
+            await frozen.submit_order(sell("AAPL", "1"))
+        # No confirmed book: cannot be shown safe, so refused.
         with pytest.raises(BrokerMutationDisabled, match="confirmed long"):
-            await adapter.submit_order({"symbol": "AAPL", "qty": "1", "side": "sell", "type": "market"})
+            await portfolio.submit_order(sell("AAPL", "1"))
         # A book that does not hold the symbol: still a short.
         with pytest.raises(ShortSellProhibited, match="no confirmed long position"):
-            await adapter.submit_order(
-                {"symbol": "TSLA", "qty": "1", "side": "sell", "type": "market"},
+            await portfolio.submit_order(
+                sell("TSLA", "1"),
                 confirmed_positions={"AAPL": held},
+                ownership_ledger=StrategyOwnershipLedger(
+                    strategy="MOM_12_1",
+                    positions={
+                        "TSLA": StrategyOwnedPosition(
+                            strategy="MOM_12_1", symbol="TSLA",
+                            quantity=Decimal(5), as_of=now,
+                        )
+                    },
+                    available=True,
+                    source="test",
+                ),
+                reconciliation=evidence,
             )
         # Larger than the confirmed position: crosses zero.
         with pytest.raises(ShortSellProhibited, match="would open a short"):
-            await adapter.submit_order(
-                {"symbol": "AAPL", "qty": "11", "side": "sell", "type": "market"},
+            await portfolio.submit_order(
+                sell("AAPL", "11"),
                 confirmed_positions={"AAPL": held},
+                ownership_ledger=ledger,
+                reconciliation=evidence,
             )
         # Anything that is neither a buy nor a sell is still refused outright.
         with pytest.raises(BrokerMutationDisabled, match="position-reducing sells only"):
-            await adapter.submit_order({"symbol": "AAPL", "qty": "1", "side": "sell_short", "type": "market"})
-        await adapter._provided_client.aclose()  # type: ignore[union-attr]
+            await portfolio.submit_order(sell("AAPL", "1", side="sell_short"))
+        await frozen._provided_client.aclose()  # type: ignore[union-attr]
+        await client.aclose()
 
     asyncio.run(run())
-    assert requests == []
+    assert requests == []  # five refusals, zero network calls
 
 
 def test_external_short_prohibition_is_enforced_by_service_and_database() -> None:
@@ -218,12 +265,12 @@ def test_trend_repair_modes_are_only_less_strict_for_generated_children() -> Non
     from app.services.strategy_discovery import trend_passes
 
     feature = {"ema_20": "99", "ema_50": "100", "returns_5": "0.01"}
-    candles = [{"close": Decimal("98")}, {"close": Decimal("99")}, {"close": Decimal("101")}]
+    candles = [{"close": Decimal(98)}, {"close": Decimal(99)}, {"close": Decimal(101)}]
     base = {"trend_method": "ema", "trend_fast": 20, "trend_slow": 50}
 
-    assert not trend_passes(Decimal("101"), feature, candles, base)
-    assert trend_passes(Decimal("101"), feature, candles, {**base, "trend_repair_mode": "price_above_slow"})
-    assert trend_passes(Decimal("101"), feature, candles, {**base, "trend_repair_mode": "near_cross_with_momentum", "trend_fast_slow_ratio_min": 0.985})
+    assert not trend_passes(Decimal(101), feature, candles, base)
+    assert trend_passes(Decimal(101), feature, candles, {**base, "trend_repair_mode": "price_above_slow"})
+    assert trend_passes(Decimal(101), feature, candles, {**base, "trend_repair_mode": "near_cross_with_momentum", "trend_fast_slow_ratio_min": 0.985})
 
 
 def test_phase10_modules_have_no_runtime_ddl() -> None:
@@ -251,11 +298,13 @@ def test_phase10_modules_have_no_runtime_ddl() -> None:
 
 def test_adapter_has_explicit_guards_for_both_mutation_methods() -> None:
     source = (ROOT / "brokers" / "alpaca_paper.py").read_text(encoding="utf-8")
-    # Five: the flag gate on submit, on cancel, and again at the mutation
-    # boundary; the not-buy-not-sell refusal; and the refusal of a sell that
-    # names no confirmed position. The boundary re-check is deliberate --
-    # flags can be turned off between construction and submission.
-    assert source.count("raise BrokerMutationDisabled") == 5
+    # Seven, across two adapters. Frozen 1.0.0: the not-a-buy refusal, the flag
+    # gate on submit, the flag gate on cancel. Portfolio 2.0.0: the
+    # not-buy-not-sell refusal, the refusal of a sell naming no confirmed
+    # position, the flag gate on submit, and the flag gate again at the mutation
+    # boundary. That last re-check is deliberate -- flags can be turned off
+    # between construction and submission.
+    assert source.count("raise BrokerMutationDisabled") == 7
     assert "buy orders and" in source
     assert "position-reducing sells only" in source
     assert "assert_sell_is_position_reducing" in source

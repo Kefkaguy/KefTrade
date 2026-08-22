@@ -52,6 +52,16 @@ from app.services.position_reducing_sell import (
     plan_full_exit,
     plan_position_reduction,
 )
+from app.services.strategy_ownership import (
+    OwnershipUnavailable,
+    ReconciliationEvidence,
+    ReconciliationEvidenceMissing,
+    StrategyOwnershipLedger,
+    assert_within_strategy_ownership,
+    require_clean_reconciliation,
+    require_ownership_ledger,
+    sellable_quantity,
+)
 
 STRATEGY_MOM_12_1 = "MOM_12_1"
 MOM_12_1_UNIVERSE_HASH = "f7b50c2b0c0882df"
@@ -71,6 +81,8 @@ BLOCKER_WEIGHT_MISMATCH = "SIGNAL_WEIGHTS_NOT_EQUAL"
 BLOCKER_SELECTION_MISMATCH = "SELECTION_SET_MISMATCH"
 BLOCKER_SELL_UNSAFE = "SELL_WOULD_CROSS_ZERO"
 BLOCKER_RECONCILIATION = "RECONCILIATION_NOT_CLEAN"
+BLOCKER_STRATEGY_VERSION = "SIGNAL_STRATEGY_VERSION_INVALID"
+BLOCKER_OWNERSHIP = "STRATEGY_OWNERSHIP_UNAVAILABLE"
 
 
 # ---------------------------------------------------------------------------
@@ -187,10 +199,31 @@ def load_portfolio_signal(
             f"frozen {expected_universe_hash!r}; {BLOCKER_UNIVERSE_HASH}"
         )
 
-    versions = {str(row.get("strategy_version") or "unknown") for row in rows}
+    # Exactly one non-empty version. A file mixing versions is two signals in
+    # one, and taking the minimum -- as this once did -- would silently pick a
+    # winner rather than refuse.
+    versions = {str(row.get("strategy_version") or "").strip() for row in rows}
+    if len(versions) != 1:
+        raise FractionalExecutionError(
+            f"signal CSV at {path} carries {len(versions)} distinct "
+            f"strategy_version values {sorted(versions)}; one signal is one "
+            f"strategy version; {BLOCKER_STRATEGY_VERSION}"
+        )
+    strategy_version = versions.pop()
+    if not strategy_version:
+        raise FractionalExecutionError(
+            f"signal CSV at {path} carries an empty strategy_version; "
+            f"{BLOCKER_STRATEGY_VERSION}"
+        )
+    if provenance == PROVENANCE_FORWARD and strategy_version.lower() == "unknown":
+        raise FractionalExecutionError(
+            "a forward signal may not carry strategy_version 'unknown': forward "
+            "evidence has to name the version that produced it; "
+            f"{BLOCKER_STRATEGY_VERSION}"
+        )
     return PortfolioSignal(
         strategy=strategy,
-        strategy_version=min(versions),
+        strategy_version=strategy_version,
         universe_hash=universe_hash,
         signal_date=date.fromisoformat(signal_dates.pop()),
         intended_execution_date=date.fromisoformat(execution_dates.pop()),
@@ -290,8 +323,9 @@ def build_rebalance_plan(
     reference_prices: dict[str, Decimal],
     asset_facts: dict[str, AssetFact],
     positions: dict[str, ConfirmedPosition] | None = None,
+    ownership: StrategyOwnershipLedger | None = None,
+    reconciliation: ReconciliationEvidence | None = None,
     buying_power: Decimal | None = None,
-    reconciliation_status: str = "clean",
     share_policy: str = MOM_12_1_SHARE_POLICY,
 ) -> RebalancePlan:
     """Turn a frozen signal into an observe-only rebalance plan.
@@ -315,8 +349,26 @@ def build_rebalance_plan(
     blockers: list[str] = []
     blocked_symbols: set[str] = set()
 
-    if reconciliation_status != "clean":
+    # Reconciliation is evidence about a specific run, never a default string.
+    try:
+        require_clean_reconciliation(reconciliation)
+        reconciliation_ok = True
+    except ReconciliationEvidenceMissing:
         blockers.append(BLOCKER_RECONCILIATION)
+        reconciliation_ok = False
+
+    # Ownership is what makes an exit legitimate. Without a ledger the account
+    # book is the only thing left to read, and reading it would attribute every
+    # holding in the account to this strategy.
+    try:
+        ledger = require_ownership_ledger(ownership, strategy=signal.strategy)
+        ownership_ok = True
+    except OwnershipUnavailable:
+        ledger = StrategyOwnershipLedger.unavailable(
+            signal.strategy, source="unavailable"
+        )
+        blockers.append(BLOCKER_OWNERSHIP)
+        ownership_ok = False
 
     preflight = preflight_assets(symbols, asset_facts, share_policy=share_policy)
     if preflight["blocked"]:
@@ -374,10 +426,19 @@ def build_rebalance_plan(
             # Held more than the target: reduce, never below zero.
             action = "reduce"
             try:
+                # Bound by ownership before availability: selling more than we
+                # own takes another strategy's position.
+                assert_within_strategy_ownership(
+                    strategy=signal.strategy,
+                    symbol=symbol,
+                    requested_qty=position.quantity - (target / reference_prices[symbol]),
+                    ledger=ledger,
+                )
                 reduction = plan_position_reduction(
                     position=position,
                     target_dollars=target,
                     reference_price=reference_prices[symbol],
+                    reconciliation=reconciliation,
                 )
                 client_order_id = deterministic_client_order_id(
                     strategy_name=signal.strategy,
@@ -386,13 +447,12 @@ def build_rebalance_plan(
                     symbol=symbol,
                 )
                 payload = reduction.payload(client_order_id=client_order_id)
-            except ShortSellProhibited as refusal:
+            except (ShortSellProhibited, OwnershipUnavailable, ReconciliationEvidenceMissing):
                 symbol_blockers.append(BLOCKER_SELL_UNSAFE)
                 blockers.append(BLOCKER_SELL_UNSAFE)
                 blocked_symbols.add(symbol)
                 payload = None
                 action = "blocked"
-                _ = refusal
             except FractionalExecutionError:
                 # Not a reduction after rounding: the position already sits at
                 # target within a share fraction.
@@ -415,7 +475,10 @@ def build_rebalance_plan(
             )
         )
 
-    exits = _plan_exits(signal, held, rebalance_key, blockers, blocked_symbols)
+    exits = _plan_exits(
+        signal, held, ledger, reconciliation, rebalance_key, blockers,
+        blocked_symbols, ownership_ok=ownership_ok,
+    )
 
     total_target = target * Decimal(signal.selected_count)
     if buying_power is not None:
@@ -442,7 +505,13 @@ def build_rebalance_plan(
         "reduce_count": sum(1 for p in symbol_plans if p.action == "reduce"),
         "hold_count": sum(1 for p in symbol_plans if p.action == "hold"),
         "exit_count": len(exits),
-        "reconciliation_status": reconciliation_status,
+        "reconciliation": reconciliation.as_dict() if reconciliation else None,
+        "reconciliation_evidence_present": reconciliation_ok,
+        "ownership_ledger": ledger.as_dict(),
+        "ownership_available": ownership_ok,
+        "strategy_owned_symbols": list(ledger.held_symbols),
+        "account_positions_seen": sorted(held),
+        "account_positions_are_not_ownership": True,
         "preflight": preflight,
     }
 
@@ -463,46 +532,92 @@ def build_rebalance_plan(
 def _plan_exits(
     signal: PortfolioSignal,
     held: dict[str, ConfirmedPosition],
+    ledger: StrategyOwnershipLedger,
+    reconciliation: ReconciliationEvidence | None,
     rebalance_key: str,
     blockers: list[str],
     blocked_symbols: set[str],
+    *,
+    ownership_ok: bool,
 ) -> list[SymbolPlan]:
-    """Names we hold that the new signal does not select.
+    """Names **this strategy owns** that the new signal does not select.
 
-    Their target weight is zero, which is a statement about the strategy, not a
-    licence to short: the exit sells exactly the confirmed quantity.
+    Driven by the ownership ledger, never by the account position book. The
+    account may hold anything -- another strategy's book, a manual position, a
+    legacy holding -- and none of it becomes MOM's to liquidate merely because
+    MOM stopped selecting the symbol.
+
+    Where the strategy owns less than the account holds, the exit sells the
+    owned portion only. The remainder belongs to whoever put it there.
     """
+    if not ownership_ok:
+        # No ledger, no exits. Falling back to `held` here is exactly the bug
+        # this function exists to avoid.
+        return []
+
     selected = set(signal.symbols)
     exits: list[SymbolPlan] = []
-    for symbol, position in sorted(held.items()):
-        if symbol in selected or position.quantity <= 0:
+    for symbol in ledger.held_symbols:
+        if symbol in selected:
             continue
+        owned = ledger.owned_quantity(symbol)
+        position = held.get(symbol)
+        broker_qty = position.quantity if position else Decimal(0)
+
         payload: dict[str, Any] | None = None
         client_order_id: str | None = None
         symbol_blockers: list[str] = []
         action = "exit"
         try:
-            reduction: ReductionOrder = plan_full_exit(position=position)
-            client_order_id = deterministic_client_order_id(
-                strategy_name=signal.strategy,
-                strategy_version=signal.strategy_version,
-                rebalance_key=f"{rebalance_key}:exit",
+            sellable = sellable_quantity(
+                strategy=signal.strategy,
                 symbol=symbol,
+                ledger=ledger,
+                broker_quantity=broker_qty,
             )
-            payload = reduction.payload(client_order_id=client_order_id)
-        except ShortSellProhibited:
+            if sellable <= 0:
+                # Owned on paper, absent at the broker: a reconciliation
+                # problem, not a sell.
+                symbol_blockers.append(BLOCKER_SELL_UNSAFE)
+                blockers.append(BLOCKER_SELL_UNSAFE)
+                blocked_symbols.add(symbol)
+                action = "blocked"
+            else:
+                attributed = ConfirmedPosition(
+                    symbol=symbol,
+                    quantity=sellable,
+                    market_value=(
+                        position.market_value * (sellable / broker_qty)
+                        if position and broker_qty > 0
+                        else Decimal(0)
+                    ),
+                    observed_at=position.observed_at if position else ledger_as_of(ledger, symbol),
+                    reconciliation_status=reconciliation.status if reconciliation else "unknown",
+                )
+                reduction: ReductionOrder = plan_full_exit(
+                    position=attributed, reconciliation=reconciliation
+                )
+                client_order_id = deterministic_client_order_id(
+                    strategy_name=signal.strategy,
+                    strategy_version=signal.strategy_version,
+                    rebalance_key=f"{rebalance_key}:exit",
+                    symbol=symbol,
+                )
+                payload = reduction.payload(client_order_id=client_order_id)
+        except (ShortSellProhibited, OwnershipUnavailable, ReconciliationEvidenceMissing):
             symbol_blockers.append(BLOCKER_SELL_UNSAFE)
             blockers.append(BLOCKER_SELL_UNSAFE)
             blocked_symbols.add(symbol)
             action = "blocked"
+
         exits.append(
             SymbolPlan(
                 symbol=symbol,
                 target_weight=Decimal(0),
                 target_dollars=Decimal(0),
-                current_quantity=position.quantity,
-                current_dollars=position.market_value,
-                required_dollar_delta=-position.market_value,
+                current_quantity=owned,
+                current_dollars=position.market_value if position else Decimal(0),
+                required_dollar_delta=-(position.market_value if position else Decimal(0)),
                 action=action,
                 order_payload=payload,
                 client_order_id=client_order_id,
@@ -512,6 +627,14 @@ def _plan_exits(
             )
         )
     return exits
+
+
+def ledger_as_of(ledger: StrategyOwnershipLedger, symbol: str):
+    """When the ledger last attributed this symbol."""
+    from datetime import UTC, datetime
+
+    entry = ledger.positions.get(symbol)
+    return entry.as_of if entry else datetime.now(UTC)
 
 
 def verify_plan_against_signal(plan: RebalancePlan) -> dict[str, Any]:

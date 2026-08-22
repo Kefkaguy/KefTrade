@@ -604,15 +604,37 @@ def test_no_module_here_can_submit_or_enable_anything():
 
 
 def test_the_adapter_still_refuses_sells_and_still_needs_both_flags():
-    """The new payload guard must not have displaced either existing check."""
+    """The new payload guard must not have displaced either existing check.
+
+    The frozen 1.0.0 adapter is the identity existing deployments already
+    approved. It stays buy-only: the reducing-sell capability lives on a
+    separate, separately-governed subclass, so an approved deployment cannot
+    inherit a mutation capability it never reviewed.
+    """
     import app.brokers.alpaca_paper as adapter_module
 
     source = inspect.getsource(adapter_module.AlpacaPaperBrokerAdapter.submit_order)
-    assert "position-reducing sells only" in source
+    assert "buy orders only" in source
+    assert "position-reducing sells only" not in source  # no sells here
     assert "both broker execution flags" in source
     assert "validate_order_payload" in source
     # The flag check must still precede the network call.
     assert source.index("both broker execution flags") < source.index("_mutate")
+
+
+def test_only_the_portfolio_adapter_carries_the_reducing_sell_capability():
+    import app.brokers.alpaca_paper as adapter_module
+
+    frozen = adapter_module.AlpacaPaperBrokerAdapter
+    portfolio = adapter_module.AlpacaPaperPortfolioAdapter
+
+    assert "position_reducing_sell" not in frozen.capabilities
+    assert "position_reducing_sell" in portfolio.capabilities
+    # A new capability is not a patch, and must not be released as one.
+    assert frozen.change_class == "compatible_patch"
+    assert portfolio.change_class == "behavioral_change"
+    assert portfolio.adapter_version != frozen.adapter_version
+    assert portfolio.behavior_version != frozen.behavior_version
 
 
 def test_execution_flags_remain_disabled_by_default():

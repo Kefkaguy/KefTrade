@@ -1,8 +1,14 @@
 """MOM_12_1 portfolio bridge CLI -- observe-only throughout.
 
 ``plan`` turns a frozen signal CSV into a complete rebalance plan and proves it
-reproduces the signal. ``preflight`` asks Alpaca Paper which of the selected
-names are tradable and fractionable, using read-only endpoints only.
+reproduces the signal, using whatever local evidence exists.
+
+``preflight`` is the account-aware version: it resolves every input a real
+rebalance would need -- the frozen signal, Alpaca's own tradable/fractionable
+verdict, the paper account, a fresh position read, the latest clean KefTrade
+reconciliation, the strategy's own ownership ledger, and buying power -- and
+produces the complete book of orders that *would* be submitted, without
+submitting any of them.
 
 Neither submits an order. There is no ``run`` verb here, because submission
 still belongs to the existing gated execution path.
@@ -114,13 +120,15 @@ def plan(args: argparse.Namespace) -> dict[str, Any]:
         facts = _asset_facts_from_db(symbols)
         prices = _reference_prices(symbols)
 
+    # No positions, no ownership ledger, no reconciliation evidence: this verb
+    # sizes a portfolio from a signal. Any exit it might otherwise infer would
+    # rest on none of the evidence an exit requires, so it plans none.
     rebalance = build_rebalance_plan(
         signal=signal,
         allocated_capital=Decimal(str(args.allocated_capital)),
         reference_prices=prices,
         asset_facts=facts,
         share_policy=MOM_12_1_SHARE_POLICY,
-        reconciliation_status=args.reconciliation_status,
     )
     verification = verify_plan_against_signal(rebalance)
     payload = {
@@ -139,67 +147,306 @@ def plan(args: argparse.Namespace) -> dict[str, Any]:
     return summary
 
 
-def preflight(args: argparse.Namespace) -> dict[str, Any]:
-    """Ask Alpaca Paper which selected names are tradable and fractionable.
+def _broker_account() -> dict[str, Any] | None:
+    """The KefTrade record of the Alpaca Paper account, if one is registered."""
+    from app.cli.stage40_audit import _open_connection
+    from app.db import connect
 
-    Read-only: this uses the assets endpoint and never touches ``/v2/orders``.
+    with _open_connection(connect) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, external_account_id, account_number_masked, status,
+                   last_successful_sync_at
+              FROM broker_accounts
+             WHERE provider = 'alpaca' AND environment = 'paper'
+             ORDER BY id
+             LIMIT 1
+            """
+        )
+        row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def _latest_reconciliation(broker_account_id: int) -> Any:
+    """The most recent *completed* reconciliation run for this account.
+
+    Deliberately the latest completed run, not the latest clean one. Searching
+    for the latest clean run would find one however old, and however many failed
+    runs came after it -- which is choosing the evidence that permits the trade.
+    If the newest run is not clean, this returns it anyway, and the bridge
+    refuses every sell.
+    """
+    from app.cli.stage40_audit import _open_connection
+    from app.db import connect
+    from app.services.strategy_ownership import ReconciliationEvidence
+
+    with _open_connection(connect) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT id, status, completed_at, broker_account_id
+              FROM broker_reconciliation_runs
+             WHERE broker_account_id = %s AND completed_at IS NOT NULL
+             ORDER BY completed_at DESC
+             LIMIT 1
+            """,
+            [broker_account_id],
+        )
+        row = cursor.fetchone()
+    if row is None:
+        return None
+    return ReconciliationEvidence(
+        run_id=int(row["id"]),
+        status=str(row["status"]),
+        completed_at=row["completed_at"],
+        broker_account_id=int(row["broker_account_id"]),
+    )
+
+
+def _ownership_ledger(strategy: str, broker_account_id: int) -> Any:
+    """What this strategy owns, per KefTrade's own attribution.
+
+    Never the Alpaca position book. That book is one book per account and holds
+    whatever anyone put there; attributing it to this strategy is exactly the
+    error that would let a rebalance liquidate someone else's position.
+
+    A table that cannot be read yields an unavailable ledger, which blocks. An
+    empty table yields an available, empty ledger -- the strategy owns nothing,
+    so it may sell nothing, which is a conclusion rather than a guess.
+    """
+    from app.cli.stage40_audit import _open_connection
+    from app.db import connect
+    from app.services.strategy_ownership import (
+        StrategyOwnershipLedger,
+        ledger_from_rows,
+    )
+
+    try:
+        with _open_connection(connect) as conn, conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT symbol, quantity, as_of
+                  FROM strategy_owned_positions
+                 WHERE strategy = %s AND broker_account_id = %s AND quantity > 0
+                """,
+                [strategy, broker_account_id],
+            )
+            rows = [dict(row) for row in (cursor.fetchall() or [])]
+    except Exception:  # noqa: BLE001
+        # Migration 081 unapplied, permissions, anything: no ledger is no
+        # ownership evidence, and no ownership evidence is no sells.
+        return StrategyOwnershipLedger.unavailable(strategy, source="unreadable")
+    return ledger_from_rows(rows, strategy=strategy, source="strategy_owned_positions")
+
+
+def preflight(args: argparse.Namespace) -> dict[str, Any]:
+    """The complete would-submit rebalance, resolved from real account state.
+
+    Read-only throughout: ``/v2/account``, ``/v2/positions`` and
+    ``/v2/assets/{symbol}`` are the only endpoints touched, and no order is
+    built for submission -- only for inspection.
+
+    Every input a live rebalance would consume is resolved here, so that what
+    blocks a rebalance is visible before anyone is in a position to submit one.
     """
     import asyncio
+    from datetime import UTC, datetime
 
     from app.brokers.alpaca_paper import AlpacaPaperBrokerAdapter
+    from app.services.fractional_execution import preflight_assets
+    from app.services.position_reducing_sell import parse_broker_positions
 
     signal = load_portfolio_signal(Path(args.signal_csv), provenance=args.provenance)
     symbols = list(signal.symbols)
+    blockers: list[str] = []
 
+    # --- Alpaca, read-only --------------------------------------------------
     async def fetch() -> dict[str, Any]:
         adapter = AlpacaPaperBrokerAdapter()
-        observed: dict[str, Any] = {}
+        account: dict[str, Any] = {}
+        account_error: str | None = None
+        try:
+            account = (await adapter._get("/v2/account", "account")).payload or {}
+        except Exception as error:  # noqa: BLE001
+            account_error = error.__class__.__name__
+
+        positions_body: Any = None
+        positions_error: str | None = None
+        try:
+            positions_body = (await adapter._get("/v2/positions", "positions")).payload
+        except Exception as error:  # noqa: BLE001
+            positions_error = error.__class__.__name__
+
+        assets: dict[str, Any] = {}
         for symbol in symbols:
             try:
-                response = await adapter._get(f"/v2/assets/{symbol}", "asset")
-                body = response.payload or {}
-                observed[symbol] = {
+                body = (
+                    await adapter._get(f"/v2/assets/{symbol}", "asset")
+                ).payload or {}
+                assets[symbol] = {
                     "tradable": bool(body.get("tradable")),
                     "fractionable": (
                         bool(body["fractionable"]) if "fractionable" in body else None
                     ),
                     "status": body.get("status"),
                 }
-            except Exception as error:  # noqa: BLE001 -- see below
-                # Deliberately broad: one symbol Alpaca will not describe must
-                # not abort the preflight for the other 607. The failure is
-                # recorded per symbol and fails closed at the gate, because a
-                # symbol we could not ask about is not a symbol we may trade
-                # fractionally.
-                observed[symbol] = {
+            except Exception as error:  # noqa: BLE001
+                # Deliberately broad, and per symbol: one name Alpaca will not
+                # describe must not abort the preflight for the rest. A symbol
+                # we could not ask about is not a symbol we may trade, so it
+                # fails closed at the gate below rather than here.
+                assets[symbol] = {
                     "tradable": None,
                     "fractionable": None,
                     "error": error.__class__.__name__,
                 }
-        return observed
+        return {
+            "account": account,
+            "account_error": account_error,
+            "positions_body": positions_body,
+            "positions_error": positions_error,
+            "assets": assets,
+        }
 
     observed = asyncio.run(fetch())
+    observed_at = datetime.now(UTC)
+
+    if observed["account_error"] or not observed["account"]:
+        blockers.append("ALPACA_ACCOUNT_UNREADABLE")
+    if observed["positions_error"] or observed["positions_body"] is None:
+        blockers.append("ALPACA_POSITIONS_UNREADABLE")
+
+    # --- Alpaca is authoritative on tradability -----------------------------
+    #
+    # The database `is_active` flag is a KefTrade housekeeping bit, refreshed on
+    # its own schedule. It cannot say whether Alpaca will accept an order right
+    # now, so it is recorded as context and never consulted as evidence.
     facts = {
         symbol: AssetFact(
             symbol=symbol,
             tradable=bool(fact.get("tradable")),
             fractionable=fact.get("fractionable"),
         )
-        for symbol, fact in observed.items()
+        for symbol, fact in observed["assets"].items()
     }
-    from app.services.fractional_execution import preflight_assets
+    asset_gate = preflight_assets(symbols, facts, share_policy=MOM_12_1_SHARE_POLICY)
 
-    result = preflight_assets(symbols, facts, share_policy=MOM_12_1_SHARE_POLICY)
+    database_is_active = {}
+    disagreements: list[dict[str, Any]] = []
+    if not args.no_database:
+        try:
+            database_is_active = {
+                symbol: fact.tradable
+                for symbol, fact in _asset_facts_from_db(symbols).items()
+            }
+        except Exception:  # noqa: BLE001
+            database_is_active = {}
+        for symbol, db_active in database_is_active.items():
+            live = observed["assets"].get(symbol, {}).get("tradable")
+            if live is not db_active:
+                disagreements.append(
+                    {"symbol": symbol, "database_is_active": db_active, "alpaca_tradable": live}
+                )
+
+    # --- account-scoped evidence -------------------------------------------
+    positions = (
+        parse_broker_positions(
+            observed["positions_body"],
+            observed_at=observed_at,
+            reconciliation_status="unknown",
+        )
+        if observed["positions_body"] is not None
+        else {}
+    )
+
+    account_row = None
+    reconciliation = None
+    from app.services.strategy_ownership import StrategyOwnershipLedger
+
+    ownership = StrategyOwnershipLedger.unavailable(signal.strategy, source="not_read")
+    if not args.no_database:
+        try:
+            account_row = _broker_account()
+        except Exception:  # noqa: BLE001
+            account_row = None
+        if account_row is None:
+            blockers.append("NO_REGISTERED_PAPER_ACCOUNT")
+        else:
+            try:
+                reconciliation = _latest_reconciliation(int(account_row["id"]))
+            except Exception:  # noqa: BLE001
+                reconciliation = None
+            ownership = _ownership_ledger(signal.strategy, int(account_row["id"]))
+    else:
+        blockers.append("DATABASE_NOT_CONSULTED")
+
+    # --- capital ------------------------------------------------------------
+    buying_power = None
+    raw_buying_power = observed["account"].get("buying_power")
+    if raw_buying_power is not None:
+        buying_power = Decimal(str(raw_buying_power))
+    allocated = Decimal(str(args.allocated_capital))
+    if buying_power is not None and allocated > buying_power:
+        # Refused rather than silently reduced: sizing 300 names against capital
+        # that is not there produces a plan nobody asked for.
+        blockers.append("ALLOCATED_CAPITAL_EXCEEDS_BUYING_POWER")
+
+    # --- the plan that would be submitted -----------------------------------
+    prices = _reference_prices(symbols) if not args.no_database else {}
+    rebalance = build_rebalance_plan(
+        signal=signal,
+        allocated_capital=allocated,
+        reference_prices=prices,
+        asset_facts=facts,
+        positions=positions,
+        ownership=ownership,
+        reconciliation=reconciliation,
+        buying_power=buying_power,
+        share_policy=MOM_12_1_SHARE_POLICY,
+    )
+    verification = verify_plan_against_signal(rebalance)
+
     payload = {
         **_governance(),
         "signal": signal.as_dict(),
-        "endpoints_used": ["/v2/assets/{symbol}"],
+        "endpoints_used": ["/v2/account", "/v2/positions", "/v2/assets/{symbol}"],
         "mutating_endpoints_used": [],
-        "preflight": result,
-        "observed": observed,
+        "account": {
+            "registered": account_row is not None,
+            "keftrade_account": account_row,
+            "alpaca_account_id": observed["account"].get("id"),
+            "alpaca_account_status": observed["account"].get("status"),
+            "trading_blocked": observed["account"].get("trading_blocked"),
+            "buying_power": str(buying_power) if buying_power is not None else None,
+            "cash": observed["account"].get("cash"),
+            "allocated_capital": str(allocated),
+        },
+        "reconciliation": reconciliation.as_dict() if reconciliation else None,
+        "ownership": ownership.as_dict(),
+        "positions": {
+            "source": "alpaca_fresh_read",
+            "observed_at": observed_at,
+            "count": len(positions),
+            # Stated at every layer, because the whole failure mode is someone
+            # reading this list as the strategy's book.
+            "account_positions_are_not_ownership": True,
+        },
+        "asset_preflight": asset_gate,
+        "tradability_authority": "alpaca",
+        "database_is_active_is_not_authoritative": True,
+        "tradability_disagreements": disagreements,
+        "preflight_blockers": blockers,
+        "would_submit": rebalance.as_dict(),
+        "verification": verification,
+        "observed": observed["assets"],
     }
     _write(Path(args.output_dir) / f"preflight_{signal.signal_date}.json", payload)
-    return {k: v for k, v in payload.items() if k != "observed"}
+    summary = {k: v for k, v in payload.items() if k not in ("observed", "would_submit")}
+    summary["would_submit"] = {
+        k: v
+        for k, v in payload["would_submit"].items()
+        if k not in ("symbol_plans", "exits")
+    }
+    return summary
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -228,7 +475,6 @@ def build_parser() -> argparse.ArgumentParser:
     plan_cmd = subparsers.add_parser("plan", help="Build one observe-only plan.")
     add_signal(plan_cmd)
     plan_cmd.add_argument("--allocated-capital", required=True, type=float)
-    plan_cmd.add_argument("--reconciliation-status", default="clean")
     plan_cmd.add_argument(
         "--offline",
         action="store_true",
@@ -238,9 +484,23 @@ def build_parser() -> argparse.ArgumentParser:
     plan_cmd.set_defaults(handler=plan)
 
     pre_cmd = subparsers.add_parser(
-        "preflight", help="Read-only Alpaca Paper tradable/fractionable check."
+        "preflight",
+        help=(
+            "Read-only account-aware rebalance preflight: resolves account, "
+            "fresh positions, reconciliation, ownership and buying power, and "
+            "prints the orders that would be submitted."
+        ),
     )
     add_signal(pre_cmd)
+    pre_cmd.add_argument("--allocated-capital", required=True, type=float)
+    pre_cmd.add_argument(
+        "--no-database",
+        action="store_true",
+        help=(
+            "skip every KefTrade table. The result can never be a clean "
+            "preflight, because ownership and reconciliation live there"
+        ),
+    )
     pre_cmd.set_defaults(handler=preflight)
     return parser
 

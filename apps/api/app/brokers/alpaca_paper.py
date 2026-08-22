@@ -19,6 +19,9 @@ class AlpacaPaperBrokerAdapter:
     behavior_version = "1"
     change_class = "compatible_patch"
     compatible_from = "1.0.0"
+    # Declared so a deployment can see what it approved. This release reads and
+    # buys; it has never been able to sell.
+    capabilities = ("read", "buy")
 
     def __init__(self, *, client: httpx.AsyncClient | None = None) -> None:
         validate_paper_configuration()
@@ -82,68 +85,144 @@ class AlpacaPaperBrokerAdapter:
     async def get_order_by_client_id(self, client_order_id: str) -> BrokerResponse:
         return await self._get("/v2/orders:by_client_order_id", "order_by_client_id", {"client_order_id": client_order_id})
 
-    async def submit_order(
-        self,
-        payload: dict[str, Any],
-        *,
-        confirmed_positions: dict[str, Any] | None = None,
-        reconciliation_status: str = "clean",
-    ) -> BrokerResponse:
-        side = str(payload.get("side") or "").lower()
-        if side == "sell":
-            # A sell is permitted only as a reduction of a confirmed long
-            # position, and only when the caller supplies the confirmed book to
-            # check it against. Without that book there is no way to know the
-            # order cannot open a short, so the default stays refusal.
-            from app.services.position_reducing_sell import (
-                assert_sell_is_position_reducing,
-            )
+    async def submit_order(self, payload: dict[str, Any]) -> BrokerResponse:
+        """Buy-only, exactly as this adapter version was approved.
 
-            if confirmed_positions is None:
-                raise BrokerMutationDisabled(
-                    "a sell requires the confirmed long positions it reduces; "
-                    "KefTrade never sells against a remembered position"
-                )
-            assert_sell_is_position_reducing(payload, confirmed_positions)
-        elif side != "buy":
-            raise BrokerMutationDisabled(
-                "KefTrade external paper supports buy orders and "
-                "position-reducing sells only"
-            )
+        Position-reducing sells are a *new mutation capability*, not a patch to
+        this one. They live in ``AlpacaPaperPortfolioAdapter`` under its own
+        release identity, so a deployment approved against 1.0.0 cannot inherit
+        them by upgrading in place.
+        """
+        if str(payload.get("side") or "").lower() != "buy":
+            raise BrokerMutationDisabled("KefTrade external paper supports buy orders only")
         if not settings.broker_order_submission_enabled or not settings.external_paper_execution_enabled:
             raise BrokerMutationDisabled("both broker execution flags must be enabled for Alpaca Paper mutation")
         # qty and notional are mutually exclusive at Alpaca, and fractional
         # orders are market/day only. Checking here means a malformed payload is
         # a local error rather than a remote reject whose outcome is ambiguous.
+        # This is a tightening of an existing capability, not a new one.
         from app.services.fractional_execution import validate_order_payload
 
         validate_order_payload(payload)
-
-        if side == "sell":
-            # The last thing before the order leaves the process. Every check
-            # above ran against a snapshot; this one runs against the broker.
-            await self._revalidate_reduction_now(
-                payload, confirmed_positions, reconciliation_status
-            )
         return await self._mutate("POST", "/v2/orders", "submit_order", payload)
+
+    async def cancel_order(self, broker_order_id: str) -> BrokerResponse:
+        if not settings.broker_order_submission_enabled or not settings.external_paper_execution_enabled:
+            raise BrokerMutationDisabled("both broker execution flags must be enabled for Alpaca Paper mutation")
+        return await self._mutate("DELETE", f"/v2/orders/{broker_order_id}", "cancel_order")
+
+
+
+
+class AlpacaPaperPortfolioAdapter(AlpacaPaperBrokerAdapter):
+    """Alpaca Paper with position-reducing sells, under a distinct release.
+
+    Adding sells to the 1.0.0 adapter would have shipped a new mutation
+    capability under a frozen identity, and ``change_class="compatible_patch"``
+    would have carried it through the approval gate that exists to catch exactly
+    that. So the capability is a separate release instead:
+
+    * ``adapter_version`` 2.0.0-portfolio, ``behavior_version`` 2;
+    * ``change_class`` **behavioral_change**, which
+      ``external_execution.enable_observe_only`` refuses -- it admits only
+      ``compatible_patch`` -- so an existing approved deployment cannot inherit
+      sell capability by upgrading. Approving this adapter is a deliberate,
+      separate act.
+
+    Everything read-only is inherited unchanged, so there is one book-reading
+    implementation rather than two that can disagree.
+    """
+
+    adapter_version = "2.0.0-portfolio"
+    behavior_version = "2"
+    change_class = "behavioral_change"
+    compatible_from = "2.0.0-portfolio"
+    capabilities = ("read", "buy", "position_reducing_sell")
+
+    async def submit_order(
+        self,
+        payload: dict[str, Any],
+        *,
+        confirmed_positions: dict[str, Any] | None = None,
+        ownership_ledger: Any = None,
+        reconciliation: Any = None,
+    ) -> BrokerResponse:
+        """A buy, or a sell that provably reduces a position this strategy owns.
+
+        A sell must satisfy both bounds, and neither substitutes for the other:
+        it may not exceed what the strategy *owns*, and it may not exceed what
+        the broker *confirms exists*. The first stops a rebalance liquidating
+        another strategy's holding; the second stops it opening a short.
+        """
+        side = str(payload.get("side") or "").lower()
+        if side == "buy":
+            return await super().submit_order(payload)
+        if side != "sell":
+            raise BrokerMutationDisabled(
+                "KefTrade external paper supports buy orders and "
+                "position-reducing sells only"
+            )
+
+        from app.services.position_reducing_sell import (
+            assert_sell_is_position_reducing,
+        )
+        from app.services.strategy_ownership import (
+            assert_within_strategy_ownership,
+            require_clean_reconciliation,
+            require_ownership_ledger,
+        )
+
+        if confirmed_positions is None:
+            raise BrokerMutationDisabled(
+                "a sell requires the confirmed long positions it reduces; "
+                "KefTrade never sells against a remembered position"
+            )
+        # Evidence, not a default. Omission is a refusal.
+        evidence = require_clean_reconciliation(reconciliation)
+        ledger = require_ownership_ledger(
+            ownership_ledger, strategy=str(payload.get("strategy") or "")
+        )
+        from decimal import Decimal
+
+        assert_within_strategy_ownership(
+            strategy=ledger.strategy,
+            symbol=str(payload.get("symbol") or ""),
+            requested_qty=Decimal(str(payload.get("qty"))),
+            ledger=ledger,
+        )
+        assert_sell_is_position_reducing(payload, confirmed_positions)
+
+        if not settings.broker_order_submission_enabled or not settings.external_paper_execution_enabled:
+            raise BrokerMutationDisabled("both broker execution flags must be enabled for Alpaca Paper mutation")
+
+        from app.services.fractional_execution import validate_order_payload
+
+        wire = {k: v for k, v in payload.items() if k != "strategy"}
+        validate_order_payload(wire)
+
+        # The last thing before the order leaves the process. Everything above
+        # ran against a snapshot; this runs against the broker.
+        await self._revalidate_reduction_now(wire, confirmed_positions, evidence, ledger)
+        return await self._mutate("POST", "/v2/orders", "submit_order", wire)
 
     async def _revalidate_reduction_now(
         self,
         payload: dict[str, Any],
         stored_positions: dict[str, Any],
-        reconciliation_status: str,
+        evidence: Any,
+        ledger: Any,
     ) -> None:
         """Re-read Alpaca's positions and refuse unless they still support the sell.
 
         Staleness bounds how old a stored snapshot may be; it cannot bound what
-        happened since. A fill, a corporate action, or another process can move
-        a position between planning and submission, and the only way to know is
-        to ask the venue at the moment of the mutation.
+        happened since. A fill, a corporate action, or another process can move a
+        position between planning and submission, and the only way to know is to
+        ask the venue at the moment of the mutation.
 
-        Any failure refuses: a timeout, a malformed body, a vanished position, a
-        smaller position, or a disagreement with what was planned. Nothing is
-        clamped -- an oversized sell means the plan rests on state that no
-        longer exists, and the answer is to recompute it.
+        Any failure refuses -- timeout, malformed body, vanished position,
+        smaller position, or disagreement with the plan. Nothing is clamped: an
+        oversized sell means the plan rests on state that no longer exists, and
+        the answer is to recompute it.
         """
         from decimal import Decimal
 
@@ -153,9 +232,10 @@ class AlpacaPaperBrokerAdapter:
             parse_broker_positions,
             revalidate_reduction_against_fresh_positions,
         )
+        from app.services.strategy_ownership import assert_within_strategy_ownership
 
-        # The environment and flags are re-asserted here rather than trusted
-        # from construction time: this is the instant that matters.
+        # Environment and flags are re-asserted here rather than trusted from
+        # construction time: this is the instant that matters.
         validate_paper_configuration()
         if not settings.broker_order_submission_enabled or not settings.external_paper_execution_enabled:
             raise BrokerMutationDisabled(
@@ -172,25 +252,27 @@ class AlpacaPaperBrokerAdapter:
             ) from error
 
         symbol = str(payload.get("symbol") or "")
-        observed_at = datetime.now(UTC)
+        requested = Decimal(str(payload.get("qty")))
         positions = parse_broker_positions(
             fresh.payload,
-            observed_at=observed_at,
-            reconciliation_status=reconciliation_status,
+            observed_at=datetime.now(UTC),
+            reconciliation_status=evidence.status,
         )
         revalidate_reduction_against_fresh_positions(
             symbol=symbol,
-            requested_qty=Decimal(str(payload.get("qty"))),
+            requested_qty=requested,
             fresh_positions=positions,
             stored=stored_positions.get(symbol),
-            reconciliation_status=reconciliation_status,
+            reconciliation=evidence,
         )
-
-    async def cancel_order(self, broker_order_id: str) -> BrokerResponse:
-        if not settings.broker_order_submission_enabled or not settings.external_paper_execution_enabled:
-            raise BrokerMutationDisabled("both broker execution flags must be enabled for Alpaca Paper mutation")
-        return await self._mutate("DELETE", f"/v2/orders/{broker_order_id}", "cancel_order")
-
+        # Ownership is re-asserted against the fresh read too: the availability
+        # bound moving does not widen what this strategy is entitled to sell.
+        assert_within_strategy_ownership(
+            strategy=ledger.strategy,
+            symbol=symbol,
+            requested_qty=requested,
+            ledger=ledger,
+        )
 
 def validate_paper_configuration() -> None:
     if settings.broker_provider != "alpaca":
