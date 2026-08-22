@@ -191,7 +191,7 @@ def plan_position_reduction(
             f"{max_position_staleness()}; selling against a remembered position "
             f"is how an account ends up short; {BLOCKER_STALE_POSITION}"
         )
-    require_clean_reconciliation(reconciliation)
+    require_clean_reconciliation(reconciliation, now=now)
     if reference_price <= 0:
         raise FractionalExecutionError(
             f"reference price for {position.symbol} must be positive"
@@ -237,7 +237,7 @@ def plan_full_exit(
             f"position snapshot for {position.symbol} is stale; "
             f"{BLOCKER_STALE_POSITION}"
         )
-    require_clean_reconciliation(reconciliation)
+    require_clean_reconciliation(reconciliation, now=now)
     return _build_reduction(position, position.quantity)
 
 

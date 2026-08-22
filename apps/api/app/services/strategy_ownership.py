@@ -89,10 +89,36 @@ class ReconciliationEvidence:
         }
 
 
+DEFAULT_RECONCILIATION_MAX_AGE_SECONDS = 900
+
+
+def max_reconciliation_age() -> timedelta:
+    """The configured reconciliation freshness limit, read at call time.
+
+    Read on each call rather than captured at import, so a deployment that
+    tightens the limit does not have to restart the process to mean it.
+    """
+    from app.settings import settings
+
+    seconds = getattr(
+        settings,
+        "broker_reconciliation_max_age_seconds",
+        DEFAULT_RECONCILIATION_MAX_AGE_SECONDS,
+    )
+    return timedelta(seconds=int(seconds))
+
+
+# Distinguishes "the caller said nothing" from "the caller explicitly asked for
+# no age bound". Omission must be the safe case: the previous defect here was a
+# check that passed by default, and an age bound nobody remembers to supply is
+# the same defect wearing a different argument name.
+_USE_CONFIGURED_MAX_AGE: Any = object()
+
+
 def require_clean_reconciliation(
     evidence: ReconciliationEvidence | None,
     *,
-    max_age: timedelta | None = None,
+    max_age: timedelta | None = _USE_CONFIGURED_MAX_AGE,
     now: datetime | None = None,
 ) -> ReconciliationEvidence:
     """Refuse unless a real, recent, clean reconciliation run says so.
@@ -101,7 +127,13 @@ def require_clean_reconciliation(
     a string defaulting to ``"clean"``, which meant every caller that forgot the
     argument asserted cleanliness by omission -- the exact fail-open this
     replaces.
+
+    Age is bounded by default. ``max_age=None`` disables the bound and exists
+    only so the status and evidence branches can be exercised in isolation; no
+    mutation-authorising path may pass it, and a test asserts that none does.
     """
+    if max_age is _USE_CONFIGURED_MAX_AGE:
+        max_age = max_reconciliation_age()
     if evidence is None:
         raise ReconciliationEvidenceMissing(
             "a reduction sell requires evidence that reconciliation is clean; "
