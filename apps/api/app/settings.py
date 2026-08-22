@@ -38,6 +38,15 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="AUTO_ENABLE_READY_PAPER_EXECUTION",
     )
+    # The broker worker synchronizes roughly once per minute, so a snapshot
+    # older than a few sync cycles is not evidence of what we hold now. This
+    # bounds how stale a stored position may be before a reduction refuses --
+    # but it is only the outer bound: every reduction is revalidated against a
+    # fresh broker read at the mutation boundary regardless of this value.
+    broker_position_snapshot_max_staleness_seconds: int = Field(
+        default=180,
+        validation_alias="BROKER_POSITION_SNAPSHOT_MAX_STALENESS_SECONDS",
+    )
     elite_minimum_trades_per_year: float = Field(default=0, validation_alias="ELITE_MINIMUM_TRADES_PER_YEAR")
     # Phase 12 (Intraday Research Lab), Step 1. Only opening_range_minutes is
     # consumed by Step 1's feature computation

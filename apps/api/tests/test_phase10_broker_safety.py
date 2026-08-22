@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -9,10 +10,19 @@ import pytest
 
 from app.brokers.alpaca_paper import AlpacaPaperBrokerAdapter
 from app.brokers.base import BrokerMutationDisabled
-from app.services.external_execution import assert_execution_disabled, bar_is_complete, candidate_fingerprint, feature_flags
-from app.services.broker_sync import canonical_json, normalize_account, normalize_order, sanitize_value
+from app.services.broker_sync import (
+    canonical_json,
+    normalize_account,
+    normalize_order,
+    sanitize_value,
+)
+from app.services.external_execution import (
+    assert_execution_disabled,
+    bar_is_complete,
+    candidate_fingerprint,
+    feature_flags,
+)
 from app.settings import settings
-
 
 ROOT = Path(__file__).resolve().parents[1] / "app"
 
@@ -88,14 +98,54 @@ def test_paper_order_submission_requires_and_uses_both_flags(monkeypatch: pytest
 
 
 def test_external_adapter_rejects_short_even_when_both_flags_are_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A sell that cannot be shown to reduce a confirmed long position is a
+    short, and is refused with both flags on.
+
+    The adapter now supports position-reducing sells for portfolio rebalancing,
+    so the refusal is no longer "buy orders only" -- but the property this test
+    exists to protect is unchanged and, if anything, sharper: a sell naming no
+    confirmed position, and a sell larger than the position it names, both fail
+    before the network.
+    """
+    from decimal import Decimal
+
+    from app.services.position_reducing_sell import (
+        ConfirmedPosition,
+        ShortSellProhibited,
+    )
+
     requests: list[httpx.Request] = []
     adapter = configured_adapter(monkeypatch, lambda request: requests.append(request) or httpx.Response(500))
     monkeypatch.setattr(settings, "broker_order_submission_enabled", True)
     monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
 
+    held = ConfirmedPosition(
+        symbol="AAPL",
+        quantity=Decimal(10),
+        market_value=Decimal(1000),
+        observed_at=datetime.now(UTC),
+        reconciliation_status="clean",
+    )
+
     async def run() -> None:
-        with pytest.raises(BrokerMutationDisabled, match="buy orders only"):
+        # No confirmed book at all: cannot be shown safe, so refused.
+        with pytest.raises(BrokerMutationDisabled, match="confirmed long"):
             await adapter.submit_order({"symbol": "AAPL", "qty": "1", "side": "sell", "type": "market"})
+        # A book that does not hold the symbol: still a short.
+        with pytest.raises(ShortSellProhibited, match="no confirmed long position"):
+            await adapter.submit_order(
+                {"symbol": "TSLA", "qty": "1", "side": "sell", "type": "market"},
+                confirmed_positions={"AAPL": held},
+            )
+        # Larger than the confirmed position: crosses zero.
+        with pytest.raises(ShortSellProhibited, match="would open a short"):
+            await adapter.submit_order(
+                {"symbol": "AAPL", "qty": "11", "side": "sell", "type": "market"},
+                confirmed_positions={"AAPL": held},
+            )
+        # Anything that is neither a buy nor a sell is still refused outright.
+        with pytest.raises(BrokerMutationDisabled, match="position-reducing sells only"):
+            await adapter.submit_order({"symbol": "AAPL", "qty": "1", "side": "sell_short", "type": "market"})
         await adapter._provided_client.aclose()  # type: ignore[union-attr]
 
     asyncio.run(run())
@@ -201,8 +251,17 @@ def test_phase10_modules_have_no_runtime_ddl() -> None:
 
 def test_adapter_has_explicit_guards_for_both_mutation_methods() -> None:
     source = (ROOT / "brokers" / "alpaca_paper.py").read_text(encoding="utf-8")
-    assert source.count("raise BrokerMutationDisabled") == 3
-    assert "external paper supports buy orders only" in source
+    # Five: the flag gate on submit, on cancel, and again at the mutation
+    # boundary; the not-buy-not-sell refusal; and the refusal of a sell that
+    # names no confirmed position. The boundary re-check is deliberate --
+    # flags can be turned off between construction and submission.
+    assert source.count("raise BrokerMutationDisabled") == 5
+    assert "buy orders and" in source
+    assert "position-reducing sells only" in source
+    assert "assert_sell_is_position_reducing" in source
+    # And the fresh broker read that bounds every reduction.
+    assert "_revalidate_reduction_now" in source
+    assert "revalidate_reduction_against_fresh_positions" in source
 
 
 def test_completed_bar_gate_is_strict() -> None:
