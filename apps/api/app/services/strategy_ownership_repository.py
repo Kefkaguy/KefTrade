@@ -187,6 +187,30 @@ def load_attributions(
     }
 
 
+def read_order_attribution(
+    conn: Any, *, broker_account_id: int, client_order_id: str
+) -> dict[str, Any] | None:
+    """The stored attribution for one order, with every field it was written with.
+
+    ``load_attributions`` builds the objects the fill path consumes and drops
+    ``intended_side`` because that path reads the side off the fill itself. The
+    submission gate needs the whole row: it is checking that what is stored
+    describes the order about to be sent, and a field it does not read is a field
+    that could disagree unnoticed.
+    """
+    result = conn.execute(
+        """
+        SELECT broker_account_id, client_order_id, strategy, strategy_version,
+               symbol, intended_side
+          FROM strategy_order_attributions
+         WHERE broker_account_id = %s AND client_order_id = %s
+        """,
+        (broker_account_id, client_order_id),
+    )
+    rows = _rows(result)
+    return rows[0] if rows else None
+
+
 def attributed_strategies(conn: Any, *, broker_account_id: int) -> list[str]:
     """Which strategies have orders on this account, in a stable order."""
     result = conn.execute(
