@@ -241,6 +241,9 @@ CREATE TABLE IF NOT EXISTS strategy_ownership_events (
     fill_price NUMERIC(20, 9) NOT NULL,
     quantity_delta NUMERIC(20, 9) NOT NULL,
     resulting_quantity NUMERIC(20, 9) NOT NULL,
+    -- Which synchronization cycle applied this fill. Provenance only: the sync
+    -- run explains when we learned of the fill, never how much of it happened.
+    sync_run_id BIGINT REFERENCES broker_sync_runs(id) ON DELETE SET NULL,
     transaction_at TIMESTAMPTZ NOT NULL,
     applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CONSTRAINT strategy_ownership_events_side_check CHECK (side IN ('buy', 'sell')),

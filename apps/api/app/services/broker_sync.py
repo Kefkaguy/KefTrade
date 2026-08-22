@@ -208,6 +208,23 @@ def persist_normalized_state(
     persist_orders(conn, account_id, sync_run_id, responses["orders"])
     persist_fills(conn, account_id, sync_run_id, responses["fill_activities"])
     persist_positions(conn, account_id, sync_run_id, trace_id, responses["positions"])
+    apply_strategy_ownership(conn, account_id, sync_run_id)
+
+
+def apply_strategy_ownership(conn: psycopg.Connection, account_id: int, sync_run_id: int) -> dict[str, Any]:
+    """Advance strategy ownership from the fills this cycle just persisted.
+
+    Deliberately here, inside the sync transaction and immediately after the
+    orders and fills it reads: ownership then commits with the evidence it was
+    derived from, and a crash rolls back both. A separate polling loop over the
+    same fills would need its own idempotency story, and one is enough.
+
+    Ownership moves on confirmed fills only. Nothing about an order's status,
+    requested quantity, or the account position book reaches this path.
+    """
+    from app.services.strategy_ownership_repository import apply_ownership_from_fills
+
+    return apply_ownership_from_fills(conn, broker_account_id=account_id, sync_run_id=sync_run_id)
 
 
 def persist_orders(conn: psycopg.Connection, account_id: int, sync_run_id: int, source: tuple[BrokerResponse, int]) -> None:
