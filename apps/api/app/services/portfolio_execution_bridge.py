@@ -83,6 +83,11 @@ BLOCKER_SELL_UNSAFE = "SELL_WOULD_CROSS_ZERO"
 BLOCKER_RECONCILIATION = "RECONCILIATION_NOT_CLEAN"
 BLOCKER_STRATEGY_VERSION = "SIGNAL_STRATEGY_VERSION_INVALID"
 BLOCKER_OWNERSHIP = "STRATEGY_OWNERSHIP_UNAVAILABLE"
+# KefTrade attributes more of a symbol to this strategy than the broker
+# reports in the whole account. One of the two records is wrong, and
+# guessing which would either strand shares or sell shares that are not
+# there.
+BLOCKER_OWNERSHIP_EXCEEDS_ACCOUNT = "STRATEGY_OWNERSHIP_EXCEEDS_ACCOUNT"
 
 
 # ---------------------------------------------------------------------------
@@ -385,17 +390,57 @@ def build_rebalance_plan(
 
     for symbol in symbols:
         fact = asset_facts.get(symbol)
-        position = held.get(symbol)
-        current_qty = position.quantity if position else Decimal(0)
-        current_dollars = position.market_value if position else Decimal(0)
+        account_position = held.get(symbol)
+
+        # What MOM currently holds, which is what its allocation is measured
+        # against. The account book answers a different question -- "does this
+        # account hold AAPL" -- and reading it here would let another
+        # strategy's 80 shares stand in for MOM's 20, so MOM would size its
+        # rebalance against a position it does not have.
+        current_qty = ledger.owned_quantity(symbol) if ownership_ok else Decimal(0)
+        account_qty = account_position.quantity if account_position else Decimal(0)
+        current_dollars = _attributed_value(
+            owned_quantity=current_qty,
+            account_position=account_position,
+            reference_price=reference_prices.get(symbol),
+        )
         delta = target - current_dollars
+
+        # The strategy's own position, marked at its share of the account's
+        # value. Every sizing decision below reads this, never `held`.
+        position = (
+            ConfirmedPosition(
+                symbol=symbol,
+                quantity=current_qty,
+                market_value=current_dollars,
+                observed_at=account_position.observed_at,
+                reconciliation_status=reconciliation.status if reconciliation else "unknown",
+            )
+            if account_position is not None and current_qty > 0
+            else None
+        )
 
         payload: dict[str, Any] | None = None
         client_order_id: str | None = None
         action = "hold"
         symbol_blockers: list[str] = []
 
-        if symbol in blocked_symbols:
+        if not ownership_ok:
+            # Without a ledger, MOM's current allocation is unknown, so every
+            # delta below would be measured from a guess. Sizing a buy from a
+            # guess is as wrong as sizing a sell from one.
+            symbol_blockers.append(BLOCKER_OWNERSHIP)
+            blocked_symbols.add(symbol)
+        elif current_qty > account_qty:
+            # KefTrade attributes shares to MOM that the broker does not show.
+            # That is a reconciliation fault, not a rounding difference, and it
+            # must not be resolved by quietly believing either side.
+            symbol_blockers.append(BLOCKER_OWNERSHIP_EXCEEDS_ACCOUNT)
+            if BLOCKER_OWNERSHIP_EXCEEDS_ACCOUNT not in blockers:
+                blockers.append(BLOCKER_OWNERSHIP_EXCEEDS_ACCOUNT)
+            blocked_symbols.add(symbol)
+
+        if symbol in blocked_symbols and not symbol_blockers:
             symbol_blockers.append(
                 BLOCKER_NONFRACTIONABLE
                 if symbol in preflight["nonfractionable_symbols"]
@@ -431,7 +476,7 @@ def build_rebalance_plan(
                 assert_within_strategy_ownership(
                     strategy=signal.strategy,
                     symbol=symbol,
-                    requested_qty=position.quantity - (target / reference_prices[symbol]),
+                    requested_qty=current_qty - (target / reference_prices[symbol]),
                     ledger=ledger,
                 )
                 reduction = plan_position_reduction(
@@ -527,6 +572,32 @@ def build_rebalance_plan(
         blocked_symbols=tuple(sorted(blocked_symbols)),
         diagnostics=diagnostics,
     )
+
+
+def _attributed_value(
+    *,
+    owned_quantity: Decimal,
+    account_position: ConfirmedPosition | None,
+    reference_price: Decimal | None,
+) -> Decimal:
+    """The strategy's share of an account position, in dollars.
+
+    Marked pro-rata against the broker's own valuation where there is one, so
+    the strategy's slice moves with the same marks as the rest of the position.
+    Where the account shows nothing, there is nothing to take a share of.
+    """
+    if owned_quantity <= 0:
+        return Decimal(0)
+    if account_position is not None and account_position.quantity > 0:
+        share = owned_quantity / account_position.quantity
+        return (account_position.market_value * share).quantize(
+            NOTIONAL_PRECISION, rounding=ROUND_DOWN
+        )
+    if reference_price is not None:
+        return (owned_quantity * reference_price).quantize(
+            NOTIONAL_PRECISION, rounding=ROUND_DOWN
+        )
+    return Decimal(0)
 
 
 def _plan_exits(

@@ -3,6 +3,9 @@
 ``plan`` turns a frozen signal CSV into a complete rebalance plan and proves it
 reproduces the signal, using whatever local evidence exists.
 
+``ownership`` replays confirmed fills into the attributed book and reports
+drift from the stored ledger, writing nothing.
+
 ``preflight`` is the account-aware version: it resolves every input a real
 rebalance would need -- the frozen signal, Alpaca's own tradable/fractionable
 verdict, the paper account, a fresh position read, the latest clean KefTrade
@@ -28,6 +31,7 @@ from app.services.portfolio_execution_bridge import (
     MOM_12_1_SHARE_POLICY,
     PROVENANCE_FORWARD,
     PROVENANCE_TEST_REPLAY,
+    STRATEGY_MOM_12_1,
     build_rebalance_plan,
     load_portfolio_signal,
     verify_plan_against_signal,
@@ -449,6 +453,121 @@ def preflight(args: argparse.Namespace) -> dict[str, Any]:
     return summary
 
 
+def _confirmed_fills(strategy: str, broker_account_id: int) -> tuple[list, dict]:
+    """Confirmed fills for this account, with the attribution of each order.
+
+    Reads ``broker_fills`` -- executions the broker confirmed -- joined to the
+    attribution table by client order id. Deliberately never reads
+    ``broker_orders.filled_quantity``: an aggregate can be recomputed and
+    re-applied, whereas each activity id applies exactly once.
+    """
+    from app.cli.stage40_audit import _open_connection
+    from app.db import connect
+    from app.services.strategy_ownership_lifecycle import (
+        attributions_from_rows,
+        fills_from_rows,
+    )
+
+    with _open_connection(connect) as conn, conn.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT f.broker_activity_id, f.broker_account_id, f.broker_order_id,
+                   o.client_order_id, f.symbol, f.side, f.quantity, f.price,
+                   f.transaction_at
+              FROM broker_fills f
+              LEFT JOIN broker_orders o
+                     ON o.broker_account_id = f.broker_account_id
+                    AND o.broker_order_id = f.broker_order_id
+             WHERE f.broker_account_id = %s
+             ORDER BY f.transaction_at, f.broker_activity_id
+            """,
+            [broker_account_id],
+        )
+        fill_rows = [dict(row) for row in (cursor.fetchall() or [])]
+        cursor.execute(
+            """
+            SELECT client_order_id, strategy, strategy_version,
+                   broker_account_id, symbol
+              FROM strategy_order_attributions
+             WHERE broker_account_id = %s AND strategy = %s
+            """,
+            [broker_account_id, strategy],
+        )
+        attribution_rows = [dict(row) for row in (cursor.fetchall() or [])]
+
+    return fills_from_rows(fill_rows), attributions_from_rows(attribution_rows)
+
+
+def ownership(args: argparse.Namespace) -> dict[str, Any]:
+    """Rebuild the attributed book from confirmed fills. Read-only.
+
+    Replays every confirmed fill for the account and reports the ledger it
+    produces, alongside whatever ``strategy_owned_positions`` currently says.
+    A disagreement between the two is the thing worth seeing: the stored
+    aggregate is a cache of this replay, and a cache that has drifted from its
+    source is not evidence of ownership.
+
+    Writes nothing. The replay is the specification; persisting it is a
+    separate, governed step that migration 081 has to land first.
+    """
+    from app.services.strategy_ownership_lifecycle import ownership_rows, replay_fills
+
+    account_row = _broker_account()
+    if account_row is None:
+        return {**_governance(), "error": "NO_REGISTERED_PAPER_ACCOUNT"}
+
+    account_id = int(account_row["id"])
+    fills, attributions = _confirmed_fills(args.strategy, account_id)
+    state = replay_fills(
+        fills,
+        attributions=attributions,
+        strategy=args.strategy,
+        strategy_version=args.strategy_version,
+        broker_account_id=account_id,
+    )
+
+    stored = _ownership_ledger(args.strategy, account_id)
+    replayed = state.to_ledger(source="replay")
+    drift = []
+    symbols = set(stored.positions) | set(state.positions)
+    for symbol in sorted(symbols):
+        stored_qty = stored.owned_quantity(symbol)
+        replay_qty = state.owned_quantity(symbol)
+        if stored_qty != replay_qty:
+            drift.append(
+                {
+                    "symbol": symbol,
+                    "stored_quantity": str(stored_qty),
+                    "replayed_quantity": str(replay_qty),
+                }
+            )
+
+    payload = {
+        **_governance(),
+        "strategy": args.strategy,
+        "broker_account_id": account_id,
+        "confirmed_fills_read": len(fills),
+        "attributed_orders": len(attributions),
+        "replayed_ledger": replayed.as_dict(),
+        "stored_ledger": stored.as_dict(),
+        "drift": drift,
+        "faults": list(state.faults),
+        "rows_that_would_be_written": [
+            {**row, "quantity": str(row["quantity"]),
+             "average_entry_price": (
+                 str(row["average_entry_price"])
+                 if row["average_entry_price"] is not None else None
+             ),
+             "as_of": row["as_of"]}
+            for row in ownership_rows(state)
+        ],
+        "rows_written": 0,
+        "intent_is_never_ownership_evidence": True,
+    }
+    _write(Path(args.output_dir) / f"ownership_{args.strategy}.json", payload)
+    return {k: v for k, v in payload.items() if k != "rows_that_would_be_written"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="keftrade-mom12-1-portfolio",
@@ -502,6 +621,17 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     pre_cmd.set_defaults(handler=preflight)
+
+    own_cmd = subparsers.add_parser(
+        "ownership",
+        help=(
+            "Read-only: rebuild the attributed book from confirmed fills and "
+            "report any drift from the stored ledger. Writes nothing."
+        ),
+    )
+    own_cmd.add_argument("--strategy", default=STRATEGY_MOM_12_1)
+    own_cmd.add_argument("--strategy-version", default="unknown")
+    own_cmd.set_defaults(handler=ownership)
     return parser
 
 

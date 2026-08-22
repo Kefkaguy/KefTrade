@@ -1770,3 +1770,383 @@ def test_the_ownership_table_exists_in_the_migration():
     # A negative attribution would be a short by bookkeeping.
     assert "strategy_owned_positions_non_negative_check CHECK (quantity >= 0)" in sql
     assert "UNIQUE (strategy, broker_account_id, symbol)" in sql
+
+
+# ---------------------------------------------------------------------------
+# Selected symbols: the strategy's allocation, not the account's
+# ---------------------------------------------------------------------------
+#
+# The exit path was ownership-driven from the previous commit. The rebalance
+# path was not: it measured every selected name's current allocation from the
+# account book, so another strategy's shares counted as this strategy's.
+
+
+def _shared_account_plan(tmp_path, *, mom_owns, account_holds, price=100):
+    """One selected symbol, held by the account, partly owned by MOM."""
+    symbols = universe(10)
+    signal = load_portfolio_signal(
+        write_signal(tmp_path, symbols), provenance=PROVENANCE_TEST_REPLAY
+    )
+    target_symbol = symbols[0]
+    book = {
+        target_symbol: ConfirmedPosition(
+            symbol=target_symbol,
+            quantity=Decimal(str(account_holds)),
+            market_value=Decimal(str(account_holds)) * Decimal(str(price)),
+            observed_at=NOW - timedelta(seconds=30),
+        )
+    }
+    plan = build_rebalance_plan(
+        signal=signal,
+        # $100k over ten names is $10,000 each, which at $100 is 100 shares.
+        # Scaled below by the caller's choice of capital.
+        allocated_capital=CAPITAL,
+        reference_prices={s: Decimal(str(price)) for s in symbols},
+        asset_facts=facts(symbols),
+        positions=book,
+        ownership=ledger({target_symbol: mom_owns}),
+        reconciliation=evidence(),
+    )
+    return target_symbol, next(p for p in plan.symbol_plans if p.symbol == target_symbol), plan
+
+
+def test_another_strategys_shares_are_not_this_strategys_position(tmp_path):
+    """The mandated case.
+
+    The account holds 100 AAPL. MOM owns 20 of them; the other 80 are someone
+    else's. MOM's target is 30 shares' worth. MOM must plan from 20 to 30 --
+    a buy of 10 shares -- and must not read the account's 100 as its own.
+    """
+    # $30,000 over ten names is $3,000 each: 30 shares at $100.
+    symbols = universe(10)
+    signal = load_portfolio_signal(
+        write_signal(tmp_path, symbols), provenance=PROVENANCE_TEST_REPLAY
+    )
+    aapl = symbols[0]
+    account = {
+        aapl: ConfirmedPosition(
+            symbol=aapl, quantity=Decimal(100), market_value=Decimal(10000),
+            observed_at=NOW - timedelta(seconds=30),
+        )
+    }
+    plan = build_rebalance_plan(
+        signal=signal, allocated_capital=Decimal(30000),
+        reference_prices={s: Decimal(100) for s in symbols},
+        asset_facts=facts(symbols),
+        positions=account,
+        ownership=ledger({aapl: 20}),   # MOM owns 20; 80 belong to someone else
+        reconciliation=evidence(),
+    )
+    first = next(p for p in plan.symbol_plans if p.symbol == aapl)
+
+    assert first.current_quantity == Decimal(20)        # not 100
+    assert first.current_dollars == Decimal(2000)       # not 10000
+    assert first.required_dollar_delta == Decimal(1000)  # 20 -> 30 shares
+    assert first.action == "buy"
+    assert first.order_payload["side"] == "buy"
+    assert first.order_payload["notional"] == "1000.00"
+
+
+def test_the_account_book_never_turns_a_buy_into_a_reduction(tmp_path):
+    """The failure this defect produced: MOM owns nothing, the account holds
+    $8,000 of the name for someone else, MOM's target is $2,000. Reading the
+    account book made MOM $6,000 overweight and it planned a sell."""
+    symbols = universe(50)  # $100k / 50 = $2,000 each
+    signal = load_portfolio_signal(
+        write_signal(tmp_path, symbols), provenance=PROVENANCE_TEST_REPLAY
+    )
+    aapl = symbols[0]
+    account = {
+        aapl: ConfirmedPosition(
+            symbol=aapl, quantity=Decimal(80), market_value=Decimal(8000),
+            observed_at=NOW - timedelta(seconds=30),
+        )
+    }
+    plan = build_rebalance_plan(
+        signal=signal, allocated_capital=CAPITAL,
+        reference_prices={s: Decimal(100) for s in symbols},
+        asset_facts=facts(symbols),
+        positions=account,
+        ownership=ledger({}),           # MOM owns none of it
+        reconciliation=evidence(),
+    )
+    first = next(p for p in plan.symbol_plans if p.symbol == aapl)
+
+    assert first.current_quantity == Decimal(0)
+    assert first.current_dollars == Decimal(0)
+    assert first.required_dollar_delta == Decimal(2000)
+    assert first.action == "buy"                      # not "reduce", not blocked
+    assert first.order_payload["notional"] == "2000.00"
+
+
+def test_a_reduction_is_measured_against_the_owned_slice(tmp_path):
+    """The inverse case. MOM owns 40 of the account's 100; the target is 30.
+    MOM may reduce by 10 -- never by 70, which is what measuring against the
+    account's 100 would produce."""
+    symbols = universe(10)
+    signal = load_portfolio_signal(
+        write_signal(tmp_path, symbols), provenance=PROVENANCE_TEST_REPLAY
+    )
+    aapl = symbols[0]
+    account = {
+        aapl: ConfirmedPosition(
+            symbol=aapl, quantity=Decimal(100), market_value=Decimal(10000),
+            observed_at=NOW - timedelta(seconds=30),
+        )
+    }
+    plan = build_rebalance_plan(
+        signal=signal, allocated_capital=Decimal(30000),  # $3,000 = 30 shares
+        reference_prices={s: Decimal(100) for s in symbols},
+        asset_facts=facts(symbols),
+        positions=account,
+        ownership=ledger({aapl: 40}),
+        reconciliation=evidence(),
+    )
+    first = next(p for p in plan.symbol_plans if p.symbol == aapl)
+
+    assert first.current_quantity == Decimal(40)
+    assert first.current_dollars == Decimal(4000)
+    assert first.required_dollar_delta == Decimal(-1000)
+    assert first.action == "reduce"
+    assert first.order_payload["side"] == "sell"
+    assert Decimal(first.order_payload["qty"]) == Decimal(10)
+    # The other strategy's 60 shares are untouched by construction.
+    assert Decimal(first.order_payload["qty"]) < Decimal(40)
+
+
+def test_attributed_value_is_marked_pro_rata_not_at_reference_price(tmp_path):
+    """MOM's slice moves with the same marks as the rest of the position, so a
+    stale reference price cannot make the strategy look richer than it is."""
+    symbols = universe(10)
+    signal = load_portfolio_signal(
+        write_signal(tmp_path, symbols), provenance=PROVENANCE_TEST_REPLAY
+    )
+    aapl = symbols[0]
+    account = {
+        aapl: ConfirmedPosition(
+            # 100 shares marked at $90, while the reference price still says $100.
+            symbol=aapl, quantity=Decimal(100), market_value=Decimal(9000),
+            observed_at=NOW - timedelta(seconds=30),
+        )
+    }
+    plan = build_rebalance_plan(
+        signal=signal, allocated_capital=Decimal(30000),
+        reference_prices={s: Decimal(100) for s in symbols},
+        asset_facts=facts(symbols),
+        positions=account,
+        ownership=ledger({aapl: 20}),
+        reconciliation=evidence(),
+    )
+    first = next(p for p in plan.symbol_plans if p.symbol == aapl)
+    assert first.current_dollars == Decimal(1800)  # 20/100 of $9,000
+
+
+def test_ownership_beyond_what_the_account_holds_blocks_the_symbol(tmp_path):
+    """KefTrade says MOM owns 50; the broker shows 10 in the entire account.
+    One record is wrong and neither may be quietly believed."""
+    from app.services.portfolio_execution_bridge import (
+        BLOCKER_OWNERSHIP_EXCEEDS_ACCOUNT,
+    )
+
+    symbols = universe(10)
+    signal = load_portfolio_signal(
+        write_signal(tmp_path, symbols), provenance=PROVENANCE_TEST_REPLAY
+    )
+    aapl = symbols[0]
+    account = {
+        aapl: ConfirmedPosition(
+            symbol=aapl, quantity=Decimal(10), market_value=Decimal(1000),
+            observed_at=NOW - timedelta(seconds=30),
+        )
+    }
+    plan = build_rebalance_plan(
+        signal=signal, allocated_capital=CAPITAL,
+        reference_prices={s: Decimal(100) for s in symbols},
+        asset_facts=facts(symbols),
+        positions=account,
+        ownership=ledger({aapl: 50}),
+        reconciliation=evidence(),
+    )
+    first = next(p for p in plan.symbol_plans if p.symbol == aapl)
+
+    assert BLOCKER_OWNERSHIP_EXCEEDS_ACCOUNT in first.blockers
+    assert first.order_payload is None
+    assert plan.blocked is True
+
+
+def test_an_unavailable_ledger_blocks_every_selected_symbol_too(tmp_path):
+    """Not just exits. Without a ledger, a buy is sized from a guess about what
+    the strategy already holds, which is the same defect pointing the other
+    way."""
+    symbols = universe(5)
+    signal = load_portfolio_signal(
+        write_signal(tmp_path, symbols), provenance=PROVENANCE_TEST_REPLAY
+    )
+    plan = build_rebalance_plan(
+        signal=signal, allocated_capital=CAPITAL,
+        reference_prices=prices(symbols), asset_facts=facts(symbols),
+        positions={s: position(s, 5) for s in symbols},
+        ownership=ledger({}, available=False),
+        reconciliation=evidence(),
+    )
+    assert plan.blocked is True
+    assert all(p.order_payload is None for p in plan.symbol_plans)
+    assert all(BLOCKER_OWNERSHIP in p.blockers for p in plan.symbol_plans)
+
+
+def test_an_empty_ledger_still_buys_the_full_target(tmp_path):
+    """An available, empty ledger is a conclusion -- the strategy owns nothing
+    -- and must not be confused with an unreadable one."""
+    symbols = universe(10)
+    signal = load_portfolio_signal(
+        write_signal(tmp_path, symbols), provenance=PROVENANCE_TEST_REPLAY
+    )
+    plan = build_rebalance_plan(
+        signal=signal, allocated_capital=CAPITAL,
+        reference_prices=prices(symbols), asset_facts=facts(symbols),
+        ownership=ledger({}), reconciliation=evidence(),
+    )
+    assert plan.blocked is False
+    assert all(p.action == "buy" for p in plan.symbol_plans)
+    assert all(p.current_quantity == Decimal(0) for p in plan.symbol_plans)
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation freshness is enforced, not merely available
+# ---------------------------------------------------------------------------
+
+
+def test_an_old_but_clean_reconciliation_blocks_the_rebalance(tmp_path):
+    """`clean` describes the moment the run finished. Two weeks later it
+    describes a book nobody has checked since."""
+    symbols = universe(5)
+    signal = load_portfolio_signal(
+        write_signal(tmp_path, symbols), provenance=PROVENANCE_TEST_REPLAY
+    )
+    plan = build_rebalance_plan(
+        signal=signal, allocated_capital=CAPITAL,
+        reference_prices=prices(symbols), asset_facts=facts(symbols),
+        positions={"OLDCO": position("OLDCO", 25)},
+        ownership=ledger({"OLDCO": 25}),
+        reconciliation=evidence(age=timedelta(days=14)),  # clean, but ancient
+    )
+    assert BLOCKER_RECONCILIATION in plan.blockers
+    assert plan.blocked is True
+    assert all(p.order_payload is None for p in plan.exits)
+
+
+def test_an_old_clean_reconciliation_blocks_a_reduction_sell():
+    from app.services.strategy_ownership import ReconciliationEvidenceMissing
+
+    with pytest.raises(ReconciliationEvidenceMissing, match="beyond the"):
+        plan_position_reduction(
+            position=position("AAPL", 100), target_dollars=Decimal(3000),
+            reference_price=Decimal(100),
+            reconciliation=evidence(age=timedelta(days=14)),
+            now=NOW,
+        )
+
+
+def test_an_old_clean_reconciliation_blocks_a_full_exit():
+    from app.services.strategy_ownership import ReconciliationEvidenceMissing
+
+    with pytest.raises(ReconciliationEvidenceMissing, match="beyond the"):
+        plan_full_exit(
+            position=position("AAPL", 100),
+            reconciliation=evidence(age=timedelta(days=14)),
+            now=NOW,
+        )
+
+
+def test_an_old_clean_reconciliation_is_refused_at_the_adapter(monkeypatch):
+    """And zero orders are posted."""
+    import asyncio
+
+    import httpx
+
+    from app.services.strategy_ownership import ReconciliationEvidenceMissing
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.method} {request.url.path}")
+        if request.url.path == "/v2/positions":
+            return httpx.Response(200, json=_position_body("AAPL", 10))
+        return httpx.Response(200, json={"id": "must-not-happen"})
+
+    adapter, client = _paper_adapter(monkeypatch, handler)
+
+    async def run() -> None:
+        with pytest.raises(ReconciliationEvidenceMissing, match="beyond the"):
+            await adapter.submit_order(
+                _sell("AAPL", 4),
+                confirmed_positions={"AAPL": position("AAPL", 10)},
+                ownership_ledger=ledger({"AAPL": 10}),
+                reconciliation=evidence(age=timedelta(days=14)),
+            )
+        await client.aclose()
+
+    asyncio.run(run())
+    assert not any("POST" in call for call in seen)
+
+
+def test_the_freshness_limit_is_configured_and_read_at_call_time(monkeypatch):
+    from app.services.strategy_ownership import max_reconciliation_age
+    from app.settings import Settings, settings
+
+    assert Settings(_env_file=None).broker_reconciliation_max_age_seconds == 900
+    assert max_reconciliation_age() == timedelta(seconds=900)
+    monkeypatch.setattr(settings, "broker_reconciliation_max_age_seconds", 60)
+    assert max_reconciliation_age() == timedelta(seconds=60)
+    # And the tightened limit takes effect without a restart.
+    with pytest.raises(Exception, match="beyond the"):
+        plan_full_exit(
+            position=position("AAPL", 10),
+            reconciliation=evidence(age=timedelta(seconds=61)),
+            now=NOW,
+        )
+
+
+def test_no_mutation_path_opts_out_of_the_freshness_bound():
+    """`max_age=None` disables the bound. It exists for unit-testing the other
+    branches in isolation, and no production caller may reach for it."""
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "app"
+    offenders: list[str] = []
+    for path in root.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            name = getattr(node.func, "id", None) or getattr(node.func, "attr", None)
+            if name != "require_clean_reconciliation":
+                continue
+            for keyword in node.keywords:
+                explicitly_none = (
+                    keyword.arg == "max_age"
+                    and isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is None
+                )
+                if explicitly_none:
+                    offenders.append(f"{path.name}:{node.lineno}")
+    assert offenders == []
+
+
+def test_every_sell_authorising_path_checks_reconciliation():
+    """Named individually, because the defect was that the check existed and
+    the callers did not use it."""
+    import inspect
+
+    from app.brokers import alpaca_paper
+    from app.services import portfolio_execution_bridge, position_reducing_sell
+
+    for source in (
+        inspect.getsource(portfolio_execution_bridge.build_rebalance_plan),
+        inspect.getsource(position_reducing_sell.plan_position_reduction),
+        inspect.getsource(position_reducing_sell.plan_full_exit),
+        inspect.getsource(position_reducing_sell.revalidate_reduction_against_fresh_positions),
+        inspect.getsource(alpaca_paper.AlpacaPaperPortfolioAdapter.submit_order),
+    ):
+        assert "require_clean_reconciliation" in source

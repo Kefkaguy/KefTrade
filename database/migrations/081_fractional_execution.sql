@@ -190,3 +190,67 @@ CREATE TABLE IF NOT EXISTS strategy_owned_positions (
 CREATE INDEX IF NOT EXISTS strategy_owned_positions_lookup_idx
     ON strategy_owned_positions(strategy, broker_account_id)
     WHERE quantity > 0;
+
+-- ---------------------------------------------------------------------------
+-- Ownership lifecycle: attribution in, confirmed fills only
+-- ---------------------------------------------------------------------------
+--
+-- Two tables, because attribution and quantity are different kinds of evidence
+-- and must never substitute for one another.
+--
+-- strategy_order_attributions answers "whose order was this". It is written
+-- when the order is planned, and carries NO quantity: the moment it did,
+-- submitted size would become ownership evidence, and a strategy would own
+-- shares the market never gave it.
+--
+-- strategy_ownership_events is the applied-fill log. Its unique key is the
+-- broker's own activity id, so replaying broker activity -- after a restart, a
+-- backfill, or a duplicated page -- cannot apply a fill twice.
+CREATE TABLE IF NOT EXISTS strategy_order_attributions (
+    id BIGSERIAL PRIMARY KEY,
+    broker_account_id BIGINT NOT NULL REFERENCES broker_accounts(id) ON DELETE RESTRICT,
+    client_order_id TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    strategy_version TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    intended_side TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT strategy_order_attributions_side_check
+        CHECK (intended_side IN ('buy', 'sell')),
+    CONSTRAINT strategy_order_attributions_version_check
+        CHECK (length(strategy_version) > 0),
+    -- The client order id is deterministic per (strategy, version, rebalance,
+    -- symbol), so a retried rebalance re-attributes the same order rather than
+    -- claiming a second one.
+    UNIQUE (broker_account_id, client_order_id)
+);
+
+CREATE TABLE IF NOT EXISTS strategy_ownership_events (
+    id BIGSERIAL PRIMARY KEY,
+    broker_account_id BIGINT NOT NULL REFERENCES broker_accounts(id) ON DELETE RESTRICT,
+    strategy TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    -- Alpaca's broker_activity_id. Not derived by us: a key we computed would
+    -- change whenever the derivation changed, and every past fill would apply
+    -- again the next time we replayed.
+    fill_id TEXT NOT NULL,
+    broker_order_id TEXT NOT NULL,
+    client_order_id TEXT NOT NULL,
+    side TEXT NOT NULL,
+    filled_quantity NUMERIC(20, 9) NOT NULL,
+    fill_price NUMERIC(20, 9) NOT NULL,
+    quantity_delta NUMERIC(20, 9) NOT NULL,
+    resulting_quantity NUMERIC(20, 9) NOT NULL,
+    transaction_at TIMESTAMPTZ NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CONSTRAINT strategy_ownership_events_side_check CHECK (side IN ('buy', 'sell')),
+    CONSTRAINT strategy_ownership_events_filled_check CHECK (filled_quantity > 0),
+    CONSTRAINT strategy_ownership_events_price_check CHECK (fill_price > 0),
+    -- Attribution can never go negative, here or in the aggregate.
+    CONSTRAINT strategy_ownership_events_resulting_check CHECK (resulting_quantity >= 0),
+    -- The whole of the idempotency guarantee.
+    UNIQUE (broker_account_id, fill_id)
+);
+
+CREATE INDEX IF NOT EXISTS strategy_ownership_events_replay_idx
+    ON strategy_ownership_events(strategy, broker_account_id, transaction_at, fill_id);

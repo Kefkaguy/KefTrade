@@ -47,6 +47,15 @@ class Settings(BaseSettings):
         default=180,
         validation_alias="BROKER_POSITION_SNAPSHOT_MAX_STALENESS_SECONDS",
     )
+    # Reconciliation runs once per broker cycle (broker_worker_poll_seconds,
+    # 60s by default), so 900s is roughly fifteen cycles: long enough to ride
+    # out a transient sync failure, short enough that "clean" still describes
+    # today's account. A clean verdict from two weeks ago is not evidence about
+    # the book a sell is about to touch, so age is checked as well as status.
+    broker_reconciliation_max_age_seconds: int = Field(
+        default=900,
+        validation_alias="BROKER_RECONCILIATION_MAX_AGE_SECONDS",
+    )
     elite_minimum_trades_per_year: float = Field(default=0, validation_alias="ELITE_MINIMUM_TRADES_PER_YEAR")
     # Phase 12 (Intraday Research Lab), Step 1. Only opening_range_minutes is
     # consumed by Step 1's feature computation
