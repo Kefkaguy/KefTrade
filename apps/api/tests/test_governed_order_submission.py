@@ -700,3 +700,282 @@ def test_execution_flags_remain_false_by_default():
     fresh = Settings(_env_file=None)
     assert fresh.broker_order_submission_enabled is False
     assert fresh.external_paper_execution_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# The bypass is closed
+# ---------------------------------------------------------------------------
+#
+# The submitter enforces "attribution before POST" by doing them in that order.
+# That is only a guarantee if the second step cannot be reached without the
+# first -- and it could be, by constructing the adapter and calling it.
+
+
+def test_a_directly_constructed_adapter_cannot_submit(monkeypatch):
+    from app.brokers.submission_capability import SubmissionCapabilityError
+
+    timeline: list[str] = []
+    adapter, client = make_adapter(timeline, monkeypatch)
+
+    async def run():
+        with pytest.raises(
+            SubmissionCapabilityError, match="does not submit orders directly"
+        ):
+            await adapter.submit_order(buy_payload())
+        await client.aclose()
+
+    asyncio.run(run())
+    assert posts(timeline) == []
+    assert timeline == []  # not even a position read
+
+
+def test_a_direct_sell_on_the_adapter_cannot_submit(monkeypatch):
+    from app.brokers.submission_capability import SubmissionCapabilityError
+
+    timeline: list[str] = []
+    adapter, client = make_adapter(
+        timeline, monkeypatch, positions=position_body("AAPL", 100)
+    )
+
+    async def run():
+        with pytest.raises(SubmissionCapabilityError):
+            await adapter.submit_order(sell_payload())
+        await client.aclose()
+
+    asyncio.run(run())
+    assert timeline == []
+
+
+def test_the_mutating_entry_point_refuses_without_a_capability(monkeypatch):
+    """Even reaching past the public name gets nowhere: the private entry point
+    is gated on the capability, not on being called politely."""
+    from app.brokers.submission_capability import SubmissionCapabilityError
+
+    timeline: list[str] = []
+    adapter, client = make_adapter(
+        timeline, monkeypatch, positions=position_body("AAPL", 100)
+    )
+
+    async def run():
+        with pytest.raises(
+            SubmissionCapabilityError, match="requires a submission capability"
+        ):
+            await adapter._submit_governed_order(
+                sell_payload(),
+                confirmed_positions={"AAPL": position("AAPL", 100)},
+                ownership_ledger=ledger({"AAPL": 100}),
+                reconciliation=evidence(),
+            )
+        await client.aclose()
+
+    asyncio.run(run())
+    assert timeline == []  # refused before the flags, before the position read
+
+
+def test_a_capability_cannot_be_constructed_directly():
+    from app.brokers.submission_capability import (
+        SubmissionCapability,
+        SubmissionCapabilityError,
+    )
+
+    with pytest.raises(
+        SubmissionCapabilityError, match="cannot be constructed directly"
+    ):
+        SubmissionCapability(
+            object(),
+            broker_account_id=ACCOUNT, client_order_id=COID, strategy=MOM,
+            strategy_version=VERSION, symbol="AAPL", intended_side="buy",
+        )
+
+
+def test_an_unverified_attribution_mints_nothing():
+    from app.brokers.submission_capability import (
+        SubmissionCapability,
+        SubmissionCapabilityError,
+    )
+
+    intent = intent_from_payload(
+        buy_payload(), broker_account_id=ACCOUNT, strategy=MOM, strategy_version=VERSION
+    )
+    with pytest.raises(SubmissionCapabilityError, match="not verified"):
+        SubmissionCapability.after_verified_attribution(
+            attribution=intent.as_dict(), verified=False
+        )
+
+
+def test_an_incomplete_attribution_mints_nothing():
+    from app.brokers.submission_capability import (
+        SubmissionCapability,
+        SubmissionCapabilityError,
+    )
+
+    intent = intent_from_payload(
+        buy_payload(), broker_account_id=ACCOUNT, strategy=MOM, strategy_version=VERSION
+    )
+    with pytest.raises(SubmissionCapabilityError, match="missing"):
+        SubmissionCapability.after_verified_attribution(
+            attribution=intent.as_dict() | {"strategy_version": ""}, verified=True
+        )
+
+
+def test_a_capability_cannot_be_replayed_onto_another_order(monkeypatch):
+    """Bound to one order, so a bug that reused one fails loudly instead of
+    sending the wrong thing."""
+    from app.brokers.submission_capability import (
+        SubmissionCapability,
+        SubmissionCapabilityError,
+    )
+
+    timeline: list[str] = []
+    adapter, client = make_adapter(timeline, monkeypatch)
+    intent = intent_from_payload(
+        buy_payload(), broker_account_id=ACCOUNT, strategy=MOM, strategy_version=VERSION
+    )
+    capability = SubmissionCapability.after_verified_attribution(
+        attribution=intent.as_dict(), verified=True
+    )
+
+    async def run():
+        for other in (
+            buy_payload(client_order_id="kt-mom_12_1-different"),
+            buy_payload(symbol="TSLA"),
+            sell_payload(),
+        ):
+            with pytest.raises(SubmissionCapabilityError, match="cannot be replayed"):
+                await adapter._submit_governed_order(other, capability=capability)
+        await client.aclose()
+
+    asyncio.run(run())
+    assert timeline == []
+
+
+def test_something_that_is_not_a_capability_is_refused(monkeypatch):
+    """A duck-typed lookalike does not get through: the check is on the type,
+    because the type is what only the sanctioned path can produce."""
+    from app.brokers.submission_capability import SubmissionCapabilityError
+
+    timeline: list[str] = []
+    adapter, client = make_adapter(timeline, monkeypatch)
+
+    class Lookalike:
+        client_order_id = COID
+        symbol = "AAPL"
+        intended_side = "buy"
+
+        def authorises(self, payload):
+            return True
+
+        def assert_authorises(self, payload):
+            return None
+
+    async def run():
+        with pytest.raises(
+            SubmissionCapabilityError, match="not a submission capability"
+        ):
+            await adapter._submit_governed_order(buy_payload(), capability=Lookalike())
+        await client.aclose()
+
+    asyncio.run(run())
+    assert timeline == []
+
+
+def test_the_governed_submitter_still_reaches_the_venue(monkeypatch):
+    """The gate closes the bypass without closing the door."""
+    timeline: list[str] = []
+    conn = Conn(timeline)
+    adapter, client = make_adapter(timeline, monkeypatch)
+    submitter = GovernedOrderSubmitter(
+        conn=conn, adapter=adapter, broker_account_id=ACCOUNT
+    )
+
+    async def run():
+        response = await submitter.submit(
+            buy_payload(), strategy=MOM, strategy_version=VERSION, now=NOW
+        )
+        await client.aclose()
+        return response
+
+    response = asyncio.run(run())
+    assert response.payload["id"] == "paper-order-1"
+    assert len(posts(timeline)) == 1
+    assert timeline == [
+        "db:insert-attribution", "db:commit", "db:read-attribution",
+        "http:POST /v2/orders",
+    ]
+
+
+def test_the_frozen_adapter_keeps_its_buy_only_contract(monkeypatch):
+    """The gate is on the portfolio release only. The frozen 1.0.0 adapter is
+    unchanged: it still buys, still refuses sells, and needs no capability."""
+    from app.brokers.alpaca_paper import AlpacaPaperBrokerAdapter
+    from app.brokers.base import BrokerMutationDisabled
+
+    timeline: list[str] = []
+    make_adapter(timeline, monkeypatch)  # for the paper settings only
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json={"id": "frozen-order"})
+        ),
+        base_url=settings.alpaca_paper_base_url,
+    )
+    frozen = AlpacaPaperBrokerAdapter(client=client)
+
+    async def run():
+        response = await frozen.submit_order(
+            {"symbol": "AAPL", "side": "buy", "qty": "1",
+             "type": "market", "time_in_force": "day"}
+        )
+        assert response.payload["id"] == "frozen-order"
+        with pytest.raises(BrokerMutationDisabled, match="buy orders only"):
+            await frozen.submit_order({"symbol": "AAPL", "side": "sell", "qty": "1"})
+        await client.aclose()
+
+    asyncio.run(run())
+    assert frozen.capabilities == ("read", "buy")
+
+
+def test_the_capability_module_imports_nothing():
+    """It is named by both the adapter and the service, so it must depend on
+    neither -- and must not drag a database import into the broker layer."""
+    import ast
+    import inspect
+
+    from app.brokers import submission_capability
+
+    tree = ast.parse(inspect.getsource(submission_capability))
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    assert imported <= {"__future__", "typing"}
+
+
+def test_no_database_dependency_entered_the_adapter_module():
+    import ast
+    import inspect
+
+    from app.brokers import alpaca_paper
+
+    source = inspect.getsource(alpaca_paper)
+    for banned in ("psycopg", "app.db", "sqlite", "strategy_order_attributions"):
+        assert banned not in source
+
+    tree = ast.parse(source)
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            imported.add(node.module)
+    assert not any("repository" in name or "governed" in name for name in imported)
+
+
+def test_the_capability_carries_no_quantity():
+    from app.brokers.submission_capability import SubmissionCapability
+
+    assert not any(
+        "quantity" in slot or "notional" in slot
+        for slot in SubmissionCapability.__slots__
+    )

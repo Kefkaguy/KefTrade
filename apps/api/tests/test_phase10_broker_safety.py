@@ -108,6 +108,10 @@ def test_external_adapter_rejects_short_even_when_both_flags_are_enabled(monkeyp
     from decimal import Decimal
 
     from app.brokers.alpaca_paper import AlpacaPaperPortfolioAdapter
+    from app.brokers.submission_capability import (
+        SubmissionCapability,
+        SubmissionCapabilityError,
+    )
     from app.services.position_reducing_sell import (
         ConfirmedPosition,
         ShortSellProhibited,
@@ -154,19 +158,46 @@ def test_external_adapter_rejects_short_even_when_both_flags_are_enabled(monkeyp
         return {
             "symbol": symbol, "qty": qty, "side": side,
             "type": "market", "time_in_force": "day", "strategy": "MOM_12_1",
+            "client_order_id": f"kt-mom_12_1-{side}-{symbol}",
         }
+
+    def capability(symbol: str, side: str) -> SubmissionCapability:
+        """Minted as production mints it: from a verified attribution record.
+
+        These cases are about what the adapter refuses once it has been reached,
+        so they are given a real capability rather than reaching past the gate.
+        """
+        return SubmissionCapability.after_verified_attribution(
+            attribution={
+                "broker_account_id": 1,
+                "client_order_id": f"kt-mom_12_1-{side}-{symbol}",
+                "strategy": "MOM_12_1",
+                "strategy_version": "1.0.0",
+                "symbol": symbol,
+                "intended_side": side,
+            },
+            verified=True,
+        )
 
     async def run() -> None:
         # The frozen release has no sell path at all.
         with pytest.raises(BrokerMutationDisabled, match="buy orders only"):
             await frozen.submit_order(sell("AAPL", "1"))
+        # The portfolio release will not submit anything called directly: a
+        # portfolio order needs a capability, issued only after attribution.
+        with pytest.raises(SubmissionCapabilityError, match="does not submit orders directly"):
+            await portfolio.submit_order(sell("AAPL", "1"))
+        # Past that gate, with a capability in hand, the short refusals stand.
         # No confirmed book: cannot be shown safe, so refused.
         with pytest.raises(BrokerMutationDisabled, match="confirmed long"):
-            await portfolio.submit_order(sell("AAPL", "1"))
+            await portfolio._submit_governed_order(
+                sell("AAPL", "1"), capability=capability("AAPL", "sell")
+            )
         # A book that does not hold the symbol: still a short.
         with pytest.raises(ShortSellProhibited, match="no confirmed long position"):
-            await portfolio.submit_order(
+            await portfolio._submit_governed_order(
                 sell("TSLA", "1"),
+                capability=capability("TSLA", "sell"),
                 confirmed_positions={"AAPL": held},
                 ownership_ledger=StrategyOwnershipLedger(
                     strategy="MOM_12_1",
@@ -183,15 +214,19 @@ def test_external_adapter_rejects_short_even_when_both_flags_are_enabled(monkeyp
             )
         # Larger than the confirmed position: crosses zero.
         with pytest.raises(ShortSellProhibited, match="would open a short"):
-            await portfolio.submit_order(
+            await portfolio._submit_governed_order(
                 sell("AAPL", "11"),
+                capability=capability("AAPL", "sell"),
                 confirmed_positions={"AAPL": held},
                 ownership_ledger=ledger,
                 reconciliation=evidence,
             )
         # Anything that is neither a buy nor a sell is still refused outright.
         with pytest.raises(BrokerMutationDisabled, match="position-reducing sells only"):
-            await portfolio.submit_order(sell("AAPL", "1", side="sell_short"))
+            await portfolio._submit_governed_order(
+                sell("AAPL", "1", side="sell_short"),
+                capability=capability("AAPL", "sell_short"),
+            )
         await frozen._provided_client.aclose()  # type: ignore[union-attr]
         await client.aclose()
 

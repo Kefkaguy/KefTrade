@@ -566,13 +566,11 @@ def test_the_adapter_refuses_a_sell_without_the_confirmed_book(monkeypatch):
 
     import httpx
 
-    from app.brokers.alpaca_paper import AlpacaPaperPortfolioAdapter
     from app.brokers.base import BrokerMutationDisabled
     from app.services.strategy_ownership import (
         OwnershipUnavailable,
         ReconciliationEvidenceMissing,
     )
-    from app.settings import settings
 
     requests: list[httpx.Request] = []
 
@@ -580,23 +578,10 @@ def test_the_adapter_refuses_a_sell_without_the_confirmed_book(monkeypatch):
         requests.append(request)
         return httpx.Response(200, json={"id": "should-never-happen"})
 
-    monkeypatch.setattr(settings, "broker_provider", "alpaca")
-    monkeypatch.setattr(
-        settings, "alpaca_paper_base_url", "https://paper-api.alpaca.markets"
-    )
-    monkeypatch.setattr(settings, "alpaca_paper_api_key", "paper-key")
-    monkeypatch.setattr(settings, "alpaca_paper_secret_key", "paper-secret")
-    monkeypatch.setattr(settings, "broker_order_submission_enabled", True)
-    monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
-    client = httpx.AsyncClient(
-        transport=httpx.MockTransport(handler),
-        base_url=settings.alpaca_paper_base_url,
-    )
-    adapter = AlpacaPaperPortfolioAdapter(client=client)
-    sell = {
-        "symbol": "AAPL", "side": "sell", "qty": "1",
-        "type": "market", "time_in_force": "day", "strategy": STRATEGY_MOM_12_1,
-    }
+    # Through the governed submitter: attribution succeeds, and the adapter's
+    # own evidence checks still refuse. Being attributable is not being safe.
+    adapter, client = _paper_adapter(monkeypatch, handler)
+    sell = _sell("AAPL", 1)
     book = {"AAPL": position("AAPL", 10)}
     owned = ledger({"AAPL": 10})
 
@@ -622,7 +607,9 @@ def test_the_adapter_still_names_buy_and_reducing_sells_only():
 
     frozen = inspect.getsource(module.AlpacaPaperBrokerAdapter.submit_order)
     assert "buy orders only" in frozen  # the frozen release did not gain sells
-    source = inspect.getsource(module.AlpacaPaperPortfolioAdapter.submit_order)
+    source = inspect.getsource(
+        module.AlpacaPaperPortfolioAdapter._submit_governed_order
+    )
     assert "position-reducing sells only" in source
     assert "both broker execution flags" in source
     assert "assert_sell_is_position_reducing" in source
@@ -969,7 +956,8 @@ def test_the_adapter_refuses_a_sell_beyond_strategy_ownership(monkeypatch):
             await adapter.submit_order(
                 {"symbol": "AAPL", "side": "sell", "qty": "60",
                  "type": "market", "time_in_force": "day",
-                 "strategy": STRATEGY_MOM_12_1},
+                 "strategy": STRATEGY_MOM_12_1,
+                 "client_order_id": "kt-mom_12_1-sell-AAPL-60"},
                 confirmed_positions={"AAPL": position("AAPL", 100)},
                 ownership_ledger=ledger({"AAPL": 40}),
                 reconciliation=evidence(),
@@ -1011,7 +999,8 @@ def test_a_sell_with_everything_but_reconciliation_is_refused(monkeypatch):
             await adapter.submit_order(
                 {"symbol": "AAPL", "side": "sell", "qty": "10",
                  "type": "market", "time_in_force": "day",
-                 "strategy": STRATEGY_MOM_12_1},
+                 "strategy": STRATEGY_MOM_12_1,
+                 "client_order_id": "kt-mom_12_1-sell-AAPL-10"},
                 confirmed_positions={"AAPL": position("AAPL", 100)},
                 ownership_ledger=ledger({"AAPL": 40}),
                 # reconciliation deliberately omitted
@@ -1161,8 +1150,81 @@ def test_a_named_version_is_kept_verbatim(tmp_path):
 # already history by the time an order reaches the venue.
 
 
+class _AttributionDB:
+    """The smallest store the submitter needs: one attribution table.
+
+    Real SQLite rather than a stub, so the idempotent insert and the read-back
+    behave as they will in production -- these tests submit through the governed
+    path, and a stub would agree with it whatever it did.
+    """
+
+    def __init__(self):
+        import sqlite3
+
+        self._db = sqlite3.connect(":memory:", isolation_level="DEFERRED")
+        self._db.row_factory = sqlite3.Row
+        self._db.execute(
+            "CREATE TABLE strategy_order_attributions ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, broker_account_id INTEGER NOT NULL,"
+            "client_order_id TEXT NOT NULL, strategy TEXT NOT NULL,"
+            "strategy_version TEXT NOT NULL, symbol TEXT NOT NULL,"
+            "intended_side TEXT NOT NULL, created_at TIMESTAMP NOT NULL,"
+            "UNIQUE (broker_account_id, client_order_id))"
+        )
+        self._db.commit()
+
+    def execute(self, query, params=()):
+        from datetime import datetime as _dt
+        from decimal import Decimal as _D
+
+        adapted = tuple(str(p) if isinstance(p, (_D, _dt)) else p for p in params)
+        cursor = self._db.execute(query.replace("%s", "?"), adapted)
+
+        class _Result:
+            rowcount = cursor.rowcount
+
+            @staticmethod
+            def fetchall():
+                return [dict(row) for row in cursor.fetchall()]
+
+        return _Result()
+
+    def commit(self):
+        self._db.commit()
+
+    def rollback(self):
+        self._db.rollback()
+
+
+class _GovernedAdapter:
+    """Exposes ``submit_order`` by routing through GovernedOrderSubmitter.
+
+    The adapter's own entry point is capability-gated now, so these tests reach
+    it the way production does: attribution is persisted and verified first, and
+    only then does the adapter see the order. Every check they were written to
+    exercise still runs, one layer further in.
+    """
+
+    def __init__(self, adapter, strategy=None):
+        from app.services.governed_order_submission import GovernedOrderSubmitter
+
+        self.adapter = adapter
+        self._strategy = strategy or STRATEGY_MOM_12_1
+        self.submitter = GovernedOrderSubmitter(
+            conn=_AttributionDB(), adapter=adapter, broker_account_id=1
+        )
+
+    async def submit_order(self, payload, **kwargs):
+        return await self.submitter.submit(
+            payload,
+            strategy=str(payload.get("strategy") or self._strategy),
+            strategy_version="1.0.0",
+            **kwargs,
+        )
+
+
 def _paper_adapter(monkeypatch, handler):
-    """A portfolio adapter on a mock transport, paper settings, both flags on."""
+    """A governed submitter over a portfolio adapter on a mock transport."""
     import httpx
 
     from app.brokers.alpaca_paper import AlpacaPaperPortfolioAdapter
@@ -1180,7 +1242,7 @@ def _paper_adapter(monkeypatch, handler):
         transport=httpx.MockTransport(handler),
         base_url=settings.alpaca_paper_base_url,
     )
-    return AlpacaPaperPortfolioAdapter(client=client), client
+    return _GovernedAdapter(AlpacaPaperPortfolioAdapter(client=client)), client
 
 
 def _position_body(symbol, qty, price=100):
@@ -1191,6 +1253,8 @@ def _sell(symbol, qty):
     return {
         "symbol": symbol, "side": "sell", "qty": str(qty),
         "type": "market", "time_in_force": "day", "strategy": STRATEGY_MOM_12_1,
+        # Attribution is keyed on this, so a governed order carries one.
+        "client_order_id": f"kt-mom_12_1-sell-{symbol}-{qty}",
     }
 
 
@@ -1469,7 +1533,8 @@ def test_a_buy_does_not_trigger_a_position_read(monkeypatch):
     async def run() -> None:
         await adapter.submit_order(
             {"symbol": "AAPL", "side": "buy", "notional": "164.47",
-             "type": "market", "time_in_force": "day"}
+             "type": "market", "time_in_force": "day",
+             "client_order_id": "kt-mom_12_1-buy-AAPL"}
         )
         await client.aclose()
 
@@ -2147,6 +2212,8 @@ def test_every_sell_authorising_path_checks_reconciliation():
         inspect.getsource(position_reducing_sell.plan_position_reduction),
         inspect.getsource(position_reducing_sell.plan_full_exit),
         inspect.getsource(position_reducing_sell.revalidate_reduction_against_fresh_positions),
-        inspect.getsource(alpaca_paper.AlpacaPaperPortfolioAdapter.submit_order),
+        inspect.getsource(
+            alpaca_paper.AlpacaPaperPortfolioAdapter._submit_governed_order
+        ),
     ):
         assert "require_clean_reconciliation" in source
