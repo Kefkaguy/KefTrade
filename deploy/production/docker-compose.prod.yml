@@ -176,6 +176,11 @@ services:
       migrate:
         condition: service_completed_successfully
     command: ["python", "-m", "app.workers.broker_runner"]
+    volumes:
+      # The frozen MOM_12_1 reference panel and forward signal files already
+      # live on the VPS under reports/. They are runtime evidence, not image
+      # source, and remain writable by the existing forward signal generator.
+      - ../../reports/mom_12_1_shadow:/strategy-artifacts/mom_12_1_shadow:ro
     healthcheck:
       # See apps/api/app/workers/broker_worker_healthcheck.py for what this
       # checks (liveness + fresh cycles) and, in its module docstring, why the
@@ -185,6 +190,24 @@ services:
       timeout: 10s
       retries: 5
       start_period: 45s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  mom12-signal-worker:
+    build:
+      context: ../..
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["python", "-m", "app.workers.mom12_signal_runner"]
+    volumes:
+      # This is the frozen, independently validated generator and its immutable
+      # reference panel. Only this worker may create new forward signal files.
+      - ../../reports/mom_12_1_shadow:/reports:rw
     logging:
       driver: json-file
       options:
