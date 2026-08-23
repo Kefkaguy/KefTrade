@@ -8,10 +8,11 @@ The account would hold shares belonging to a strategy that cannot claim them,
 and the next rebalance would size against a position it does not know it has.
 
 Until now that ordering was a convention -- a caller was expected to record
-attributions before submitting. This module makes it structural. The adapter
-cannot be reached except through a submitter that holds a database connection,
-and that submitter refuses to call it until attribution is committed and
-re-read.
+attributions before submitting. This module makes it structural. Verification
+mints a ``SubmissionCapability`` naming that one order, and the portfolio
+adapter's mutating entry point requires one; its public ``submit_order`` refuses
+outright. So the adapter is not merely the wrong door for an unattributed order,
+it is a door with nothing behind it.
 
 **Why a service rather than a check inside the adapter.** The adapter is a
 broker client: it speaks HTTP and knows nothing about our tables. Giving it a
@@ -43,6 +44,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from app.brokers.submission_capability import SubmissionCapability
 from app.services.strategy_ownership_repository import (
     OwnershipPersistenceError,
     read_order_attribution,
@@ -281,12 +283,21 @@ class GovernedOrderSubmitter:
         record = persist_and_verify_attribution(self._conn, intent, now=now)
         self.attributions.append(record)
 
+        # The capability exists only on this side of verification. It is what
+        # makes the ordering structural rather than remembered: the adapter's
+        # mutating entry point has nothing to act on without one, so an order
+        # nobody attributed cannot reach it even by calling it directly.
+        capability = SubmissionCapability.after_verified_attribution(
+            attribution=record["attribution"], verified=record["verified"]
+        )
+
         # Step 3 and 4, inside the adapter: execution flags, ownership, the
         # fresh GET /v2/positions for a sell, then POST.
         wire = dict(payload)
         wire.setdefault("strategy", strategy)
-        return await self._adapter.submit_order(
+        return await self._adapter._submit_governed_order(
             wire,
+            capability=capability,
             confirmed_positions=confirmed_positions,
             ownership_ledger=ownership_ledger,
             reconciliation=reconciliation,

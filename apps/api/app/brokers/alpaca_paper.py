@@ -6,6 +6,10 @@ from typing import Any
 import httpx
 
 from app.brokers.base import BrokerMutationDisabled, BrokerResponse
+from app.brokers.submission_capability import (
+    SubmissionCapabilityError,
+    require_submission_capability,
+)
 from app.settings import settings
 
 
@@ -139,24 +143,49 @@ class AlpacaPaperPortfolioAdapter(AlpacaPaperBrokerAdapter):
     compatible_from = "2.0.0-portfolio"
     capabilities = ("read", "buy", "position_reducing_sell")
 
-    async def submit_order(
+    async def submit_order(self, payload: dict[str, Any]) -> BrokerResponse:
+        """Refused. Portfolio orders go through ``GovernedOrderSubmitter``.
+
+        The inherited signature is kept so this class still satisfies the
+        adapter protocol, and so a direct call fails here rather than silently
+        falling through to the base class's buy path -- which would let a
+        portfolio buy reach the venue with no attribution behind it.
+        """
+        raise SubmissionCapabilityError(
+            "AlpacaPaperPortfolioAdapter does not submit orders directly; a "
+            "portfolio order must carry a submission capability, which is issued "
+            "only after its attribution has been persisted and verified. Submit "
+            "through GovernedOrderSubmitter."
+        )
+
+    async def _submit_governed_order(
         self,
         payload: dict[str, Any],
         *,
+        capability: Any = None,
         confirmed_positions: dict[str, Any] | None = None,
         ownership_ledger: Any = None,
         reconciliation: Any = None,
     ) -> BrokerResponse:
         """A buy, or a sell that provably reduces a position this strategy owns.
 
+        Reachable only with a capability naming this exact order, so an order
+        nobody attributed has nothing to call. Private by name as well, because
+        the capability check is the guarantee and the underscore is the signpost.
+
         A sell must satisfy both bounds, and neither substitutes for the other:
         it may not exceed what the strategy *owns*, and it may not exceed what
         the broker *confirms exists*. The first stops a rebalance liquidating
         another strategy's holding; the second stops it opening a short.
         """
+        # Before anything else, including the flag checks: an order that cannot
+        # be accounted for must not reach even the parts of this method that
+        # decide whether it is safe.
+        require_submission_capability(capability, payload)
+
         side = str(payload.get("side") or "").lower()
         if side == "buy":
-            return await super().submit_order(payload)
+            return await AlpacaPaperBrokerAdapter.submit_order(self, payload)
         if side != "sell":
             raise BrokerMutationDisabled(
                 "KefTrade external paper supports buy orders and "
