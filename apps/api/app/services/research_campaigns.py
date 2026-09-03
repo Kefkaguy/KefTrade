@@ -1217,6 +1217,12 @@ def create_research_campaign(
     search_mode: str = "full",
     dataset_mode: str = "rolling",
     dataset_id: int | None = None,
+    generator_mode: str = "standard",
+    rug_seed: int = 0,
+    rug_batch_index: int = 0,
+    rug_target_candidates: int | None = None,
+    rug_batch_size: int | None = None,
+    rug_auto_continue: bool = False,
 ) -> dict[str, Any]:
     started = time.perf_counter()
     log_event("Research campaign launch requested", universe_key=universe_key, max_candidates=max_candidates, asset_limit=asset_limit, timeframes=timeframes)
@@ -1245,7 +1251,20 @@ def create_research_campaign(
     log_event("Job generation started", assets=len(assets), timeframes=len(selected_timeframes), strategies=max_candidates, expected_jobs=len(assets) * len(selected_timeframes) * max_candidates)
     if search_mode not in {"full", "scout_expand"}:
         raise ValueError("search_mode must be full or scout_expand")
-    candidates, generation_metrics = campaign_generation_candidates(conn, universe_key=universe_key, max_candidates=max_candidates)
+    if generator_mode == "rug":
+        from app.services.rug import generate_rug_candidates
+
+        guidance = research_generation_guidance(conn)
+        candidates, generation_metrics = generate_rug_candidates(
+            max_candidates=max_candidates,
+            seed=rug_seed,
+            batch_index=rug_batch_index,
+            guidance=guidance,
+        )
+    elif generator_mode == "standard":
+        candidates, generation_metrics = campaign_generation_candidates(conn, universe_key=universe_key, max_candidates=max_candidates)
+    else:
+        raise ValueError("generator_mode must be standard or rug")
     queued_candidates = candidates
     scout_ids: list[str] = []
     if search_mode == "scout_expand":
@@ -1258,6 +1277,7 @@ def create_research_campaign(
         max_candidates,
         search_mode=search_mode,
         dataset_id=dataset_id,
+        variant=(f"rug_v1_seed_{rug_seed}_batch_{rug_batch_index}" if generator_mode == "rug" else None),
     )
     campaign_name = name or f"{universe['name']} strategy discovery campaign"
     insert_started = time.perf_counter()
@@ -1266,8 +1286,25 @@ def create_research_campaign(
                 "asset_limit": asset_limit,
                 "timeframes": selected_timeframes,
                 "campaign_version": CAMPAIGN_VERSION,
-                "candidate_generation": "family_balanced_frequency_hypotheses_v1",
+                "candidate_generation": "rug_v1" if generator_mode == "rug" else "family_balanced_frequency_hypotheses_v1",
                 "candidate_generation_mix": generation_metrics,
+                "rug": {
+                    "enabled": generator_mode == "rug",
+                    "seed": rug_seed,
+                    "batch_index": rug_batch_index,
+                    "batch_candidates": max_candidates,
+                    "batch_size": int(rug_batch_size or max_candidates),
+                    "target_candidates": rug_target_candidates,
+                    "completed_before_batch": rug_batch_index * int(rug_batch_size or max_candidates),
+                    "remaining_after_batch": max(
+                        0,
+                        int(rug_target_candidates or max_candidates)
+                        - ((rug_batch_index * int(rug_batch_size or max_candidates)) + max_candidates),
+                    ),
+                    "generator_only": True,
+                    "auto_continue": rug_auto_continue,
+                    "judge": "existing_backtester_and_validation_pipeline",
+                },
                 "research_execution": {
                     "search_mode": search_mode,
                     "stage": "scout" if search_mode == "scout_expand" else "full",
@@ -1315,7 +1352,9 @@ def create_research_campaign(
                     "dataset_content_hash": dataset.get("content_hash") if dataset else None,
                     "assets": assets,
                     "timeframes": selected_timeframes,
-                    "candidate_generation": "family_balanced_frequency_hypotheses_v1",
+                    "candidate_generation": "rug_v1" if generator_mode == "rug" else "family_balanced_frequency_hypotheses_v1",
+                    "rug_seed": rug_seed if generator_mode == "rug" else None,
+                    "rug_batch_index": rug_batch_index if generator_mode == "rug" else None,
                     "search_mode": search_mode,
                     "correlation_evidence_version": "aligned_marked_returns_v1",
                 }),
@@ -1347,6 +1386,20 @@ def create_research_campaign(
         "dataset_mode": dataset_mode,
         "jobs_created": created,
         "campaign_version": CAMPAIGN_VERSION,
+        "generator_mode": generator_mode,
+        "generation_metrics": generation_metrics,
+        "rug": {
+            "seed": rug_seed,
+            "batch_index": rug_batch_index,
+            "target_candidates": rug_target_candidates,
+            "batch_size": int(rug_batch_size or max_candidates),
+            "auto_continue": rug_auto_continue,
+            "next_batch_index": rug_batch_index + 1,
+            "has_more_batches": bool(
+                rug_target_candidates
+                and ((rug_batch_index * int(rug_batch_size or max_candidates)) + max_candidates) < rug_target_candidates
+            ),
+        } if generator_mode == "rug" else None,
         "simulation_only": True,
         "safety": SAFETY_STATEMENT,
     }
@@ -5176,6 +5229,12 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
             key: archive.get(key)
             for key in ("archive_key", "content_hash", "storage_locations")
         }
+    try:
+        continuation = continue_rug_run_after_learning(conn, campaign_metadata)
+        if continuation is not None:
+            analytics["rug_continuation"] = continuation
+    except Exception as error:  # noqa: BLE001 - a next batch must never invalidate completed evidence
+        analytics["rug_continuation"] = {"queued": False, "error": str(error)}
     conn.execute(
         "UPDATE research_campaigns SET analytics = %s, updated_at = NOW() WHERE id = %s",
         (Jsonb(jsonable(analytics)), campaign_id),
@@ -5183,6 +5242,111 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
     persist_campaign_analytics_snapshot(conn, campaign_id, analytics)
     refresh_command_center_aggregate_snapshot(conn)
     return analytics
+
+
+def continue_rug_run_after_learning(conn: psycopg.Connection, campaign: dict[str, Any]) -> dict[str, Any] | None:
+    """Queue the next bounded RUG batch after this batch has taught global learning."""
+
+    controls = dict(campaign.get("controls") or {})
+    rug = dict(controls.get("rug") or {})
+    if not rug.get("enabled") or not rug.get("auto_continue"):
+        return None
+    target = int(rug.get("target_candidates") or 0)
+    batch_size = int(rug.get("batch_size") or rug.get("batch_candidates") or 0)
+    current_index = int(rug.get("batch_index") or 0)
+    completed = min(target, (current_index * batch_size) + int(rug.get("batch_candidates") or batch_size))
+    if target <= 0 or batch_size <= 0 or completed >= target:
+        return {"queued": False, "complete": True, "completed_candidates": completed, "target_candidates": target}
+    next_index = current_index + 1
+    next_count = min(batch_size, target - completed)
+    result = create_research_campaign(
+        conn,
+        universe_key=str(campaign["universe_key"]),
+        name=f"RUG batch {next_index + 1}",
+        max_candidates=next_count,
+        asset_limit=int(controls.get("asset_limit") or 10),
+        timeframes=list(controls.get("timeframes") or []),
+        search_mode="full",
+        dataset_mode=str(campaign.get("dataset_mode") or "rolling"),
+        dataset_id=int(campaign["dataset_id"]) if campaign.get("dataset_id") is not None else None,
+        generator_mode="rug",
+        rug_seed=int(rug.get("seed") or 0),
+        rug_batch_index=next_index,
+        rug_target_candidates=target,
+        rug_batch_size=batch_size,
+        rug_auto_continue=True,
+    )
+    inherited_scheduling = {
+        key: value
+        for key, value in dict(campaign.get("scheduling_config") or {}).items()
+        if key in DEFAULT_SCHEDULING_CONFIG and key != "target_workers"
+    }
+    if inherited_scheduling:
+        update_campaign_scheduling_config(conn, int(result["campaign"]["id"]), inherited_scheduling)
+    inherited_workers = max(0, min(campaign_worker_limit(), int(campaign.get("target_workers") or 0)))
+    inherited_jobs_per_worker = max(1, min(100, int((campaign.get("scheduling_config") or {}).get("batch_size") or 10)))
+    worker_dispatch = None
+    if inherited_workers > 0:
+        worker_dispatch = run_parallel_campaign_batch(
+            conn,
+            campaign_id=int(result["campaign"]["id"]),
+            workers=inherited_workers,
+            jobs_per_worker=inherited_jobs_per_worker,
+        )
+    return {
+        "queued": True,
+        "complete": False,
+        "completed_candidates": completed,
+        "target_candidates": target,
+        "next_campaign_id": result["campaign"]["id"],
+        "next_batch_index": next_index,
+        "next_batch_candidates": next_count,
+        "inherited_workers": inherited_workers,
+        "inherited_scheduling": inherited_scheduling,
+        "worker_dispatch": worker_dispatch,
+    }
+
+
+def rug_run_status(conn: psycopg.Connection, *, seed: int | None = None) -> dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT id, name, universe_key, status, requested_candidates, controls,
+               queued_jobs, completed_jobs, failed_jobs, promoted_candidates,
+               rejected_candidates, created_at, completed_at
+        FROM research_campaigns
+        WHERE simulation_only = TRUE
+          AND COALESCE((controls->'rug'->>'enabled')::boolean, FALSE) = TRUE
+        ORDER BY id ASC
+        """
+    ).fetchall()
+    campaigns = [jsonable(dict(row)) for row in rows]
+    if seed is not None:
+        campaigns = [row for row in campaigns if int(((row.get("controls") or {}).get("rug") or {}).get("seed") or 0) == seed]
+    grouped: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for row in campaigns:
+        rug = dict((row.get("controls") or {}).get("rug") or {})
+        grouped[int(rug.get("seed") or 0)].append(row)
+    runs = []
+    for run_seed, items in grouped.items():
+        latest_rug = dict((items[-1].get("controls") or {}).get("rug") or {})
+        runs.append({
+            "seed": run_seed,
+            "target_candidates": int(latest_rug.get("target_candidates") or 0),
+            "batches_queued": len(items),
+            "candidates_queued": sum(int(((row.get("controls") or {}).get("rug") or {}).get("batch_candidates") or 0) for row in items),
+            "candidates_completed": sum(
+                int(((row.get("controls") or {}).get("rug") or {}).get("batch_candidates") or 0)
+                for row in items if row.get("status") == "completed"
+            ),
+            "backtest_jobs_completed": sum(int(row.get("completed_jobs") or 0) for row in items),
+            "good_candidates_collected": sum(int(row.get("promoted_candidates") or 0) for row in items),
+            "rejected_candidates_learned_from": sum(int(row.get("rejected_candidates") or 0) for row in items),
+            "failed_jobs": sum(int(row.get("failed_jobs") or 0) for row in items),
+            "active_campaign_ids": [row["id"] for row in items if row.get("status") not in {"completed", "canceled", "failed"}],
+            "latest_campaign_id": items[-1]["id"],
+            "auto_continue": bool(latest_rug.get("auto_continue")),
+        })
+    return {"generator": "RUG", "version": "rug_v1", "runs": runs, "campaigns": campaigns, "simulation_only": True}
 
 
 def generate_campaign_report(conn: psycopg.Connection, campaign_id: int, analytics: dict[str, Any] | None = None) -> dict[str, Any]:

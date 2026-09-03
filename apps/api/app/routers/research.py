@@ -66,6 +66,7 @@ from app.services.research_campaigns import (
     reevaluate_elite_candidates,
     refresh_elite_candidate_forward_evidence,
     repair_campaign,
+    rug_run_status,
     research_campaign_preflight,
     retry_campaign_job,
     run_campaign_scheduler_cycle,
@@ -174,6 +175,20 @@ class AutonomousResearchCyclePayload(BaseModel):
     asset_limit: int = Field(default=10, ge=1, le=100)
     dataset_mode: str = Field(default="rolling", pattern="^(rolling|reproducibility)$")
     approval_mode: str = Field(default="manual", pattern="^(manual|auto_queue)$")
+
+
+class RugCampaignPayload(BaseModel):
+    universe_key: str = "research_core_ten"
+    name: str | None = None
+    target_candidates: int = Field(default=1_000_000, ge=1, le=10_000_000)
+    batch_size: int = Field(default=1000, ge=1, le=5000)
+    batch_index: int = Field(default=0, ge=0)
+    seed: int = 0
+    auto_continue: bool = True
+    asset_limit: int = Field(default=10, ge=1, le=100)
+    timeframes: list[str] | None = None
+    dataset_mode: str = Field(default="rolling", pattern="^(rolling|reproducibility)$")
+    dataset_id: int | None = Field(default=None, ge=1)
 
 
 class CampaignSchedulingPayload(BaseModel):
@@ -548,6 +563,56 @@ def create_large_scale_research_campaign(
     except Exception as error:
         log_exception("Campaign creation exception", error, elapsed_ms=elapsed_ms(started))
         raise
+
+
+@router.post("/research/rug/campaigns")
+def create_rug_research_campaign(
+    payload: RugCampaignPayload,
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    """Queue one bounded RUG batch through the unchanged campaign judge.
+
+    Million-candidate searches are intentionally chunked: callers queue the
+    next batch only after the prior batch has produced global learning.  This
+    prevents an unbounded database queue and makes failures useful to later
+    generations.
+    """
+
+    completed_before = payload.batch_index * payload.batch_size
+    if completed_before >= payload.target_candidates:
+        raise HTTPException(status_code=400, detail="RUG batch_index is beyond the requested target_candidates")
+    batch_size = min(payload.batch_size, payload.target_candidates - completed_before)
+    try:
+        result = create_research_campaign(
+            conn,
+            universe_key=payload.universe_key,
+            name=payload.name or f"RUG batch {payload.batch_index + 1}",
+            max_candidates=batch_size,
+            asset_limit=payload.asset_limit,
+            timeframes=payload.timeframes,
+            search_mode="full",
+            dataset_mode=payload.dataset_mode,
+            dataset_id=payload.dataset_id,
+            generator_mode="rug",
+            rug_seed=payload.seed,
+            rug_batch_index=payload.batch_index,
+            rug_target_candidates=payload.target_candidates,
+            rug_batch_size=payload.batch_size,
+            rug_auto_continue=payload.auto_continue,
+        )
+        result["rug"]["batches_required"] = (payload.target_candidates + payload.batch_size - 1) // payload.batch_size
+        result["rug"]["queue_policy"] = "one bounded batch at a time; complete and learn before queuing the next batch"
+        return result
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@router.get("/research/rug/status")
+def get_rug_status(
+    seed: int | None = Query(None),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    return rug_run_status(conn, seed=seed)
 
 
 @router.get("/research/campaigns")

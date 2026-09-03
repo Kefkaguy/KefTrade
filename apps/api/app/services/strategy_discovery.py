@@ -358,6 +358,10 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
         "generation_channel",
         "generation_stage",
         "generator_version",
+        "rug_seed",
+        "rug_batch_index",
+        "rug_ordinal",
+        "rug_channel",
         "elite_repair_version",
         "parent_elite_candidate_id",
         "parent_external_deployment_id",
@@ -452,9 +456,11 @@ def discovered_strategy_decision(candle: dict[str, Any], feature: dict[str, Any]
     if params.get("strategy_architecture") == "relative_strength_continuation_v2":
         return relative_strength_continuation_v2_decision(candle, feature, recent_candles, params)
     close = Decimal(candle["close"])
+    if not entry_window_passes(candle, params):
+        return avoid("Entry-time window failed.")
     if not trend_passes(close, feature, recent_candles, params):
         return avoid("Trend block failed.")
-    if not momentum_passes(feature, params):
+    if not momentum_passes(feature, recent_candles, params):
         return avoid("Momentum block failed.")
     if not volatility_passes(close, feature, recent_candles, params):
         return avoid("Volatility block failed.")
@@ -558,6 +564,45 @@ def moving_average(candles: list[dict[str, Any]], period: int, method: str = "em
     return ema
 
 
+def rsi_value(recent_candles: list[dict[str, Any]], period: int) -> Decimal | None:
+    """Calculate Wilder RSI for executable RUG periods; stored RSI-14 remains the fast path."""
+    if period <= 0 or len(recent_candles) <= period:
+        return None
+    closes = [Decimal(str(row["close"])) for row in recent_candles]
+    changes = [closes[index] - closes[index - 1] for index in range(1, len(closes))]
+    gains = [max(change, Decimal("0")) for change in changes]
+    losses = [max(-change, Decimal("0")) for change in changes]
+    avg_gain = sum(gains[:period]) / Decimal(period)
+    avg_loss = sum(losses[:period]) / Decimal(period)
+    for gain, loss in zip(gains[period:], losses[period:]):
+        avg_gain = ((avg_gain * Decimal(period - 1)) + gain) / Decimal(period)
+        avg_loss = ((avg_loss * Decimal(period - 1)) + loss) / Decimal(period)
+    if avg_loss == 0:
+        return Decimal("100") if avg_gain > 0 else Decimal("50")
+    return Decimal("100") - (Decimal("100") / (Decimal("1") + (avg_gain / avg_loss)))
+
+
+def candidate_rsi(feature: dict[str, Any], recent_candles: list[dict[str, Any]], params: dict[str, Any]) -> Decimal | None:
+    period = int(params.get("rsi_period", 14))
+    if period == 14 and feature.get("rsi_14") is not None:
+        return Decimal(str(feature["rsi_14"]))
+    return rsi_value(recent_candles, period)
+
+
+def entry_window_passes(candle: dict[str, Any], params: dict[str, Any]) -> bool:
+    start = int(params.get("entry_start_minute_utc", 0))
+    end = int(params.get("entry_end_minute_utc", 1440))
+    if start <= 0 and end >= 1440:
+        return True
+    timestamp = candle.get("timestamp")
+    if timestamp is None:
+        return False
+    if isinstance(timestamp, str):
+        timestamp = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    minute = int(timestamp.hour) * 60 + int(timestamp.minute)
+    return start <= minute < end
+
+
 def trend_passes(close: Decimal, feature: dict[str, Any], recent_candles: list[dict[str, Any]], params: dict[str, Any]) -> bool:
     if params.get("trend_method") == "vwap":
         vwap = feature.get("vwap") or feature.get("ema_20")
@@ -606,10 +651,11 @@ def trend_passes(close: Decimal, feature: dict[str, Any], recent_candles: list[d
     return close > slow and fast > slow
 
 
-def momentum_passes(feature: dict[str, Any], params: dict[str, Any]) -> bool:
+def momentum_passes(feature: dict[str, Any], recent_candles: list[dict[str, Any]], params: dict[str, Any]) -> bool:
     block = params.get("momentum")
     if block == "rsi":
-        return feature.get("rsi_14") is not None and Decimal(feature["rsi_14"]) >= Decimal(str(params.get("rsi_min", 50)))
+        rsi = candidate_rsi(feature, recent_candles, params)
+        return rsi is not None and rsi >= Decimal(str(params.get("rsi_min", 50)))
     if block == "macd":
         if feature.get("macd") is None or feature.get("macd_signal") is None:
             return False
@@ -619,10 +665,11 @@ def momentum_passes(feature: dict[str, Any], params: dict[str, Any]) -> bool:
     if block in {"roc", "adx_proxy"}:
         return feature.get("returns_5") is not None and Decimal(feature["returns_5"]) >= Decimal(str(params.get("returns_5_min", 0)))
     if block == "stochastic_proxy":
-        rsi = feature.get("rsi_14")
+        rsi = candidate_rsi(feature, recent_candles, params)
         return rsi is not None and Decimal(str(params.get("rsi_min", 45))) <= Decimal(rsi) <= Decimal(str(params.get("rsi_max", 72)))
     if block == "rsi_oversold":
-        return feature.get("rsi_14") is not None and Decimal(feature["rsi_14"]) <= Decimal(str(params.get("rsi_oversold", 42)))
+        rsi = candidate_rsi(feature, recent_candles, params)
+        return rsi is not None and rsi <= Decimal(str(params.get("rsi_oversold", 42)))
     return False
 
 
@@ -716,7 +763,8 @@ def entry_passes(close: Decimal, candle: dict[str, Any], feature: dict[str, Any]
         ema20 = Decimal(str(feature["ema_20"])) if feature.get("ema_20") is not None else moving_average(recent_candles, 20, "ema")
         return ema20 is not None and abs((close - ema20) / ema20) <= Decimal(str(params.get("entry_distance_to_ema20_max", 0.035)))
     if entry == "mean_reversion":
-        return feature.get("rsi_14") is not None and Decimal(feature["rsi_14"]) <= Decimal(str(params.get("rsi_oversold", 38)))
+        rsi = candidate_rsi(feature, recent_candles, params)
+        return rsi is not None and rsi <= Decimal(str(params.get("rsi_oversold", 38)))
     if entry in {"trend_continuation", "gap_proxy"}:
         return feature.get("returns_5") is not None and Decimal(feature["returns_5"]) >= Decimal(str(params.get("returns_5_min", 0.01)))
     return False
