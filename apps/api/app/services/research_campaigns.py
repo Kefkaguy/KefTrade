@@ -57,13 +57,36 @@ DEFAULT_CAMPAIGN_TIMEFRAMES = ("1h", "4h", "1d")
 # Timeframes a campaign MAY use when explicitly requested. Kept separate from
 # the defaults above: 1h/4h/1d give only ~500-250 decision points per year, so
 # no strategy on them can exceed ~10 trades/year regardless of its entry logic.
-# 15m/30m are supported by the Alpaca adapter and are the only lever that can
-# produce genuinely higher-frequency candidates. Defaults are unchanged.
-SUPPORTED_CAMPAIGN_TIMEFRAMES = ("15m", "30m", "1h", "4h", "1d")
+# Intraday RUG campaigns can explicitly request direct Alpaca bars down to 1m.
+# Defaults remain unchanged so existing campaigns do not silently expand.
+SUPPORTED_CAMPAIGN_TIMEFRAMES = ("1m", "3m", "5m", "15m", "30m", "1h", "4h", "1d")
 WORKER_VERSION = "campaign_worker_v1"
 DEFAULT_BATCH_SIZE = 1000
 MIN_CAMPAIGN_CANDLES = 120
 MIN_CAMPAIGN_FEATURES = 80
+# A few hundred minute bars can pass the mechanical backtester but cannot
+# support useful discovery. These floors force preparation to backfill a
+# meaningful low-timeframe sample before a campaign can launch.
+MIN_CAMPAIGN_CANDLES_BY_TIMEFRAME = {"1m": 4000, "3m": 4000, "5m": 4000}
+# Roughly comparable research horizons across intraday bar sizes. Preparation
+# and live (non-snapshot) workers use these depths unless the configured global
+# campaign limit is larger.
+CAMPAIGN_CANDLE_LIMITS_BY_TIMEFRAME = {
+    "1m": 50_000,
+    "3m": 30_000,
+    "5m": 20_000,
+    "15m": 10_000,
+    "30m": 5_000,
+}
+
+
+def minimum_campaign_candles(timeframe: str) -> int:
+    return max(MIN_CAMPAIGN_CANDLES, MIN_CAMPAIGN_CANDLES_BY_TIMEFRAME.get(str(timeframe), 0))
+
+
+def campaign_candle_limit(timeframe: str) -> int:
+    configured = max(500, int(settings.campaign_backtest_candle_limit or 4000))
+    return max(configured, CAMPAIGN_CANDLE_LIMITS_BY_TIMEFRAME.get(str(timeframe), 0))
 DEFAULT_SCHEDULING_CONFIG: dict[str, Any] = {
     "mode": "manual",
     "batch_size": 25,
@@ -804,7 +827,7 @@ def create_hidden_gem_recovery_campaign(
     }
 
 
-TIMEFRAME_SECONDS = {"15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
+TIMEFRAME_SECONDS = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
 TIMEFRAME_SCALING_REFERENCE = "4h"
 # Entry thresholds that describe a PRICE MOVE and therefore scale with the
 # square root of the bar duration (a random walk's expected move grows as
@@ -819,7 +842,7 @@ MOVE_SCALED_PARAMETERS = (
     "normal_volatility_min",
     "normal_volatility_max",
 )
-HIGH_FREQUENCY_TIMEFRAMES = ("15m", "30m")
+HIGH_FREQUENCY_TIMEFRAMES = ("1m", "3m", "5m", "15m", "30m")
 
 
 def timeframe_scaled_parameters(parameters: dict[str, Any], timeframe: str, *, reference: str = TIMEFRAME_SCALING_REFERENCE) -> dict[str, Any]:
@@ -3790,7 +3813,7 @@ def load_campaign_dataset(
         features = frozen["features"]
         regimes = frozen["regimes"]
     else:
-        candle_limit = max(500, int(settings.campaign_backtest_candle_limit or 4000))
+        candle_limit = campaign_candle_limit(timeframe)
         candles = load_candles(conn, symbol, timeframe, limit=candle_limit)
         first_timestamp = candles[0]["timestamp"] if candles else None
         features = list(
@@ -3922,12 +3945,13 @@ def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dic
             (dataset_id, symbol, timeframe),
         ).fetchone()
         candle_count = int((row or {}).get("candle_count") or 0)
-        if candle_count < MIN_CAMPAIGN_CANDLES:
+        required_candles = minimum_campaign_candles(timeframe)
+        if candle_count < required_candles:
             classification = "missing_dataset" if candle_count == 0 else "insufficient_historical_depth"
             return readiness_block(
                 "blocked_data",
                 classification,
-                f"Immutable dataset {dataset_id} contains {candle_count} candles; {MIN_CAMPAIGN_CANDLES} are required.",
+                f"Immutable dataset {dataset_id} contains {candle_count} candles; {required_candles} are required.",
                 retry_after_seconds=86400,
                 job=job,
                 symbol_row={"symbol": symbol, "asset_class": "snapshot", "is_active": True},
@@ -3978,9 +4002,10 @@ def data_readiness_for_job(conn: psycopg.Connection, job: dict[str, Any]) -> dic
     ).fetchone()
     candle_count = int((row or {}).get("candle_count") or 0)
     latest = (row or {}).get("latest_candle_timestamp")
-    if candle_count < MIN_CAMPAIGN_CANDLES:
+    required_candles = minimum_campaign_candles(timeframe)
+    if candle_count < required_candles:
         classification = "missing_dataset" if candle_count == 0 else "insufficient_historical_depth"
-        return readiness_block("blocked_data", classification, f"Only {candle_count} candles are available; {MIN_CAMPAIGN_CANDLES} are required.", retry_after_seconds=3600, job=job, symbol_row=dict(symbol_row), candle_count=candle_count, latest_candle_timestamp=latest)
+        return readiness_block("blocked_data", classification, f"Only {candle_count} candles are available; {required_candles} are required.", retry_after_seconds=3600, job=job, symbol_row=dict(symbol_row), candle_count=candle_count, latest_candle_timestamp=latest)
     freshness = data_freshness(latest, timeframe, (symbol_row or {}).get("asset_class"))
     if freshness["stale"]:
         return readiness_block("blocked_data", "stale_data", freshness["reason"], retry_after_seconds=1800, job=job, symbol_row=dict(symbol_row), candle_count=candle_count, latest_candle_timestamp=latest, freshness=freshness)
@@ -4071,9 +4096,10 @@ def research_campaign_preflight(conn: psycopg.Connection, *, assets: list[str], 
             elif timeframe not in SUPPORTED_CAMPAIGN_TIMEFRAMES:
                 classification = "unsupported_timeframe"
                 reason = f"Timeframe {timeframe} is not supported by campaign preflight."
-            elif candle_count < MIN_CAMPAIGN_CANDLES:
+            elif candle_count < minimum_campaign_candles(timeframe):
+                required_candles = minimum_campaign_candles(timeframe)
                 classification = "missing_dataset" if candle_count == 0 else "insufficient_historical_depth"
-                reason = f"Only {candle_count} candles are available; {MIN_CAMPAIGN_CANDLES} are required."
+                reason = f"Only {candle_count} candles are available; {required_candles} are required."
             else:
                 freshness = data_freshness(candle_row.get("latest_candle_timestamp"), timeframe, symbol_row.get("asset_class"))
                 if freshness["stale"]:
@@ -4165,7 +4191,7 @@ def preflight_detail(
 ) -> dict[str, Any]:
     symbol = str(job.get("symbol") or symbol_row.get("symbol") or "").upper()
     timeframe = str(job.get("timeframe") or "")
-    required = MIN_CAMPAIGN_CANDLES
+    required = minimum_campaign_candles(timeframe)
     return {
         "campaign_job_id": job.get("id"),
         "symbol": symbol,
@@ -4208,7 +4234,7 @@ def data_freshness(timestamp: Any, timeframe: str, asset_class: str | None) -> d
     expected = expected_completed_candle(timeframe, asset_class)
     if market_closed_for_asset(asset_class) and parsed >= expected - timedelta(hours=4):
         return {"stale": False, "classification": "market_closed", "reason": "Market closed: latest completed candle is expected.", "expected_completed_candle": expected}
-    max_age_hours = {"15m": 2, "30m": 4, "60m": 8, "1h": 8, "4h": 24, "1d": 96}.get(timeframe, 24)
+    max_age_hours = {"1m": 1, "3m": 1, "5m": 1, "15m": 2, "30m": 4, "60m": 8, "1h": 8, "4h": 24, "1d": 96}.get(timeframe, 24)
     age_hours = (datetime.now(UTC) - parsed).total_seconds() / 3600
     if is_equity_market_asset(asset_class) and parsed.weekday() == 4 and datetime.now(UTC).weekday() in {5, 6, 0}:
         max_age_hours = max(max_age_hours, 96)

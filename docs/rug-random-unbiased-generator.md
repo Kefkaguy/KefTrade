@@ -10,6 +10,9 @@ RUG cannot promote a candidate or weaken a validation threshold.
 RUG varies executable RSI periods and thresholds, EMA fast/slow pairs, entry
 structures, ATR stop distances, reward targets, holding periods, UTC entry
 windows, volatility thresholds, volume thresholds, assets, and timeframes.
+Campaigns can directly research `1m`, `3m`, `5m`, `15m`, and `30m` Alpaca
+bars. Low-timeframe preparation uses deeper, timeframe-aware history instead
+of treating a few hundred minute bars as adequate research data.
 Invalid EMA pairs and duplicate executable configurations are discarded before
 jobs are queued.
 
@@ -57,7 +60,7 @@ Example body:
   "seed": 20260903,
   "auto_continue": true,
   "asset_limit": 10,
-  "timeframes": ["15m", "30m"],
+  "timeframes": ["1m", "3m", "5m", "15m", "30m"],
   "dataset_mode": "reproducibility"
 }
 ```
@@ -68,4 +71,4 @@ into learning, failures, and active campaign IDs.
 
 The candidate target is not the number of backtest jobs. Each candidate is
 tested for every selected asset/timeframe combination, so one million
-candidates over ten assets and two timeframes represents twenty million jobs.
+candidates over ten assets and five timeframes represents fifty million jobs.

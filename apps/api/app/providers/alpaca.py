@@ -33,6 +33,8 @@ MAX_STOCK_TRADE_PAGES = 400
 MAX_STOCK_QUOTE_STREAM_PAGES = 4000
 SUPPORTED_TIMEFRAMES = {
     "1m": "1Min",
+    "3m": "3Min",
+    "5m": "5Min",
     "15m": "15Min",
     "30m": "30Min",
     "1h": "1Hour",
@@ -41,6 +43,8 @@ SUPPORTED_TIMEFRAMES = {
 }
 TIMEFRAME_SECONDS = {
     "1m": 60,
+    "3m": 3 * 60,
+    "5m": 5 * 60,
     "15m": 15 * 60,
     "30m": 30 * 60,
     "1h": 60 * 60,

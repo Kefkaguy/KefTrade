@@ -62,7 +62,7 @@ from app.services.research_campaigns import (
     list_campaign_jobs,
     list_research_campaigns,
     list_research_universes,
-    MIN_CAMPAIGN_CANDLES,
+    campaign_candle_limit,
     reevaluate_elite_candidates,
     refresh_elite_candidate_forward_evidence,
     repair_campaign,
@@ -654,10 +654,10 @@ async def prepare_large_scale_research_campaign(
         for issue in initial_readiness.get("issues", [])
         if issue.get("classification") in remediable
     ]
-    sync_limit = max(400, MIN_CAMPAIGN_CANDLES * 3)
     for target in targets:
         symbol = str(target["symbol"])
         timeframe = str(target["timeframe"])
+        sync_limit = campaign_candle_limit(timeframe)
         provider_name = "binance_dev" if symbol.upper().endswith("USDT") else "alpaca_iex" if settings.alpaca_api_key and settings.alpaca_api_secret else "yfinance_research"
         provider = get_market_data_provider(provider_name)
         asset_started = time.perf_counter()
