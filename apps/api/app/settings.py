@@ -38,6 +38,48 @@ class Settings(BaseSettings):
         default=False,
         validation_alias="AUTO_ENABLE_READY_PAPER_EXECUTION",
     )
+    established_paper_strategies_enabled: bool = Field(
+        default=False,
+        validation_alias="ESTABLISHED_PAPER_STRATEGIES_ENABLED",
+    )
+    established_rsi5_notional: float = Field(
+        default=1000,
+        validation_alias="KEFTRADE_RSI5_NOTIONAL",
+    )
+    established_connors_risk_pct: float = Field(
+        default=0.005,
+        validation_alias="KEFTRADE_CONNORS_RISK_PCT",
+    )
+    mom_12_1_signal_dir: str = Field(
+        default="/strategy-artifacts/mom_12_1_shadow/signals",
+        validation_alias="MOM_12_1_SIGNAL_DIR",
+    )
+    mom_12_1_generator_script: str = Field(
+        default="/reports/mom_12_1_shadow.py",
+        validation_alias="MOM_12_1_GENERATOR_SCRIPT",
+    )
+    mom_12_1_generator_poll_seconds: int = Field(
+        default=3600,
+        validation_alias="MOM_12_1_GENERATOR_POLL_SECONDS",
+    )
+    # The broker worker synchronizes roughly once per minute, so a snapshot
+    # older than a few sync cycles is not evidence of what we hold now. This
+    # bounds how stale a stored position may be before a reduction refuses --
+    # but it is only the outer bound: every reduction is revalidated against a
+    # fresh broker read at the mutation boundary regardless of this value.
+    broker_position_snapshot_max_staleness_seconds: int = Field(
+        default=180,
+        validation_alias="BROKER_POSITION_SNAPSHOT_MAX_STALENESS_SECONDS",
+    )
+    # Reconciliation runs once per broker cycle (broker_worker_poll_seconds,
+    # 60s by default), so 900s is roughly fifteen cycles: long enough to ride
+    # out a transient sync failure, short enough that "clean" still describes
+    # today's account. A clean verdict from two weeks ago is not evidence about
+    # the book a sell is about to touch, so age is checked as well as status.
+    broker_reconciliation_max_age_seconds: int = Field(
+        default=900,
+        validation_alias="BROKER_RECONCILIATION_MAX_AGE_SECONDS",
+    )
     elite_minimum_trades_per_year: float = Field(default=0, validation_alias="ELITE_MINIMUM_TRADES_PER_YEAR")
     # Phase 12 (Intraday Research Lab), Step 1. Only opening_range_minutes is
     # consumed by Step 1's feature computation
@@ -74,6 +116,19 @@ class Settings(BaseSettings):
     campaign_dataset_cache_entries: int = Field(default=8, validation_alias="KEFTRADE_CAMPAIGN_DATASET_CACHE_ENTRIES")
 
     model_config = SettingsConfigDict(env_file=ROOT_DIR / ".env", env_file_encoding="utf-8", extra="ignore")
+
+    def model_post_init(self, __context: object) -> None:
+        """Reuse legacy Alpaca credentials only for the validated paper domain.
+
+        Older KefTrade deployments predate the ``ALPACA_PAPER_*`` names and
+        carry one paper key pair as ``ALPACA_API_*``.  The broker adapter still
+        refuses any base URL except ``paper-api.alpaca.markets``, so this alias
+        cannot redirect those credentials to a live trading endpoint.
+        """
+        if not self.alpaca_paper_api_key:
+            self.alpaca_paper_api_key = self.alpaca_api_key
+        if not self.alpaca_paper_secret_key:
+            self.alpaca_paper_secret_key = self.alpaca_api_secret
 
 
 settings = Settings()

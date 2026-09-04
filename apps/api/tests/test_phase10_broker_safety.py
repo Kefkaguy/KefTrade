@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import asyncio
 import ast
+import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
@@ -9,29 +10,50 @@ import pytest
 
 from app.brokers.alpaca_paper import AlpacaPaperBrokerAdapter
 from app.brokers.base import BrokerMutationDisabled
-from app.services.external_execution import assert_execution_disabled, bar_is_complete, candidate_fingerprint, feature_flags
-from app.services.broker_sync import canonical_json, normalize_account, normalize_order, sanitize_value
+from app.services.broker_sync import (
+    canonical_json,
+    normalize_account,
+    normalize_order,
+    sanitize_value,
+)
+from app.services.external_execution import (
+    assert_execution_disabled,
+    bar_is_complete,
+    candidate_fingerprint,
+    feature_flags,
+)
 from app.settings import settings
-
 
 ROOT = Path(__file__).resolve().parents[1] / "app"
 
 
-def configured_adapter(monkeypatch: pytest.MonkeyPatch, handler) -> AlpacaPaperBrokerAdapter:
+def configured_adapter(
+    monkeypatch: pytest.MonkeyPatch, handler
+) -> AlpacaPaperBrokerAdapter:
     monkeypatch.setattr(settings, "broker_provider", "alpaca")
-    monkeypatch.setattr(settings, "alpaca_paper_base_url", "https://paper-api.alpaca.markets")
+    monkeypatch.setattr(
+        settings, "alpaca_paper_base_url", "https://paper-api.alpaca.markets"
+    )
     monkeypatch.setattr(settings, "alpaca_paper_api_key", "paper-key")
     monkeypatch.setattr(settings, "alpaca_paper_secret_key", "paper-secret")
-    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url=settings.alpaca_paper_base_url)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url=settings.alpaca_paper_base_url
+    )
     return AlpacaPaperBrokerAdapter(client=client)
 
 
-def test_adapter_only_uses_read_only_alpaca_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_adapter_only_uses_read_only_alpaca_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        payload = [] if request.url.path.endswith(("orders", "positions", "FILL")) else {"id": "paper-account"}
+        payload = (
+            []
+            if request.url.path.endswith(("orders", "positions", "FILL"))
+            else {"id": "paper-account"}
+        )
         return httpx.Response(200, json=payload)
 
     adapter = configured_adapter(monkeypatch, handler)
@@ -50,9 +72,55 @@ def test_adapter_only_uses_read_only_alpaca_endpoints(monkeypatch: pytest.Monkey
     assert all(request.url.host == "paper-api.alpaca.markets" for request in requests)
 
 
-def test_broker_mutations_fail_closed_without_both_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_fill_activity_reader_paginates_through_the_final_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     requests: list[httpx.Request] = []
-    adapter = configured_adapter(monkeypatch, lambda request: requests.append(request) or httpx.Response(500))
+    first = [{"id": f"fill-{index:03d}"} for index in range(100)]
+    second = [{"id": "fill-100"}]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        token = request.url.params.get("page_token")
+        return httpx.Response(200, json=second if token else first)
+
+    adapter = configured_adapter(monkeypatch, handler)
+
+    async def run() -> None:
+        result = await adapter.list_fill_activities()
+        assert len(result.payload) == 101
+        assert result.payload[-1]["id"] == "fill-100"
+        await adapter._provided_client.aclose()  # type: ignore[union-attr]
+
+    asyncio.run(run())
+    assert len(requests) == 2
+    assert requests[0].url.params.get("page_size") == "100"
+    assert requests[1].url.params.get("page_token") == "fill-099"
+
+
+def test_fill_activity_reader_rejects_non_advancing_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page = [{"id": "same-token"} for _ in range(100)]
+    adapter = configured_adapter(
+        monkeypatch, lambda request: httpx.Response(200, json=page)
+    )
+
+    async def run() -> None:
+        with pytest.raises(RuntimeError, match="did not advance"):
+            await adapter.list_fill_activities()
+        await adapter._provided_client.aclose()  # type: ignore[union-attr]
+
+    asyncio.run(run())
+
+
+def test_broker_mutations_fail_closed_without_both_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    adapter = configured_adapter(
+        monkeypatch, lambda request: requests.append(request) or httpx.Response(500)
+    )
     monkeypatch.setattr(settings, "broker_order_submission_enabled", False)
     monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
 
@@ -67,46 +135,202 @@ def test_broker_mutations_fail_closed_without_both_flags(monkeypatch: pytest.Mon
     assert requests == []
 
 
-def test_paper_order_submission_requires_and_uses_both_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_paper_order_submission_requires_and_uses_both_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(200, json={"id": "paper-order-1", "client_order_id": "kef-1"}, headers={"X-Request-ID": "req-1"})
+        return httpx.Response(
+            200,
+            json={"id": "paper-order-1", "client_order_id": "kef-1"},
+            headers={"X-Request-ID": "req-1"},
+        )
 
     adapter = configured_adapter(monkeypatch, handler)
     monkeypatch.setattr(settings, "broker_order_submission_enabled", True)
     monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
 
     async def run() -> None:
-        result = await adapter.submit_order({"symbol": "AAPL", "qty": "1", "side": "buy", "type": "market", "time_in_force": "day"})
+        result = await adapter.submit_order(
+            {
+                "symbol": "AAPL",
+                "qty": "1",
+                "side": "buy",
+                "type": "market",
+                "time_in_force": "day",
+            }
+        )
         assert result.payload["id"] == "paper-order-1"
         await adapter._provided_client.aclose()  # type: ignore[union-attr]
 
     asyncio.run(run())
-    assert [(request.method, request.url.path) for request in requests] == [("POST", "/v2/orders")]
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("POST", "/v2/orders")
+    ]
 
 
-def test_external_adapter_rejects_short_even_when_both_flags_are_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_external_adapter_rejects_short_even_when_both_flags_are_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No adapter in this codebase can open a short, with both flags on.
+
+    The property this test protects is unchanged. What changed is that there are
+    now two adapters to prove it about: the frozen 1.0.0 release, which still
+    refuses every sell outright, and the portfolio release, which refuses any
+    sell that cannot be shown to reduce a position the strategy owns.
+    """
+    from decimal import Decimal
+
+    from app.brokers.alpaca_paper import AlpacaPaperPortfolioAdapter
+    from app.brokers.submission_capability import (
+        SubmissionCapability,
+        SubmissionCapabilityError,
+    )
+    from app.services.position_reducing_sell import (
+        ConfirmedPosition,
+        ShortSellProhibited,
+    )
+    from app.services.strategy_ownership import (
+        ReconciliationEvidence,
+        StrategyOwnedPosition,
+        StrategyOwnershipLedger,
+    )
+
     requests: list[httpx.Request] = []
-    adapter = configured_adapter(monkeypatch, lambda request: requests.append(request) or httpx.Response(500))
+    handler = lambda request: requests.append(request) or httpx.Response(500)
+    frozen = configured_adapter(monkeypatch, handler)
     monkeypatch.setattr(settings, "broker_order_submission_enabled", True)
     monkeypatch.setattr(settings, "external_paper_execution_enabled", True)
+    client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url=settings.alpaca_paper_base_url
+    )
+    portfolio = AlpacaPaperPortfolioAdapter(client=client)
+
+    now = datetime.now(UTC)
+    held = ConfirmedPosition(
+        symbol="AAPL",
+        quantity=Decimal(10),
+        market_value=Decimal(1000),
+        observed_at=now,
+        reconciliation_status="clean",
+    )
+    ledger = StrategyOwnershipLedger(
+        strategy="MOM_12_1",
+        positions={
+            "AAPL": StrategyOwnedPosition(
+                strategy="MOM_12_1", symbol="AAPL", quantity=Decimal(20), as_of=now
+            )
+        },
+        available=True,
+        source="test",
+    )
+    evidence = ReconciliationEvidence(
+        run_id=1, status="clean", completed_at=now, broker_account_id=1
+    )
+
+    def sell(symbol: str, qty: str, side: str = "sell") -> dict[str, object]:
+        return {
+            "symbol": symbol,
+            "qty": qty,
+            "side": side,
+            "type": "market",
+            "time_in_force": "day",
+            "strategy": "MOM_12_1",
+            "client_order_id": f"kt-mom_12_1-{side}-{symbol}",
+        }
+
+    def capability(symbol: str, side: str) -> SubmissionCapability:
+        """Minted as production mints it: from a verified attribution record.
+
+        These cases are about what the adapter refuses once it has been reached,
+        so they are given a real capability rather than reaching past the gate.
+        """
+        return SubmissionCapability.after_verified_attribution(
+            attribution={
+                "broker_account_id": 1,
+                "client_order_id": f"kt-mom_12_1-{side}-{symbol}",
+                "strategy": "MOM_12_1",
+                "strategy_version": "1.0.0",
+                "symbol": symbol,
+                "intended_side": side,
+            },
+            verified=True,
+        )
 
     async def run() -> None:
+        # The frozen release has no sell path at all.
         with pytest.raises(BrokerMutationDisabled, match="buy orders only"):
-            await adapter.submit_order({"symbol": "AAPL", "qty": "1", "side": "sell", "type": "market"})
-        await adapter._provided_client.aclose()  # type: ignore[union-attr]
+            await frozen.submit_order(sell("AAPL", "1"))
+        # The portfolio release will not submit anything called directly: a
+        # portfolio order needs a capability, issued only after attribution.
+        with pytest.raises(
+            SubmissionCapabilityError, match="does not submit orders directly"
+        ):
+            await portfolio.submit_order(sell("AAPL", "1"))
+        # Past that gate, with a capability in hand, the short refusals stand.
+        # No confirmed book: cannot be shown safe, so refused.
+        with pytest.raises(BrokerMutationDisabled, match="confirmed long"):
+            await portfolio._submit_governed_order(
+                sell("AAPL", "1"), capability=capability("AAPL", "sell")
+            )
+        # A book that does not hold the symbol: still a short.
+        with pytest.raises(ShortSellProhibited, match="no confirmed long position"):
+            await portfolio._submit_governed_order(
+                sell("TSLA", "1"),
+                capability=capability("TSLA", "sell"),
+                confirmed_positions={"AAPL": held},
+                ownership_ledger=StrategyOwnershipLedger(
+                    strategy="MOM_12_1",
+                    positions={
+                        "TSLA": StrategyOwnedPosition(
+                            strategy="MOM_12_1",
+                            symbol="TSLA",
+                            quantity=Decimal(5),
+                            as_of=now,
+                        )
+                    },
+                    available=True,
+                    source="test",
+                ),
+                reconciliation=evidence,
+            )
+        # Larger than the confirmed position: crosses zero.
+        with pytest.raises(ShortSellProhibited, match="would open a short"):
+            await portfolio._submit_governed_order(
+                sell("AAPL", "11"),
+                capability=capability("AAPL", "sell"),
+                confirmed_positions={"AAPL": held},
+                ownership_ledger=ledger,
+                reconciliation=evidence,
+            )
+        # Anything that is neither a buy nor a sell is still refused outright.
+        with pytest.raises(
+            BrokerMutationDisabled, match="position-reducing sells only"
+        ):
+            await portfolio._submit_governed_order(
+                sell("AAPL", "1", side="sell_short"),
+                capability=capability("AAPL", "sell_short"),
+            )
+        await frozen._provided_client.aclose()  # type: ignore[union-attr]
+        await client.aclose()
 
     asyncio.run(run())
-    assert requests == []
+    assert requests == []  # five refusals, zero network calls
 
 
 def test_external_short_prohibition_is_enforced_by_service_and_database() -> None:
-    external_source = (ROOT / "services" / "external_execution.py").read_text(encoding="utf-8")
-    migration = (ROOT.parents[2] / "database" / "migrations" / "038_elite_portfolio_builder.sql").read_text(encoding="utf-8")
+    external_source = (ROOT / "services" / "external_execution.py").read_text(
+        encoding="utf-8"
+    )
+    migration = (
+        ROOT.parents[2] / "database" / "migrations" / "038_elite_portfolio_builder.sql"
+    ).read_text(encoding="utf-8")
 
-    assert "external paper rejects short and internal-only deployments" in external_source
+    assert (
+        "external paper rejects short and internal-only deployments" in external_source
+    )
     assert "COALESCE(d.strategy_direction, 'long') = 'long'" in external_source
     assert "external_paper_deployments_long_only_guard" in migration
     assert "deployment_direction <> 'long'" in migration
@@ -127,7 +351,12 @@ def test_execution_flags_fail_closed(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_external_broker_http_surface_is_read_only() -> None:
     source = (ROOT / "routers" / "broker.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    decorators = [ast.unparse(item) for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) for item in node.decorator_list]
+    decorators = [
+        ast.unparse(item)
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for item in node.decorator_list
+    ]
     assert decorators
     assert all("router.get" in decorator for decorator in decorators)
 
@@ -144,7 +373,12 @@ def test_shadow_elite_repair_generator_is_research_only() -> None:
             "candidate_id": "sd_parent",
             "symbol": "AAXJ",
             "timeframe": "1h",
-            "parameters": {"trend_method": "ema", "trend_fast": 20, "trend_slow": 50, "entry": "trend_continuation"},
+            "parameters": {
+                "trend_method": "ema",
+                "trend_fast": 20,
+                "trend_slow": 50,
+                "entry": "trend_continuation",
+            },
             "research_score": 6.1,
             "forward_validation_state": "awaiting_paper_deployment",
             "shadow_execution_id": 99,
@@ -154,12 +388,29 @@ def test_shadow_elite_repair_generator_is_research_only() -> None:
     )
 
     assert len(proposals) == 3
-    assert {proposal["candidate"]["parent_candidate_id"] for proposal in proposals} == {"sd_parent"}
-    assert all(proposal["candidate"]["candidate_id"].startswith("sr_") for proposal in proposals)
-    assert all(proposal["candidate"]["parameters"]["generation_channel"] == "phase10_shadow_elite_repair" for proposal in proposals)
-    assert all("candidate_id" not in proposal["candidate"]["parameters"] for proposal in proposals)
-    assert all("campaign_id" not in proposal["candidate"]["parameters"] for proposal in proposals)
-    assert all("normal research campaign" in proposal["next_step"] for proposal in proposals)
+    assert {proposal["candidate"]["parent_candidate_id"] for proposal in proposals} == {
+        "sd_parent"
+    }
+    assert all(
+        proposal["candidate"]["candidate_id"].startswith("sr_")
+        for proposal in proposals
+    )
+    assert all(
+        proposal["candidate"]["parameters"]["generation_channel"]
+        == "phase10_shadow_elite_repair"
+        for proposal in proposals
+    )
+    assert all(
+        "candidate_id" not in proposal["candidate"]["parameters"]
+        for proposal in proposals
+    )
+    assert all(
+        "campaign_id" not in proposal["candidate"]["parameters"]
+        for proposal in proposals
+    )
+    assert all(
+        "normal research campaign" in proposal["next_step"] for proposal in proposals
+    )
 
 
 def test_trend_repair_modes_are_only_less_strict_for_generated_children() -> None:
@@ -168,31 +419,71 @@ def test_trend_repair_modes_are_only_less_strict_for_generated_children() -> Non
     from app.services.strategy_discovery import trend_passes
 
     feature = {"ema_20": "99", "ema_50": "100", "returns_5": "0.01"}
-    candles = [{"close": Decimal("98")}, {"close": Decimal("99")}, {"close": Decimal("101")}]
+    candles = [{"close": Decimal(98)}, {"close": Decimal(99)}, {"close": Decimal(101)}]
     base = {"trend_method": "ema", "trend_fast": 20, "trend_slow": 50}
 
-    assert not trend_passes(Decimal("101"), feature, candles, base)
-    assert trend_passes(Decimal("101"), feature, candles, {**base, "trend_repair_mode": "price_above_slow"})
-    assert trend_passes(Decimal("101"), feature, candles, {**base, "trend_repair_mode": "near_cross_with_momentum", "trend_fast_slow_ratio_min": 0.985})
+    assert not trend_passes(Decimal(101), feature, candles, base)
+    assert trend_passes(
+        Decimal(101),
+        feature,
+        candles,
+        {**base, "trend_repair_mode": "price_above_slow"},
+    )
+    assert trend_passes(
+        Decimal(101),
+        feature,
+        candles,
+        {
+            **base,
+            "trend_repair_mode": "near_cross_with_momentum",
+            "trend_fast_slow_ratio_min": 0.985,
+        },
+    )
 
 
 def test_phase10_modules_have_no_runtime_ddl() -> None:
-    paths = [ROOT / "main.py", *(ROOT / name for name in ("routers", "services", "workers", "cli"))]
+    paths = [
+        ROOT / "main.py",
+        *(ROOT / name for name in ("routers", "services", "workers", "cli")),
+    ]
     files = [path for path in paths if path.is_file()]
-    files.extend(child for path in paths if path.is_dir() for child in path.rglob("*.py"))
-    forbidden = ("CREATE TABLE", "CREATE INDEX", "ALTER TABLE", "DROP TABLE", "DROP INDEX")
+    files.extend(
+        child for path in paths if path.is_dir() for child in path.rglob("*.py")
+    )
+    forbidden = (
+        "CREATE TABLE",
+        "CREATE INDEX",
+        "ALTER TABLE",
+        "DROP TABLE",
+        "DROP INDEX",
+    )
     violations = []
     for path in files:
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        bodies = [tree.body, *(node.body for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)))]
+        bodies = [
+            tree.body,
+            *(
+                node.body
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            ),
+        ]
         for body in bodies:
             for statement in body:
                 if isinstance(statement, ast.Return):
                     break
-                if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                if isinstance(
+                    statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+                ):
                     continue
-                for call in (node for node in ast.walk(statement) if isinstance(node, ast.Call)):
-                    if not call.args or not isinstance(call.args[0], ast.Constant) or not isinstance(call.args[0].value, str):
+                for call in (
+                    node for node in ast.walk(statement) if isinstance(node, ast.Call)
+                ):
+                    if (
+                        not call.args
+                        or not isinstance(call.args[0], ast.Constant)
+                        or not isinstance(call.args[0].value, str)
+                    ):
                         continue
                     if any(token in call.args[0].value.upper() for token in forbidden):
                         violations.append(f"{path.relative_to(ROOT)}:{call.lineno}")
@@ -201,8 +492,19 @@ def test_phase10_modules_have_no_runtime_ddl() -> None:
 
 def test_adapter_has_explicit_guards_for_both_mutation_methods() -> None:
     source = (ROOT / "brokers" / "alpaca_paper.py").read_text(encoding="utf-8")
-    assert source.count("raise BrokerMutationDisabled") == 3
-    assert "external paper supports buy orders only" in source
+    # Seven, across two adapters. Frozen 1.0.0: the not-a-buy refusal, the flag
+    # gate on submit, the flag gate on cancel. Portfolio 2.0.0: the
+    # not-buy-not-sell refusal, the refusal of a sell naming no confirmed
+    # position, the flag gate on submit, and the flag gate again at the mutation
+    # boundary. That last re-check is deliberate -- flags can be turned off
+    # between construction and submission.
+    assert source.count("raise BrokerMutationDisabled") == 7
+    assert "buy orders and" in source
+    assert "position-reducing sells only" in source
+    assert "assert_sell_is_position_reducing" in source
+    # And the fresh broker read that bounds every reduction.
+    assert "_revalidate_reduction_now" in source
+    assert "revalidate_reduction_against_fresh_positions" in source
 
 
 def test_completed_bar_gate_is_strict() -> None:
@@ -254,7 +556,10 @@ def test_forward_observation_updates_do_not_change_execution_fingerprint() -> No
         "calculation_version": "v2",
     }
 
-    assert candidate_fingerprint(deployment, refreshed_elite, refreshed_candidate) == original
+    assert (
+        candidate_fingerprint(deployment, refreshed_elite, refreshed_candidate)
+        == original
+    )
 
 
 @pytest.mark.parametrize(
@@ -266,7 +571,9 @@ def test_forward_observation_updates_do_not_change_execution_fingerprint() -> No
         ("parameters", {"trend_fast": 10, "trend_slow": 50}),
     ],
 )
-def test_execution_configuration_changes_do_change_fingerprint(field: str, replacement) -> None:
+def test_execution_configuration_changes_do_change_fingerprint(
+    field: str, replacement
+) -> None:
     deployment = {
         "campaign_id": 10,
         "candidate_id": "sd_test",
@@ -279,24 +586,44 @@ def test_execution_configuration_changes_do_change_fingerprint(field: str, repla
     elite = {"id": 7}
     candidate = {"candidate_id": "sd_test"}
 
-    assert candidate_fingerprint({**deployment, field: replacement}, elite, candidate) != candidate_fingerprint(deployment, elite, candidate)
+    assert candidate_fingerprint(
+        {**deployment, field: replacement}, elite, candidate
+    ) != candidate_fingerprint(deployment, elite, candidate)
 
 
 def test_raw_evidence_sanitization_rejects_nested_credentials() -> None:
-    sanitized = sanitize_value({"Authorization": "Bearer secret", "nested": {"APCA-API-SECRET-KEY": "secret", "safe": "value"}, "url": "https://example.test/path"})
+    sanitized = sanitize_value(
+        {
+            "Authorization": "Bearer secret",
+            "nested": {"APCA-API-SECRET-KEY": "secret", "safe": "value"},
+            "url": "https://example.test/path",
+        }
+    )
     assert "Authorization" not in sanitized
     assert "APCA-API-SECRET-KEY" not in sanitized["nested"]
     assert sanitized["nested"]["safe"] == "value"
 
 
 def test_normalized_broker_metrics_are_json_serializable() -> None:
-    account = normalize_account({"cash": "100000.00", "equity": "100000.00", "buying_power": "400000.00"})
-    order = normalize_order({"id": "order-1", "symbol": "AAPL", "side": "buy", "qty": "1", "filled_qty": "0"})
+    account = normalize_account(
+        {"cash": "100000.00", "equity": "100000.00", "buying_power": "400000.00"}
+    )
+    order = normalize_order(
+        {
+            "id": "order-1",
+            "symbol": "AAPL",
+            "side": "buy",
+            "qty": "1",
+            "filled_qty": "0",
+        }
+    )
     assert '"cash":"100000.00"' in canonical_json(account)
     assert '"requested_quantity":"1"' in canonical_json(order)
 
 
-def test_observe_only_onboarding_survives_phase11_execution_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_observe_only_onboarding_survives_phase11_execution_flags(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Observe-only must stay available once paper execution is enabled.
 
     Observe-only records decisions and submits nothing (submission requires

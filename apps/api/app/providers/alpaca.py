@@ -173,7 +173,10 @@ def normalize_alpaca_asset(row: dict[str, Any]) -> dict[str, Any] | None:
         "tradable": True,
         "marginable": bool(row.get("marginable")),
         "shortable": bool(row.get("shortable")),
-        "fractionable": bool(row.get("fractionable")),
+        # Preserved as None when Alpaca did not say. "Never observed" and
+        # "observed as not fractionable" both fail closed at the execution
+        # gate, but only distinguishing them makes the blocker actionable.
+        "fractionable": bool(row["fractionable"]) if "fractionable" in row else None,
     }
 
 
@@ -184,8 +187,8 @@ def import_alpaca_stock_assets(conn: psycopg.Connection, assets: list[dict[str, 
     with conn.cursor() as cur:
         cur.executemany(
             """
-            INSERT INTO symbols(symbol, asset_class, exchange, currency, name, provider_symbol, primary_provider, index_membership, is_active)
-            VALUES (%s, 'us_equity', %s, 'USD', %s, %s, 'alpaca_iex', %s, TRUE)
+            INSERT INTO symbols(symbol, asset_class, exchange, currency, name, provider_symbol, primary_provider, index_membership, is_active, fractionable, fractionable_checked_at)
+            VALUES (%s, 'us_equity', %s, 'USD', %s, %s, 'alpaca_iex', %s, TRUE, %s, NOW())
             ON CONFLICT (symbol)
             DO UPDATE SET
                 asset_class = CASE WHEN symbols.asset_class = 'etf' THEN symbols.asset_class ELSE EXCLUDED.asset_class END,
@@ -194,7 +197,11 @@ def import_alpaca_stock_assets(conn: psycopg.Connection, assets: list[dict[str, 
                 name = EXCLUDED.name,
                 provider_symbol = EXCLUDED.provider_symbol,
                 primary_provider = EXCLUDED.primary_provider,
-                is_active = TRUE
+                is_active = TRUE,
+                -- Fractional eligibility is what the execution gate consults, so
+                -- it must track Alpaca rather than keep a first-seen value.
+                fractionable = EXCLUDED.fractionable,
+                fractionable_checked_at = NOW()
             """,
             [
                 (
@@ -203,6 +210,7 @@ def import_alpaca_stock_assets(conn: psycopg.Connection, assets: list[dict[str, 
                     asset["name"],
                     asset["symbol"],
                     Jsonb([]),
+                    asset.get("fractionable"),
                 )
                 for asset in assets
             ],

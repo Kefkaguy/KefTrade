@@ -51,6 +51,51 @@ def default_risk_policy() -> dict[str, Any]:
     }
 
 
+def fractional_risk_policy(share_policy: str) -> dict[str, Any]:
+    """The whole-share policy, plus an explicit fractional share policy.
+
+    Deliberately built *from* ``default_risk_policy()`` rather than beside it,
+    so the two can never drift on a limit. Only the share fields differ.
+
+    This is a separate policy version on purpose. ``persist_policy`` re-hashes
+    the policy dict and raises on any change, so editing v1 in place would break
+    every already-approved deployment -- and silently changing what a frozen
+    configuration was approved under is precisely what the version mechanism
+    exists to prevent.
+    """
+    from app.services.fractional_execution import FRACTIONAL_POLICIES
+
+    if share_policy not in FRACTIONAL_POLICIES:
+        raise ValueError(
+            f"fractional_risk_policy expects one of {sorted(FRACTIONAL_POLICIES)}, "
+            f"got {share_policy!r}"
+        )
+    policy = default_risk_policy()
+    policy["whole_shares"] = False
+    policy["share_policy"] = share_policy
+    return policy
+
+
+FRACTIONAL_RISK_POLICY_VERSIONS = {
+    "notional": "phase10-risk-v2-notional",
+    "fractional_qty": "phase10-risk-v2-fractional-qty",
+}
+
+
+def ensure_fractional_policy_version(
+    conn: psycopg.Connection, share_policy: str
+) -> dict[str, Any]:
+    """Register a fractional risk-policy version without touching v1."""
+    version = FRACTIONAL_RISK_POLICY_VERSIONS.get(share_policy)
+    if not version:
+        raise ValueError(f"no declared risk policy version for {share_policy!r}")
+    row = persist_policy(
+        conn, "risk_policy_versions", version, fractional_risk_policy(share_policy)
+    )
+    conn.commit()
+    return row
+
+
 def default_eligibility_policy() -> dict[str, Any]:
     return {
         "allowed_forward_states": sorted(STARTABLE_FORWARD_STATES),
@@ -311,13 +356,31 @@ def risk_decision(conn: psycopg.Connection, external: dict[str, Any], epoch: dic
     weekly_limit = allocated * Decimal(str(policy["weekly_loss_limit_pct"]))
     max_risk = allocated * Decimal(str(policy["max_risk_per_trade_pct"]))
     remaining_exposure = max(Decimal("0"), allocated * Decimal(str(policy["max_total_exposure_pct"])) - exposure)
-    risk_qty = math.floor(max_risk / risk_per_share) if risk_per_share > 0 else 0
-    exposure_qty = math.floor(remaining_exposure / reference_price) if reference_price > 0 else 0
-    requested = max(0, min(risk_qty, exposure_qty))
+    # Single-name stop-loss sizing, unchanged. The share policy is read here
+    # only so a fractional deployment is not silently sized as whole shares;
+    # whole-share deployments take exactly the path they always took.
+    from app.services.fractional_execution import (
+        SHARE_POLICY_WHOLE,
+        resolve_share_policy,
+    )
+
+    share_policy = resolve_share_policy(policy)
+    if share_policy == SHARE_POLICY_WHOLE:
+        risk_qty = math.floor(max_risk / risk_per_share) if risk_per_share > 0 else 0
+        exposure_qty = math.floor(remaining_exposure / reference_price) if reference_price > 0 else 0
+        requested = max(0, min(risk_qty, exposure_qty))
+    else:
+        risk_qty = (max_risk / risk_per_share) if risk_per_share > 0 else Decimal("0")
+        exposure_qty = (remaining_exposure / reference_price) if reference_price > 0 else Decimal("0")
+        requested = max(Decimal("0"), min(risk_qty, exposure_qty))
     checks = [
         check("ELIGIBILITY_APPROVED", bool(eligibility["eligible"])),
         check("VALID_STOP_DISTANCE", risk_per_share > 0),
-        check("WHOLE_SHARE_QUANTITY", requested >= 1),
+        check(
+            "MINIMUM_SIZEABLE_QUANTITY",
+            requested >= 1 if share_policy == SHARE_POLICY_WHOLE else requested > 0,
+        ),
+        check("SHARE_POLICY_DECLARED", share_policy in {"whole_shares", "fractional_qty", "notional"}),
         check("MAX_OPEN_POSITIONS", len(positions) < int(policy["max_open_positions"])),
         check("MAX_OPEN_ORDERS", len(open_orders) < int(policy["max_open_orders"])),
         check("DAILY_LOSS_LIMIT", daily_pnl > -daily_limit),
@@ -328,8 +391,9 @@ def risk_decision(conn: psycopg.Connection, external: dict[str, Any], epoch: dic
     ]
     approved = all(item["passed"] for item in checks)
     approved_qty = requested if approved else 0
-    expected_risk = Decimal(approved_qty) * max(Decimal("0"), risk_per_share)
-    projected_exposure = exposure + Decimal(approved_qty) * reference_price
+    approved_decimal = Decimal(str(approved_qty))
+    expected_risk = approved_decimal * max(Decimal("0"), risk_per_share)
+    projected_exposure = exposure + approved_decimal * reference_price
     row = conn.execute(
         """
         INSERT INTO execution_risk_decisions(external_deployment_id, execution_epoch_id, trace_id, eligibility_decision_id, risk_policy_version_id, eligibility_policy_version_id, deployment_configuration_version_id, adapter_release_id, approved, requested_quantity, approved_quantity, expected_risk, projected_exposure, checks)
@@ -426,12 +490,17 @@ async def run_shadow_cycle(conn: psycopg.Connection, external_deployment_id: int
 async def submit_approved_paper_order(conn: psycopg.Connection, external: dict[str, Any], epoch: dict[str, Any], proposed: dict[str, Any], portfolio: dict[str, Any], model: dict[str, Any], trace_id: UUID) -> dict[str, Any]:
     if not execution_mode_coherent("enabled_execution"):
         raise RuntimeError("paper order submission requires both execution flags")
+    from app.services.fractional_execution import validate_order_payload
+
     payload: dict[str, Any] = {
         "symbol": proposed["symbol"], "qty": str(proposed["quantity"]), "side": "buy",
         "type": "market", "time_in_force": "day", "client_order_id": proposed["client_order_id"],
     }
     if proposed.get("stop_price") and proposed.get("target_price"):
         payload.update({"order_class": "bracket", "take_profit": {"limit_price": str(proposed["target_price"])}, "stop_loss": {"stop_price": str(proposed["stop_price"])}})
+    # Refuse locally rather than letting Alpaca reject it: a locally rejected
+    # payload never becomes an ambiguous submission we then have to reconcile.
+    validate_order_payload(payload)
     attempt = conn.execute(
         """INSERT INTO broker_execution_attempts(external_deployment_id,execution_epoch_id,proposed_order_id,portfolio_risk_decision_id,model_risk_decision_id,trace_id,client_order_id,status,request_payload)
            VALUES (%s,%s,%s,%s,%s,%s,%s,'intent_recorded',%s) ON CONFLICT(client_order_id) DO UPDATE SET client_order_id=EXCLUDED.client_order_id RETURNING *""",

@@ -11,8 +11,14 @@ from psycopg.types.json import Jsonb
 from app.db import connect
 from app.services.broker_reconciliation import reconcile_broker_snapshot
 from app.services.broker_sync import synchronize_broker
-from app.services.external_execution import ensure_disabled_external_candidates, run_shadow_cycle
-from app.services.elite_portfolio_operations import enable_all_ready_members_paper_execution
+from app.services.elite_portfolio_operations import (
+    enable_all_ready_members_paper_execution,
+)
+from app.services.established_paper_execution import run_established_paper_cycle
+from app.services.external_execution import (
+    ensure_disabled_external_candidates,
+    run_shadow_cycle,
+)
 from app.settings import settings
 
 BROKER_WORKER_LOCK = 918273645
@@ -93,16 +99,43 @@ async def run_broker_cycle() -> dict[str, Any]:
                             portfolio_run_id,
                         )
 
+            established = {"status": "not_run", "broker_mutation": False}
+            if reconciliation.get("status") == "clean":
+                try:
+                    established = await run_established_paper_cycle(
+                        conn,
+                        sync_run_id=int(sync["sync_run"]["id"]),
+                        reconciliation_run_id=int(reconciliation["id"]),
+                    )
+                    logger.info("established paper strategies %s", json.dumps(established, default=str, sort_keys=True))
+                except Exception as error:
+                    conn.rollback()
+                    established = {
+                        "status": "failed",
+                        "error_class": error.__class__.__name__,
+                        "error": str(error),
+                        "broker_mutation": False,
+                    }
+                    logger.exception("established paper strategy cycle failed")
+
             persist_daily_summary(conn, sync, reconciliation, shadows)
             # Historical evidence is retained indefinitely. No runtime pruning occurs.
-            result = {"status": "complete", "sync": sync, "reconciliation": reconciliation, "shadow_executions": shadows, "broker_mutation": False}
+            result = {
+                "status": "complete",
+                "sync": sync,
+                "reconciliation": reconciliation,
+                "shadow_executions": shadows,
+                "established_paper_strategies": established,
+                "broker_mutation": bool(established.get("broker_mutation")),
+            }
             logger.info(
-                "broker cycle complete sync_run_id=%s reconciliation=%s elite_results=%s would_submit=%s failures=%s broker_mutation=false",
+                "broker cycle complete sync_run_id=%s reconciliation=%s elite_results=%s would_submit=%s failures=%s broker_mutation=%s",
                 sync.get("sync_run", {}).get("id"),
                 reconciliation.get("status"),
                 len(shadows),
                 sum(1 for item in shadows if bool((item.get("shadow") or {}).get("would_submit"))),
                 sum(1 for item in shadows if item.get("status") == "failed"),
+                bool(established.get("broker_mutation")),
             )
             return result
         finally:
@@ -112,7 +145,7 @@ async def run_broker_cycle() -> dict[str, Any]:
 
 def prune_derived_snapshots(conn) -> None:
     """Compatibility no-op: historical evidence retention is now indefinite."""
-    return None
+    return
 
 
 def persist_daily_summary(conn, sync: dict[str, Any], reconciliation: dict[str, Any], shadows: list[dict[str, Any]]) -> None:
