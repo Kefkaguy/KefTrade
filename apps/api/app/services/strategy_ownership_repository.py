@@ -322,7 +322,11 @@ def load_attributed_fills(
                     WHERE recovered.broker_account_id = f.broker_account_id
                       AND recovered.strategy = a.strategy
                       AND recovered.broker_order_id = f.broker_order_id
-                      AND recovered.fill_id LIKE 'order-aggregate:%'
+                      AND SUBSTR(
+                          recovered.fill_id,
+                          1,
+                          LENGTH('order-aggregate:')
+                      ) = 'order-aggregate:'
                )
            )
          ORDER BY f.transaction_at, f.broker_activity_id

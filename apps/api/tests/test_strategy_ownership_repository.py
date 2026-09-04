@@ -855,6 +855,15 @@ def test_one_off_manual_recovery_is_adopted_only_when_broker_evidence_matches(co
     assert stored["source"] == "recovered_from_attributed_filled_order_verified"
 
 
+def test_attributed_fill_query_avoids_psycopg_percent_placeholder_collision():
+    """A literal LIKE percent is parsed as a placeholder by psycopg."""
+    import inspect
+
+    source = inspect.getsource(load_attributed_fills)
+    assert "order-aggregate:%" not in source
+    assert "SUBSTR(" in source
+
+
 # ---------------------------------------------------------------------------
 # The sync wiring
 # ---------------------------------------------------------------------------
