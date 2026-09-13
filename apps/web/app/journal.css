@@ -10,11 +10,15 @@
 #pnl-journal .journal-icon:hover { background: #dde5b6; }
 #pnl-journal .journal-day { min-height: 108px; padding: 10px; border-radius: 9px; display: flex; flex-direction: column; justify-content: space-between; align-items: flex-start; transition: transform .18s ease, box-shadow .18s ease; }
 #pnl-journal .journal-day:hover { transform: translateY(-3px); box-shadow: 0 4px 12px #6c584c1c; }
-#pnl-journal .journal-table { border-collapse: collapse; width: 100%; font-size: 12px; white-space: nowrap; }
-#pnl-journal .journal-table th { color: #79695b; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; background: #f0ead24d; }
-#pnl-journal .journal-table th, #pnl-journal .journal-table td { text-align: left; padding: 14px 12px; border-bottom: 1px solid #6c584c15; }
-#pnl-journal .journal-table tbody tr:hover { background: #f0ead240; }
-#pnl-journal .journal-table small { color: #79695b; }
+#pnl-journal .journal-table { border-collapse: separate; border-spacing: 0; width: 100%; font-size: 12px; white-space: nowrap; color: #27180f; }
+#pnl-journal .journal-table th { color: #3f4d1d; font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .06em; background: #dde5b6; }
+#pnl-journal .journal-table th:first-child { border-top-left-radius: 8px; }
+#pnl-journal .journal-table th:last-child { border-top-right-radius: 8px; }
+#pnl-journal .journal-table th, #pnl-journal .journal-table td { text-align: left; padding: 13px 12px; border-bottom: 1px solid #6c584c26; }
+#pnl-journal .journal-table td { background: #fffdf7; color: #27180f; font-weight: 600; }
+#pnl-journal .journal-table tbody tr:nth-child(even) td { background: #faf6e9; }
+#pnl-journal .journal-table tbody tr:hover td { background: #eef3cf; }
+#pnl-journal .journal-table small { color: #5f5147; font-weight: 700; }
 #pnl-journal .journal-drawer { position: fixed; inset: 0 0 0 auto; width: min(760px, 100%); max-width: 100%; height: 100dvh; max-height: 100dvh; margin: 0; border: 0; padding: 28px; background: #fffdf7; color: #27180f; box-shadow: -20px 0 90px #27180f22; overflow-y: auto; }
 #pnl-journal .journal-drawer[open] { animation: journal-slide .25s ease; }
 #pnl-journal .journal-drawer::backdrop { background: #2f272255; backdrop-filter: blur(3px); }
