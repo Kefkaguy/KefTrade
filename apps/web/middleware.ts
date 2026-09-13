@@ -2,7 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
-  if (pathname === "/") return NextResponse.next();
+  if (pathname === "/" || pathname === "/paper" || pathname === "/api/pnl-journal") return NextResponse.next();
 
   const url = request.nextUrl.clone();
   url.pathname = "/";

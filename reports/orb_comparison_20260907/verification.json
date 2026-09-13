@@ -1,0 +1,17 @@
+{
+  "reconciled_scenarios": 48,
+  "paired_bootstrap": [
+    {
+      "direction": "both_hypothetical_borrow",
+      "mean_daily_delta_bps": 4.083748157813796,
+      "lower95": 1.9205987678896141,
+      "upper95": 6.490583301151652
+    },
+    {
+      "direction": "long_only",
+      "mean_daily_delta_bps": 1.6057336327411478,
+      "lower95": 0.5036315010415102,
+      "upper95": 2.6990977599606243
+    }
+  ]
+}

@@ -10,6 +10,13 @@ from app.services.elite_repair_generator import elite_repair_proposals
 router = APIRouter(prefix="/broker", tags=["external-paper-broker"])
 
 
+@router.get("/pnl-journal")
+def get_pnl_journal(month: str = Query(pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+                    conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
+    from app.services.pnl_journal import pnl_journal
+    return pnl_journal(conn, month)
+
+
 @router.get("/status")
 def get_broker_status(conn: psycopg.Connection = Depends(get_connection)) -> dict[str, Any]:
     return broker_status(conn)

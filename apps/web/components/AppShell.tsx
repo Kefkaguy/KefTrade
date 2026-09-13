@@ -1,6 +1,11 @@
+"use client";
+
 import type { ReactNode } from "react";
+import { usePathname } from "next/navigation";
 
 export function AppShell({ children }: { children: ReactNode }) {
+  const pathname = usePathname();
+  if (pathname === "/") return <>{children}</>;
   return (
     <div className="paperOnlyShell">
       <header className="paperOnlyHeader">

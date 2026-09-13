@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from app.services.strategy_research import finite_metric
 
 LEARNING_VERSION = "research_learning_v2"
-GLOBAL_LEARNING_VERSION = "research_learning_global_v1"
+GLOBAL_LEARNING_VERSION = "research_learning_global_v2_economic_trials"
 SAFETY_STATEMENT = "Deterministic simulation-only research learning. No live trading, broker routing, or opaque ML decisioning."
 
 
@@ -223,6 +223,12 @@ def learn_from_completed_campaign(conn: psycopg.Connection, campaign_id: int) ->
     ).fetchall()
     learning = build_campaign_learning(dict(campaign), [dict(row) for row in jobs])
     persist_campaign_learning(conn, learning)
+    if jobs and all((row.get("candidate") or {}).get("parameters", {}).get("strategy_architecture") == "rug_v2_intraday" for row in jobs):
+        learning["global_learning"] = {
+            "status": "not_rebuilt",
+            "reason": "RUG v2 consumes comparable completed development evidence directly at next-batch generation",
+        }
+        return learning
     global_learning = learn_from_all_research(conn, persist=True)
     learning["global_learning"] = {
         "snapshot_key": global_learning["snapshot_key"],
@@ -535,14 +541,25 @@ def build_global_duplicate_intelligence(candidate_objects: list[dict[str, Any]],
         signatures[str(row["learning_summary"].get("duplicate_signature"))].append(row)
     exact = [rows for rows in signatures.values() if len(rows) > 1]
     failed_parameters = Counter()
+    tested_parameters = Counter()
     for row in jobs:
+        # Technical/data failures are not experiments about market economics.
+        if row.get("status") not in {"completed", "rejected", "promoted"} or (row.get("result") or {}).get("development_only"):
+            continue
+        buckets = parameter_buckets(row["parameters"]).values()
+        tested_parameters.update(buckets)
         if row["rejected"]:
-            failed_parameters.update(parameter_buckets(row["parameters"]).values())
+            failed_parameters.update(buckets)
+    failed_regions = [{"region": key, "failures": count, "trials": tested_parameters[key],
+                       "failure_rate": count / tested_parameters[key],
+                       "smoothed_failure_rate": (count + 1) / (tested_parameters[key] + 2)}
+                      for key, count in failed_parameters.items() if tested_parameters[key] >= 20]
+    failed_regions.sort(key=lambda row: (-row["smoothed_failure_rate"], -row["trials"], row["region"]))
     return {
         "candidate_objects": len(candidate_objects),
         "exact_duplicate_groups": [{"signature": rows[0]["learning_summary"]["duplicate_signature"], "candidate_ids": [row["candidate_id"] for row in rows[:10]], "count": len(rows)} for rows in exact[:20]],
         "exact_duplicates": sum(len(rows) - 1 for rows in exact),
-        "repeated_failed_parameter_regions": [{"region": key, "failures": count} for key, count in failed_parameters.most_common(25)],
+        "repeated_failed_parameter_regions": failed_regions[:25],
         "generation_policy": "Down-rank exact duplicate signatures and repeatedly failed parameter buckets before allocating exploratory budget.",
     }
 
@@ -586,7 +603,7 @@ def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
     failure_reasons = list(job.get("failure_reasons") or result.get("failure_reasons") or [])
     if job.get("failure_classification"):
         failure_reasons.append(str(job["failure_classification"]))
-    if status in {"rejected", "failed", "blocked_data"} and not failure_reasons:
+    if status == "rejected" and not failure_reasons:
         failure_reasons.extend(infer_metric_failure_reasons(metrics))
     return {
         "job_id": job.get("id"),
@@ -599,7 +616,8 @@ def normalize_job(job: dict[str, Any]) -> dict[str, Any]:
         "timeframe": str(job.get("timeframe") or result.get("timeframe") or "unknown"),
         "status": status,
         "promoted": status == "promoted",
-        "rejected": status in {"rejected", "failed", "blocked_data"},
+        "rejected": status == "rejected",
+        "technical_failure": status in {"failed", "blocked_data"},
         "blocks": blocks,
         "parameters": parameters,
         "metrics": metrics,
@@ -679,7 +697,7 @@ def persist_global_learning(conn: psycopg.Connection, snapshot: dict[str, Any], 
             Jsonb(jsonable(snapshot["candidate_object_summary"])),
             Jsonb(jsonable(snapshot["campaign_guidance"])),
             Jsonb(jsonable(snapshot["constraints"])),
-            LEARNING_VERSION,
+            GLOBAL_LEARNING_VERSION,
         ),
     )
 
@@ -692,9 +710,10 @@ def research_generation_guidance(conn: psycopg.Connection) -> dict[str, Any]:
             SELECT campaign_guidance
             FROM research_global_learning_snapshots
             WHERE simulation_only = TRUE
+              AND calculation_version = %s
             ORDER BY created_at DESC, id DESC
             LIMIT 1
-            """
+            """, (GLOBAL_LEARNING_VERSION,)
         ).fetchone()
     except Exception:
         rollback = getattr(conn, "rollback", None)
@@ -1442,6 +1461,7 @@ def get_strategy_timeline(conn: psycopg.Connection, strategy_id: str, limit: int
 def parameter_buckets(parameters: dict[str, Any]) -> dict[str, str]:
     buckets = {}
     for key in (
+        "rsi_period", "entry_start_minute_utc", "entry_end_minute_utc",
         "trend_fast", "trend_slow", "rsi_min", "rsi_max", "risk_reward", "atr_multiplier", "max_holding_bars", "volume_change_min",
         "breakout_lookback", "breakout_buffer", "compression_ratio_max", "volume_ratio_min",
         "momentum_short_bars", "momentum_long_bars", "momentum_short_min", "momentum_long_min", "momentum_acceleration_min",
@@ -1459,7 +1479,7 @@ def parameter_buckets(parameters: dict[str, Any]) -> dict[str, str]:
 
 def bucket_value(key: str, value: Any) -> str:
     numeric = finite_metric(value)
-    if key in {"trend_fast", "trend_slow", "max_holding_bars"}:
+    if key in {"trend_fast", "trend_slow", "max_holding_bars", "rsi_period", "entry_start_minute_utc", "entry_end_minute_utc"}:
         return f"{key}:{int(numeric)}"
     if key in {"risk_reward", "atr_multiplier"}:
         return f"{key}:{round(numeric * 2) / 2:.1f}"

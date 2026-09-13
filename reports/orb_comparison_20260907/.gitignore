@@ -1,0 +1,7 @@
+data/
+trades_*.csv
+daily_*.csv
+__pycache__/
+minute_check/data/
+minute_check/trades_*.csv
+minute_check/daily_*.csv

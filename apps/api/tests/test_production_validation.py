@@ -215,6 +215,7 @@ def test_candidate_linked_forward_trade_is_readiness_eligible() -> None:
             "fee": Decimal("0"),
             "slippage": Decimal("0"),
             "filled_at": start + timedelta(hours=1),
+            "signal_timestamp": start + timedelta(minutes=30),
             "simulation_only": True,
             "deployment_id": 7,
             "campaign_id": 1,

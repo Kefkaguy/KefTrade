@@ -391,6 +391,15 @@ def candidate_execution_key(candidate: DiscoveryCandidate) -> str:
 
 
 def make_strategy_definition(candidate: DiscoveryCandidate) -> StrategyDefinition:
+    from app.services.rug_intraday import VERSION as RUG_INTRADAY_VERSION, IntradayRugStrategy
+    if candidate.parameters.get("strategy_architecture") == RUG_INTRADAY_VERSION:
+        return StrategyDefinition(
+            name=RUG_INTRADAY_VERSION, version=candidate.candidate_id,
+            description="Session-bound development research; not deployment certification.",
+            parameters=candidate.parameters, entry_rules=["Exchange-session gates and actual ATR"],
+            exit_rules=["ATR stop, R target, time limit, mandatory session close"],
+            supported_market_regimes=[], decide=IntradayRugStrategy(),
+        )
     # Deferred import: labs/intraday/families/registry.py imports
     # labs/intraday/campaign.py, which imports DiscoveryCandidate/
     # canonical_candidate_key from this module -- a module-level import

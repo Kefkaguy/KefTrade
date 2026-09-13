@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from statistics import mean, pstdev
 from typing import Any
@@ -75,6 +75,13 @@ def run_backtest(
     candle_rows = [row["candle"] for row in rows]
     arrays = market_arrays if market_arrays is not None and len(market_arrays["low"]) == len(rows) else build_market_arrays(rows)
     train_rows, validation_rows = walk_forward_split(rows, float(params["walk_forward_train_ratio"]))
+    # Exact session-aligned fold boundary for versioned research. Legacy
+    # callers retain their original floating-ratio split and frozen metrics.
+    if params.get("research_execution_start_index") is not None:
+        boundary = int(params["research_execution_start_index"])
+        if not 0 < boundary < len(rows):
+            raise ValueError("Research fold boundary must be inside the dataset")
+        train_rows, validation_rows = rows[:boundary], rows[boundary:]
     execution_rows = validation_rows or rows
 
     equity = Decimal(str(params["initial_equity"]))
@@ -121,6 +128,9 @@ def run_backtest(
             continue
 
         entry_candle = rows[i + entry_offset]["candle"]
+        if effective_session_end_index is not None and i + entry_offset > effective_session_end_index[i]:
+            i += 1
+            continue
         direction = decision.direction
         entry_slippage_rate = (
             _calibrated_side_cost_rate(
@@ -168,6 +178,14 @@ def run_backtest(
 
         max_risk = equity * risk_per_trade
         quantity = max_risk / risk_per_unit
+        if params.get("max_notional_to_equity") is not None:
+            cap = Decimal(str(params["max_notional_to_equity"]))
+            if not cap.is_finite() or cap <= 0:
+                raise ValueError("max_notional_to_equity must be positive and finite")
+            quantity = min(quantity, max(Decimal(0), equity) * cap / (entry_price * (1 + fee_rate)))
+            if quantity <= 0:
+                i += 1
+                continue
         entry_index = i + entry_offset
         if persist_bar_series:
             for flat_index in range(mark_cursor, entry_index):
@@ -183,8 +201,15 @@ def run_backtest(
             max_holding_bars=int(params.get("max_holding_bars") or 0),
             direction=direction,
             session_end_index=effective_session_end_index,
+            holding_bars_includes_entry=params.get("holding_bar_convention") == "entry_bar_is_one",
         )
         exit_candle = rows[exit_index]["candle"]
+        exit_time = exit_candle["timestamp"]
+        if params.get("exit_timestamp_convention") == "bar_close_for_forced_exits" and exit_reason in {"time_exit", "session_close", "end_of_data"}:
+            timeframe = str(exit_candle["timeframe"])
+            if not timeframe.endswith("m"):
+                raise ValueError("Versioned close timestamps require minute candles")
+            exit_time += timedelta(minutes=int(timeframe[:-1]))
         exit_slippage_rate = (
             _calibrated_side_cost_rate(
                 execution_cost_model,
@@ -197,7 +222,10 @@ def run_backtest(
         )
         if exit_reason.startswith("stop_loss"):
             raw_exit_price = decision.stop_loss
-            exit_price = decision.stop_loss * (
+            if params.get("gap_aware_stops"):
+                opening_price = Decimal(str(exit_candle["open"]))
+                raw_exit_price = min(raw_exit_price, opening_price) if direction == "long" else max(raw_exit_price, opening_price)
+            exit_price = raw_exit_price * (
                 Decimal("1") - exit_slippage_rate
                 if direction == "long"
                 else Decimal("1") + exit_slippage_rate
@@ -245,7 +273,7 @@ def run_backtest(
         equity += pnl
         if persist_bar_series:
             marked_equity_points[rows[exit_index]["candle"]["timestamp"]] = equity
-        realized_equity_points.append({"timestamp": rows[exit_index]["candle"]["timestamp"], "equity": equity})
+        realized_equity_points.append({"timestamp": exit_time, "equity": equity})
         mfe_price, mae_price, bars_to_mfe, bars_to_mae = excursion_extremes(
             arrays, entry_index=entry_index, exit_index=exit_index, entry_price=entry_price, direction=direction
         )
@@ -260,7 +288,7 @@ def run_backtest(
                 "symbol": candle["symbol"],
                 "side": direction,
                 "entry_time": entry_candle["timestamp"],
-                "exit_time": rows[exit_index]["candle"]["timestamp"],
+                "exit_time": exit_time,
                 "entry_price": entry_price,
                 "exit_price": exit_price,
                 "quantity": quantity,
@@ -275,7 +303,7 @@ def run_backtest(
                 "pnl": pnl,
                 "pnl_pct": pnl / initial_equity,
                 "exit_reason": exit_reason,
-                "holding_period_hours": (rows[exit_index]["candle"]["timestamp"] - entry_candle["timestamp"]).total_seconds() / 3600,
+                "holding_period_hours": (exit_time - entry_candle["timestamp"]).total_seconds() / 3600,
                 "mfe_amount": mfe_amount,
                 "mae_amount": mae_amount,
                 "mfe_r": float(mfe_price / risk_per_unit) if risk_per_unit != 0 else None,
@@ -426,9 +454,10 @@ def find_exit_index(
     max_holding_bars: int,
     direction: str = "long",
     session_end_index: list[int] | None = None,
+    holding_bars_includes_entry: bool = False,
 ) -> tuple[int, str]:
     final_index = len(rows) - 1
-    time_bound = min(final_index, start_index + max_holding_bars) if max_holding_bars > 0 else final_index
+    time_bound = min(final_index, start_index + max_holding_bars - int(holding_bars_includes_entry)) if max_holding_bars > 0 else final_index
     # `session_end_index[start_index]` is the last row index that belongs to
     # the entry bar's own trading session (see `build_session_end_index` in
     # the intraday dataset loader). When absent (every swing call site,

@@ -181,10 +181,12 @@ class RugCampaignPayload(BaseModel):
     universe_key: str = "research_core_ten"
     name: str | None = None
     target_candidates: int = Field(default=1_000_000, ge=1, le=10_000_000)
-    batch_size: int = Field(default=1000, ge=1, le=5000)
+    batch_size: int = Field(default=25, ge=1, le=5000)
     batch_index: int = Field(default=0, ge=0)
     seed: int = 0
-    auto_continue: bool = True
+    auto_continue: bool = False
+    generator_version: str = Field(default="rug_v2_intraday", pattern="^(rug_v1|rug_v2_intraday)$")
+    cost_calibration_id: int | None = Field(default=None, ge=1)
     asset_limit: int = Field(default=10, ge=1, le=100)
     timeframes: list[str] | None = None
     dataset_mode: str = Field(default="rolling", pattern="^(rolling|reproducibility)$")
@@ -599,6 +601,8 @@ def create_rug_research_campaign(
             rug_target_candidates=payload.target_candidates,
             rug_batch_size=payload.batch_size,
             rug_auto_continue=payload.auto_continue,
+            rug_version=payload.generator_version,
+            rug_cost_calibration_id=payload.cost_calibration_id,
         )
         result["rug"]["batches_required"] = (payload.target_candidates + payload.batch_size - 1) // payload.batch_size
         result["rug"]["queue_policy"] = "one bounded batch at a time; complete and learn before queuing the next batch"
@@ -613,6 +617,40 @@ def get_rug_status(
     conn: psycopg.Connection = Depends(get_connection),
 ) -> dict[str, Any]:
     return rug_run_status(conn, seed=seed)
+
+
+@router.get("/research/rug/candidates")
+def get_rug_candidate_evidence(
+    seed: int = Query(...),
+    limit: int = Query(100, ge=1, le=500),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    from app.services.research_campaigns import rug_candidate_evidence
+    return rug_candidate_evidence(conn, seed=seed, limit=limit)
+
+
+@router.get("/research/rug/datasets/{dataset_id}/preflight")
+def get_rug_dataset_preflight(
+    dataset_id: int,
+    assets: str = Query(..., min_length=1, max_length=200),
+    timeframe: str = Query("15m", pattern="^(1m|3m|5m|15m|30m)$"),
+    conn: psycopg.Connection = Depends(get_connection),
+) -> dict[str, Any]:
+    from app.services.research_architecture import load_snapshot_candles
+    from app.services.rug_intraday import build_dataset
+    symbols = sorted({s.strip().upper() for s in assets.split(",") if s.strip()})
+    if not symbols or len(symbols) > 10:
+        raise HTTPException(status_code=400, detail="Check between one and ten explicit assets")
+    checks = []
+    for symbol in symbols:
+        try:
+            dataset = build_dataset(load_snapshot_candles(conn, dataset_id, symbol, timeframe), timeframe)
+            checks.append({"symbol": symbol, "ready": True, "coverage": dataset["coverage"],
+                           "reserved_start": dataset["reserved_start"], "reserved_tail_status": dataset["reserved_tail_status"]})
+        except ValueError as error:
+            checks.append({"symbol": symbol, "ready": False, "reason": str(error)})
+    return {"dataset_id": dataset_id, "timeframe": timeframe, "ready": all(c["ready"] for c in checks),
+            "checks": checks, "simulation_only": True, "certification": False}
 
 
 @router.get("/research/campaigns")

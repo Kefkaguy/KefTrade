@@ -1,5 +1,7 @@
 # Phase 12.4 — Intraday Portfolio-Wide Failure Analysis and Research Allocation
 
+> Audit correction — 5 September 2026: The original numerical tables below are preserved. In the backtester, `gross_pnl` uses executed prices after modeled slippage and before explicit fees; it is not a frictionless result. Negative gross strategy P&L also does not isolate an entry signal's directional predictability from exits and sizing. The selected 88-trade AMD subgroup is a historical lead, not proof of a repeatable edge or proof that it is “not noise.” Its selection across many experiments and absence of independent prospective confirmation limit those earlier narrative claims.
+
 **Date:** 2026-07-24
 **Scope:** Trade-level root-cause analysis of the six Phase 12.3 intraday families (Gap Fill, Session Momentum,
 Intraday Trend Pullback, EMA Trend Continuation, Opening Fade, VWAP Trend Continuation). ORB v1 and VWAP Reversion v1

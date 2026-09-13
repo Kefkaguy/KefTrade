@@ -413,6 +413,25 @@ def test_shadow_elite_repair_generator_is_research_only() -> None:
     )
 
 
+def test_external_execution_requires_take_profit_for_actionable_setup() -> None:
+    source = (ROOT / "services" / "external_execution.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    assignments = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "actionable_setup"
+            for target in node.targets
+        )
+    ]
+
+    assert assignments
+    expression = ast.unparse(assignments[0].value)
+    assert "decision.stop_loss is not None" in expression
+    assert "decision.take_profit is not None" in expression
+
+
 def test_trend_repair_modes_are_only_less_strict_for_generated_children() -> None:
     from decimal import Decimal
 

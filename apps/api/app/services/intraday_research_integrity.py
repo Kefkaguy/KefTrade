@@ -330,6 +330,12 @@ def estimated_round_trip_cost_bps(
         slot_row.get("p90_bar_spread_bps" if stressed else "median_bar_spread_bps"),
         cost_model.get("stressed_round_trip_bps" if stressed else "observed_round_trip_bps"),
     ]
+    if (cost_model.get("methodology") or {}).get("cost_basis_version") == "all_in_symbol_costs_v2":
+        # Symbol/slot observations are spreads, whereas the global estimate
+        # already includes regulatory costs. Compare on the same all-in basis.
+        regulatory = float(cost_model.get("regulatory_bps") or 0)
+        candidates[:2] = [float(value) + regulatory if value is not None else None for value in candidates[:2]]
+        candidates.append(symbol_row.get("stressed_round_trip_bps" if stressed else "observed_round_trip_bps"))
     usable = [float(value) for value in candidates if value is not None]
     if usable:
         return max(usable)

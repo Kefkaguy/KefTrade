@@ -3,6 +3,7 @@ import "@fontsource-variable/manrope";
 import "@fontsource-variable/jetbrains-mono";
 import { AppShell } from "@/components/AppShell";
 import "./globals.css";
+import "./journal.css";
 
 export const metadata: Metadata = {
   title: "KefTrade",

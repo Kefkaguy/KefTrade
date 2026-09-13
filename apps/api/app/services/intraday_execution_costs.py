@@ -248,6 +248,16 @@ def calibrate_regular_session_bar_costs(
             "p90_bar_spread_bps": _round(percentile(values, 0.9)),
         }
 
+    def symbol_summary(symbol, group):
+        summary = summarize(group)
+        slippages = [max(0.0, float(item["signed_slippage_bps"])) for item in matched
+                     if str(item["fill"]["symbol"]).upper() == symbol]
+        observed_fill = percentile(slippages, .5)
+        stressed_fill = percentile(slippages, .9)
+        return {**summary, "matched_fill_observations": len(slippages),
+                "observed_round_trip_bps": _round(2 * observed_fill + regulatory_bps) if observed_fill is not None else None,
+                "stressed_round_trip_bps": _round(max(2 * stressed_fill, summary["p90_bar_spread_bps"]) + regulatory_bps) if stressed_fill is not None else None}
+
     timestamps = [row["timestamp"] for row in valid]
     return {
         "calculation_version": EXECUTION_COST_VERSION,
@@ -267,7 +277,7 @@ def calibrate_regular_session_bar_costs(
         "stressed_round_trip_bps": _round(stressed),
         "conservative_round_trip_bps": round(float(conservative_round_trip_bps), 6),
         "by_symbol": {
-            key: summarize(rows) for key, rows in sorted(by_symbol_rows.items())
+            key: symbol_summary(key, rows) for key, rows in sorted(by_symbol_rows.items())
         },
         "by_time_slot": {
             key: summarize(rows) for key, rows in sorted(by_slot_rows.items())
@@ -281,6 +291,8 @@ def calibrate_regular_session_bar_costs(
             "event_weighting_guard": (
                 "one observation per symbol/bar; raw quote-update frequency cannot dominate"
             ),
+            "feeds": sorted({str(row["feed"]).lower() for row in valid}),
+            "cost_basis_version": "all_in_symbol_costs_v2",
             "stress_definition": "90th percentile across regular-session symbol/bar median spreads",
             "bar_observations": len(valid),
             "quote_feed_limitation": (

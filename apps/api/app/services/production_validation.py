@@ -549,9 +549,9 @@ def paper_ledger_reconciliation(conn: psycopg.Connection, persist: bool = False)
     position_qty = Counter()
     for fill in fills:
         qty = Decimal(str(fill.get("quantity") or 0))
-        position_qty[fill.get("symbol")] += qty if fill.get("side") == "buy" else -qty
+        position_qty[(fill.get("account_id"), fill.get("symbol"))] += qty if fill.get("side") == "buy" else -qty
     for position in positions:
-        expected = position_qty[position.get("symbol")]
+        expected = position_qty[(position.get("account_id"), position.get("symbol"))]
         actual = Decimal(str(position.get("quantity") or 0))
         if abs(expected - actual) > Decimal("0.0001"):
             mismatches.append(mismatch("incorrect_position_quantity", position.get("symbol"), f"Expected {expected}; observed {actual}."))
@@ -803,7 +803,7 @@ def classify_forward_trade(trade: dict[str, Any]) -> dict[str, Any]:
     classification = "eligible_forward_evidence"
     origin = str(trade.get("evidence_origin") or trade.get("deployment_origin") or "").lower()
     deployment_created = parse_time(trade.get("deployment_created_at"))
-    forward_started = parse_time(trade.get("forward_validation_started_at")) or FORWARD_VALIDATION_START
+    forward_started = parse_time(trade.get("forward_validation_started_at"))
     lifecycle = str(trade.get("deployment_lifecycle_state") or "").lower()
     required = {
         "deployment_id": trade.get("deployment_id"),
@@ -829,11 +829,30 @@ def classify_forward_trade(trade: dict[str, Any]) -> dict[str, Any]:
     elif "legacy" in origin:
         classification = "legacy_simulation"
         reasons.append("legacy_origin")
+    for endpoint in ("entry", "exit"):
+        endpoint_origin = str(trade.get(f"{endpoint}_evidence_origin") or "").lower()
+        if any(label in endpoint_origin for label in ("test", "manual", "legacy")):
+            reasons.append(f"ineligible_{endpoint}_origin")
     if not trade.get("deployment_id") or not trade.get("candidate_id"):
         classification = "unattributed_simulation"
         reasons.append("no linked candidate or forward-validation deployment")
-    if deployment_created and deployment_created < forward_started:
+    if deployment_created and deployment_created < FORWARD_VALIDATION_START:
         reasons.append("deployment_before_forward_validation_start")
+    entry = parse_time(trade.get("entry_timestamp"))
+    exit_time = parse_time(trade.get("exit_timestamp"))
+    signal = parse_time(trade.get("signal_timestamp"))
+    if not deployment_created or not forward_started or not entry or not exit_time or not signal:
+        reasons.append("missing_forward_chronology")
+    else:
+        boundary = max(deployment_created, forward_started, FORWARD_VALIDATION_START)
+        if signal < boundary or entry < boundary:
+            reasons.append("trade_before_forward_validation_start")
+        if signal > entry or exit_time < entry:
+            reasons.append("invalid_forward_trade_chronology")
+        for endpoint in ("entry", "exit"):
+            candle_time = parse_time(trade.get(f"{endpoint}_candle_timestamp"))
+            if candle_time and candle_time < boundary:
+                reasons.append(f"historical_{endpoint}_candle_before_forward_start")
     if lifecycle and lifecycle not in {"active_forward_validation", "collecting_forward_evidence", "elite_candidate", "research_candidate"}:
         reasons.append(f"ineligible_deployment_lifecycle:{lifecycle}")
     if reasons and classification == "eligible_forward_evidence":

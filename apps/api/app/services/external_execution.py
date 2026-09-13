@@ -440,7 +440,11 @@ async def run_shadow_cycle(conn: psycopg.Connection, external_deployment_id: int
         return {"status": "duplicate_skipped", "signal": dict(existing), "strategy_evaluation": strategy_evaluation, "trace_id": str(trace_id)}
     signal = conn.execute("INSERT INTO external_execution_signals(external_deployment_id, execution_epoch_id, trace_id, execution_key, symbol, timeframe, completed_bar_timestamp, signal_type, signal) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING *", (external["id"], epoch["id"], trace_id, execution_key, internal["symbol"], internal["timeframe"], candle["timestamp"], decision.signal, Jsonb(decision_payload(decision)))).fetchone()
     eligibility = evaluate_eligibility(conn, dict(external), dict(epoch), sync_run_id, trace_id, bar_fresh=not candle_is_stale(candle) and bar_is_complete(candle["timestamp"], internal["timeframe"]))
-    actionable_setup = decision.signal == "setup" and decision.stop_loss is not None
+    actionable_setup = (
+        decision.signal == "setup"
+        and decision.stop_loss is not None
+        and decision.take_profit is not None
+    )
     model = (
         await evaluate_model_risk(
             conn,

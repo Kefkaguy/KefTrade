@@ -448,8 +448,9 @@ def record_dataset_snapshot(
     return jsonable(dict(row))
 
 
-def verify_dataset_snapshot(conn: psycopg.Connection, dataset_id: int) -> dict[str, Any]:
-    ensure_research_architecture_tables(conn)
+def verify_dataset_snapshot(conn: psycopg.Connection, dataset_id: int, *, ensure_schema: bool = True) -> dict[str, Any]:
+    if ensure_schema:
+        ensure_research_architecture_tables(conn)
     manifest = conn.execute("SELECT * FROM research_dataset_manifests WHERE id = %s", (dataset_id,)).fetchone()
     if not manifest:
         raise ValueError(f"research dataset {dataset_id} was not found")

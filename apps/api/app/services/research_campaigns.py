@@ -1246,7 +1246,17 @@ def create_research_campaign(
     rug_target_candidates: int | None = None,
     rug_batch_size: int | None = None,
     rug_auto_continue: bool = False,
+    rug_version: str = "rug_v2_intraday",
+    rug_cost_calibration_id: int | None = None,
 ) -> dict[str, Any]:
+    if generator_mode == "rug" and rug_version not in {"rug_v1", "rug_v2_intraday"}:
+        raise ValueError("Unknown RUG version")
+    if generator_mode == "rug" and rug_version == "rug_v2_intraday":
+        from app.services.rug_intraday import TIMEFRAMES
+        if not timeframes or any(tf not in TIMEFRAMES for tf in timeframes):
+            raise ValueError("RUG v2 requires explicit intraday timeframes: 1m, 3m, 5m, 15m, 30m")
+        if dataset_id is None:
+            raise ValueError("RUG v2 requires an explicit immutable dataset_id; no rolling-data fallback")
     started = time.perf_counter()
     log_event("Research campaign launch requested", universe_key=universe_key, max_candidates=max_candidates, asset_limit=asset_limit, timeframes=timeframes)
     seed_default_universes(conn)
@@ -1274,16 +1284,53 @@ def create_research_campaign(
     log_event("Job generation started", assets=len(assets), timeframes=len(selected_timeframes), strategies=max_candidates, expected_jobs=len(assets) * len(selected_timeframes) * max_candidates)
     if search_mode not in {"full", "scout_expand"}:
         raise ValueError("search_mode must be full or scout_expand")
+    if generator_mode == "rug" and rug_version == "rug_v2_intraday":
+        replay_key = research_campaign_key(
+            universe_key, assets, selected_timeframes, max_candidates, search_mode=search_mode,
+            dataset_id=dataset_id,
+            variant=f"{rug_version}_seed_{rug_seed}_batch_{rug_batch_index}" +
+                    (f"_cost_{rug_cost_calibration_id}" if rug_cost_calibration_id is not None else ""),
+        )
+        # Serialize duplicate launch requests. Never regenerate an existing
+        # batch with newly learned guidance or silently add candidates to it.
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(%s))", (replay_key,))
+        existing = conn.execute("SELECT * FROM research_campaigns WHERE campaign_key = %s", (replay_key,)).fetchone()
+        if existing:
+            conn.commit()
+            return {"campaign": jsonable(dict(existing)), "already_exists": True, "jobs_created": 0,
+                    "rug": dict((existing.get("controls") or {}).get("rug") or {}), "simulation_only": True}
     if generator_mode == "rug":
         from app.services.rug import generate_rug_candidates
-
-        guidance = research_generation_guidance(conn)
-        candidates, generation_metrics = generate_rug_candidates(
-            max_candidates=max_candidates,
-            seed=rug_seed,
-            batch_index=rug_batch_index,
-            guidance=guidance,
-        )
+        if rug_version == "rug_v2_intraday":
+            from app.services.rug_intraday import generate_candidates, load_cost_model
+            cost_model = load_cost_model(conn, rug_cost_calibration_id, assets) if rug_cost_calibration_id is not None else None
+            # Comparable evidence only: no technical failures, legacy runs,
+            # other datasets or mismatched timeframe/universe cohorts.
+            evidence_rows = conn.execute(
+                """SELECT j.candidate_id, MIN(j.candidate->'parameters'->>'entry') AS entry,
+                          COUNT(*) AS market_count, COUNT(DISTINCT (j.symbol, j.timeframe)) AS distinct_markets,
+                          BOOL_AND(COALESCE(j.result->>'valid_economic_test', 'false') = 'true') AS valid_economic_test,
+                          BOOL_OR(COALESCE(j.result->>'screen_passed', 'false') = 'true') AS screen_passed
+                   FROM research_campaign_jobs j JOIN research_campaigns c ON c.id = j.campaign_id
+                   WHERE j.dataset_id = %s AND j.status = 'completed' AND j.simulation_only = TRUE
+                     AND c.controls->'timeframes' = %s::jsonb
+                     AND c.immutable_config->'assets' = %s::jsonb
+                     AND j.candidate->'parameters'->>'strategy_architecture' = 'rug_v2_intraday'
+                     AND j.candidate->'parameters'->>'indicator_convention' = 'causal_full_history_ema_v1'
+                     AND j.candidate->'parameters'->>'holding_bar_convention' = 'entry_bar_is_one'
+                     AND j.candidate->'parameters'->>'exit_timestamp_convention' = 'bar_close_for_forced_exits'
+                     AND (j.candidate->'parameters'->>'execution_cost_calibration_id') IS NOT DISTINCT FROM %s
+                   GROUP BY j.candidate_id ORDER BY j.candidate_id""", (dataset_id, Jsonb(selected_timeframes), Jsonb(assets), str(rug_cost_calibration_id) if rug_cost_calibration_id is not None else None),
+            ).fetchall()
+            evidence = [dict(row) for row in evidence_rows
+                        if row["market_count"] == row["distinct_markets"] == len(assets) * len(selected_timeframes)]
+            candidates, generation_metrics = generate_candidates(max_candidates=max_candidates, seed=rug_seed,
+                                                                 batch_index=rug_batch_index, evidence=evidence, cost_model=cost_model,
+                                                                 excluded_candidate_ids={str(e["candidate_id"]) for e in evidence_rows})
+        else:
+            guidance = research_generation_guidance(conn)
+            candidates, generation_metrics = generate_rug_candidates(
+                max_candidates=max_candidates, seed=rug_seed, batch_index=rug_batch_index, guidance=guidance)
     elif generator_mode == "standard":
         candidates, generation_metrics = campaign_generation_candidates(conn, universe_key=universe_key, max_candidates=max_candidates)
     else:
@@ -1300,7 +1347,7 @@ def create_research_campaign(
         max_candidates,
         search_mode=search_mode,
         dataset_id=dataset_id,
-        variant=(f"rug_v1_seed_{rug_seed}_batch_{rug_batch_index}" if generator_mode == "rug" else None),
+        variant=((f"{rug_version}_seed_{rug_seed}_batch_{rug_batch_index}" + (f"_cost_{rug_cost_calibration_id}" if rug_cost_calibration_id is not None else "")) if generator_mode == "rug" else None),
     )
     campaign_name = name or f"{universe['name']} strategy discovery campaign"
     insert_started = time.perf_counter()
@@ -1309,10 +1356,12 @@ def create_research_campaign(
                 "asset_limit": asset_limit,
                 "timeframes": selected_timeframes,
                 "campaign_version": CAMPAIGN_VERSION,
-                "candidate_generation": "rug_v1" if generator_mode == "rug" else "family_balanced_frequency_hypotheses_v1",
+                "candidate_generation": rug_version if generator_mode == "rug" else "family_balanced_frequency_hypotheses_v1",
                 "candidate_generation_mix": generation_metrics,
                 "rug": {
                     "enabled": generator_mode == "rug",
+                    "version": rug_version,
+                    "cost_calibration_id": rug_cost_calibration_id,
                     "seed": rug_seed,
                     "batch_index": rug_batch_index,
                     "batch_candidates": max_candidates,
@@ -1375,7 +1424,7 @@ def create_research_campaign(
                     "dataset_content_hash": dataset.get("content_hash") if dataset else None,
                     "assets": assets,
                     "timeframes": selected_timeframes,
-                    "candidate_generation": "rug_v1" if generator_mode == "rug" else "family_balanced_frequency_hypotheses_v1",
+                    "candidate_generation": rug_version if generator_mode == "rug" else "family_balanced_frequency_hypotheses_v1",
                     "rug_seed": rug_seed if generator_mode == "rug" else None,
                     "rug_batch_index": rug_batch_index if generator_mode == "rug" else None,
                     "search_mode": search_mode,
@@ -3154,11 +3203,17 @@ def run_research_campaign_batch(
             job_payload = {**dict(job), "_dataset_cache": worker_dataset_cache}
             result = run_campaign_job(conn, job_payload)
             runtime_ms = int((time.perf_counter() - started) * 1000)
-            status = "promoted" if passes_single_market_validation(result) else "rejected"
+            status = "completed" if result.get("development_only") else ("promoted" if passes_single_market_validation(result) else "rejected")
             profile = dict(result.pop("execution_profile", {}))
             trades = result.pop("trades", None)
             from app.services.labs.intraday.families.registry import is_intraday_lab_candidate
 
+            from app.services.rug_intraday import is_rug_v2
+            if is_rug_v2(job["candidate"]):
+                # Keep fold-tagged evidence with this version's result. The
+                # legacy intraday ledger computes features using a different
+                # snapshot table and labels trades as validation, not development.
+                result["development_trade_evidence"] = trades or []
             if trades and is_intraday_lab_candidate(job["candidate"]):
                 walk_forward = (result.get("metrics") or {}).get("walk_forward") or {}
                 validation_start_raw = walk_forward.get("validation_start") if walk_forward.get("enabled") else None
@@ -3661,6 +3716,22 @@ def run_campaign_job(
 ) -> dict[str, Any]:
     symbol = job["symbol"]
     timeframe = job["timeframe"]
+    from app.services.rug_intraday import is_rug_v2, build_dataset as build_rug_dataset, evaluate as evaluate_rug
+    if is_rug_v2(job["candidate"]):
+        from app.services.research_architecture import load_snapshot_candles
+        if job.get("dataset_id") is None:
+            raise ValueError("RUG v2 refuses non-frozen data")
+        cache = job.get("_dataset_cache")
+        cache = cache if isinstance(cache, dict) else {}
+        key = ("rug_v2_intraday", int(job["dataset_id"]), str(symbol), str(timeframe))
+        if key not in cache:
+            dataset = build_rug_dataset(load_snapshot_candles(conn, int(job["dataset_id"]), symbol, timeframe), timeframe)
+            while len(cache) >= max(1, int(settings.campaign_dataset_cache_entries or 8)):
+                cache.pop(next(iter(cache)))
+            cache[key] = dataset
+        result = evaluate_rug(candidate_from_payload(job["candidate"]), cache[key])
+        return {**result, "symbol": symbol, "timeframe": timeframe, "dataset_id": job["dataset_id"],
+                "campaign_version": CAMPAIGN_VERSION}
 
     from app.services.labs.intraday.cross_sectional_dataset import is_cross_sectional_candidate
     from app.services.labs.intraday.families.registry import is_intraday_lab_candidate
@@ -5104,6 +5175,8 @@ def candidate_from_payload(payload: dict[str, Any]) -> DiscoveryCandidate:
 
 
 def passes_single_market_validation(result: dict[str, Any]) -> bool:
+    if result.get("development_only"):
+        return False
     metrics = result.get("metrics") or {}
     readiness = result.get("paper_readiness") or {}
     return (
@@ -5157,6 +5230,8 @@ def finalize_research_campaign(conn: psycopg.Connection, campaign_id: int) -> di
         status = str(job.get("status") or "")
         status_counts[status] = status_counts.get(status, 0) + 1
     for summary in summaries:
+        if summary.get("development_only"):
+            continue  # neither elite nor economically rejected merely for lacking final certification
         if passes_cross_validation(summary):
             promoted += 1
             persist_elite_candidate(conn, campaign_id, summary)
@@ -5301,6 +5376,8 @@ def continue_rug_run_after_learning(conn: psycopg.Connection, campaign: dict[str
         rug_target_candidates=target,
         rug_batch_size=batch_size,
         rug_auto_continue=True,
+        rug_version=str(rug.get("version") or controls.get("candidate_generation") or "rug_v1"),
+        rug_cost_calibration_id=rug.get("cost_calibration_id"),
     )
     inherited_scheduling = {
         key: value
@@ -5355,6 +5432,19 @@ def rug_run_status(conn: psycopg.Connection, *, seed: int | None = None) -> dict
     runs = []
     for run_seed, items in grouped.items():
         latest_rug = dict((items[-1].get("controls") or {}).get("rug") or {})
+        campaign_ids = [int(row["id"]) for row in items]
+        evidence_counts = conn.execute(
+            """SELECT COUNT(DISTINCT candidate_id) FILTER
+                    (WHERE forward_validation_state = 'forward_validation_passed') AS forward_passed
+               FROM elite_research_candidates WHERE campaign_id = ANY(%s) AND simulation_only = TRUE""",
+            (campaign_ids,),
+        ).fetchone() or {}
+        development_counts = conn.execute(
+            """SELECT COUNT(*) AS tested_jobs,
+                      COUNT(*) FILTER (WHERE result->>'screen_passed' = 'true') AS screen_passed_jobs
+               FROM research_campaign_jobs WHERE campaign_id = ANY(%s) AND status = 'completed'
+                 AND result->>'development_only' = 'true'""", (campaign_ids,),
+        ).fetchone() or {}
         runs.append({
             "seed": run_seed,
             "target_candidates": int(latest_rug.get("target_candidates") or 0),
@@ -5366,13 +5456,51 @@ def rug_run_status(conn: psycopg.Connection, *, seed: int | None = None) -> dict
             ),
             "backtest_jobs_completed": sum(int(row.get("completed_jobs") or 0) for row in items),
             "good_candidates_collected": sum(int(row.get("promoted_candidates") or 0) for row in items),
+            "historically_promoted_candidates": sum(int(row.get("promoted_candidates") or 0) for row in items),
+            "forward_validation_passed_candidates": int(evidence_counts.get("forward_passed") or 0),
+            "fully_certified_candidates": 0,  # no seven-gate certificate is minted by this generator
+            "development_jobs_completed": int(development_counts.get("tested_jobs") or 0),
+            "development_screen_passed_jobs": int(development_counts.get("screen_passed_jobs") or 0),
+            "counter_definitions": {
+                "good_candidates_collected": "Legacy alias: historical promotions, NOT deployable strategies",
+                "rejected_candidates_learned_from": "Legacy rejection count; NOT verified successful learning",
+                "fully_certified_candidates": "RUG does not issue seven-gate deployment certificates",
+            },
             "rejected_candidates_learned_from": sum(int(row.get("rejected_candidates") or 0) for row in items),
             "failed_jobs": sum(int(row.get("failed_jobs") or 0) for row in items),
             "active_campaign_ids": [row["id"] for row in items if row.get("status") not in {"completed", "canceled", "failed"}],
             "latest_campaign_id": items[-1]["id"],
             "auto_continue": bool(latest_rug.get("auto_continue")),
         })
-    return {"generator": "RUG", "version": "rug_v1", "runs": runs, "campaigns": campaigns, "simulation_only": True}
+    return {"generator": "RUG", "version": "rug_status_v2", "runs": runs, "campaigns": campaigns, "simulation_only": True}
+
+
+def rug_candidate_evidence(conn: psycopg.Connection, *, seed: int, limit: int = 100) -> dict[str, Any]:
+    """Bounded, read-only evidence; never returns an implicit deployment decision."""
+    rows = conn.execute(
+        """SELECT e.candidate_id, e.campaign_id, e.profit_factor, e.expectancy, e.trade_count,
+                  e.max_drawdown, e.assets_passed, e.forward_validation_state, e.paper_performance
+           FROM elite_research_candidates e JOIN research_campaigns c ON c.id = e.campaign_id
+           WHERE c.simulation_only = TRUE AND e.simulation_only = TRUE
+             AND c.controls->'rug'->>'seed' = %s
+           ORDER BY e.campaign_id DESC, e.candidate_id LIMIT %s""", (str(seed), limit),
+    ).fetchall()
+    screens = conn.execute(
+        """SELECT j.candidate_id, j.campaign_id, j.symbol, j.timeframe,
+                  j.result->'metrics' AS metrics, j.result->'certification' AS certification,
+                  j.result->'execution_semantics' AS execution_semantics,
+                  j.result->'folds' AS development_folds
+           FROM research_campaign_jobs j JOIN research_campaigns c ON c.id = j.campaign_id
+           WHERE c.simulation_only = TRUE AND j.simulation_only = TRUE AND j.status = 'completed'
+             AND c.controls->'rug'->>'seed' = %s AND j.result->>'development_only' = 'true'
+             AND j.result->>'screen_passed' = 'true'
+           ORDER BY j.campaign_id DESC, j.id DESC LIMIT %s""", (str(seed), limit),
+    ).fetchall()
+    return {"seed": seed, "historical_promotions": [jsonable(dict(r)) for r in rows],
+            "promising_development_markets": [jsonable(dict(r)) for r in screens],
+            "limit_per_section": limit, "deployment_authorized": False,
+            "warning": "Historical promotion and development screening are not seven-gate certification.",
+            "simulation_only": True}
 
 
 def generate_campaign_report(conn: psycopg.Connection, campaign_id: int, analytics: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -5488,8 +5616,8 @@ def trades_per_year_for_metrics(metrics: dict[str, Any]) -> float | None:
     variants that cannot be annualized rather than treating them as zero.
     """
     walk_forward = dict(metrics.get("walk_forward") or {})
-    start = parse_timestamp(walk_forward.get("train_start") or walk_forward.get("validation_start"))
-    end = parse_timestamp(walk_forward.get("validation_end") or walk_forward.get("train_end"))
+    start = parse_timestamp(walk_forward.get("validation_start"))
+    end = parse_timestamp(walk_forward.get("validation_end"))
     if start is None or end is None or end <= start:
         return None
     years = (end - start).total_seconds() / 31_557_600.0
@@ -5539,6 +5667,7 @@ def candidate_consistency_summaries(jobs: list[dict[str, Any]]) -> list[dict[str
         first = rows[0]
         summary = {
                 "candidate_id": candidate_id,
+                "development_only": any(result.get("development_only") for result in results),
                 "family_id": first["family_id"],
                 "strategy_name": "autonomous_strategy_discovery",
                 "strategy_version": candidate_id,
@@ -5648,6 +5777,8 @@ def median_consistency_failures(summary: dict[str, Any]) -> list[str]:
 def cross_validation_failures(summary: dict[str, Any]) -> list[str]:
     """Every reason a candidate is not elite under the honest (v2) gate."""
     failures: list[str] = []
+    if summary.get("development_only"):
+        failures.append("DEVELOPMENT_EVIDENCE_NOT_CERTIFICATION")
     if not passes_single_market_gate(summary):
         failures.append("AGGREGATE_GATE")
     failures.extend(median_consistency_failures(summary))
@@ -5971,36 +6102,43 @@ def refresh_elite_candidate_forward_evidence(conn: psycopg.Connection, *, elite_
         ).fetchall()
     refreshed = []
     drift_rows = []
+    errors = []
     for elite in rows:
-        rollup = calculate_elite_paper_rollup(conn, dict(elite))
-        state = forward_validation_state(rollup["metrics"], rollup["thresholds"], bool(dict(elite).get("promoted_to_paper_at")))
-        persist_paper_rollup(conn, dict(elite), rollup, state)
-        drift = calculate_evidence_drift(dict(elite), rollup["metrics"])
-        persist_evidence_drift(conn, dict(elite), drift)
-        if any(row["drift_classification"] == "severe" for row in drift):
-            create_drift_alert(conn, dict(elite), drift)
-        conn.execute(
-            """
-            UPDATE elite_research_candidates
-            SET paper_performance = %s,
-                forward_validation_state = %s,
-                forward_validation_thresholds = %s,
-                forward_validation_updated_at = NOW(),
-                drift_status = %s
-            WHERE id = %s
-            """,
-            (
-                Jsonb(jsonable(rollup["metrics"])),
-                state,
-                Jsonb(jsonable(rollup["thresholds"])),
-                max_drift_classification(drift),
-                elite["id"],
-            ),
-        )
+        try:
+            # Nested psycopg transactions create savepoints: a malformed
+            # candidate must not roll back evidence for all other candidates.
+            with conn.transaction():
+                rollup, state, drift = refresh_one_elite_forward_evidence(conn, dict(elite))
+        except Exception as error:
+            log_exception("Elite forward evidence refresh failed", error, elite_candidate_id=elite["id"])
+            errors.append({"elite_candidate_id": elite["id"], "candidate_id": elite["candidate_id"],
+                           "error_type": type(error).__name__, "refreshed": False})
+            continue
         refreshed.append({"elite_candidate_id": elite["id"], "candidate_id": elite["candidate_id"], "forward_validation_state": state, "paper_performance": rollup["metrics"]})
         drift_rows.extend(drift)
     conn.commit()
-    return {"refreshed": len(refreshed), "elite_candidates": refreshed, "drift": drift_rows, "simulation_only": True}
+    return {"refreshed": len(refreshed), "elite_candidates": refreshed, "drift": drift_rows,
+            "errors": errors, "failed": len(errors), "complete": not errors, "simulation_only": True}
+
+
+def refresh_one_elite_forward_evidence(conn, elite):
+    rollup = calculate_elite_paper_rollup(conn, elite)
+    deployed = bool(elite.get("promoted_to_paper_at") or rollup["metrics"].get("deployment_ids"))
+    state = forward_validation_state(rollup["metrics"], rollup["thresholds"], deployed)
+    persist_paper_rollup(conn, elite, rollup, state)
+    drift = calculate_evidence_drift(elite, rollup["metrics"])
+    persist_evidence_drift(conn, elite, drift)
+    if any(row["drift_classification"] == "severe" for row in drift):
+        create_drift_alert(conn, elite, drift)
+    conn.execute(
+        """UPDATE elite_research_candidates
+           SET paper_performance = %s, forward_validation_state = %s,
+               forward_validation_thresholds = %s, forward_validation_updated_at = NOW(), drift_status = %s
+           WHERE id = %s""",
+        (Jsonb(jsonable(rollup["metrics"])), state, Jsonb(jsonable(rollup["thresholds"])),
+         max_drift_classification(drift), elite["id"]),
+    )
+    return rollup, state, drift
 
 
 def calculate_elite_paper_rollup(conn: psycopg.Connection, elite: dict[str, Any]) -> dict[str, Any]:
@@ -6008,38 +6146,69 @@ def calculate_elite_paper_rollup(conn: psycopg.Connection, elite: dict[str, Any]
         """
         SELECT *
         FROM strategy_deployments
-        WHERE strategy_name = %s
-          AND strategy_version = %s
+        WHERE candidate_id = %s
+          AND campaign_id IS NOT DISTINCT FROM %s
           AND simulation_only = TRUE
         ORDER BY created_at ASC
         """,
-        (elite["strategy_name"], elite["strategy_version"]),
+        (elite["candidate_id"], elite.get("campaign_id")),
     ).fetchall()
     deployment_ids = [row["id"] for row in deployments]
     if not deployment_ids:
         return {"metrics": empty_paper_metrics(), "thresholds": thresholds_for_elite(elite)}
     orders = rows_for_ids(conn, "paper_orders", "deployment_id", deployment_ids)
     fills = rows_for_ids(conn, "paper_fills", "order_id", [row["id"] for row in orders])
+    # Older fills may lack deployment metadata. Recover it only through the
+    # exact order FK, never by strategy label or symbol similarity.
+    orders_by_id = {row["id"]: row for row in orders}
+    deployments_by_id = {row["id"]: row for row in deployments}
+    enriched_fills = []
+    for fill in fills:
+        order = orders_by_id[fill["order_id"]]
+        deployment = deployments_by_id[order["deployment_id"]]
+        enriched = dict(fill)
+        for field in ("deployment_id", "campaign_id", "candidate_id", "strategy_id", "strategy_version",
+                      "signal_timestamp", "decision_id", "evidence_origin", "timeframe"):
+            if enriched.get(field) is None:
+                enriched[field] = order.get(field)
+        enriched.update(deployment_created_at=deployment.get("created_at"),
+                        forward_validation_started_at=deployment.get("forward_validation_started_at"),
+                        deployment_lifecycle_state=deployment.get("lifecycle_state"),
+                        deployment_origin=deployment.get("deployment_origin"))
+        enriched_fills.append(enriched)
+    fills = enriched_fills
     logs = rows_for_ids(conn, "execution_logs", "deployment_id", deployment_ids)
     positions = conn.execute(
         """
-        SELECT *
-        FROM paper_positions
-        WHERE simulation_only = TRUE
-          AND account_id = ANY(%s)
-          AND symbol = ANY(%s)
+        SELECT p.*
+        FROM paper_positions p
+        WHERE p.simulation_only = TRUE
+          AND EXISTS (SELECT 1 FROM strategy_deployments d
+                      WHERE d.id = ANY(%s) AND d.simulation_only = TRUE
+                        AND d.account_id = p.account_id AND d.symbol = p.symbol)
         """,
-        ([row["account_id"] for row in deployments], [row["symbol"] for row in deployments]),
+        (deployment_ids,),
     ).fetchall()
-    first_deployment = min((parse_timestamp(row.get("created_at")) for row in deployments), default=None)
+    first_deployment = min((parsed for row in deployments
+                            if (parsed := parse_timestamp(row.get("forward_validation_started_at") or row.get("created_at"))) is not None), default=None)
     last_activity = max(
         [parsed for parsed in [*(parse_timestamp(row.get("submitted_at")) for row in orders), *(parse_timestamp(row.get("filled_at")) for row in fills), *(parse_timestamp(row.get("created_at")) for row in logs)] if parsed is not None],
         default=None,
     )
-    realized = sum_decimal(row.get("realized_pnl") for row in positions)
-    unrealized = sum_decimal(row.get("unrealized_pnl") for row in positions)
+    # paper_positions has no marked unrealized_pnl column. A missing mark
+    # must not turn an open position's P&L into an invented zero.
+    open_positions = [row for row in positions if Decimal(str(row.get("quantity") or 0)) != 0]
+    unrealized = None if open_positions else Decimal(0)
     slippage = average(Decimal(str(row.get("slippage") or 0)) for row in fills)
     attribution = closed_trade_attribution(fills)
+    from app.services.production_validation import classify_forward_trade
+    classified = [classify_forward_trade(trade) for trade in attribution["closed_trades"]]
+    eligible = [trade for trade in classified if trade["readiness_eligible"]]
+    all_attribution = attribution
+    attribution = summarize_closed_paper_trades(eligible)
+    # The position ledger excludes entry fees from realized P&L. Matched fills
+    # account for both sides' fees and remain scoped to this candidate.
+    realized = sum_decimal(trade["realized_pnl"] for trade in attribution["closed_trades"])
     setup_count = sum(1 for row in logs if row.get("event_type") == "paper_scan_completed" and ((row.get("payload") or {}).get("decision") or {}).get("signal") == "setup")
     skipped = sum(1 for row in logs if "skipped" in str(row.get("event_type")))
     stale = sum(1 for row in logs if row.get("event_type") == "paper_scan_stale_data_skipped")
@@ -6048,23 +6217,31 @@ def calculate_elite_paper_rollup(conn: psycopg.Connection, elite: dict[str, Any]
     closed_trade_count = attribution["closed_trade_count"]
     total_orders = len(orders)
     metrics = {
+        "deployment_ids": deployment_ids,
+        "all_simulation_closed_lots": all_attribution["closed_trade_count"],
+        "excluded_closed_lots": len(classified) - len(eligible),
+        "forward_evidence_scope": "candidate_campaign_and_post_deployment_fills",
         "deployment_age_days": active_days,
-        "active_paper_trading_days": len({parse_timestamp(row.get("filled_at")).date().isoformat() for row in fills if parse_timestamp(row.get("filled_at"))}),
+        "active_paper_trading_days": len({parse_timestamp(row["exit_timestamp"]).date().isoformat() for row in eligible}),
         "generated_setups": setup_count,
         "simulated_orders": total_orders,
         "simulated_fills": len(fills),
         "closed_trade_count": closed_trade_count,
-        "open_position_count": sum(1 for row in positions if Decimal(str(row.get("quantity") or 0)) > 0),
+        "open_position_count": len(open_positions),
         "realized_pnl": float(realized),
-        "unrealized_pnl": float(unrealized),
-        "total_simulated_pnl": float(realized + unrealized),
+        "unrealized_pnl": float(unrealized) if unrealized is not None else None,
+        "total_simulated_pnl": float(realized + unrealized) if unrealized is not None else None,
+        "valuation_complete": unrealized is not None,
+        "valuation_limitation": "open positions require attributed marks" if open_positions else None,
         "paper_profit_factor": attribution["paper_profit_factor"],
         "paper_expectancy": attribution["paper_expectancy"],
         "paper_win_rate": attribution["paper_win_rate"],
         "average_win": attribution["average_win"],
         "average_loss": attribution["average_loss"],
         "average_trade_duration_hours": attribution["average_trade_duration_hours"],
-        "closed_trades": attribution["closed_trades"],
+        "closed_trades": attribution["closed_trades"][-50:],
+        "closed_trades_display_limit": 50,
+        "calculation_version": "candidate_scoped_fifo_v2",
         "paper_max_drawdown": paper_max_drawdown(conn, deployments),
         "average_simulated_slippage": float(slippage),
         "signal_frequency": round(setup_count / active_days, 4) if active_days else 0.0,
@@ -6122,6 +6299,8 @@ def thresholds_for_elite(elite: dict[str, Any]) -> dict[str, Any]:
 def forward_validation_state(metrics: dict[str, Any], thresholds: dict[str, Any], deployed: bool) -> str:
     if not deployed and metrics["simulated_orders"] == 0:
         return "awaiting_paper_deployment"
+    if metrics.get("valuation_complete") is False:
+        return "insufficient_forward_sample"
     if metrics["active_paper_trading_days"] < thresholds["minimum_active_paper_days"] or metrics["closed_trade_count"] < thresholds["minimum_closed_trades"]:
         return "insufficient_forward_sample"
     if (
@@ -6295,8 +6474,8 @@ def paper_profit_factor(realized: Decimal) -> float:
 
 
 def closed_trade_attribution(fills: list[dict[str, Any]]) -> dict[str, Any]:
-    ordered = sorted(fills, key=lambda row: parse_timestamp(row.get("filled_at")) or datetime.min.replace(tzinfo=UTC))
-    open_lots: list[dict[str, Any]] = []
+    ordered = sorted(fills, key=lambda row: (parse_timestamp(row.get("filled_at")) or datetime.min.replace(tzinfo=UTC), int(row.get("id") or 0)))
+    lots_by_owner: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     trades: list[dict[str, Any]] = []
     for fill in ordered:
         side = str(fill.get("side"))
@@ -6305,25 +6484,18 @@ def closed_trade_attribution(fills: list[dict[str, Any]]) -> dict[str, Any]:
         fee = Decimal(str(fill.get("fee") or 0))
         slippage = Decimal(str(fill.get("slippage") or 0))
         timestamp = parse_timestamp(fill.get("filled_at"))
-        if side == "buy":
-            open_lots.append(
-                {
-                    "quantity": quantity,
-                    "original_quantity": quantity,
-                    "price": price,
-                    "fee": fee,
-                    "slippage": slippage,
-                    "timestamp": timestamp,
-                    "fill": fill,
-                }
-            )
-            continue
+        if side not in {"buy", "sell"} or not all(v.is_finite() for v in (quantity, price, fee, slippage)) or quantity <= 0 or price <= 0:
+            raise ValueError("Invalid paper fill; cannot calculate forward evidence")
+        owner = (fill.get("account_id"), fill.get("symbol"), fill.get("deployment_id"))
+        open_lots = lots_by_owner[owner]
         remaining = quantity
-        while remaining > 0 and open_lots:
+        while remaining > 0 and open_lots and open_lots[0]["side"] != side:
             lot = open_lots[0]
             matched = min(remaining, lot["quantity"])
             entry_fee = lot["fee"] * (matched / lot["original_quantity"]) if lot["original_quantity"] else Decimal("0")
-            pnl = (price - lot["price"]) * matched - entry_fee - fee * (matched / quantity if quantity else Decimal("0"))
+            exit_fee = fee * matched / quantity
+            sign = Decimal(1 if lot["side"] == "buy" else -1)
+            pnl = sign * (price - lot["price"]) * matched - entry_fee - exit_fee
             duration = 0.0
             if timestamp and lot["timestamp"]:
                 duration = (timestamp - lot["timestamp"]).total_seconds() / 3600
@@ -6334,8 +6506,9 @@ def closed_trade_attribution(fills: list[dict[str, Any]]) -> dict[str, Any]:
                     "quantity": float(matched),
                     "realized_pnl": float(pnl),
                     "holding_period_hours": round(duration, 4),
-                    "slippage": float(lot["slippage"] + slippage),
-                    "commission": float(entry_fee + fee),
+                    "slippage": float(lot["slippage"] * matched / lot["original_quantity"] + slippage * matched / quantity),
+                    "commission": float(entry_fee + exit_fee),
+                    "direction": "long" if sign > 0 else "short",
                     "symbol": fill.get("symbol") or (lot["fill"] or {}).get("symbol"),
                     "timeframe": fill.get("timeframe") or (lot["fill"] or {}).get("timeframe"),
                     "account_id": fill.get("account_id") or (lot["fill"] or {}).get("account_id"),
@@ -6353,8 +6526,10 @@ def closed_trade_attribution(fills: list[dict[str, Any]]) -> dict[str, Any]:
                     "strategy_id": fill.get("strategy_id") or (lot["fill"] or {}).get("strategy_id"),
                     "strategy_version": fill.get("strategy_version") or (lot["fill"] or {}).get("strategy_version"),
                     "decision_id": fill.get("decision_id") or (lot["fill"] or {}).get("decision_id"),
-                    "signal_timestamp": fill.get("signal_timestamp") or (lot["fill"] or {}).get("signal_timestamp"),
+                    "signal_timestamp": (lot["fill"] or {}).get("signal_timestamp"),
                     "evidence_origin": fill.get("evidence_origin") or (lot["fill"] or {}).get("evidence_origin"),
+                    "entry_evidence_origin": (lot["fill"] or {}).get("evidence_origin"),
+                    "exit_evidence_origin": fill.get("evidence_origin"),
                     "deployment_created_at": fill.get("deployment_created_at") or (lot["fill"] or {}).get("deployment_created_at"),
                     "forward_validation_started_at": fill.get("forward_validation_started_at") or (lot["fill"] or {}).get("forward_validation_started_at"),
                     "deployment_lifecycle_state": fill.get("deployment_lifecycle_state") or (lot["fill"] or {}).get("deployment_lifecycle_state"),
@@ -6366,6 +6541,14 @@ def closed_trade_attribution(fills: list[dict[str, Any]]) -> dict[str, Any]:
             remaining -= matched
             if lot["quantity"] <= 0:
                 open_lots.pop(0)
+        if remaining > 0:
+            open_lots.append({"quantity": remaining, "original_quantity": quantity,
+                              "side": side, "price": price, "fee": fee, "slippage": slippage,
+                              "timestamp": timestamp, "fill": fill})
+    return summarize_closed_paper_trades(trades)
+
+
+def summarize_closed_paper_trades(trades: list[dict[str, Any]]) -> dict[str, Any]:
     wins = [Decimal(str(row["realized_pnl"])) for row in trades if Decimal(str(row["realized_pnl"])) > 0]
     losses = [abs(Decimal(str(row["realized_pnl"]))) for row in trades if Decimal(str(row["realized_pnl"])) < 0]
     gross_profit = sum(wins, Decimal("0"))
@@ -6379,7 +6562,7 @@ def closed_trade_attribution(fills: list[dict[str, Any]]) -> dict[str, Any]:
         "average_win": float(gross_profit / Decimal(len(wins))) if wins else 0.0,
         "average_loss": float(gross_loss / Decimal(len(losses))) if losses else 0.0,
         "average_trade_duration_hours": average(row["holding_period_hours"] for row in trades),
-        "closed_trades": trades[-50:],
+        "closed_trades": trades,
     }
 
 
@@ -6389,18 +6572,19 @@ def paper_max_drawdown(conn: psycopg.Connection, deployments: list[dict[str, Any
         return 0.0
     rows = conn.execute(
         """
-        SELECT equity
+        SELECT account_id, equity
         FROM paper_equity_curve
         WHERE account_id = ANY(%s) AND simulation_only = TRUE
-        ORDER BY timestamp ASC
+        ORDER BY timestamp ASC, id ASC
         """,
         (account_ids,),
     ).fetchall()
-    peak = Decimal("0")
+    peaks: dict[Any, Decimal] = defaultdict(Decimal)
     max_dd = Decimal("0")
     for row in rows:
         equity = Decimal(str(row.get("equity") or 0))
-        peak = max(peak, equity)
+        account_id = row.get("account_id")
+        peak = peaks[account_id] = max(peaks[account_id], equity)
         if peak > 0:
             max_dd = max(max_dd, (peak - equity) / peak)
     return float(max_dd)

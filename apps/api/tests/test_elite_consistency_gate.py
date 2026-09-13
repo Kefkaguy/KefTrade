@@ -160,8 +160,10 @@ def test_trades_per_year_annualizes_from_walk_forward_window() -> None:
 
     metrics = {
         "number_of_trades": 40,
-        "walk_forward": {"train_start": "2024-01-01T00:00:00+00:00", "validation_end": "2026-01-01T00:00:00+00:00"},
+        "walk_forward": {"train_start": "2020-01-01T00:00:00+00:00", "validation_start": "2024-01-01T00:00:00+00:00", "validation_end": "2026-01-01T00:00:00+00:00"},
     }
     # Jan-2024 -> Jan-2026 spans 731 days (2024 is a leap year), so ~2.001 years.
     assert trades_per_year_for_metrics(metrics) == pytest.approx(20.0, rel=0.01)
     assert trades_per_year_for_metrics({"number_of_trades": 40}) is None
+    assert trades_per_year_for_metrics({"number_of_trades": 40, "walk_forward": {
+        "train_start": "2024-01-01T00:00:00+00:00", "validation_end": "2026-01-01T00:00:00+00:00"}}) is None

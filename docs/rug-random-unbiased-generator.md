@@ -1,5 +1,14 @@
 # RUG — Random Unbiased Generator
 
+> Version note (September 2026): the material below describes the legacy
+> `rug_v1` search, including proxy indicators and a generic non-session-flat
+> backtester. It is not a specification of fully validated day trading.
+> New API launches default to the separately versioned development-only
+> `rug_v2_intraday`; see [repair notes](rug-v2-repair-notes.md) for its actual
+> behavior, evidence limitations, and inspection commands. Existing campaigns
+> continue with their original version. Historical promotions are not seven-gate
+> deployment certificates.
+
 RUG is KefTrade's broad, reproducible candidate generator. It is a generator,
 not a judge: every candidate is submitted to the existing campaign workers,
 backtester, validation gates, learning engine, elite collection, and archive.

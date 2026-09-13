@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KefTrade — intraday research audit, 5 September 2026</title>
+<style>
+:root{color-scheme:light;--ink:#162a36;--muted:#506674;--line:#d6e0e5;--accent:#096d72}
+*{box-sizing:border-box}body{margin:0;background:#f2f5f6;color:var(--ink);font:16px/1.65 system-ui,sans-serif}
+main{max-width:1040px;margin:32px auto;padding:48px;background:white;border:1px solid var(--line)}
+h1{font-size:36px;line-height:1.2;letter-spacing:-1px;margin:10px 0 20px}h2{font-size:23px;margin:34px 0 12px;line-height:1.3}
+p{margin:12px 0}.eyebrow{color:var(--accent);font-size:13px;letter-spacing:1.2px;text-transform:uppercase}
+.lead{font-size:20px}.note{padding:16px 20px;background:#eef6f6;border-left:4px solid var(--accent)}
+.muted,small{color:var(--muted)}a{color:var(--accent);text-decoration-thickness:1px;text-underline-offset:3px}
+table{width:100%;border-collapse:collapse;font-size:14px;margin:18px 0}th,td{text-align:left;vertical-align:top;padding:12px 10px;border-bottom:1px solid var(--line)}th{background:#edf3f5}td:first-child{font-weight:600}code{font-size:13px;overflow-wrap:anywhere}.table-wrap{overflow-x:auto}li{margin:10px 0}
+footer{border-top:1px solid var(--line);margin-top:36px;padding-top:18px;font-size:13px}
+@media(max-width:700px){main{margin:0;padding:24px 18px;border:0}h1{font-size:30px}th,td{padding:9px 6px}}
+@media print{body{background:white}main{margin:0;max-width:none;border:0;padding:0}h2{break-after:avoid}tr{break-inside:avoid}a{color:inherit}}
+</style>
+</head>
+<body><main>
+<div class="eyebrow">KefTrade · Engineering and evidence review · 5 September 2026</div>
+<h1>Repair the experiment before scaling the search</h1>
+<p class="lead">The audit found reproducible errors in forward P&amp;L attribution, cost coverage and intraday execution. Repairs are implemented locally. Five profitable strategies have <strong>not</strong> been established.</p>
+<p class="note">The five existing candidates are historical leads. Their VPS records currently report zero paper orders, zero paper fills and <code>insufficient_forward_sample</code>. The repaired search still needs to run against the full frozen dataset.</p>
+<p class="muted">Scope: candidate generation, data loading, backtesting, costs, learning and paper evidence. This is a focused research-path audit, not an exhaustive security or UI review. No production deployment, campaign change or broker trade was performed.</p>
+
+<h2>What was wrong, and what changed</h2>
+<div class="table-wrap"><table>
+<thead><tr><th>Problem</th><th>Consequence</th><th>Local repair</th></tr></thead>
+<tbody>
+<tr><td>One global FIFO queue</td><td>A sell could match a buy from another symbol, account or deployment.</td><td>Separate ownership queues; long and short matching; proportional partial-fill fees and slippage.</td></tr>
+<tr><td>Evidence capped at 50 trades</td><td>Older losses could disappear from downstream forward calculations.</td><td>Retain complete evidence; truncate only the elite display list.</td></tr>
+<tr><td>Broad paper rollup scope</td><td>Strategy labels and independent account/symbol filters could mix unrelated records.</td><td>Use candidate/campaign identity and exact deployment account-symbol pairs. Calculate realized forward P&amp;L from eligible fills including entry fees.</td></tr>
+<tr><td>Missing forward chronology</td><td>Historical candles or pre-start signals could be presented as forward evidence.</td><td>Validate timestamps and origins; preserve the entry signal's identity.</td></tr>
+<tr><td>One failure aborts every refresh</td><td>A bad candidate can prevent other candidates' evidence from updating.</td><td>Per-candidate savepoints and explicit partial-success errors.</td></tr>
+<tr><td>Misleading risk reporting</td><td>Different account capital levels were interleaved for drawdown; absent open-position marks became zero.</td><td>Separate account drawdown peaks. Unknown open-position P&amp;L is unavailable and blocks forward passage.</td></tr>
+<tr><td>Intraday timing errors</td><td>A two-bar limit held three bars; forced close-price exits used bar-open timestamps.</td><td>Explicit versioned holding and timestamp conventions; old replay behavior retained.</td></tr>
+<tr><td>Rolling EMA reinitialization</td><td>EMA200 was repeatedly seeded inside a 240-bar window.</td><td>Causal full-history EMAs cached per dataset; remove unrelated legacy diagnostics from RUG decisions.</td></tr>
+<tr><td>Pooled cost evidence</td><td>One well-sampled stock could qualify unmeasured stocks. Some symbol spreads omitted regulatory cost.</td><td>Per-symbol bar/fill coverage; symbol slippage estimates; consistent all-in cost comparisons for new calibrations.</td></tr>
+<tr><td>Repeated global learning rebuild</td><td>Each batch reloads and rebuilds the growing research history.</td><td>V2 keeps local learning and retrieves compact comparable feedback. Million-scale throughput still requires measurement.</td></tr>
+</tbody></table></div>
+<p>Previously built local safeguards remain: session-aware flat-by-close execution, true ATR, opening ranges, relative volume, complete-data checks, three development folds, baseline/stress scenarios, and refusal to promote development-only results as certified survivors.</p>
+
+<h2>The five existing leads</h2>
+<p>Direct candidate API observations on 5 September 2026. Historical figures retain their original execution assumptions.</p>
+<div class="table-wrap"><table>
+<thead><tr><th>Candidate</th><th>Campaign</th><th>Historical PF</th><th>Trades</th><th>Paper fills</th></tr></thead>
+<tbody>
+<tr><td><a href="https://keftrade.duckdns.org/research/elite-candidates/rug_1fe4e2dbcedc5b72/forward-validation"><code>rug_1fe4e2dbcedc5b72</code></a></td><td>122</td><td>1.7741</td><td>287</td><td>0</td></tr>
+<tr><td><a href="https://keftrade.duckdns.org/research/elite-candidates/rug_4385b23944606d2f/forward-validation"><code>rug_4385b23944606d2f</code></a></td><td>130</td><td>1.3050</td><td>374</td><td>0</td></tr>
+<tr><td><a href="https://keftrade.duckdns.org/research/elite-candidates/rug_e6bec299bb8e7d30/forward-validation"><code>rug_e6bec299bb8e7d30</code></a></td><td>131</td><td>1.5119</td><td>379</td><td>0</td></tr>
+<tr><td><a href="https://keftrade.duckdns.org/research/elite-candidates/rug_0f9d99607fd3fa10/forward-validation"><code>rug_0f9d99607fd3fa10</code></a></td><td>135</td><td>1.3515</td><td>243</td><td>0</td></tr>
+<tr><td><a href="https://keftrade.duckdns.org/research/elite-candidates/rug_4dcf693714cbb3b4/forward-validation"><code>rug_4dcf693714cbb3b4</code></a></td><td>143</td><td>1.4850</td><td>339</td><td>0</td></tr>
+</tbody></table></div>
+<p>The <a href="https://keftrade.duckdns.org/research/rug/status?seed=20260904">run status</a> reported 2,900 completed candidates, 14,999 completed market jobs and campaign 144 active. Four of the previously shown deployments use AAPL and one uses AMD. Five different IDs do not establish five independent return streams.</p>
+
+<h2>Data observations and limits</h2>
+<p>The latest 1,000 rolling 15m rows for each requested symbol had no duplicate timestamps and carried the <code>alpaca_iex</code> label. The AAPL sample had 115 outside-session rows, 34 complete regular sessions and one truncated first session. Other symbols had different latest timestamps. This supports using explicit session filters; it does not certify the full frozen dataset or establish that every regular session is bad.</p>
+<p>Regular market hours and early closes should follow the <a href="https://www.nyse.com/trade/hours-calendars">NYSE calendar</a>. IEX and consolidated SIP have different coverage, so source labels matter for both price and volume evidence. <a href="https://docs.alpaca.markets/us/docs/market-data-faq">Alpaca explains the feed differences</a>.</p>
+
+<h2>What would establish cost survival?</h2>
+<p>A larger search also creates more chances to select historical noise. The original <a href="https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf">Deflated Sharpe Ratio research by Bailey and López de Prado</a> explains why trial counts and selection bias matter. Reusing an old holdout after learning from it does not restore independence.</p>
+<p>Paper execution checks implementation, but it does not establish live fills or costs. Alpaca's paper model omits impact, latency slippage, queue position and regulatory fees; KefTrade's separate internal simulator also requires its own validation. <a href="https://docs.alpaca.markets/us/docs/paper-trading">Alpaca paper-trading specification</a>.</p>
+<p>Before accepting five strategies, the remaining work is representative execution-cost measurement, protected final/prospective evaluation, multiplicity correction, parameter-neighborhood robustness, sufficient independent observations, aligned correlation and shared-capital checks, corporate-action/feed validation, and short-borrow/capacity evidence where applicable. These gates remain incomplete. No stop-after-five certification was invented.</p>
+
+<h2>A concrete next experiment</h2>
+<p>The new <code>app.cli.rug_research</code> runner can audit the existing five without updating their records, or test a bounded 15m/five-asset pilot. It verifies frozen data before generation, releases its read-only database connection before simulations, journals results, and uses complete valid cohorts for the next batch's feedback. Technical errors do not become trading losses.</p>
+<p>It distinguishes frictionless losses, baseline-cost failures and stress failures, and measures throughput. Its development shortlist is not a certified portfolio. The full local database connection timed out, and the public candle endpoint is capped at 1,000 rolling rows, so this real-data pilot has not been run.</p>
+<p><a href="../rug-research-vps-runbook.md">VPS build, audit, pilot and monitoring commands</a>. The runbook requires the patched checkout on the VPS. Building its standalone research image does not restart the currently running trading services.</p>
+
+<h2>Verification</h2>
+<p id="verification">Final full suite: <strong>2,661 passed, 36 skipped, one pre-existing failure</strong> in <code>test_phase10_modules_have_no_runtime_ddl</code>, pointing to the unchanged <code>intraday_sector_leadlag_predictor.py</code>. The expanded focused checkpoint passed all 196 tests. No new test failures remain. The existing full-suite failure has not been fixed or hidden.</p>
+<p>No SQL integration against the VPS, complete frozen-data rerun, production deployment or five-survivor result is claimed. Further research needs actual data and prospective observations, rather than additional general articles.</p>
+<footer>Prepared from local code inspection, independent execution and validation reviews, reproducible regressions, bounded read-only VPS observations and primary sources linked near their claims. Artifact checks: HTML structure and link targets; no rendered visual review. Local changes remain uncommitted and undeployed.</footer>
+</main></body></html>

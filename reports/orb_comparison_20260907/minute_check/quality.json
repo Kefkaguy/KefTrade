@@ -1,0 +1,4213 @@
+{
+  "expected_test_sessions": 64,
+  "common_complete_test_sessions": 64,
+  "excluded_test_dates": [],
+  "issues": [
+    {
+      "symbol": "ABBV",
+      "date": "2026-05-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-05-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-05-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-05-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-05-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-05-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-05-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-05-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-06-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-06-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-07-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "ABBV",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-05-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-06-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-06-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-06-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-06-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-06-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-07-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "BA",
+      "date": "2026-08-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CAT",
+      "date": "2026-05-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CAT",
+      "date": "2026-07-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CAT",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CAT",
+      "date": "2026-07-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CAT",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CAT",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CAT",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CAT",
+      "date": "2026-08-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "COIN",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COP",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COP",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-05-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-05-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-05-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-05-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-05-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-05-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-05-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-06-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-06-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-06-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-06-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-06-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-07-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "COST",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-05-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-05-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-05-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-06-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-06-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-07-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-07-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-07-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-07-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-08-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-08-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "CVS",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVX",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVX",
+      "date": "2026-05-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVX",
+      "date": "2026-05-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVX",
+      "date": "2026-05-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVX",
+      "date": "2026-06-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVX",
+      "date": "2026-07-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVX",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "CVX",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 25
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 17
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-05-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 21
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 15
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-06-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 16
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 18
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 16
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 15
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 18
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-07-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 20
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 15
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 23
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 23
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 20
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 34
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 36
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 26
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 15
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 21
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 23
+    },
+    {
+      "symbol": "DE",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "GE",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-07-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "GM",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HD",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HD",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-05-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-06-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-06-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-06-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-06-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-06-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-07-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 21
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 22
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "HON",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "JNJ",
+      "date": "2026-05-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "JNJ",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "JNJ",
+      "date": "2026-05-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "JNJ",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "JNJ",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "JNJ",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "JNJ",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "JNJ",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "JNJ",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-05-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-06-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 18
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 17
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 17
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 26
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 16
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-07-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 18
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 20
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 28
+    },
+    {
+      "symbol": "LMT",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 16
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-05-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-06-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-07-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "LOW",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-05-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-05-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-06-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-06-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-06-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-07-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-07-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-07-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "MRK",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PEP",
+      "date": "2026-05-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PEP",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PEP",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-05-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-05-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-05-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-05-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-05-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-06-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-06-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-06-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-06-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-07-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-07-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "PG",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-05-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-05-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-05-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-05-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-05-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-06-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-06-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-06-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-07-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-07-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-07-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-07-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-07-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "RTX",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-06-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-07-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-08-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "SBUX",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-05-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-05-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-05-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-05-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-05-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-06-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-06-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-06-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-06-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-06-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-06-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-06-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-06-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-06-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-07-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "TGT",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 18
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 32
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-05-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-06-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 11
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 27
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 21
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 23
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-07-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 7
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 21
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-07",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 21
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-11",
+      "reason": "verified_no_trade_minutes",
+      "count": 15
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 6
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 12
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-17",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 5
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-21",
+      "reason": "verified_no_trade_minutes",
+      "count": 8
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 10
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-25",
+      "reason": "verified_no_trade_minutes",
+      "count": 9
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 19
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 13
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 15
+    },
+    {
+      "symbol": "UNP",
+      "date": "2026-08-31",
+      "reason": "verified_no_trade_minutes",
+      "count": 14
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-05-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-05-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-05-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-05-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-05-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-05-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-05-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-05-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-03",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-05",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 4
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-06-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-02",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-08",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-13",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-14",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-16",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-22",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-23",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-24",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-07-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-08-04",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-08-12",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-08-19",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-08-26",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-08-27",
+      "reason": "verified_no_trade_minutes",
+      "count": 3
+    },
+    {
+      "symbol": "UPS",
+      "date": "2026-08-28",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "WFC",
+      "date": "2026-05-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "WFC",
+      "date": "2026-06-10",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "WFC",
+      "date": "2026-06-29",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "WFC",
+      "date": "2026-06-30",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "WFC",
+      "date": "2026-07-01",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "WFC",
+      "date": "2026-07-09",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "WFC",
+      "date": "2026-08-18",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "XOM",
+      "date": "2026-05-20",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    },
+    {
+      "symbol": "XOM",
+      "date": "2026-07-15",
+      "reason": "verified_no_trade_minutes",
+      "count": 2
+    },
+    {
+      "symbol": "XOM",
+      "date": "2026-08-06",
+      "reason": "verified_no_trade_minutes",
+      "count": 1
+    }
+  ],
+  "data_hashes": {
+    "AAPL_1Day_raw.parquet": "e0f84b61e6bbc9a87e1ebf787fe65caec725e10e25b573687fd937ff2dbff390",
+    "AAPL_1Day_split.parquet": "e0f84b61e6bbc9a87e1ebf787fe65caec725e10e25b573687fd937ff2dbff390",
+    "AAPL_1Min_raw.parquet": "b51c744db9ecb7abcece92ee4db22dfcfd52f097e56114560066a9d812a5d4ce",
+    "ABBV_1Day_raw.parquet": "54099d10f11dd0f9b5fcaf1c519ebd0ef538a86a5adc17c06687fd1a846ddc99",
+    "ABBV_1Day_split.parquet": "54099d10f11dd0f9b5fcaf1c519ebd0ef538a86a5adc17c06687fd1a846ddc99",
+    "ABBV_1Min_raw.parquet": "ed4a51c2a42d16fb268205a88a234aeb8461d32a317a6005c6ceb5e7f028fb4e",
+    "AMD_1Day_raw.parquet": "9ae30cc0b2aed8fd2b4e2d8b3e4ae004cc89f395a74e046d424d9db1ee232933",
+    "AMD_1Day_split.parquet": "9ae30cc0b2aed8fd2b4e2d8b3e4ae004cc89f395a74e046d424d9db1ee232933",
+    "AMD_1Min_raw.parquet": "3c61442e372faff916d0bc43473d8579fb76625568946b912a2952d589e8d288",
+    "AMZN_1Day_raw.parquet": "f6d27d84845a0fad391982a7fb4bae8ea5002b81b909c26e8a7d7f2fe9e808a9",
+    "AMZN_1Day_split.parquet": "f6d27d84845a0fad391982a7fb4bae8ea5002b81b909c26e8a7d7f2fe9e808a9",
+    "AMZN_1Min_raw.parquet": "138da30130848648e8ddca316a2e406b1dc0c789e33f26584a2f1bcb12122dd8",
+    "AVGO_1Day_raw.parquet": "998d39c86a09d192841881b05b5c568a352ab4a8959578dc2a40a3e3bb951c0f",
+    "AVGO_1Day_split.parquet": "998d39c86a09d192841881b05b5c568a352ab4a8959578dc2a40a3e3bb951c0f",
+    "AVGO_1Min_raw.parquet": "ad7d26d32643e22c40d29aeb0aa7f670812f33da668d616a45429644312bcddc",
+    "BAC_1Day_raw.parquet": "e46e391c83c346b4dd9b5695f6b3ec04aa11d9d85913edd2867170c47e8b367c",
+    "BAC_1Day_split.parquet": "e46e391c83c346b4dd9b5695f6b3ec04aa11d9d85913edd2867170c47e8b367c",
+    "BAC_1Min_raw.parquet": "b8a91d5273fc8c660db42b619159f78b5155725591ac0a4605299c6d71023175",
+    "BA_1Day_raw.parquet": "850dd59c9c542bf583c0b2035bd069a9e112f7dc5dec37278a30c9c557ba756a",
+    "BA_1Day_split.parquet": "850dd59c9c542bf583c0b2035bd069a9e112f7dc5dec37278a30c9c557ba756a",
+    "BA_1Min_raw.parquet": "7d2c1e3e644126481bb87b16c2b27b44f81f18780aa051d4c75cacda2fe3fadf",
+    "CAT_1Day_raw.parquet": "c9c787e661ac49db042b7a25022149f6bbf4f398e1445c7188c55cfb80bda100",
+    "CAT_1Day_split.parquet": "c9c787e661ac49db042b7a25022149f6bbf4f398e1445c7188c55cfb80bda100",
+    "CAT_1Min_raw.parquet": "07cb903c1f6083771cd878249db0ce5c48ba1f248d4e36cb4f5aa741a1e3c57b",
+    "COIN_1Day_raw.parquet": "ee82ba8dd37baf19007ee7f7069a44629220e9caf71648505ee210aae2dc8506",
+    "COIN_1Day_split.parquet": "ee82ba8dd37baf19007ee7f7069a44629220e9caf71648505ee210aae2dc8506",
+    "COIN_1Min_raw.parquet": "9fa4572fd57ae7c8c4a038a7e9458b88d7ab6ef95bd28ca1c3438a7e666ffacb",
+    "COP_1Day_raw.parquet": "6d81b8d25f7a45a3f79169fc2946e36156bf5063f172bdf431d8c7efa61fac93",
+    "COP_1Day_split.parquet": "6d81b8d25f7a45a3f79169fc2946e36156bf5063f172bdf431d8c7efa61fac93",
+    "COP_1Min_raw.parquet": "2e69b48a104278eea94fb8dd9e06e9c69b8ec6d6f55d887cc98c7e15f379cce0",
+    "COST_1Day_raw.parquet": "e889e5663103e466b90fa1dee09fde3d63bc8c08dcb25ee9d7142d193088ce95",
+    "COST_1Day_split.parquet": "e889e5663103e466b90fa1dee09fde3d63bc8c08dcb25ee9d7142d193088ce95",
+    "COST_1Min_raw.parquet": "918a7ebf5ab310e46ffddc873e9773e5a83429435b8d41892fd421084bcf0e99",
+    "CRM_1Day_raw.parquet": "578565c9dea1c65c2795d02815cfc583845b8faabf9cb9a8fbb40179762882d1",
+    "CRM_1Day_split.parquet": "578565c9dea1c65c2795d02815cfc583845b8faabf9cb9a8fbb40179762882d1",
+    "CRM_1Min_raw.parquet": "ddaaf30ea955317a2187738f8d9d15800b18d092f0fc8b4055624540ab144fe3",
+    "CVS_1Day_raw.parquet": "98d946749d2decde9af4d4972db4cccba9b9f0957bea6f4c7c9cd8cc31b6e9a6",
+    "CVS_1Day_split.parquet": "98d946749d2decde9af4d4972db4cccba9b9f0957bea6f4c7c9cd8cc31b6e9a6",
+    "CVS_1Min_raw.parquet": "3af554cec78f08f80c083083e0151d83718f852864399eb026693e37d88c7e01",
+    "CVX_1Day_raw.parquet": "c8f95b98e7bc900ab6f4dfc929e9eec218f7f85238bcce7605499bbed2b02910",
+    "CVX_1Day_split.parquet": "c8f95b98e7bc900ab6f4dfc929e9eec218f7f85238bcce7605499bbed2b02910",
+    "CVX_1Min_raw.parquet": "92f37e831b5ca92e13e87862f89f51ba9973f9f2e1775f6eb50cb33d377e2c1b",
+    "DE_1Day_raw.parquet": "64b4902fc8d304f4009a4fdb350c81e0b9542409006b0d9358cdbf7a78e49b63",
+    "DE_1Day_split.parquet": "64b4902fc8d304f4009a4fdb350c81e0b9542409006b0d9358cdbf7a78e49b63",
+    "DE_1Min_raw.parquet": "12ae0cac5c92bc21904c05db5ffea89c7463bdd1abf4f4b0bfea309a4d552c25",
+    "DIS_1Day_raw.parquet": "879ab61174bf990e2a045f0bcb17c84e32e53397874b1040950525cce95209a0",
+    "DIS_1Day_split.parquet": "879ab61174bf990e2a045f0bcb17c84e32e53397874b1040950525cce95209a0",
+    "DIS_1Min_raw.parquet": "08d6fa849827a0698fbb3b5de66ccba9fb26f8c19b0e0defeee822258511f4ee",
+    "F_1Day_raw.parquet": "9b88b5ad431ac95b1f560596984577ad27fd10fbb486d80280443a594baccd58",
+    "F_1Day_split.parquet": "9b88b5ad431ac95b1f560596984577ad27fd10fbb486d80280443a594baccd58",
+    "F_1Min_raw.parquet": "432076636755428fb56d0dac7c4f2eed6910a5643da74dc8d50ff4a62a713d30",
+    "GE_1Day_raw.parquet": "00c0035a1194cbcee85e1f744e596d2b1b5b216b394f943db0ed95ae239e387d",
+    "GE_1Day_split.parquet": "00c0035a1194cbcee85e1f744e596d2b1b5b216b394f943db0ed95ae239e387d",
+    "GE_1Min_raw.parquet": "f58844509d289f367970f57e039e7880012f6a963f1906fbefab93850a81c779",
+    "GM_1Day_raw.parquet": "9b08da609cd031cf74f4d46d43aaa025215aec50e6290e36aaa6d8981ffd14ae",
+    "GM_1Day_split.parquet": "9b08da609cd031cf74f4d46d43aaa025215aec50e6290e36aaa6d8981ffd14ae",
+    "GM_1Min_raw.parquet": "735d36a69af26b5b42d05bc661c629b033a9eef9da720c7e28a4f446c1bc5edd",
+    "GOOGL_1Day_raw.parquet": "ec5c401397d032f76fb1b0f5a079ad152e49d82cc6113aaf7e579e30d782df78",
+    "GOOGL_1Day_split.parquet": "ec5c401397d032f76fb1b0f5a079ad152e49d82cc6113aaf7e579e30d782df78",
+    "GOOGL_1Min_raw.parquet": "133bcb08c81ee7aece2dc185b1c890437f1e577dcfafa7ca50db3ff864fc640d",
+    "HD_1Day_raw.parquet": "9d7e4281063e2be55c57667c32fe82822dada9dc67b2e0be3c1f2aa65cf47600",
+    "HD_1Day_split.parquet": "9d7e4281063e2be55c57667c32fe82822dada9dc67b2e0be3c1f2aa65cf47600",
+    "HD_1Min_raw.parquet": "c1c52948155031a807e0e31abc7cfb99b1f46aa5ed553e919ed5e7c4a42d4a36",
+    "HON_1Day_raw.parquet": "97cd389c3e57695b38034566e5ddc054d120b05521cfb82dfcc6a29b414c24ac",
+    "HON_1Day_split.parquet": "1054c83e0d59dc7984af97626a662b48ed284e48b8494821c981c849142bfd13",
+    "HON_1Min_raw.parquet": "164cff2e16af86451e9cd84f7f8259a301b6907cdbfea26209e9bc2d0841d495",
+    "INTC_1Day_raw.parquet": "e9329967f6a3d5108e7c5295f6c4fd1b22512fc95a95db165917d5a17f491b0b",
+    "INTC_1Day_split.parquet": "e9329967f6a3d5108e7c5295f6c4fd1b22512fc95a95db165917d5a17f491b0b",
+    "INTC_1Min_raw.parquet": "09f15ac1e505fceb9168196ae1dd0e9d869f08cece3fe54a5a2ee8dfa575e997",
+    "JNJ_1Day_raw.parquet": "7b9a9557b8e47831cee59c521249dfe0b914bdecc5c3e5a1c6e8edebbbae9f2a",
+    "JNJ_1Day_split.parquet": "7b9a9557b8e47831cee59c521249dfe0b914bdecc5c3e5a1c6e8edebbbae9f2a",
+    "JNJ_1Min_raw.parquet": "8ae875418cc922a59ba0daedd8d02b61a89cdaf71384a06b8736107857e99334",
+    "JPM_1Day_raw.parquet": "7b8761f4c9f4b7c2a4a58854df86d63907463232f31d136c06fad74ecb9201cc",
+    "JPM_1Day_split.parquet": "7b8761f4c9f4b7c2a4a58854df86d63907463232f31d136c06fad74ecb9201cc",
+    "JPM_1Min_raw.parquet": "a61d8d5a34cf1343cc56453485efc90c2f805d424df680ccdd0c1668258f9e43",
+    "KO_1Day_raw.parquet": "49861b5230ba16bf0e95e4df14672e6856e4650e2cd1711eebd28b6e575eb999",
+    "KO_1Day_split.parquet": "49861b5230ba16bf0e95e4df14672e6856e4650e2cd1711eebd28b6e575eb999",
+    "KO_1Min_raw.parquet": "ed4c3ae6a484e22b591c1e01c468a8d95a91f4b9f80d63562cd86eeeabb8d7e9",
+    "LMT_1Day_raw.parquet": "a29d27ef92d90781a78e9d89e40004ea76f6ca9eeac0addf8e4496226bb0bf03",
+    "LMT_1Day_split.parquet": "a29d27ef92d90781a78e9d89e40004ea76f6ca9eeac0addf8e4496226bb0bf03",
+    "LMT_1Min_raw.parquet": "e91e2b3b39bdb5bd959ee8b65928c1a18bc3c4d3d01631582dc4562eaeb6062f",
+    "LOW_1Day_raw.parquet": "0f378605632dea4cf7be0fdc5fcb866f1c999b7411426268221fcd7971086608",
+    "LOW_1Day_split.parquet": "0f378605632dea4cf7be0fdc5fcb866f1c999b7411426268221fcd7971086608",
+    "LOW_1Min_raw.parquet": "b023040908446e5ae8ff054a61add32cbe9f7fad3be51d3258a48f0cfd5c8c83",
+    "MCD_1Day_raw.parquet": "46d870baea8c2682bfced8191648bcf08099a93798ff9a474c96ef3fad87e698",
+    "MCD_1Day_split.parquet": "46d870baea8c2682bfced8191648bcf08099a93798ff9a474c96ef3fad87e698",
+    "MCD_1Min_raw.parquet": "4b21a365284d46af099b642e81a63040472aaab34506e215a1ce12d3af63e018",
+    "META_1Day_raw.parquet": "52cea76bca082ab08ae88d36b75b0cba8ee7970d06f16dcd54de5e4c632ee07d",
+    "META_1Day_split.parquet": "52cea76bca082ab08ae88d36b75b0cba8ee7970d06f16dcd54de5e4c632ee07d",
+    "META_1Min_raw.parquet": "8fa0d9c054dbc59271fab7534f9507c4dcd2892310c09daa3194cc62430ebfb4",
+    "MRK_1Day_raw.parquet": "0e83670141c707ecf4e76a5473adfbee8c3dbf4395af7b8f1f5628ffe3373fe3",
+    "MRK_1Day_split.parquet": "0e83670141c707ecf4e76a5473adfbee8c3dbf4395af7b8f1f5628ffe3373fe3",
+    "MRK_1Min_raw.parquet": "27394249b80b4e9cb062e4b96a13e5d8f09377f537381c07f1544ce51c101d34",
+    "MSFT_1Day_raw.parquet": "77740e0900be755ca6c70d3cf9529058793bfea5cf276b4f00f6ba942af284cd",
+    "MSFT_1Day_split.parquet": "77740e0900be755ca6c70d3cf9529058793bfea5cf276b4f00f6ba942af284cd",
+    "MSFT_1Min_raw.parquet": "f54644690e745b0cbef55d653efec89f28109584f9cfd8c7b958c943472ac39c",
+    "MU_1Day_raw.parquet": "59d2aa97703c2b6feeb6efd9b10e175a79a3529981796570f85698323fc696c5",
+    "MU_1Day_split.parquet": "59d2aa97703c2b6feeb6efd9b10e175a79a3529981796570f85698323fc696c5",
+    "MU_1Min_raw.parquet": "1ae1e7d62f574e5b1985bc0206f52559c06aba64f275b048db63013dcbc84a10",
+    "NFLX_1Day_raw.parquet": "c55d67de91d84dd4460378487893433ca19782c5175a0936105262feb62eae0b",
+    "NFLX_1Day_split.parquet": "c55d67de91d84dd4460378487893433ca19782c5175a0936105262feb62eae0b",
+    "NFLX_1Min_raw.parquet": "4ae5377cb64e0aa043710b3eefccb5b85a5ccd2a96e8db029a916e41a73539d3",
+    "NKE_1Day_raw.parquet": "919b5644d622ebdb0a5ac91613f6d0249b2add539face65b9763e2ef77895afe",
+    "NKE_1Day_split.parquet": "919b5644d622ebdb0a5ac91613f6d0249b2add539face65b9763e2ef77895afe",
+    "NKE_1Min_raw.parquet": "cc3f2ec46875e376680f915c0152be2f5737bfb8ac9834a43199a85cc2896227",
+    "NVDA_1Day_raw.parquet": "14386c1d56e35cf016f27e93626c22b47ad4e5bc7f7c3dfba114db973103a51d",
+    "NVDA_1Day_split.parquet": "14386c1d56e35cf016f27e93626c22b47ad4e5bc7f7c3dfba114db973103a51d",
+    "NVDA_1Min_raw.parquet": "b71ecf4a44685002cad1094804d4b68e019da2bf67d3de47a50aec52800f6759",
+    "ORCL_1Day_raw.parquet": "85e1eab923410e10cc606f6474b4959c93088965a2a222c83b28139dd2377b13",
+    "ORCL_1Day_split.parquet": "85e1eab923410e10cc606f6474b4959c93088965a2a222c83b28139dd2377b13",
+    "ORCL_1Min_raw.parquet": "4289f59236716283372d7f08b5efca72012bc0bb1068d26575b6867c991e73a3",
+    "PEP_1Day_raw.parquet": "8d4eb56aea96c1ed274df753c1725897f72f397813cf7901b5d11bf79a08f680",
+    "PEP_1Day_split.parquet": "8d4eb56aea96c1ed274df753c1725897f72f397813cf7901b5d11bf79a08f680",
+    "PEP_1Min_raw.parquet": "464e213fbc5fd00fef8eec2820bd9d29c9376cb392847ab080354e21a1944b71",
+    "PG_1Day_raw.parquet": "8c2d092c9b7427c288fd91dabe50777c0e78700d3fbb2f1c2e3e093e34d56bd3",
+    "PG_1Day_split.parquet": "8c2d092c9b7427c288fd91dabe50777c0e78700d3fbb2f1c2e3e093e34d56bd3",
+    "PG_1Min_raw.parquet": "f3b8dbcac4c1a15f23503796838ab781195edaa1e0c8717083cc8573244c2657",
+    "RTX_1Day_raw.parquet": "276bd32c7c94658e3161036395644811a5a40a6e13f75132839dbf55ae2eb6d4",
+    "RTX_1Day_split.parquet": "276bd32c7c94658e3161036395644811a5a40a6e13f75132839dbf55ae2eb6d4",
+    "RTX_1Min_raw.parquet": "1355245650f0cb9e8ee5fba30356bf41de598137f94644e0a7a8eba606e562df",
+    "SBUX_1Day_raw.parquet": "374e31689d615472c5bcf764bf90cfcf49c4e16b0184df0fc2d6ebd299fbbbab",
+    "SBUX_1Day_split.parquet": "374e31689d615472c5bcf764bf90cfcf49c4e16b0184df0fc2d6ebd299fbbbab",
+    "SBUX_1Min_raw.parquet": "b3a6f04389402579668be1f80f1a5e7350f5eb59910974f77d5226e519bb8bf6",
+    "SLB_1Day_raw.parquet": "ec1a3ccced951ef29f489f3683062495d26137770f97f78c308c7437ac829e2f",
+    "SLB_1Day_split.parquet": "ec1a3ccced951ef29f489f3683062495d26137770f97f78c308c7437ac829e2f",
+    "SLB_1Min_raw.parquet": "09ff1c3eded321199835085b49d2632f6c67c662f40e4a4a92318ff9ce6b36ea",
+    "TGT_1Day_raw.parquet": "85c036347185c281d24831615f464bb5f19c355c84e8918680c261307f867e38",
+    "TGT_1Day_split.parquet": "85c036347185c281d24831615f464bb5f19c355c84e8918680c261307f867e38",
+    "TGT_1Min_raw.parquet": "7c04b6a55896b9c500253eb256c77b5a822b577d8e6e9bb86f90feb09a3b4460",
+    "TSLA_1Day_raw.parquet": "18cce4d074e8f7ff84c44b698bb786759e9aafa6f8211f155b5cb84eabb3561f",
+    "TSLA_1Day_split.parquet": "18cce4d074e8f7ff84c44b698bb786759e9aafa6f8211f155b5cb84eabb3561f",
+    "TSLA_1Min_raw.parquet": "a0f5eb3edc6cdd6b8e9cf971cd75b58de401fa999374cd1039d2f8fab1aa145c",
+    "UNH_1Day_raw.parquet": "61e403533222d255cd015bc640c6fca0ed9bdc578db1f61775af68076d34deb1",
+    "UNH_1Day_split.parquet": "61e403533222d255cd015bc640c6fca0ed9bdc578db1f61775af68076d34deb1",
+    "UNH_1Min_raw.parquet": "e0268c918eecce3e8f5ae5436eabe4717cb13b6978cbd914f783eb0690f6ca85",
+    "UNP_1Day_raw.parquet": "3aa10ec9331d4ecd1195047dca49fa3d732874070388a6f9c755ca9f7c441b27",
+    "UNP_1Day_split.parquet": "3aa10ec9331d4ecd1195047dca49fa3d732874070388a6f9c755ca9f7c441b27",
+    "UNP_1Min_raw.parquet": "836eefbfbf424d410cb164096122d489c1ac73f2f351ca09708f00f93f8e2304",
+    "UPS_1Day_raw.parquet": "46b4997f33322cad79a3d0e15d8953b4eef094a3968ca16ae6bd2f02447a0218",
+    "UPS_1Day_split.parquet": "46b4997f33322cad79a3d0e15d8953b4eef094a3968ca16ae6bd2f02447a0218",
+    "UPS_1Min_raw.parquet": "8b65d24e4e163cc5237df66730d4cc3d522f311f4cd4cb14b2be62eb8b60b6fa",
+    "WFC_1Day_raw.parquet": "689da1ea7067e676f2923031426b820460c2162600a2bea0c7500c9cc89db062",
+    "WFC_1Day_split.parquet": "689da1ea7067e676f2923031426b820460c2162600a2bea0c7500c9cc89db062",
+    "WFC_1Min_raw.parquet": "d07467686fd5fddc80a96ce24b8909a89a5f845f85cc72255dc9247bdc58895c",
+    "WMT_1Day_raw.parquet": "ea492c6f5499daff918ed946e0470760935cdf992b586290cabec616c29326eb",
+    "WMT_1Day_split.parquet": "ea492c6f5499daff918ed946e0470760935cdf992b586290cabec616c29326eb",
+    "WMT_1Min_raw.parquet": "aecf2ec19fe0e5633202938aae265984c06cdc5c36684cb9f9775f349197bfc5",
+    "XOM_1Day_raw.parquet": "aa8c317b677f2d8501fc31f46919ad4f235103330eb3cc23351610c2a68bc8a8",
+    "XOM_1Day_split.parquet": "aa8c317b677f2d8501fc31f46919ad4f235103330eb3cc23351610c2a68bc8a8",
+    "XOM_1Min_raw.parquet": "a6b053ebed3a6229a787893b98bd7994e111a2b70631768e7cb8ff1c7a9fdb82"
+  },
+  "five_minute_reference_hashes": {
+    "AAPL_5Min_raw.parquet": "cfff9724b1fd70d59e42766671a1dbce0b08937b095f904c07315e51bf8663a7",
+    "ABBV_5Min_raw.parquet": "0435737a8d6e37f34cf44586c7938ca3c32de8e912071a9f99e1756b6443a028",
+    "AMD_5Min_raw.parquet": "3ba662e7275295f03a2de8031050015c37bf2c93139afcdfe5aa07b784a6500c",
+    "AMZN_5Min_raw.parquet": "b557dec9a1836ee3c53068e2a11ae60c9d3e695917206b94df10b405b1b28f82",
+    "AVGO_5Min_raw.parquet": "a534afc6033964246a17c09c2c1fd2ff6ff862fe0460af1e09c85a15e9317a7b",
+    "BAC_5Min_raw.parquet": "319ee991431708c701fb38ceee8567c9641c14ffa40c760786ca2b2ad49dfe75",
+    "BA_5Min_raw.parquet": "cd88f25efcc07161c5297f6f6a25b81d9acd585c0f4a93159818f80fe751bff2",
+    "CAT_5Min_raw.parquet": "8082899e87c7dde9706fff26cfcaf296a0e8448aca467fd10e27da3db7ee5469",
+    "COIN_5Min_raw.parquet": "208a86ead62d561cf4cd9b03c57360ecf7d0e24fd0531cc087a683a03e2b70bc",
+    "COP_5Min_raw.parquet": "96309af3572604cd4426c3dc367a661ac1a097079ba6aca74a32e626a868b0ff",
+    "COST_5Min_raw.parquet": "8327aec99946b23e2d935b6f8c08173e54058ad6cb05ad1a0acbf9be03d08b84",
+    "CRM_5Min_raw.parquet": "8f6e91687a9e0be870a701e3665bc4aac9b2a12856b61792355c6681813fb866",
+    "CVS_5Min_raw.parquet": "2e1d8c193feffa19c43a97d20a667a7419f1ec3effd2da9c0585fb2ccc4de105",
+    "CVX_5Min_raw.parquet": "9f21710c0bae8f34655fd1638f69893cf8c2bfb172394098bbf3a157cb03a1cb",
+    "DE_5Min_raw.parquet": "751e36efa4f3f06c79457efcff659a7a397ef163c4c042214850fbbca82f98a9",
+    "DIS_5Min_raw.parquet": "434fa861045d76ddc196deb9992a92ed4d64c3a1dc84d0d15ac9665babd1d53c",
+    "F_5Min_raw.parquet": "b18fe7779afc0b7266b45b658de1772c07b7542cb93bd362754f962037a8aaad",
+    "GE_5Min_raw.parquet": "d533661523f7c0c0803a5ac4868a10574c90e9b244b811595751499cfc8eeaae",
+    "GM_5Min_raw.parquet": "757fab0ca78d92a959efc710dc1c9be4c69da57790ec64ace3694fc77a31bb63",
+    "GOOGL_5Min_raw.parquet": "712e15c3de491a75a561d75157885ee621ba862bcef9ba9edd1a52f3300297af",
+    "HD_5Min_raw.parquet": "4777a45dea020601d7b1afefd6f62f4ff8f51c942f219cfeb7eff0c15669d92b",
+    "HON_5Min_raw.parquet": "e51a894b53c47552e83575bde8062eae0216d6c83c0b7029108bcb3db27a34cb",
+    "INTC_5Min_raw.parquet": "a0711b5c8f19320cd822838829e8c4d81d53974d7f07ac0de3595491a9c5674a",
+    "JNJ_5Min_raw.parquet": "12d135834f747051d35558d8e2eccf93b9e9d0179dc228f6b98ac18d61d05cbd",
+    "JPM_5Min_raw.parquet": "d67423bd0b63daacede448cdc3cc0784efdfab90d7457072fd2ab2a0f1155df3",
+    "KO_5Min_raw.parquet": "df5379be31c9bda32a3e8585667612c373566188795910dc25a4f01d3adbda52",
+    "LMT_5Min_raw.parquet": "06bfe9678850ea1e671b646e983b1e843c63815f672affd21f2b2b46cdc2ca93",
+    "LOW_5Min_raw.parquet": "84af8aa9f07b61e37224e44b35805c26662338d82bcb1d3879e651114757bcf0",
+    "MCD_5Min_raw.parquet": "75309ca5465ebbc770969c9d40325c50107a5546db42606a8f5f3ce33401cabc",
+    "META_5Min_raw.parquet": "c5288b6e95dd0f4cd0428c23cdf33190e2f3531c4796a00883332fcc6ade88fc",
+    "MRK_5Min_raw.parquet": "b738c5567abf72ae3d5e05caf3ae10258a3713e194636b2fbf2c9c2eec0a239a",
+    "MSFT_5Min_raw.parquet": "2695bd83abfdca3710e574171d3cfbe71a317c6adfd4e5bc8e37afa49ed67d73",
+    "MU_5Min_raw.parquet": "6cdb59df5b90d1f2154717384ab634485cb61d055bcf4c0303431f2722378c98",
+    "NFLX_5Min_raw.parquet": "d7b71f9eea2c1e445867c2333d6b9e9cafd50caa9861889a55ea1c215e6d49f7",
+    "NKE_5Min_raw.parquet": "83df09c00b47799ce2e0eea31d7dc3ac510ae82d4c9edc63c7044e2c5a67798b",
+    "NVDA_5Min_raw.parquet": "a7763d58a2812e0d196b70b77a6e62237d37532704d864b3cb6815c59d4f2d67",
+    "ORCL_5Min_raw.parquet": "3dbe85c124c2cbca0e6f5e8b3ad2e13dd0ea6e5449061f4ea5cd4a93f78fdf9b",
+    "PEP_5Min_raw.parquet": "90f2c0baf1c9c6d71c3053f6d8751b6e137ba3939c0ccecbce4dbffc0ead174a",
+    "PG_5Min_raw.parquet": "2c8d980e8d4a35c13dab50c89baf3b029b07a613e2c9fa273fa491bb9bb85555",
+    "RTX_5Min_raw.parquet": "c814290d82f0c981c86b9185cdf8069ad9f8c6c796e3305f2f871f0253220f77",
+    "SBUX_5Min_raw.parquet": "736f56c7d93f0db10386887dc92868019367632fa29476d874322b747f7fdd2a",
+    "SLB_5Min_raw.parquet": "50059cf3a1b0ff16690ed22cb540a8ea2e40dc002328a1cf24ac4820539ff322",
+    "TGT_5Min_raw.parquet": "b6288d24a481b6d859352d044b93eceff3d3b5dd5c3cd9fdb021d6993dbab17f",
+    "TSLA_5Min_raw.parquet": "9bd850a2d6200b6adc09319b2911a5065be0a3daa471ae1cf54011227c31377e",
+    "UNH_5Min_raw.parquet": "bc94a91de8123830d914744991107e459dd790571c093338f39851333c95ccb6",
+    "UNP_5Min_raw.parquet": "fff153c16cbaff0f9037839d1994bbe32da92a4a00823240a3df8600573c7c67",
+    "UPS_5Min_raw.parquet": "40098de86d2e1f5fe0df01cfa867b24c379071d674b6ab3a2988f0d57d15d78a",
+    "WFC_5Min_raw.parquet": "b6b20e4454ee0480361325f3fe462b67ae266a39c2feb6dbcf773cebf48aa4dd",
+    "WMT_5Min_raw.parquet": "724bd7488190926dc05d1faf7b4115ff7ce965fa8a4bee04932a14663ea08e27",
+    "XOM_5Min_raw.parquet": "8fb2092e7bf3fbb719d23fe11a7810f2e8a66aa1a2335a55b5739873c634931f"
+  }
+}

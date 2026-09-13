@@ -27,6 +27,15 @@ def enrich_decision(
     Signal semantics stay owned by the frozen strategy. The diagnostic layer reports
     every independently measurable configured rule and never turns an avoid into a setup.
     """
+    if params.get("strategy_architecture") == "rug_v2_intraday":
+        # RUG owns its session, directional EMA, ATR and entry rules. Legacy
+        # long-only BASE_PARAMETERS are not independent gates for that engine.
+        return replace(decision, decision_version="rug_intraday_decision_v1", gates=[{
+            "code": "RUG_STRATEGY_SIGNAL", "group": "strategy",
+            "status": "passed" if decision.signal == "setup" else "failed",
+            "actual": decision.signal, "required": "setup",
+            "reason": "; ".join(decision.explanation),
+        }])
     gates: list[dict[str, Any]] = []
     close = number(candle.get("close"))
     fast_period = integer(params.get("ema_fast") or params.get("trend_fast"))
